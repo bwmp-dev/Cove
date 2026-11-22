@@ -106,6 +106,16 @@ export async function requestText(path: string, signal?: AbortSignal): Promise<s
   }
 }
 
+// Binary GET for audited downloads, sent with the same session and team headers as JSON requests.
+export async function requestBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await send("GET", path, "application/octet-stream", undefined, signal);
+  try {
+    return await response.blob();
+  } catch {
+    throw new ApiError(response.status, "The server returned an unreadable response.");
+  }
+}
+
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     return error.message;

@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Files     *FileRequest          `json:"files,omitempty"`
 	Telemetry *TelemetryRequest     `json:"telemetry,omitempty"`
 	Links     *LinkConfig           `json:"links,omitempty"`
 	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
@@ -28,6 +29,7 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Files         *FileResponse        `json:"files,omitempty"`
 	Telemetry     *Telemetry           `json:"telemetry,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
 	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
@@ -51,6 +53,15 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "files":
+		if r.Files == nil {
+			return RPCResponse{Error: "file request required"}
+		}
+		result, err := e.FileOperation(ctx, r.ID, *r.Files)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Files: result}
 	case "telemetry":
 		if r.Telemetry == nil {
 			return RPCResponse{Error: "telemetry request required"}

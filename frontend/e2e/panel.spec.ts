@@ -1170,6 +1170,59 @@ test("environment graph creates, applies and revokes a private connection on the
   await page.unroute("**/api/projects/*/connections*");
 });
 
+test("administrators browse, edit, download and delete container files on the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  await page.goto("/projects");
+  await signIn(page);
+  await createProject(page, "Files project");
+  const url = await createResource(page, "files-service");
+  // This test covers Files, not Compose editor input, so store the exact Compose text before deploying.
+  const id = new URL(url).pathname.split("/")[2];
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: compose("files-service") } })).status()).toBe(200);
+  await page.reload();
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true }).click();
+  const files = page.getByRole("region", { name: "Files", exact: true });
+  await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+  const root = files.getByRole("list", { name: "Contents of /" });
+  await expect(root.getByRole("button", { name: "tmp", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(root.getByRole("button", { name: "proc", exact: true })).toHaveCount(0);
+  await root.getByRole("button", { name: "tmp", exact: true }).click();
+  await expect(files.getByRole("list", { name: "Contents of /tmp" }).or(files.getByText("This folder is empty.", { exact: true }))).toBeVisible();
+
+  await files.getByRole("button", { name: "New file", exact: true }).click();
+  const create = page.getByRole("dialog", { name: "New file" });
+  await create.getByLabel("File name", { exact: true }).fill("cove-browser.txt");
+  await create.getByRole("button", { name: "Create file", exact: true }).click();
+  const editor = page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true });
+  await expect(editor).toHaveValue("");
+  await editor.fill("hello from the browser\n");
+  await page.getByRole("button", { name: "Save file", exact: true }).click();
+  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await editor.fill("second revision\n");
+  await page.getByRole("button", { name: "Save file", exact: true }).click();
+  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "resource-files");
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download", exact: true }).click();
+  const saved = await download;
+  expect(saved.suggestedFilename()).toBe("cove-browser.txt");
+  expect(readFileSync(await saved.path(), "utf8")).toBe("second revision\n");
+  expect(page.url()).not.toContain("cove-browser");
+  expect(await page.evaluate(() => JSON.stringify({ ...window.localStorage }) + JSON.stringify({ ...window.sessionStorage }))).not.toContain("second revision");
+
+  await page.getByRole("button", { name: "Delete cove-browser.txt", exact: true }).click();
+  const remove = page.getByRole("dialog", { name: "Delete cove-browser.txt?" });
+  await expect(remove).toContainText("/tmp/cove-browser.txt");
+  await remove.getByRole("button", { name: "Delete file", exact: true }).click();
+  await expect(page.getByText("Deleted cove-browser.txt.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true })).toHaveCount(0);
+});
+
 test("every page adapts to phone tablet laptop and wide desktop", async ({ page, browser }, testInfo) => {
   test.setTimeout(300_000);
   await page.goto("/projects");
@@ -1185,7 +1238,7 @@ test("every page adapts to phone tablet laptop and wide desktop", async ({ page,
   await page.route("**/api/cloudflare/connections/sample-connection/zones", route => route.fulfill({ json: [{ id: "a".repeat(32), name: "example.com" }, { id: "b".repeat(32), name: "a-long-domain-name-for-responsive-testing.example.net" }] }));
   await page.route("**/api/cloudflare", route => route.fulfill({ json: [{ zone_id: "a".repeat(32), domain: "example.com", can_manage: true, enabled: true, proxied: false, nodes: {}, shares: [{ team_id: "default", domains: ["app.example.com", "*.staging.example.com"] }] }] }));
   const paths = ["/dashboard", "/projects", projectURL, `${projectURL}/environments/${environmentID}`, "/resources", "/resources/new", "/nodes", "/nodes/new", `/nodes/${resource.node_id}`, `/nodes/${resource.node_id}/proxy`, "/operations", "/terminal", "/integrations", "/registries", "/storage", "/notifications", "/team", "/tokens", "/audit", "/account", "/users", "/admin",
-    ...["", "logs", "operations", "general", "source", "domains", "environment", "networking", "registry", "backups", "settings", "limits", "configuration-history", "preflight", "deployment-safety", "previews", "hooks", "schedule", "promotion", "troubleshooting"].map(section => `${resourceURL}/${section}`)];
+    ...["", "logs", "operations", "general", "source", "domains", "environment", "networking", "registry", "backups", "files", "settings", "limits", "configuration-history", "preflight", "deployment-safety", "previews", "hooks", "schedule", "promotion", "troubleshooting"].map(section => `${resourceURL}/${section}`)];
   const operations = await (await page.request.get("/api/operations")).json() as { id: string }[];
   if (operations[0]) paths.push(`/operations/${operations[0].id}`);
   else {

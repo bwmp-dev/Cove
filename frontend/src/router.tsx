@@ -120,6 +120,7 @@ const resourceEnvironmentRoute = createRoute({ getParentRoute: () => resourceRou
 const resourceNetworkingRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/networking", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceNetworking") });
 const resourceRegistryRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/registry", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceRegistryPage") });
 const resourceBackupsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/backups", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceBackups") });
+const resourceFilesRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/files", component: lazyRouteComponent(() => import("./routes/resource-files"), "ResourceFiles") });
 const resourceSettingsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/settings", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceSettings") });
 
 const nodesRoute = createRoute({ getParentRoute: () => appRoute, path: "/nodes", component: lazyRouteComponent(() => import("./routes/nodes"), "NodesPage") });
@@ -181,6 +182,7 @@ const routeTree = rootRoute.addChildren([
       resourceNetworkingRoute,
       resourceRegistryRoute,
       resourceBackupsRoute,
+      resourceFilesRoute,
       resourceSettingsRoute,
     ]),
     nodesRoute,

@@ -9,6 +9,7 @@ export interface Capabilities {
   infrastructure?: boolean;
   backup_retention?: boolean;
   backblaze_b2?: boolean;
+  file_browser?: boolean;
   protocol: number;
   os: string;
   arch: string;

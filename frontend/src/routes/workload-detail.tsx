@@ -10,6 +10,7 @@ import {
   Container,
   FileClock,
   FileCode,
+  FolderOpen,
   Gauge,
   GitPullRequest,
   Globe,
@@ -50,6 +51,7 @@ import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
+import { useSession } from "../lib/session";
 import { can } from "../lib/permissions";
 import { actionLabels, activeOperation, allowedActions, isActive, stateLabels, workloadKind } from "../lib/operations";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
@@ -395,6 +397,7 @@ type ResourcePath =
   | "/resources/$resourceId/networking"
   | "/resources/$resourceId/registry"
   | "/resources/$resourceId/backups"
+  | "/resources/$resourceId/files"
   | "/resources/$resourceId/preflight"
   | "/resources/$resourceId/schedule"
   | "/resources/$resourceId/hooks"
@@ -413,7 +416,8 @@ interface ResourceSection {
 }
 
 // Grouped by what the visitor is doing: watching the resource, configuring what runs, controlling releases, or managing its data and lifecycle.
-function resourceSections(workload: Workload): { label: string; links: ResourceSection[] }[] {
+// File access is limited to instance administrators, like the node terminal; the control plane enforces this too.
+function resourceSections(workload: Workload, admin: boolean): { label: string; links: ResourceSection[] }[] {
   const service = workloadKind(workload.kind) === "service";
   return [
     {
@@ -453,6 +457,7 @@ function resourceSections(workload: Workload): { label: string; links: ResourceS
       label: "Manage",
       links: [
         ...(service ? [{ to: "/resources/$resourceId/backups" as const, label: "Backups", icon: Archive }] : []),
+        ...(admin ? [{ to: "/resources/$resourceId/files" as const, label: "Files", icon: FolderOpen }] : []),
         { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
       ],
     },
@@ -524,7 +529,7 @@ function MobileResourceNav({ workload, groups }: { workload: Workload; groups: {
 }
 
 function ResourceNav({ workload }: { workload: Workload }) {
-  const groups = resourceSections(workload);
+  const groups = resourceSections(workload, Boolean(useSession()?.is_admin));
   return (
     <>
       <MobileResourceNav workload={workload} groups={groups} />
