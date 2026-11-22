@@ -270,7 +270,7 @@ func (s *Server) openAPIDocument() map[string]any {
 		}
 		entry[strings.ToLower(route.Method)] = operation
 	}
-	return map[string]any{"openapi": "3.1.0", "info": map[string]string{"title": "Cove public API", "version": "1.0.0", "description": "Scopes limit tokens; every request also revalidates its creator's current grants. Errors are plain text. Deployment is explicit and asynchronous. Secret values appear only in audited exports."}, "servers": []any{map[string]string{"url": "/api/v1"}}, "paths": paths, "components": map[string]any{"securitySchemes": map[string]any{"bearer": map[string]string{"type": "http", "scheme": "bearer"}}}}
+	return map[string]any{"openapi": "3.1.0", "info": map[string]string{"title": "Cove public API", "version": "1.0.0", "description": "Scopes limit tokens; every request also revalidates its creator's current grants. Errors are plain text. Deployment is explicit and asynchronous. Secret values appear only in audited exports."}, "servers": []any{map[string]string{"url": s.panelBasePath() + "/api/v1"}}, "paths": paths, "components": map[string]any{"securitySchemes": map[string]any{"bearer": map[string]string{"type": "http", "scheme": "bearer"}}}}
 }
 
 func (s *Server) publicGroup(w http.ResponseWriter, r *http.Request) {

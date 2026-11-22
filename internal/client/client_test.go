@@ -41,9 +41,27 @@ func TestClientTLSOriginHeadersAndRedactedErrors(t *testing.T) {
 			t.Fatal("unsafe API error", err)
 		}
 	}
-	for _, address := range []string{"http://localhost", "https://user:pass@example.com", "https://example.com/path", "https://example.com?token=bad"} {
+	for _, address := range []string{"http://localhost", "https://user:pass@example.com", "https://example.com/path/../other", "https://example.com?token=bad"} {
 		if _, err = New(address, token, "team"); err == nil {
 			t.Fatal("unsafe panel origin accepted")
 		}
+	}
+}
+
+func TestClientPreservesPanelBasePath(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/control/cove/api/v1/session" {
+			t.Fatal(r.URL.Path)
+		}
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	api, err := New(server.URL+"/control/cove", "fixture-token", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.HTTP = server.Client()
+	if err := api.Do(t.Context(), "GET", "/session", nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }

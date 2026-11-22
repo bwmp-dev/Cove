@@ -27,11 +27,17 @@ def output_lines(*args):
 
 def main():
     name = "cove-browser-" + secrets.token_hex(6)
+    panel_image = name + "-panel:development"
+    worker_image = name + "-worker:development"
+    base_path = os.environ.get("COVE_BROWSER_BASE_PATH", "")
+    if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*", base_path) or len(base_path) > 200:
+        raise ValueError("Use a simple COVE_BROWSER_BASE_PATH without a trailing slash")
     containers = []
     network_created = False
     ingress = []
     worker_state_owned = False
     links_owned = False
+    fixture_workloads = []
     env = os.environ.copy()
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
@@ -50,7 +56,21 @@ def main():
                     "services":{"panel":{"loadBalancer":{"servers":[{"url":"http://panel:8080"}]}}}},
             "tls":{"certificates":[{"certFile":"/fixture/cert.pem","keyFile":"/fixture/key.pem"}]}}))
         try:
-            run("docker", "build", "-t", "cove:development", ".")
+            # Claim the fixed ingress name before building so parallel tracks cannot overlap.
+            while True:
+                occupied = any(subprocess.run(["docker", kind, "inspect", "cove-ingress"], capture_output=True).returncode == 0 for kind in ("container", "network", "volume"))
+                if not occupied:
+                    claim = subprocess.run(["docker", "network", "create", "--label", "cove.managed=ingress", "cove-ingress"], capture_output=True)
+                    if claim.returncode == 0:
+                        ingress.append("network")
+                        break
+                    raced = subprocess.run(["docker", "network", "inspect", "cove-ingress"], capture_output=True).returncode == 0
+                    if not raced or os.environ.get("COVE_BROWSER_WAIT") != "1":
+                        raise RuntimeError("Could not claim the browser ingress network: " + claim.stderr.decode(errors="replace").strip())
+                elif os.environ.get("COVE_BROWSER_WAIT") != "1":
+                    raise RuntimeError("Refusing to replace an existing cove-ingress resource")
+                time.sleep(3)
+            run("docker", "build", "-t", panel_image, ".")
             run("docker", "network", "create", name, stdout=subprocess.DEVNULL)
             network_created = True
             for suffix, image, extra in [
@@ -71,10 +91,11 @@ def main():
                 listener.bind(("127.0.0.1", 0))
                 port = listener.getsockname()[1]
             origin = f"https://localhost:{port}"
-            env.update(DATABASE_URL=f"postgres://postgres:{env['POSTGRES_PASSWORD']}@db:5432/cove?sslmode=disable", COVE_PUBLIC_URL=origin)
+            panel_url = origin + base_path
+            env.update(DATABASE_URL=f"postgres://postgres:{env['POSTGRES_PASSWORD']}@db:5432/cove?sslmode=disable", COVE_PUBLIC_URL=panel_url)
             options = [item for key in ("DATABASE_URL", "COVE_PUBLIC_URL", "COVE_ADMIN_PASSWORD", "COVE_ADMIN_TOKEN", "COVE_ENCRYPTION_KEY") for item in ("-e", key)]
             run("docker", "run", "-d", "--name", name + "-panel", "--network", name,
-                "--network-alias", "panel", *options, "cove:development", env=env, stdout=subprocess.DEVNULL)
+                "--network-alias", "panel", *options, panel_image, env=env, stdout=subprocess.DEVNULL)
             containers.append(name + "-panel")
             run("docker", "run", "-d", "--name", name + "-tls", "--network", name,
                 "-p", f"127.0.0.1:{port}:443", "--mount", f"type=bind,source={fixture},target=/fixture,readonly",
@@ -90,9 +111,21 @@ def main():
                     time.sleep(1)
             else:
                 raise RuntimeError("Disposable panel did not start")
+
+            def api(method, path, body=None, credential=None, raw=False):
+                request = urllib.request.Request(panel_url+path, method=method,
+                    data=json.dumps(body).encode() if body is not None else None,
+                    headers={"Authorization": "Bearer "+(credential or env["COVE_ADMIN_TOKEN"]), "Content-Type": "application/json"})
+                with urllib.request.urlopen(request, context=context, timeout=60) as response:
+                    return response.read().decode() if raw else json.load(response)
+
+            search = api("GET", "/api/search?q=cove-group19-fixture")
+            timezone = api("GET", "/api/preferences/timezone")
+            if not isinstance(search.get("items"), list) or search.get("limit") != 40 or timezone.get("schedule_timezone") != "UTC":
+                raise RuntimeError("Packaged panel does not expose the Group 19 contract")
             run("go", "build", "-o", "bin/cove-worker-linux-amd64", "./cmd/cove-worker", env=env | {"GOOS": "linux", "GOARCH": "amd64"})
-            run("docker", "build", "-f", "test/worker/Dockerfile", "-t", "cove-browser-worker:development", ".", stdout=subprocess.DEVNULL)
-            for resource in ("container", "network", "volume"):
+            run("docker", "build", "-f", "test/worker/Dockerfile", "-t", worker_image, ".", stdout=subprocess.DEVNULL)
+            for resource in ("container", "volume"):
                 if subprocess.run(["docker", resource, "inspect", "cove-ingress"], capture_output=True).returncode == 0:
                     raise RuntimeError("Refusing to replace an existing cove-ingress " + resource)
             # Private connection tests create the worker's link gateway and networks on this Docker host.
@@ -101,7 +134,7 @@ def main():
             links_owned = True
             # The worker adopts this Cove-labelled proxy for route tests. It publishes no host ports, and
             # its ACME resolver points at a closed loopback port so no public certificate authority is contacted.
-            for resource in ("network", "volume"):
+            for resource in ("volume",):
                 run("docker", resource, "create", "--label", "cove.managed=ingress", "cove-ingress", stdout=subprocess.DEVNULL)
                 ingress.append(resource)
             run("docker", "create", "--name", "cove-ingress", "--label", "cove.managed=ingress", "--network", "cove-ingress",
@@ -118,20 +151,13 @@ def main():
             # Docker helpers need the same absolute state path as this containerized worker.
             # Refuse any existing host state rather than adopting or overwriting it.
             run("docker", "run", "--rm", "--entrypoint", "sh", "-v", "/var/lib/cove:/fixture",
-                "cove-browser-worker:development", "-ec",
+                worker_image, "-ec",
                 'test -z "$(ls -A /fixture)" || { echo "Refusing existing /var/lib/cove state" >&2; exit 1; }; cp -a /var/lib/cove/. /fixture/; printf %s "$1" > /fixture/.browser-owner; chown -R cove:cove /fixture', "sh", name)
             worker_state_owned = True
             worker = name + "-worker"
             run("docker", "run", "-d", "--name", worker, "--network", name, "--network-alias", "worker",
-                "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", "cove-browser-worker:development", stdout=subprocess.DEVNULL)
+                "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
             containers.append(worker)
-
-            def api(method, path, body=None, credential=None, raw=False):
-                request = urllib.request.Request(origin+path, method=method,
-                    data=json.dumps(body).encode() if body is not None else None,
-                    headers={"Authorization": "Bearer "+(credential or env["COVE_ADMIN_TOKEN"]), "Content-Type": "application/json"})
-                with urllib.request.urlopen(request, context=context, timeout=60) as response:
-                    return response.read().decode() if raw else json.load(response)
 
             enrollment = api("POST", "/api/nodes", {"name": "ready-browser-worker", "address": "worker", "port": 22})
             credential = re.search(r"Authorization: Bearer ([^']+)", enrollment["setup_command"]).group(1)
@@ -165,6 +191,7 @@ def main():
                     if records.returncode == 0:
                         for workload in records.stdout.splitlines():
                             if not re.fullmatch(r"[0-9a-f]{32}", workload): raise RuntimeError("Unexpected fixture workload ID")
+                            fixture_workloads.append(workload)
                             for listing, removal in [(["ps", "-aq"], ["rm", "-f", "-v"]), (["network", "ls", "-q"], ["network", "rm"])]:
                                 owned = subprocess.run(["docker", *listing, "--filter", "label=com.docker.compose.project=cove-"+workload], capture_output=True, text=True, check=True)
                                 for resource in owned.stdout.split(): subprocess.run(["docker", *removal, resource], check=True, stdout=subprocess.DEVNULL)
@@ -181,20 +208,28 @@ def main():
                 for container in reversed(containers):
                     subprocess.run(["docker", "rm", "-f", "-v", container], check=False, stdout=subprocess.DEVNULL)
                 if links_owned:
-                    subprocess.run(["docker", "rm", "-f", "cove-link"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    for label in ("cove.managed=link", "cove.managed=link-mesh"):
-                        for network in output_lines("docker", "network", "ls", "-q", "--filter", "label=" + label):
+                    gateway = subprocess.run(["docker", "inspect", "--format", '{"id":{{json .Id}},"mounts":{{json .Mounts}}}', "cove-link"], capture_output=True, text=True)
+                    owned_gateway = False
+                    if gateway.returncode == 0 and worker_state_owned:
+                        info = json.loads(gateway.stdout)
+                        owned_gateway = any(mount.get("Source") == "/var/lib/cove/links/gateway" and mount.get("Destination") == "/config" for mount in info["mounts"])
+                        if owned_gateway:
+                            subprocess.run(["docker", "rm", "-f", info["id"]], check=False, stdout=subprocess.DEVNULL)
+                    for workload in fixture_workloads:
+                        for network in output_lines("docker", "network", "ls", "-q", "--filter", "label=cove.managed=link", "--filter", "label=cove.link-workload=" + workload):
                             subprocess.run(["docker", "network", "rm", network], check=False, stdout=subprocess.DEVNULL)
-                    for image in output_lines("docker", "image", "ls", "-q", "--filter", "reference=cove-link:*"):
-                        subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL)
-                for resource in reversed(ingress):
-                    subprocess.run(["docker", resource, "rm", "-f", "cove-ingress"] if resource == "container" else ["docker", resource, "rm", "cove-ingress"], check=False, stdout=subprocess.DEVNULL)
+                    if owned_gateway:
+                        subprocess.run(["docker", "network", "rm", "cove-link-mesh"], check=False, stdout=subprocess.DEVNULL)
                 if worker_state_owned:
                     run("docker", "run", "--rm", "--entrypoint", "sh", "-v", "/var/lib/cove:/fixture",
-                        "cove-browser-worker:development", "-ec",
+                        worker_image, "-ec",
                         'test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; find /fixture -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +', "sh", name)
                 if network_created:
                     subprocess.run(["docker", "network", "rm", name], check=False, stdout=subprocess.DEVNULL)
+                for resource in reversed(ingress):
+                    subprocess.run(["docker", resource, "rm", "-f", "cove-ingress"] if resource == "container" else ["docker", resource, "rm", "cove-ingress"], check=False, stdout=subprocess.DEVNULL)
+                for image in (panel_image, worker_image):
+                    subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

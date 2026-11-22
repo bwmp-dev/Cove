@@ -15,6 +15,8 @@ import { DeploymentPlan } from "../components/DeploymentPlan";
 import { CloneForm } from "../components/Clone";
 import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { PlacementRow } from "../components/EnvironmentList";
+import { Notes } from "../components/Notes";
+import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, EmptyState, Field, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section, SectionGrid, TabNav } from "../components/ui";
 import { canCompareEnvironments, countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
@@ -282,8 +284,8 @@ function ProjectFrame({ project, workloads, environmentId, crumbsRoot }: { proje
           </MetaList>
         }
         actions={
-          (canEditProject || canCreate) && (
             <>
+              {current ? <PinButton kind="environment" id={current.id} name={current.name} /> : <PinButton kind="project" id={project.id} name={project.name} />}
               {canEditProject && (
                 <Button onClick={() => setCreating(true)}>
                   <Layers aria-hidden className="size-3.5" />
@@ -294,7 +296,6 @@ function ProjectFrame({ project, workloads, environmentId, crumbsRoot }: { proje
               {canEditProject && <DeploymentPlan projectId={project.id} resources={resources} />}
               {canEditProject && <ProjectActions project={project} resources={resources.length} />}
             </>
-          )
         }
         tabs={<ProjectTabs project={project} resources={resources} inPreview={!!current?.preview_id} />}
       />
@@ -391,6 +392,7 @@ export function ProjectOverview() {
         </SectionGrid>
       )}
       {can(project.permissions, "read") && <DependencyMap projectId={project.id} />}
+      {can(project.permissions, "read") && <Notes key={project.id} scope="project" id={project.id} canEdit={editable} />}
     </>
   );
 }

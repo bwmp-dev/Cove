@@ -1,5 +1,18 @@
+import { getDisplayTimeZone } from "./timezone";
+
 const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-const absolute = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "medium" });
+const absoluteFormats = new Map<string, Intl.DateTimeFormat>();
+
+// Undefined uses this browser's zone, as before a display preference has loaded.
+function absoluteFormat(timeZone: string | undefined) {
+  const key = timeZone ?? "";
+  let format = absoluteFormats.get(key);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "medium", timeZone });
+    absoluteFormats.set(key, format);
+  }
+  return format;
+}
 
 const units: [Intl.RelativeTimeFormatUnit, number][] = [
   ["day", 86_400_000],
@@ -22,12 +35,12 @@ export function formatRelative(iso: string, now: number) {
       return relative.format(Math.round(diff / size), unit);
     }
   }
-  return absolute.format(time);
+  return absoluteFormat(getDisplayTimeZone()).format(time);
 }
 
-export function formatAbsolute(iso: string) {
+export function formatAbsolute(iso: string, timeZone = getDisplayTimeZone()) {
   const time = Date.parse(iso);
-  return Number.isFinite(time) ? absolute.format(time) : "Unknown time";
+  return Number.isFinite(time) ? absoluteFormat(timeZone).format(time) : "Unknown time";
 }
 
 export function formatDuration(ms: number) {

@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { BookOpen } from "lucide-react";
 import { lazy, Suspense } from "react";
 import { request } from "../api/client";
+import { withBasePath } from "../lib/base-path";
 import { Breadcrumbs, Notice, PageHeader, QueryError, Section, Spinner } from "../components/ui";
 import { buttonClass, linkClass } from "../lib/styles";
 
@@ -36,7 +37,7 @@ export function ApiDocsPage() {
           </Breadcrumbs>
         }
         actions={
-          <a href={specPath} className={buttonClass()} download="cove-openapi.json">
+          <a href={withBasePath(specPath)} className={buttonClass()} download="cove-openapi.json">
             Download OpenAPI JSON
           </a>
         }

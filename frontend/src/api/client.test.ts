@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rememberTeam } from "../lib/team";
-import { ApiError, request, requestFile, requestForTeam } from "./client";
+import { ApiError, request, requestFile, requestForTeam, requestPublic } from "./client";
 
 function respond(status: number, body: string, type: string, headers: Record<string, string> = {}) {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(body, { status, headers: { "content-type": type, ...headers } }))));
@@ -88,5 +88,54 @@ describe("requestFile", () => {
   it("reports plain-text errors like JSON requests", async () => {
     respond(409, "required shared variable is missing", "text/plain");
     await expect(requestFile("POST", "/api/projects/p/configuration/export", {})).rejects.toEqual(new ApiError(409, "Required shared variable is missing"));
+  });
+});
+
+describe("requestPublic", () => {
+  it("omits the session cookie and the selected team", async () => {
+    respond(200, '{"title":"Shop"}', "application/json");
+    rememberTeam("team-a");
+    await expect(requestPublic("/api/public/projects/token")).resolves.toEqual({ title: "Shop" });
+    const [path, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/api/public/projects/token");
+    expect(init.method).toBe("GET");
+    expect(init.credentials).toBe("omit");
+    expect(new Headers(init.headers).get("x-cove-team")).toBeNull();
+  });
+
+  it("reports errors like other requests", async () => {
+    respond(404, "not found", "text/plain");
+    await expect(requestPublic("/api/public/projects/token")).rejects.toEqual(new ApiError(404, "Not found"));
+  });
+});
+
+describe("requests under a panel prefix", () => {
+  afterEach(() => {
+    document.head.querySelector('meta[name="cove-base-path"]')?.remove();
+    vi.resetModules();
+  });
+
+  it("prefixes API, auth, public and download requests once", async () => {
+    document.head.insertAdjacentHTML("afterbegin", '<meta name="cove-base-path" content="/control/cove">');
+    vi.resetModules();
+    const client = await import("./client");
+    respond(200, "{}", "application/json");
+    await client.request("GET", "/api/session");
+    await client.request("POST", "/auth/login", {});
+    await client.requestPublic("/api/public/projects/token");
+    await client.requestFile("POST", "/api/projects/p/configuration/export", {});
+    const paths = (vi.mocked(fetch).mock.calls as [string, RequestInit][]).map(([path]) => path);
+    expect(paths).toEqual(["/control/cove/api/session", "/control/cove/auth/login", "/control/cove/api/public/projects/token", "/control/cove/api/projects/p/configuration/export"]);
+  });
+
+  it.each(["/api", "/projects"])("prefixes requests under %s even when the path starts with it", async (base) => {
+    document.head.insertAdjacentHTML("afterbegin", `<meta name="cove-base-path" content="${base}">`);
+    vi.resetModules();
+    const client = await import("./client");
+    respond(200, "{}", "application/json");
+    await client.request("GET", "/api/session");
+    await client.request("GET", "/api/projects");
+    const paths = (vi.mocked(fetch).mock.calls as [string, RequestInit][]).map(([path]) => path);
+    expect(paths).toEqual([`${base}/api/session`, `${base}/api/projects`]);
   });
 });

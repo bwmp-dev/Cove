@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { request, errorMessage } from "../api/client";
 import { Notice, Section } from "../components/ui";
 import { useResource } from "./workload-detail";
+import { formatAbsolute } from "../lib/format";
 interface Revision { diffs: { field: string; before: string; after: string }[]; id: string; created_at: string; changes: string[]; baseline: boolean }
 export function ConfigurationHistory() {
   const resource = useResource();
@@ -11,7 +12,7 @@ export function ConfigurationHistory() {
     {history.error && <Notice title="Could not load history" tone="error">{errorMessage(history.error)}</Notice>}
     {history.data && <ol className="divide-y divide-line">{history.data.map((revision) => <li key={revision.id} className="space-y-1 py-3">
       <p className="text-sm font-medium">{revision.baseline ? "Earliest retained configuration" : "Configuration updated"}</p>
-      <time className="text-xs text-fg-muted" dateTime={revision.created_at}>{new Date(revision.created_at).toLocaleString()}</time>
+      <time className="text-xs text-fg-muted" dateTime={revision.created_at}>{formatAbsolute(revision.created_at)}</time>
       <p className="break-words text-xs text-fg-muted">{revision.baseline ? "Comparison starts with this revision." : revision.changes.length ? revision.changes.join(", ") : "No setting values changed."}</p>
       {!revision.baseline && revision.diffs.map((diff) => <details key={diff.field} className="text-xs">
         <summary className="cursor-pointer py-1">{diff.field}</summary>

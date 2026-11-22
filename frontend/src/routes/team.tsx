@@ -28,6 +28,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
+import { TeamTimezone } from "../components/TimezoneSettings";
 import { Button, EmptyState, Field, LoadingRows, Notice, PageHeader, QueryError, Section, SectionGrid, SettingRows } from "../components/ui";
 import { currentTeam, managesTeam, teamRoleDescriptions, teamRoleLabels } from "../lib/permissions";
 import { useOnline } from "../lib/hooks";
@@ -465,6 +466,7 @@ export function TeamPage() {
           <TeamNodes team={team} />
         </Section>
         {manager && <TeamQuota teamId={team.id} admin={Boolean(session?.is_admin)} />}
+        {manager && <TeamTimezone key={team.id} teamId={team.id} />}
         <Section title="Create another team">
           <CreateTeam />
         </Section>

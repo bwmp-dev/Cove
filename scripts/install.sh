@@ -9,8 +9,13 @@ case "$(uname -m)" in x86_64|aarch64) ;; *) fail 'Supported architectures: amd64
 domain=${1:-}
 channel=${2:-release}
 installation=${3:-/opt/cove}
+base_path=${4:-}
 case "$domain" in ''|*[!a-zA-Z0-9.-]*|.*|-*|*.) fail 'Usage: sh install.sh cove.example.com [release|beta] [/opt/cove]';; esac
 case "$channel" in release|beta) ;; *) fail 'Choose release or beta.';; esac
+case "$base_path" in ''|/*) ;; *) fail 'Use an empty base path or /cove without a trailing slash.';; esac
+case "$base_path" in *[!a-zA-Z0-9_/-]*|*/|*//*) fail 'Base paths use letters, numbers, underscores and hyphens in nonempty segments.';; esac
+[ "${#base_path}" -le 200 ] || fail 'Base path must be at most 200 characters.'
+[ "$base_path" != /healthz ] || fail '/healthz is reserved for the liveness check.'
 case "$installation" in /*) ;; *) fail 'Use an absolute installation directory.';; esac
 case "$installation" in /|*/../*|*/..|*[!a-zA-Z0-9_./-]*) fail 'Use a simple absolute installation directory.';; esac
 [ ! -e "$installation" ] || fail 'Installation directory already exists. Existing installations must use the updater.'
@@ -61,17 +66,17 @@ install -d -m 0700 "$installation/deploy" "$installation/scripts"
 for file in compose.yaml deploy/traefik.yaml deploy/traefik-panel.yaml scripts/configure.sh scripts/update-panel.py scripts/install-auto-update.sh; do
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/bwmp-dev/Cove/$revision/$file" -o "$installation/$file"
 done
-sh "$installation/scripts/configure.sh" "$domain"
+sh "$installation/scripts/configure.sh" "$domain" "$base_path"
 printf 'COVE_VERSION=%s\n' "$version" >> "$installation/.env"
 cd "$installation"
-unset COVE_DOMAIN POSTGRES_PASSWORD COVE_ENCRYPTION_KEY COVE_ADMIN_TOKEN COVE_VERSION COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
+unset COVE_DOMAIN COVE_BASE_PATH POSTGRES_PASSWORD COVE_ENCRYPTION_KEY COVE_ADMIN_TOKEN COVE_VERSION COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
 docker compose pull
 docker compose up -d --no-build --wait --wait-timeout 180
 echo 'Waiting for public HTTPS. DNS must point to this host and ports 80/443 must be reachable...'
 python3 - "$installation/.env" "$channel" <<'PY'
 import json, pathlib, sys, time, urllib.error, urllib.request
 env = dict(line.split("=", 1) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if "=" in line)
-origin = "https://" + env["COVE_DOMAIN"]
+origin = "https://" + env["COVE_DOMAIN"] + env.get("COVE_BASE_PATH", "")
 deadline = time.monotonic() + 180
 while True:
     try:
@@ -89,5 +94,5 @@ with urllib.request.urlopen(request, timeout=15) as response:
         sys.exit("Could not set the update channel.")
 PY
 sh "$installation/scripts/install-auto-update.sh" "$installation"
-echo "Cove is ready at https://$domain/register. Register now: the first account becomes the administrator."
+echo "Cove is ready at https://$domain$base_path/register. Register now: the first account becomes the administrator."
 echo "Configure SMTP and GitHub in Settings. Back up $installation/.env securely; it contains the encryption key."

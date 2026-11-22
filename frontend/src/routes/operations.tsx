@@ -4,6 +4,7 @@ import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { operationsQuery, workloadsQuery } from "../api/queries";
 import { FilterSelect, FilterToolbar, NoMatches } from "../components/FilterToolbar";
+import { ClientPagination } from "../components/ListPagination";
 import { OperationsTable } from "../components/OperationsTable";
 import { EmptyState, LoadingRows, PageHeader, QueryError, Section } from "../components/ui";
 import { actionLabels, isActive, matchesSearch, parseOperationsSearch, stateFilters, type OperationsSearch } from "../lib/operations";
@@ -89,7 +90,9 @@ export function OperationsPage() {
           {filtered.length === 0 ? (
             <NoMatches what="operations" scope="None of the 100 most recent operations match the search and filters." onReset={reset} />
           ) : (
-            <OperationsTable operations={filtered} workloadNames={names} caption="Operations" />
+            <ClientPagination rows={filtered} resetKey={`${query}|${search.state ?? ""}|${search.workload ?? ""}`} label="Operation pages" noun="operations">
+              {(rows) => <OperationsTable operations={rows} workloadNames={names} caption="Operations" />}
+            </ClientPagination>
           )}
         </Section>
       </>

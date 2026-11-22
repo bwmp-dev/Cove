@@ -208,6 +208,12 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
+	case path == "/api/preferences/timezone":
+		return true
+	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/notes") && r.Method == "GET":
+		return s.requireAccess(w, r, "project", id, 1)
+	case path == "/api/search" || path == "/api/activity" || path == "/api/onboarding" || path == "/api/resource-browser" || path == "/api/bulk-actions" || path == "/api/pins":
+		return true
 	case path == "/api/access-tokens" || strings.HasPrefix(path, "/api/access-tokens/"):
 		return true
 	case path == "/api/mcp":

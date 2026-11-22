@@ -21,7 +21,7 @@ def deploy(environment, opener=None, clock=time.monotonic, pause=time.sleep):
     parsed = urllib.parse.urlsplit(url)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username
             or parsed.query or parsed.fragment
-            or not re.fullmatch(r"/hooks/deploy/[a-f0-9]{32}", parsed.path)):
+            or not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*/hooks/deploy/[a-f0-9]{32}", parsed.path)):
         raise ValueError("hook-url must be a Cove HTTPS deploy-hook URL")
     if not token or "\n" in token or "\r" in token:
         raise ValueError("a deploy-hook token is required")

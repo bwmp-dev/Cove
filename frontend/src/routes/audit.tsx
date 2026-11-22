@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { request } from "../api/client";
 import { FilterSelect, FilterToolbar, NoMatches } from "../components/FilterToolbar";
+import { ClientPagination } from "../components/ListPagination";
 import { RelativeTime } from "../components/RelativeTime";
 import { StatusLabel } from "../components/status";
 import { EmptyState, LoadingRows, PageHeader, QueryError, Section } from "../components/ui";
@@ -80,6 +81,8 @@ function Events() {
       {filtered.length === 0 ? (
         <NoMatches what="events" scope="None of the 100 most recent events match the search and filters." onReset={reset} />
       ) : (
+        <ClientPagination rows={filtered} resetKey={`${query}|${outcome}`} label="Audit event pages" noun="events">
+          {(rows) => (
         <table className="w-full table-fixed text-left">
           <caption className="sr-only">Audit events</caption>
           <thead>
@@ -99,7 +102,7 @@ function Events() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((event) => {
+            {rows.map((event) => {
               const { tone, label } = results[result(event.status)];
               const status = <StatusLabel tone={tone} label={`${label} · ${event.status}`} />;
               return (
@@ -120,6 +123,8 @@ function Events() {
             })}
           </tbody>
         </table>
+          )}
+        </ClientPagination>
       )}
     </>
   );

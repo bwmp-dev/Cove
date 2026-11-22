@@ -11,6 +11,7 @@ import { useOnline } from "../lib/hooks";
 import { currentTeam, managesTeam } from "../lib/permissions";
 import { useSession, useSwitchTeam } from "../lib/session";
 import { groupLabelClass, inputClass, navItemClass } from "../lib/styles";
+import { CommandCenter, SearchButton } from "./CommandCenter";
 import { Spinner } from "./ui";
 
 function Wordmark() {
@@ -189,6 +190,7 @@ function MobileHeader({ fetching }: { fetching: boolean }) {
         <Wordmark />
         <div className="flex items-center gap-2">
           {fetching && <Spinner className="size-3.5 text-fg-subtle" />}
+          <SearchButton compact />
           <button
             ref={trigger}
             type="button"
@@ -231,6 +233,9 @@ export function AppShell() {
           <Wordmark />
           {fetching && <Spinner className="size-3.5 text-fg-subtle" />}
         </div>
+        <div className="shrink-0 px-2">
+          <SearchButton />
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           <Navigation />
         </div>
@@ -254,6 +259,7 @@ export function AppShell() {
           </main>
         </div>
       </div>
+      <CommandCenter />
     </div>
   );
 }

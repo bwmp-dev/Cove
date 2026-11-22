@@ -8,6 +8,7 @@ import { nodesQuery, workloadsQuery } from "../api/queries";
 import type { WorkloadSummary } from "../api/types";
 import { Checkbox } from "../components/Checkbox";
 import { PlacementRow } from "../components/EnvironmentList";
+import { ClientPagination } from "../components/ListPagination";
 import { Button, EmptyState, Field, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, resourcesIn, productionEnvironments, previewEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
@@ -159,11 +160,15 @@ function ProjectList({ projects, resources, creating, allowed, newProject }: { p
   }
   return (
     <div className="px-4 pt-5 sm:px-6">
+      <ClientPagination rows={projects} pageSize={20} label="Project pages" noun="projects">
+        {(rows) => (
       <ul aria-label="Projects" className="divide-y divide-line-strong overflow-hidden rounded-lg border border-line bg-surface">
-        {projects.map((project) => (
+        {rows.map((project) => (
           <ProjectGroup key={project.id} project={project} resources={resources} />
         ))}
       </ul>
+        )}
+      </ClientPagination>
     </div>
   );
 }

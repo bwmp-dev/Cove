@@ -25,7 +25,7 @@ func (*coveProvider) Metadata(_ context.Context, _ provider.MetadataRequest, res
 }
 func (*coveProvider) Schema(_ context.Context, _ provider.SchemaRequest, response *provider.SchemaResponse) {
 	response.Schema = schema.Schema{Description: "Manage Cove configuration through the versioned API. Deployment is explicit; this provider does not start or stop applications.", Attributes: map[string]schema.Attribute{
-		"endpoint": schema.StringAttribute{Optional: true, Description: "HTTPS panel origin; defaults to COVE_ENDPOINT."},
+		"endpoint": schema.StringAttribute{Optional: true, Description: "HTTPS panel URL including its optional base path; defaults to COVE_ENDPOINT."},
 		"token":    schema.StringAttribute{Optional: true, Sensitive: true, Description: "Scoped API token; defaults to COVE_API_TOKEN."},
 		"team":     schema.StringAttribute{Optional: true, Description: "Selected team ID; defaults to COVE_TEAM."},
 	}}

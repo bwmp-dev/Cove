@@ -1,5 +1,6 @@
 import { Link, useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { errorMessage } from "../api/client";
+import { ErrorRemediation } from "./ErrorRemediation";
 import { Button } from "./ui";
 import { buttonClass } from "../lib/styles";
 
@@ -11,6 +12,7 @@ export function RouteError({ error, reset }: ErrorComponentProps) {
       <p role="alert" className="mt-2 text-[13px] text-fg-muted">
         {errorMessage(error)}
       </p>
+      <ErrorRemediation error={error} />
       <Button
         variant="secondary"
         className="mt-5"

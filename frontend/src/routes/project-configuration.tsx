@@ -6,6 +6,7 @@ import { CoolifyImport } from "../components/CoolifyImport";
 import { EnvironmentCompare } from "../components/EnvironmentCompare";
 import { GitOpsSource } from "../components/GitOpsSource";
 import { ProjectManifest } from "../components/ProjectManifest";
+import { ProjectStatusShare } from "../components/ProjectStatusShare";
 import { EmptyState, Notice, SectionGrid } from "../components/ui";
 import { canCompareEnvironments, productionEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
@@ -52,6 +53,7 @@ export function ProjectConfiguration() {
         {editable && <ConfigurationExport project={project} environments={environments} online={online} />}
       </SectionGrid>
       <EnvironmentCompare projectId={project.id} environments={environments} />
+      {editable && <ProjectStatusShare key={project.id} projectId={project.id} />}
     </>
   );
 }

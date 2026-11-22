@@ -227,7 +227,7 @@ func login(ctx context.Context, args []string, o options, saved contexts) error 
 	flags := flag.NewFlagSet("login", flag.ContinueOnError)
 	flags.SetOutput(o.Err)
 	name := flags.String("name", "default", "context name")
-	address := flags.String("url", "", "HTTPS panel origin")
+	address := flags.String("url", "", "HTTPS panel URL, including its optional base path")
 	team := flags.String("team", "", "selected team ID")
 	stdin := flags.Bool("token-stdin", false, "read a scoped API token from standard input")
 	if err := flags.Parse(args); err != nil {

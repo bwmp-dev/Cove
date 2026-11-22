@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"cove/internal/panelurl"
 	"cove/internal/worker"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -15,7 +16,6 @@ import (
 	"golang.org/x/crypto/ssh"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,9 +49,9 @@ type Server struct {
 }
 
 func (s *Server) Init(ctx context.Context) error {
-	u, err := url.Parse(s.PublicURL)
-	if err != nil || strings.ContainsAny(s.PublicURL, "'\"\\ \t\r\n") || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
-		return errors.New("COVE_PUBLIC_URL must be an HTTPS origin without a path")
+	_, err := panelurl.Parse(s.PublicURL)
+	if err != nil {
+		return err
 	}
 	if len(s.Key) != 32 || len(s.AdminToken) < 32 {
 		return errors.New("a 32-byte encryption key and at least 32-character admin token are required")
@@ -93,6 +93,27 @@ func (s *Server) Init(ctx context.Context) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerPublicAPI(mux)
+	mux.Handle("GET /api/search", s.admin(http.HandlerFunc(s.workspaceSearch)))
+	for _, pattern := range []string{"GET /api/projects/{id}/status-share", "POST /api/projects/{id}/status-share", "DELETE /api/projects/{id}/status-share"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.projectStatusShare)))
+	}
+	mux.HandleFunc("GET /api/public/projects/{share}", s.publicProjectStatus)
+	mux.HandleFunc("GET /status/{share}/badge.svg", s.publicProjectStatus)
+	for _, pattern := range []string{"GET /api/projects/{id}/notes", "PUT /api/projects/{id}/notes", "GET /api/workloads/{id}/notes", "PUT /api/workloads/{id}/notes"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.workspaceNotes)))
+	}
+	for _, pattern := range []string{"GET /api/preferences/timezone", "PUT /api/preferences/timezone", "GET /api/teams/{id}/timezone", "PUT /api/teams/{id}/timezone"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.displayTimezone)))
+	}
+	mux.Handle("GET /api/activity", s.admin(http.HandlerFunc(s.workspaceActivity)))
+	mux.Handle("GET /api/onboarding", s.admin(http.HandlerFunc(s.onboarding)))
+	mux.Handle("PUT /api/onboarding", s.admin(http.HandlerFunc(s.onboarding)))
+	mux.Handle("GET /api/resource-browser", s.admin(http.HandlerFunc(s.browseResources)))
+	mux.Handle("POST /api/bulk-actions", s.admin(http.HandlerFunc(s.bulkResourceAction)))
+	mux.Handle("GET /api/pins", s.admin(http.HandlerFunc(s.personalPins)))
+	mux.Handle("PUT /api/pins", s.admin(http.HandlerFunc(s.personalPins)))
+	mux.Handle("GET /api/workloads/{id}/tags", s.admin(http.HandlerFunc(s.resourceTags)))
+	mux.Handle("PUT /api/workloads/{id}/tags", s.admin(http.HandlerFunc(s.resourceTags)))
 	mux.Handle("GET /api/mcp", s.admin(http.HandlerFunc(s.mcpSettings)))
 	mux.Handle("PUT /api/mcp", s.admin(http.HandlerFunc(s.mcpSettings)))
 	for _, method := range []string{"GET", "POST", "DELETE"} {
@@ -351,10 +372,11 @@ func (s *Server) Handler() http.Handler {
 		s.authenticated(http.HandlerFunc(s.register), w, r, "node enrollment")
 	})
 	mux.HandleFunc("GET /", s.frontend)
+	mounted := s.mountPanel(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		mux.ServeHTTP(w, r)
+		mounted.ServeHTTP(w, r)
 	})
 }
 func bearer(r *http.Request) string {

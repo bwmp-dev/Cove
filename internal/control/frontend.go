@@ -38,6 +38,10 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 	nonce := randomToken()
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'nonce-"+nonce+"'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://github.com")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	if strings.HasPrefix(r.URL.Path, "/shared/") {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	}
 	w.Header().Set("X-Frame-Options", "DENY")
 	if strings.HasPrefix(name, "assets/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
@@ -49,7 +53,8 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(strings.Replace(string(data), "<head>", "<head><meta name=\"cove-style-nonce\" content=\""+html.EscapeString(nonce)+"\">", 1)))
+		base := html.EscapeString(s.panelBasePath())
+		_, _ = w.Write([]byte(strings.Replace(string(data), "<head>", "<head><base href=\""+base+"/\"><meta name=\"cove-base-path\" content=\""+base+"\"><meta name=\"cove-style-nonce\" content=\""+html.EscapeString(nonce)+"\">", 1)))
 		return
 	}
 	http.ServeFileFS(w, r, files, name)

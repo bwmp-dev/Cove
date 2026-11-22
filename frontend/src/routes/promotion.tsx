@@ -10,6 +10,7 @@ import { useOnline } from "../lib/hooks";
 import { can } from "../lib/permissions";
 import { inputClass } from "../lib/styles";
 import { useResource } from "./workload-detail";
+import { formatAbsolute } from "../lib/format";
 
 export function Promotion() {
  const target = useResource();
@@ -24,7 +25,7 @@ export function Promotion() {
   <form onSubmit={submit} className="space-y-4">
    <Notice tone="warn">Promotion deploys every service image and may restart containers. It does not copy database contents or undo schema changes. Review target settings and backups before promoting.</Notice>
    <Field id="promotion-source" label="Source resource"><Select id="promotion-source" className={inputClass} value={source} onChange={event => setSource(event.target.value)} required><option value="">Select resource</option>{resources.data?.filter(item => item.id !== target.id && item.project_id === target.project_id && item.kind !== "job" && can(item.permissions, "edit")).map(item => <option key={item.id} value={item.id}>{item.environment ?? "Project resource"} / {item.name}</option>)}</Select></Field>
-   <Field id="promotion-release" label="Source release"><Select id="promotion-release" name="release" key={source} className={inputClass} required disabled={!releases.data}><option value="">Select successful retained release</option>{releases.data?.releases.map(release => <option key={release.id} value={release.id}>{new Date(release.created_at).toLocaleString()} · {release.id}</option>)}</Select></Field>
+   <Field id="promotion-release" label="Source release"><Select id="promotion-release" name="release" key={source} className={inputClass} required disabled={!releases.data}><option value="">Select successful retained release</option>{releases.data?.releases.map(release => <option key={release.id} value={release.id}>{formatAbsolute(release.created_at)} · {release.id}</option>)}</Select></Field>
    <Field id="promotion-repository" label="Registry repository" optional hint="For images built locally and promotion to another node, enter a repository such as your-org/cove-releases. Cove publishes to the registry assigned to the source and uses immutable digests. Leave empty for same-node promotion or images already published."><input id="promotion-repository" name="repository" className={inputClass} maxLength={200} /></Field>
    {(resources.isError || releases.isError) && <Notice tone="error">{errorMessage(resources.error ?? releases.error)}</Notice>}
    {promote.isError && <Notice tone="error">{errorMessage(promote.error)}</Notice>}

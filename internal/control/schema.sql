@@ -871,3 +871,41 @@ DROP TRIGGER IF EXISTS pending_adoption_workload ON workloads;
 CREATE TRIGGER pending_adoption_workload BEFORE UPDATE OF configuration,node_id,team_id,project_id,environment_id ON workloads FOR EACH ROW EXECUTE FUNCTION cove_pending_adoption();
 DROP TRIGGER IF EXISTS pending_adoption_operation ON operations;
 CREATE TRIGGER pending_adoption_operation BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_pending_adoption();
+
+-- Workspace resource organization and personal pins.
+CREATE TABLE IF NOT EXISTS workload_tags (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ tags text[] NOT NULL DEFAULT '{}', CHECK(cardinality(tags)<=12)
+);
+CREATE INDEX IF NOT EXISTS workload_tags_values ON workload_tags USING gin(tags);
+CREATE TABLE IF NOT EXISTS user_pins (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ kind text NOT NULL CHECK(kind IN ('project','environment','workload')),
+ resource_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(user_id,team_id,kind,resource_id)
+);
+CREATE TABLE IF NOT EXISTS user_onboarding (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ dismissed boolean NOT NULL DEFAULT false, PRIMARY KEY(user_id,team_id)
+);
+
+-- Private resource notes and display timezone preferences.
+CREATE TABLE IF NOT EXISTS project_notes (
+ resource_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ content bytea NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS workload_notes (
+ resource_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ content bytea NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS display_timezone text NOT NULL DEFAULT 'UTC';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS display_timezone text;
+
+-- Explicitly enabled, hash-only public deployment summaries.
+CREATE TABLE IF NOT EXISTS project_status_shares (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ title text NOT NULL, token_hash bytea UNIQUE NOT NULL,
+ expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);

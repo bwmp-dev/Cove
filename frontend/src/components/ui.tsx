@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Info, LoaderCir
 import { Children, isValidElement, useId, useState, type ButtonHTMLAttributes, type ComponentProps, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import { buttonClass, type Size, type Variant } from "../lib/styles";
+import { ErrorRemediation } from "./ErrorRemediation";
 import { Switch } from "./Switch";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -126,6 +127,7 @@ export function QueryError({ error, onRetry, retrying, what }: { error: unknown;
       }
     >
       {errorMessage(error)}
+      <ErrorRemediation error={error} />
     </Notice>
   );
 }

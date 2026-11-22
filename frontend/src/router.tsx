@@ -4,7 +4,9 @@ import { sessionQuery } from "./api/queries";
 import { ApiError } from "./api/client";
 import { AppShell } from "./components/AppShell";
 import { NotFound, RouteError } from "./components/RouteStates";
+import { TimezoneProvider } from "./components/TimezoneProvider";
 import { parseOperationsSearch } from "./lib/operations";
+import { basePath, withBasePath } from "./lib/base-path";
 import { safeRedirect } from "./lib/redirect";
 import { rememberTeam, selectedTeam } from "./lib/team";
 
@@ -28,7 +30,7 @@ const loginRoute = createRoute({
   beforeLoad: async ({ context, search }) => {
     const session = await context.queryClient.ensureQueryData(sessionQuery).catch(() => null);
     if (session) {
-      throw redirect({ href: safeRedirect(search.redirect) });
+      throw redirect({ href: withBasePath(safeRedirect(search.redirect)) });
     }
   },
   component: lazyRouteComponent(() => import("./routes/login"), "LoginPage"),
@@ -39,6 +41,18 @@ const verifyRoute = createRoute({ getParentRoute: () => rootRoute, path: "/verif
 const forgotRoute = createRoute({ getParentRoute: () => rootRoute, path: "/forgot-password", component: lazyRouteComponent(() => import("./routes/auth"), "ForgotPasswordPage") });
 const resetRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reset-password", component: lazyRouteComponent(() => import("./routes/auth"), "ResetPasswordPage") });
 const inviteRoute = createRoute({ getParentRoute: () => rootRoute, path: "/invite", component: lazyRouteComponent(() => import("./routes/auth"), "InvitationPage") });
+// Public status page for an opted-in project share link; it needs no session and sits outside the authenticated app.
+const sharedStatusRoute = createRoute({ getParentRoute: () => rootRoute, path: "/shared/$share", component: lazyRouteComponent(() => import("./routes/shared-status"), "SharedStatusPage") });
+
+// The display zone is a private preference, so only the authenticated app requests it. Public pages such as shared
+// status links stay outside, where an expired cached session must not redirect a valid public link to sign-in.
+function AuthenticatedApp() {
+  return (
+    <TimezoneProvider>
+      <AppShell />
+    </TimezoneProvider>
+  );
+}
 
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -56,7 +70,7 @@ const appRoute = createRoute({
       rememberTeam(session.team_id || null);
     }
   },
-  component: AppShell,
+  component: AuthenticatedApp,
   errorComponent: RouteError,
 });
 
@@ -92,6 +106,7 @@ const resourceNewRoute = createRoute({
   }),
   component: lazyRouteComponent(() => import("./routes/workload-new"), "NewWorkloadPage"),
 });
+const resourceBrowserRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources/organize", component: lazyRouteComponent(() => import("./routes/resource-browser"), "ResourceBrowserPage") });
 const resourceRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources/$resourceId", component: lazyRouteComponent(() => import("./routes/workload-detail"), "WorkloadPage") });
 const resourceOverviewRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceOverview") });
 const resourceLogsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/logs", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceLogs") });
@@ -147,6 +162,7 @@ const routeTree = rootRoute.addChildren([
   forgotRoute,
   resetRoute,
   inviteRoute,
+  sharedStatusRoute,
   appRoute.addChildren([
     indexRoute,
     dashboardRoute,
@@ -160,6 +176,7 @@ const routeTree = rootRoute.addChildren([
     projectRoute.addChildren([projectOverviewRoute, environmentRoute, projectPreviewsRoute, projectConfigurationRoute]),
     resourcesRoute,
     resourceNewRoute,
+    resourceBrowserRoute,
     resourceRoute.addChildren([
       resourceOverviewRoute,
       resourceLogsRoute,
@@ -201,6 +218,7 @@ const routeTree = rootRoute.addChildren([
 export function createAppRouter(queryClient: QueryClient) {
   return createRouter({
     routeTree,
+    basepath: basePath || "/",
     context: { queryClient },
     defaultPreload: "intent",
     defaultPreloadStaleTime: 0,

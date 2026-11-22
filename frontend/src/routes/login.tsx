@@ -8,6 +8,7 @@ import { authConfigQuery } from "../api/queries";
 import type { AuthConfig } from "../api/types";
 import { AuthFrame } from "../components/AuthFrame";
 import { Button, Field, Notice } from "../components/ui";
+import { withBasePath } from "../lib/base-path";
 import { safeRedirect } from "../lib/redirect";
 import { inputClass } from "../lib/styles";
 
@@ -63,7 +64,7 @@ export function LoginPage() {
     login.mutate(trimmed ? { email: trimmed, password } : { password }, {
       onSuccess: () => {
         setPassword("");
-        void navigate({ href: safeRedirect(search.redirect), replace: true });
+        void navigate({ href: withBasePath(safeRedirect(search.redirect)), replace: true });
       },
       onError: () => setPassword(""),
     });

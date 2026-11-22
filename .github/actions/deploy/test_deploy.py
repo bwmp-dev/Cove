@@ -73,6 +73,14 @@ class DeployActionTests(unittest.TestCase):
         self.assertEqual(len(triggers), 2)
         self.assertEqual(triggers[0].data, triggers[1].data)
 
+    def test_panel_base_path_is_preserved(self):
+        self.environment["COVE_DEPLOY_HOOK_URL"] = "https://panel.example.com/control/cove/hooks/deploy/" + "b" * 32
+        panel = FakePanel(["succeeded"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.run_deploy(panel)
+        for request in panel.requests:
+            self.assertTrue(request.full_url.startswith("https://panel.example.com/control/cove/hooks/deploy/"))
+
     def test_terminal_failures(self):
         for state in ("failed", "interrupted", "cancelled", "superseded"):
             with self.subTest(state=state), contextlib.redirect_stdout(io.StringIO()):

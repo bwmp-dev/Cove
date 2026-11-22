@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"cove/internal/panelurl"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -10,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -27,9 +27,9 @@ type Error struct {
 
 func (e *Error) Error() string { return fmt.Sprintf("Cove API returned %d: %s", e.Status, e.Message) }
 func New(address, token, team string) (*Client, error) {
-	u, err := url.Parse(address)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" && u.Path != "/" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || token == "" || strings.ContainsAny(token+team, "\r\n\x00") {
-		return nil, errors.New("an HTTPS panel origin, API token and valid team are required")
+	_, err := panelurl.Parse(strings.TrimSuffix(address, "/"))
+	if err != nil || token == "" || strings.ContainsAny(token+team, "\r\n\x00") {
+		return nil, errors.New("an HTTPS panel URL, API token and valid team are required")
 	}
 	httpClient := &http.Client{Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if file := os.Getenv("COVE_CA_FILE"); file != "" {

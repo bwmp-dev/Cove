@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Plus, Boxes } from "lucide-react";
+import { Plus, Boxes, Tags } from "lucide-react";
 import { useMemo, useState } from "react";
 import { projectsQuery } from "../api/projects";
 import { nodesQuery, operationsQuery, workloadsQuery } from "../api/queries";
@@ -149,7 +149,15 @@ export function WorkloadsPage() {
 
   return (
     <>
-      <PageHeader icon={<Boxes aria-hidden />} title="All resources" description="Every resource you can access, with its environment and node." actions={canCreate && <NewResourceLink />} />
+      <PageHeader icon={<Boxes aria-hidden />} title="All resources" description="Every resource you can access, with its environment and node." actions={
+          <>
+            <Link to="/resources/organize" className={buttonClass("secondary")}>
+              <Tags aria-hidden className="size-3.5" />
+              Organize
+            </Link>
+            {canCreate && <NewResourceLink />}
+          </>
+        } />
       {body}
     </>
   );

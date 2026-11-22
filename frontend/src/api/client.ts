@@ -1,3 +1,4 @@
+import { withBasePath } from "../lib/base-path";
 import { selectedTeam } from "../lib/team";
 
 export class ApiError extends Error {
@@ -68,9 +69,9 @@ async function readErrorDetails(response: Response): Promise<unknown> {
   }
 }
 
-async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal, teamOverride?: string): Promise<Response> {
+async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal, teamOverride?: string, anonymous = false): Promise<Response> {
   const headers: Record<string, string> = { Accept: accept };
-  const team = teamOverride ?? selectedTeam();
+  const team = anonymous ? null : (teamOverride ?? selectedTeam());
   if (team) {
     headers["X-Cove-Team"] = team;
   }
@@ -79,11 +80,11 @@ async function send(method: string, path: string, accept: string, body?: unknown
   }
   let response: Response;
   try {
-    response = await fetch(path, {
+    response = await fetch(withBasePath(path), {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: "same-origin",
+      credentials: anonymous ? "omit" : "same-origin",
       cache: "no-store",
       signal,
     });
@@ -111,6 +112,16 @@ export function requestForTeam<T>(team: string, method: string, path: string, bo
 
 async function requestJSON<T>(method: string, path: string, body: unknown, signal: AbortSignal | undefined, team?: string): Promise<T> {
   const response = await send(method, path, "application/json", body, signal, team);
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiError(response.status, "The server returned an unreadable response.");
+  }
+}
+
+// Public pages (such as a shared status link) must not carry the visitor's session cookie or selected team.
+export async function requestPublic<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await send("GET", path, "application/json", undefined, signal, undefined, true);
   try {
     return (await response.json()) as T;
   } catch {

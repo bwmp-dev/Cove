@@ -43,9 +43,11 @@ import { DeployReview } from "../components/DeployReview";
 import { DeleteResource } from "../components/DeleteResource";
 import { LogViewer } from "../components/LogViewer";
 import { OperationsTable } from "../components/OperationsTable";
+import { Notes } from "../components/Notes";
 import { RelativeTime } from "../components/RelativeTime";
 import { ContainerLogs, RuntimeContainers } from "../components/Runtime";
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
+import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
@@ -328,7 +330,12 @@ function ResourceHeader({ workload }: { workload: Workload }) {
             )}
           </MetaList>
         }
-        actions={can(workload.permissions, "operate") ? actions.buttons : undefined}
+        actions={
+          <>
+            <PinButton kind="workload" id={workload.id} name={workload.name} />
+            {can(workload.permissions, "operate") && actions.buttons}
+          </>
+        }
       />
       <div className="space-y-2 px-4 pt-4 empty:hidden sm:px-6" aria-live="polite">
         {actions.feedback}
@@ -601,6 +608,7 @@ export function ResourceOverview() {
         >
           <RuntimeContainers workloadId={workload.id} kind={kind} operationActive={Boolean(active)} />
         </Section>
+        <Notes key={workload.id} scope="resource" id={workload.id} canEdit={can(workload.permissions, "edit")} />
       </div>
       <Section title="Details">
         <DefinitionList

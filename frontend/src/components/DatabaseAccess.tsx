@@ -6,6 +6,7 @@ import { useOnline } from "../lib/hooks";
 import { inputClass } from "../lib/styles";
 import { Button, Field, Notice, Section } from "./ui";
 import { CopyButton } from "./CopyButton";
+import { formatAbsolute } from "../lib/format";
 
 interface Lease { id: string; service: string; port: number; expires_at: string }
 interface Connection { id: string; expires_at: string; host: string; ssh_port: number; host_key: string }
@@ -32,7 +33,7 @@ export function DatabaseAccess({ id }: { id: string }) {
    </form>
    {(open.isError || close.isError || leases.isError) && <Notice tone="error">{errorMessage(open.error ?? close.error ?? leases.error)}</Notice>}
    {connection && <div className="space-y-2"><p className="text-sm">Run locally, replacing the identity path and local port if needed:</p><pre role="region" aria-label="Local database connection command" className="overflow-x-auto rounded border border-line p-3 text-xs" tabIndex={0}>{command}</pre><CopyButton text={command} label="Copy connection command" /></div>}
-   <ul className="divide-y divide-line">{leases.data?.map(lease => <li key={lease.id} className="flex flex-wrap items-center justify-between gap-3 py-2"><div className="text-sm">{lease.service}:{lease.port}<p className="text-xs text-fg-muted">Expires {new Date(lease.expires_at).toLocaleTimeString()}</p></div><Button size="sm" disabled={!online || close.isPending} onClick={() => close.mutate(lease.id)}>Revoke access</Button></li>)}</ul>
+   <ul className="divide-y divide-line">{leases.data?.map(lease => <li key={lease.id} className="flex flex-wrap items-center justify-between gap-3 py-2"><div className="text-sm">{lease.service}:{lease.port}<p className="text-xs text-fg-muted">Expires {formatAbsolute(lease.expires_at)}</p></div><Button size="sm" disabled={!online || close.isPending} onClick={() => close.mutate(lease.id)}>Revoke access</Button></li>)}</ul>
   </div>
  </Section>;
 }

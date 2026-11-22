@@ -52,7 +52,7 @@ func (s *Server) InitAdministrator(ctx context.Context, password string) error {
 	return err
 }
 
-func (s *Server) sameOrigin(r *http.Request) bool { return r.Header.Get("Origin") == s.PublicURL }
+func (s *Server) sameOrigin(r *http.Request) bool { return r.Header.Get("Origin") == s.panelOrigin() }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(r) {
