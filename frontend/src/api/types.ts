@@ -7,6 +7,7 @@ export interface Capabilities {
   resource_limits?: boolean;
   terminal?: boolean;
   infrastructure?: boolean;
+  route_policies?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -150,7 +151,29 @@ export interface WorkloadInput {
   environment_patch?: Record<string, string | null>;
 }
 
-export interface Route { domain: string; service: string; port: number }
+export interface RouteUpstream { service: string; port: number }
+
+export interface RoutePolicy {
+  path_prefix?: string;
+  request_headers?: Record<string, string>;
+  response_headers?: Record<string, string>;
+  security_headers?: boolean;
+  ip_allow_list?: string[];
+  redirect_host?: string;
+  redirect_permanent?: boolean;
+  certificate_source?: "acme" | "default";
+  upstreams?: RouteUpstream[];
+  sticky?: boolean;
+}
+
+export interface Route {
+  domain: string;
+  service: string;
+  port: number;
+  // An htpasswd bcrypt entry set through the API. The dashboard has no editor for it and passes it through unchanged.
+  auth?: string;
+  policy?: RoutePolicy;
+}
 
 export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";

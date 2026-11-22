@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -175,7 +174,18 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if slices.Equal(config.Routes, in.Routes) {
+	if worker.HasRoutePolicies(in.Routes) {
+		var supported bool
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((capabilities->>'route_policies')::boolean,false) FROM nodes WHERE id=(SELECT node_id FROM workloads WHERE id=$1)`, id).Scan(&supported); err != nil {
+			http.Error(w, "worker capabilities unavailable", 503)
+			return
+		}
+		if !supported {
+			http.Error(w, "upgrade and verify the worker before applying route policies", 409)
+			return
+		}
+	}
+	if worker.RoutesEqual(config.Routes, in.Routes) {
 		respond(w, 200, map[string]string{"state": "unchanged"})
 		return
 	}

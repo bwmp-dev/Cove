@@ -613,6 +613,14 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 	routedServices := map[string]bool{}
 	for i, route := range src.Config.Routes {
 		routedServices[route.Service] = true
+		if route.Policy != nil {
+			for _, upstream := range route.Policy.Upstreams {
+				routedServices[upstream.Service] = true
+			}
+			if recipe.DomainTemplate != "" && route.Policy.RedirectHost != "" {
+				block("route_redirect", "A route redirects to a fixed hostname that may reach production.", "Exclude this resource or remove its hostname redirect before publishing preview domains.", "")
+			}
+		}
 		if recipe.DomainTemplate != "" {
 			name := resourceSlug(src.Name)
 			if i > 0 {

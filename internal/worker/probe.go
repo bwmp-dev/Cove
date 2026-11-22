@@ -32,6 +32,7 @@ type Probe struct {
 	SharedNetworks      bool         `json:"shared_networks"`
 	PrivateLinks        bool         `json:"private_links"`
 	LiveRoutes          bool         `json:"live_routes"`
+	RoutePolicies       bool         `json:"route_policies"`
 	Protocol            int          `json:"protocol"`
 	OS                  string       `json:"os"`
 	Arch                string       `json:"arch"`
@@ -47,6 +48,7 @@ func Inspect(ctx context.Context) Probe {
 	p.Previews = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
+	p.RoutePolicies = true
 	if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Output(); err == nil {
 		p.Docker = strings.TrimSpace(string(out))
 	}

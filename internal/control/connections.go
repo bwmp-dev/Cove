@@ -354,6 +354,15 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if r.Action == "deploy" && worker.HasRoutePolicies(r.Routes) {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'route_policies')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before applying route policies")
+		}
+	}
 	if r.Action == "deploy" && r.Hooks != nil && (len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil) {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'guarded_hooks')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {

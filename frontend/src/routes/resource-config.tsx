@@ -517,6 +517,8 @@ function DomainsForm({ workload }: { workload: Workload }) {
   const deployed = workload.deployed || Boolean(operations.data?.some((item) => item.workload_id === workload.id && (item.action === "deploy" || item.action === "rollback") && item.state === "succeeded"));
   const save = useUpdateRoutes(workload.id);
   const blocked = useSaveBlocked(workload.id);
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
   const [rows, setRows] = useState(() => routeRows(workload.routes));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [applying, setApplying] = useState<string | null>(null);
@@ -604,6 +606,7 @@ function DomainsForm({ workload }: { workload: Workload }) {
         <RouteEditor
           routes={rows}
           errors={errors}
+          policies={node ? Boolean(node.capabilities?.route_policies) : undefined}
           onChange={(next) => {
             save.reset();
             setApplying(null);

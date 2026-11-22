@@ -23,7 +23,8 @@ type Route struct {
 	Service string `json:"service"`
 	Port    int    `json:"port"`
 	// Auth is an htpasswd bcrypt entry; when set the proxy requires it before forwarding.
-	Auth string `json:"auth,omitempty"`
+	Auth   string       `json:"auth,omitempty"`
+	Policy *RoutePolicy `json:"policy,omitempty"`
 }
 
 var routeAuth = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}:\$2[aby]\$1[0-4]\$[./A-Za-z0-9]{53}$`)
@@ -36,7 +37,8 @@ func ValidateRoutes(routes []Route, kind string) error {
 	}
 	seen := map[string]bool{}
 	for _, route := range routes {
-		if len(route.Domain) > 253 || !strings.Contains(route.Domain, ".") || seen[route.Domain] || !serviceIdentifier.MatchString(route.Service) || route.Port < 1 || route.Port > 65535 || (route.Auth != "" && !routeAuth.MatchString(route.Auth)) {
+		key := route.Domain + "/" + route.pathPrefix()
+		if len(route.Domain) > 253 || !strings.Contains(route.Domain, ".") || seen[key] || !serviceIdentifier.MatchString(route.Service) || route.Port < 1 || route.Port > 65535 || (route.Auth != "" && !routeAuth.MatchString(route.Auth)) {
 			return errors.New("invalid or duplicate route hostname, service or port")
 		}
 		for _, label := range strings.Split(route.Domain, ".") {
@@ -44,7 +46,10 @@ func ValidateRoutes(routes []Route, kind string) error {
 				return errors.New("route hostnames must be lowercase DNS names without schemes, paths or wildcards")
 			}
 		}
-		seen[route.Domain] = true
+		if err := route.validatePolicy(); err != nil {
+			return err
+		}
+		seen[key] = true
 	}
 	return nil
 }
@@ -66,7 +71,7 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 				return "", errors.New("hostname already belongs to another workload")
 			}
 			owners[route.Domain] = workload
-			config.add(route.Domain, fmt.Sprintf("http://%s:%d", routeAlias(workload, route.Service), route.Port), route.Auth)
+			config.addRoute(workload, route)
 		}
 	}
 	// Traefik rejects empty nested maps as standalone configuration elements.
@@ -85,16 +90,21 @@ type ingressRouter struct {
 	TLS         map[string]string `json:"tls"`
 }
 
+type ingressBasicAuth struct {
+	Users        []string `json:"users"`
+	RemoveHeader bool     `json:"removeHeader"`
+}
 type ingressMiddleware struct {
-	BasicAuth struct {
-		Users        []string `json:"users"`
-		RemoveHeader bool     `json:"removeHeader"`
-	} `json:"basicAuth"`
+	BasicAuth     *ingressBasicAuth `json:"basicAuth,omitempty"`
+	Headers       map[string]any    `json:"headers,omitempty"`
+	IPAllowList   map[string]any    `json:"ipAllowList,omitempty"`
+	RedirectRegex map[string]any    `json:"redirectRegex,omitempty"`
 }
 
 type ingressService struct {
 	LoadBalancer struct {
 		Servers []map[string]string `json:"servers"`
+		Sticky  map[string]any      `json:"sticky,omitempty"`
 	} `json:"loadBalancer"`
 }
 
@@ -116,9 +126,14 @@ func newIngressConfig() dynamicIngress {
 func (c *dynamicIngress) add(domain, upstream, auth string) {
 	sum := sha256.Sum256([]byte(domain + "/" + upstream))
 	name := "cove-route-" + hex.EncodeToString(sum[:16])
+	c.addNamed(domain, upstream, auth, name)
+}
+
+func (c *dynamicIngress) addNamed(domain, upstream, auth, name string) {
 	router := ingressRouter{Rule: "Host(`" + domain + "`)", EntryPoints: []string{"websecure"}, Service: name, TLS: map[string]string{"certResolver": "cove"}}
 	if auth != "" {
 		middleware := ingressMiddleware{}
+		middleware.BasicAuth = &ingressBasicAuth{}
 		middleware.BasicAuth.Users = []string{auth}
 		middleware.BasicAuth.RemoveHeader = true
 		if c.HTTP.Middlewares == nil {
@@ -285,7 +300,7 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 		}
 	}
 	for workload, list := range routes {
-		for _, route := range list {
+		for _, route := range routeTargets(list) {
 			ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
 			if err != nil {
 				return err
@@ -345,7 +360,7 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route, out io.Writer) error {
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
-	for _, route := range list {
+	for _, route := range routeTargets(list) {
 		ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
 		if err != nil {
 			return err
@@ -510,7 +525,7 @@ func (e *Engine) restoreRoutes(ctx context.Context, workload string, previous []
 	if err != nil {
 		return err
 	}
-	if released && !slices.Equal(current.Routes, previous) {
+	if released && !RoutesEqual(current.Routes, previous) {
 		current.Routes = previous
 		if err = writeJSON(path, current); err != nil {
 			return err

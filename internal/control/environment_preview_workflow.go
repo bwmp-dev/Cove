@@ -559,7 +559,8 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 			if err != nil {
 				return s.failPreview(ctx, p.ID, "plan", err.Error())
 			}
-			routes = append(routes, worker.Route{Domain: domain, Service: route.Service, Port: route.Port, Auth: p.Snapshot.Auth})
+			route.Domain, route.Auth = domain, p.Snapshot.Auth
+			routes = append(routes, route)
 		}
 		routesJSON, err := json.Marshal(routes)
 		if err != nil {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -185,7 +184,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.Routes == nil {
 			in.Routes = old.Routes
-		} else if !slices.Equal(in.Routes, old.Routes) {
+		} else if !worker.RoutesEqual(in.Routes, old.Routes) {
 			attempted, err := deployAttempted(r.Context(), tx, r.PathValue("id"))
 			if err != nil {
 				http.Error(w, "database unavailable", 503)

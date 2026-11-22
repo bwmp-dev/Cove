@@ -55,6 +55,8 @@ Environment previews copy one production environment per branch name across sele
 
 Private connections are explicit, directional TCP grants from one source service to one target service port, enforced on workers by a per-node link gateway with dedicated internal networks per source hostname and per target, and pinned mutual TLS between workers. They do not replace or restrict shared networks, published ports or public routes. See DEVELOPMENT.md for the operating model and limits.
 
+Managed HTTP routes optionally carry a validated policy for path prefixes, request/response headers, source CIDR restrictions, hostname redirects, ACME selection, sticky sessions and additional upstream Compose services on the same worker. Policies travel in the existing encrypted workload configuration and durable route journal; no separate route database is introduced. Policy-derived proxy object names make stale middleware/upstream configurations fail live confirmation. Workers advertise `route_policies`; older workers cannot deploy policies. This extension does not create replicas or change proxy entrypoints.
+
 ## Completion requirement
 
 The user explicitly requires a fully fleshed-out, production-ready product, not a proof of concept. The delivery order above describes implementation increments, not acceptable stopping points. Release acceptance must cover authenticated dashboard workflows, durable execution and recovery, secret handling, Git/build deployment, routing, backup/restore, installation/upgrades, and real Linux validation. Unverified production behavior must remain explicitly identified.

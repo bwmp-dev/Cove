@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseDotenv, sameRoutes, validateComposePath, validateRepository, validateRoutes, validateWorkload, type WorkloadFormValues } from "./workload-form";
+import type { Route } from "../api/types";
+import { emptyPolicy, isCIDR, parseDotenv, routeRows, sameRoutes, validateComposePath, validateRepository, validateRoutes, validateWorkload, type RouteRow, type WorkloadFormValues } from "./workload-form";
 
 const base: WorkloadFormValues = {
   name: "web",
@@ -130,6 +131,76 @@ describe("route validation", () => {
     expect(sameRoutes([], undefined)).toBe(true);
     expect(sameRoutes([row("a", "app.example.com", "web", 8080)], saved)).toBe(false);
     expect(sameRoutes([], saved)).toBe(false);
+  });
+
+  const auth = "admin:$2y$10$" + "a".repeat(53);
+  const policyRoute: Route = {
+    domain: "app.example.com",
+    service: "web",
+    port: 8080,
+    auth,
+    policy: {
+      path_prefix: "/api",
+      request_headers: { "X-App": "api" },
+      response_headers: { "X-Version": "1", Server: "" },
+      security_headers: true,
+      ip_allow_list: ["10.0.0.0/8", "fd00::/8"],
+      redirect_host: "www.example.com",
+      redirect_permanent: true,
+      certificate_source: "acme",
+      upstreams: [{ service: "api", port: 8081 }],
+      sticky: true,
+    },
+  };
+
+  it("round-trips saved policies and basic auth unchanged", () => {
+    const rows = routeRows([policyRoute, { domain: "plain.example.com", service: "web", port: 80 }]);
+    expect(sameRoutes(rows, [policyRoute, { domain: "plain.example.com", service: "web", port: 80 }])).toBe(true);
+    expect(validateRoutes(rows)).toEqual({ routes: [policyRoute, { domain: "plain.example.com", service: "web", port: 80 }], errors: {} });
+  });
+
+  it("treats header order as unchanged and value edits as changes", () => {
+    const [row] = routeRows([policyRoute]) as [RouteRow];
+    const policy = row.policy ?? emptyPolicy();
+    expect(sameRoutes([{ ...row, policy: { ...policy, responseHeaders: [...policy.responseHeaders].reverse() } }], [policyRoute])).toBe(true);
+    expect(sameRoutes([{ ...row, policy: { ...policy, sticky: false } }], [policyRoute])).toBe(false);
+  });
+
+  it("omits empty policies so legacy routes keep their shape", () => {
+    const result = validateRoutes([{ ...row("a", "app.example.com"), policy: { ...emptyPolicy(), redirectPermanent: true } }]);
+    expect(result.routes).toEqual([{ domain: "app.example.com", service: "web", port: 80 }]);
+  });
+
+  it("allows one hostname on several path prefixes but not the same pair twice", () => {
+    const path = (id: string, pathPrefix: string): RouteRow => ({ ...row(id, "app.example.com"), policy: { ...emptyPolicy(), pathPrefix } });
+    expect(validateRoutes([row("root", "app.example.com"), path("api", "/api")]).errors).toEqual({});
+    expect(Object.keys(validateRoutes([path("a", "/api"), path("b", "/api")]).errors)).toEqual(["b"]);
+  });
+
+  it("reports invalid policy fields next to the field", () => {
+    const header = (id: string, name: string, value = "x") => ({ id, name, value });
+    const result = validateRoutes([
+      {
+        ...row("r", "app.example.com"),
+        policy: {
+          ...emptyPolicy(),
+          pathPrefix: "api?x=1",
+          redirectHost: "app.example.com",
+          securityHeaders: true,
+          requestHeaders: [header("host", "Host"), header("fwd", "X-Forwarded-For"), header("ok", "X-App"), header("dup", "x-app")],
+          responseHeaders: [header("preset", "X-Frame-Options"), header("line", "X-Line", "a\nb"), header("tab", "X-Tab", "a\tb"), header("del", "X-Del", "a\u007fb")],
+          ipAllowList: "10.0.0.0/8\n10.0.0.1",
+          upstreams: [{ id: "same", service: "web", port: 80 }, { id: "port", service: "api", port: 0 }],
+        },
+      },
+    ]);
+    expect(result.routes).toBeUndefined();
+    expect(Object.keys(result.errors).sort()).toEqual(["r.cidr", "r.path", "r.redirect", "r.request.dup", "r.request.fwd", "r.request.host", "r.response.del", "r.response.line", "r.response.preset", "r.response.tab", "r.upstream.port", "r.upstream.same"]);
+  });
+
+  it("accepts the CIDR forms the worker accepts", () => {
+    for (const cidr of ["10.0.0.0/8", "0.0.0.0/0", "192.168.1.1/32", "fd00::/8", "::/0", "2001:db8::1/128", "::ffff:10.0.0.1/128"]) expect(isCIDR(cidr)).toBe(true);
+    for (const cidr of ["10.0.0.0", "10.0.0.0/33", "010.0.0.0/8", "10.0.0/8", "fd00::/129", "fe80::1%eth0/64", "1:2:3:4:5:6:7:8:9/64", "10.0.0.0/08"]) expect(isCIDR(cidr)).toBe(false);
   });
 });
 
