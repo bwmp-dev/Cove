@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	Job                    *JobOptions              `json:"job,omitempty"`
 	Rollout                *RolloutOptions          `json:"rollout,omitempty"`
 	Build                  *BuildOptions            `json:"build,omitempty"`
 	PullLatest             bool                     `json:"pull_latest,omitempty"`
@@ -54,6 +55,7 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
+	Job        *JobResult     `json:"job,omitempty"`
 	Rollout    *RolloutStatus `json:"rollout,omitempty"`
 	Build      *BuildResult   `json:"build,omitempty"`
 	ImageCheck *ImageCheck    `json:"image_check,omitempty"`
@@ -68,6 +70,7 @@ type Operation struct {
 	Preview    *PreviewReport `json:"environment_preview,omitempty"`
 }
 type journal struct {
+	JobRun          *jobRun        `json:"job_run,omitempty"`
 	RolloutChange   *rolloutChange `json:"rollout_change,omitempty"`
 	CancelRequested bool           `json:"cancel_requested,omitempty"`
 	RouteChange     *routeChange   `json:"route_change,omitempty"`
@@ -86,6 +89,7 @@ type routeChange struct {
 // routeRecovery tracks a running route operation without an executor whose outcome must still be
 // settled from its journal: restored to the previous routes, or completed once committed.
 type routeRecovery struct {
+	job      bool
 	workload string
 	state    string
 	next     time.Time
@@ -177,6 +181,9 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.Job != nil && (r.Kind != "job" || r.Action != "deploy" || jobTimeout(r.Job) < 5 || jobTimeout(r.Job) > 86400) {
+		return errors.New("job execution settings require a job deployment and timeout from 5 to 86400 seconds")
+	}
 	if err := validateRollout(r); err != nil {
 		return err
 	}
@@ -425,6 +432,17 @@ func (e *Engine) Recover() error {
 		if err != nil {
 			return err
 		}
+		if j.Operation.State == "running" && j.Request.Kind == "job" && j.Request.Action == "deploy" {
+			if j.JobRun == nil {
+				j.JobRun = &jobRun{Legacy: true, Started: j.Operation.CreatedAt, Deadline: j.Operation.CreatedAt.Add(30 * time.Minute)}
+			}
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", job: true}
+			j.Operation.Error = "Recovering the existing job run; a second run will not start until it settles."
+			if err := writeJSON(e.path(id), j); err != nil {
+				return err
+			}
+			continue
+		}
 		if j.Operation.State == "running" && j.RolloutChange != nil {
 			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted"}
 			j.Operation.Error = "Deployment recovery is restoring or completing the journaled traffic switch."
@@ -551,7 +569,7 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 	sort.Slice(e.pending, func(i, j int) bool { return e.pending[i].CreatedAt.Before(e.pending[j].CreatedAt) })
 	remaining := make([]Operation, 0, len(e.pending))
 	for _, op := range e.pending {
-		if e.busy(op.Workload) || len(e.active) >= 4 {
+		if e.busy(op.Workload) || len(e.active)+e.recoveringJobCount() >= 4 {
 			remaining = append(remaining, op)
 			continue
 		}
@@ -650,7 +668,11 @@ func (l *boundedLog) flush(final bool) error {
 	return err
 }
 func (e *Engine) execute(parent context.Context, j journal) {
-	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
+	budget := 30 * time.Minute
+	if j.Request.Kind == "job" && j.Request.Action == "deploy" {
+		budget += time.Duration(jobTimeout(j.Request.Job)) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	err := e.perform(ctx, j.Request)
 	// Containers may have been recreated; attach them to their private links again.
@@ -662,6 +684,8 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	committed := false
 	persisted, readErr := e.read(j.Request.ID)
 	if readErr == nil {
+		j.Operation.Job = persisted.Operation.Job
+		j.JobRun = persisted.JobRun
 		j.Operation.Revision = persisted.Operation.Revision
 		j.Operation.Preview = persisted.Operation.Preview
 		j.Operation.ImageCheck = persisted.Operation.ImageCheck
@@ -671,11 +695,14 @@ func (e *Engine) execute(parent context.Context, j journal) {
 		j.CancelRequested = persisted.CancelRequested
 		committed = persisted.RouteChange != nil && persisted.RouteChange.Committed
 	}
-	if errors.Is(err, errRoutesUnresolved) || errors.Is(err, errRolloutUnresolved) {
+	if errors.Is(err, errRoutesUnresolved) || errors.Is(err, errRolloutUnresolved) || errors.Is(err, errJobUnresolved) {
 		// The operation stays running, which keeps its hostnames claimed until recovery settles it.
-		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed"}
+		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed", job: j.JobRun != nil}
 		if readErr == nil && !committed {
 			persisted.Operation.Error = routeRestoring
+			if j.JobRun != nil {
+				persisted.Operation.Error = "Waiting for the worker to confirm the existing job outcome and stop its containers."
+			}
 			readErr = writeJSON(e.path(j.Request.ID), persisted)
 		}
 		if readErr != nil {
@@ -713,6 +740,9 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	if j.RolloutChange != nil && (j.RolloutChange.Committed || j.RolloutChange.Staged) {
 		j.Operation.State, j.Operation.Error = "succeeded", ""
 	}
+	if j.Operation.Job != nil && j.Operation.Job.TimedOut && j.Operation.State != "cancelled" {
+		j.Operation.State, j.Operation.Error = "failed", "Job exceeded its execution timeout; its containers were stopped."
+	}
 	if saveErr := writeJSON(e.path(j.Request.ID), j); saveErr != nil {
 		fmt.Fprintln(os.Stderr, "could not persist operation result:", saveErr)
 		select {
@@ -722,6 +752,12 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	}
 }
 func (e *Engine) perform(ctx context.Context, r Request) (result error) {
+	jobParent := ctx
+	if r.Kind == "job" && r.Action == "deploy" {
+		prepare, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		ctx = prepare
+	}
 	dir := filepath.Join(e.Root, "workloads", r.Workload)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -1152,7 +1188,11 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}()
 		}
 		if r.Kind == "job" {
-			up = []string{"up", "--no-build", "--abort-on-container-exit", "--exit-code-from", r.JobService, "--remove-orphans"}
+			err := e.performJob(ctx, jobParent, r, dir, args, env, log)
+			if err != nil {
+				fmt.Fprintln(log, err)
+			}
+			return err
 		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), up...), env, log); err != nil {
 			return err

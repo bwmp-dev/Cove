@@ -14,6 +14,8 @@ export interface Capabilities {
   build_publish?: boolean;
   // The worker supports rolling, blue/green and canary replacements with promote and abort.
   rollouts?: boolean;
+  // The worker enforces job timeouts, reports job results and stops every service a job run started.
+  job_runs?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -228,6 +230,37 @@ export interface WorkerOperation {
   image_check?: ImageCheck;
   build?: BuildResult;
   rollout?: RolloutStatus;
+  // Reported only by workers with the job_runs capability.
+  job?: JobResult;
+}
+
+export interface JobResult {
+  // Docker's exit status for the job service. Missing means the exit status is unknown, not success.
+  exit_code?: number;
+  timed_out: boolean;
+  // False means the worker could not confirm that every container the run started has stopped.
+  containers_stopped: boolean;
+  logs_unavailable?: boolean;
+}
+
+export type JobOverlapPolicy = "skip" | "queue_one" | "replace";
+
+export interface JobSchedule {
+  cron: string;
+  timezone: string;
+  next_run_at: string | null;
+  overlap_policy: JobOverlapPolicy;
+  timeout_seconds: number;
+  // Set while one coalesced scheduled run waits for the current operation to finish.
+  pending_since: string | null;
+}
+
+// Omitted execution fields keep the saved values.
+export interface JobScheduleInput {
+  cron: string;
+  timezone?: string;
+  overlap_policy?: JobOverlapPolicy;
+  timeout_seconds?: number;
 }
 
 export interface BuiltImage {

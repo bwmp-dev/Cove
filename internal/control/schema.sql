@@ -685,3 +685,8 @@ CREATE INDEX IF NOT EXISTS due_image_checks ON workloads(next_image_check_at) WH
 DROP TRIGGER IF EXISTS cove_operation_notification ON operations;
 CREATE TRIGGER cove_operation_notification AFTER UPDATE OF state ON operations FOR EACH ROW
  WHEN (OLD.state IS DISTINCT FROM NEW.state AND NEW.action <> 'image_check' AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();
+
+-- Deploy track: scheduled runs coalesce at most one tick and bound execution.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_overlap_policy text NOT NULL DEFAULT 'skip' CHECK (job_overlap_policy IN ('skip','queue_one','replace'));
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timeout_seconds integer NOT NULL DEFAULT 1800 CHECK (job_timeout_seconds BETWEEN 5 AND 86400);
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_pending_at timestamptz;

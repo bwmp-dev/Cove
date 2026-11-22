@@ -8,6 +8,7 @@ import { useOnline } from "../lib/hooks";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { operationQuery, workloadsQuery } from "../api/queries";
 import { projectsQuery } from "../api/projects";
+import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
 import { OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
@@ -183,6 +184,7 @@ export function OperationPage() {
               { term: "Queued", value: formatAbsolute(operation.created_at) },
               ...(result?.finished_at ? [{ term: "Finished", value: formatAbsolute(result.finished_at) }] : []),
               ...(duration !== null ? [{ term: "Duration", value: formatDuration(duration) }] : []),
+              ...(result?.job ? [{ term: "Job result", value: <JobOutcome job={result.job} /> }] : []),
               ...(result?.rollout
                 ? [
                     {

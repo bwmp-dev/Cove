@@ -209,6 +209,17 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
 	request.PullLatest = in.PullLatest
+	if request.Kind == "job" && request.Action == "deploy" {
+		request.Job, err = jobExecutionOptions(r.Context(), tx, request.Workload)
+		if err != nil {
+			if errors.Is(err, errJobWorkerUnsupported) {
+				http.Error(w, err.Error(), 409)
+			} else {
+				http.Error(w, "job execution settings unavailable", 503)
+			}
+			return
+		}
+	}
 	if in.Action != "deploy" && in.Action != "rollback" || request.Rollout != nil && request.Rollout.Strategy == "disabled" {
 		request.Rollout = nil
 	}
@@ -343,6 +354,10 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if in.Action == "stop" {
+			if _, err = tx.Exec(r.Context(), `UPDATE workloads SET job_pending_at=NULL WHERE id=$1`, request.Workload); err != nil {
+				http.Error(w, "could not pause scheduled jobs", 503)
+				return
+			}
 			if _, err = tx.Exec(r.Context(), "DELETE FROM webhook_deliveries WHERE workload_id=$1 AND operation_id IS NULL", request.Workload); err != nil {
 				http.Error(w, "could not pause automatic deployments", 500)
 				return

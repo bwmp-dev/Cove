@@ -29,5 +29,15 @@ func (e *Engine) Maintenance(drain bool) (Maintenance, error) {
 		}
 	}
 	e.draining = drain
-	return Maintenance{Draining: drain, Active: len(e.active), Queued: len(e.pending)}, nil
+	return Maintenance{Draining: drain, Active: len(e.active) + e.recoveringJobCount(), Queued: len(e.pending)}, nil
+}
+
+func (e *Engine) recoveringJobCount() int {
+	count := 0
+	for _, recovery := range e.recovering {
+		if recovery.job {
+			count++
+		}
+	}
+	return count
 }

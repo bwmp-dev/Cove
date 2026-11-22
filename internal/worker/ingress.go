@@ -578,6 +578,9 @@ func (e *Engine) settleRoutes(ctx context.Context, id, state string) error {
 	if err != nil {
 		return err
 	}
+	if j.JobRun != nil {
+		return e.settleJob(ctx, id, state)
+	}
 	if j.RolloutChange != nil {
 		return e.settleRollout(ctx, id, state)
 	}

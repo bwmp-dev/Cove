@@ -511,6 +511,13 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	if r.InfrastructurePrepared {
 		return nil
 	}
+	if r.Kind == "job" && r.Action == "deploy" && r.Job == nil {
+		options, err := jobExecutionOptions(ctx, s.DB, r.Workload)
+		if err != nil {
+			return err
+		}
+		r.Job = options
+	}
 	var team string
 	if err := s.DB.QueryRow(ctx, "SELECT team_id FROM workloads WHERE id=$1", r.Workload).Scan(&team); err != nil {
 		return err

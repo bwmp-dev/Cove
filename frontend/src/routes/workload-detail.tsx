@@ -39,6 +39,7 @@ import type { Operation, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
+import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
 import { OperationsTable } from "../components/OperationsTable";
 import { RelativeTime } from "../components/RelativeTime";
@@ -66,7 +67,8 @@ export function useResource() {
 const actionIcons = { deploy: Rocket, start: Play, stop: Square, restart: RotateCcw } as const;
 
 function outcome(operation: Operation, kind: "service" | "job") {
-  if (kind === "job" && operation.action === "deploy") {
+  // Workers with job results report the exit status themselves; it is shown with JobOutcome.
+  if (kind === "job" && operation.action === "deploy" && !operation.result?.job) {
     if (operation.state === "succeeded") return "The last run completed with exit code 0.";
     if (operation.state === "failed") return "The last run failed. Check the logs for the job's exit status.";
   }
@@ -94,6 +96,7 @@ function LatestOperation({ operation, kind }: { operation: Operation; kind: "ser
         )}
       </div>
       {message && <p className="text-[13px] text-fg-muted">{message}</p>}
+      {operation.result?.job && <JobOutcome job={operation.result.job} />}
       {operation.result?.rollout && <RolloutResult rollout={operation.result.rollout} />}
       {error && (
         <Notice tone="error" title="Worker error">

@@ -1248,6 +1248,111 @@ test("replacement strategies stage, abort and promote rollouts through the real 
   await expect(deployButton).toBeEnabled({ timeout: 120_000 });
 });
 
+test("scheduled job execution reports results, enforces the timeout and runs now through the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(420_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Job execution project");
+  const marker = `job-${Date.now()}`;
+  // pull_policy never keeps every run on the busybox image the harness already loaded.
+  const jobCompose = (command: string) => `services:\n  task:\n    image: busybox:1.37\n    pull_policy: never\n    command: [sh, -c, '${command}']\n`;
+  await page.getByRole("link", { name: "New resource", exact: true }).first().click();
+  await page.getByRole("button", { name: "Custom Compose or Git" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("job-execution");
+  await chooseOption(page.getByLabel("Node", { exact: true }), { label: "ready-browser-worker" });
+  await page.getByRole("radio", { name: /^Job/ }).check();
+  await page.getByLabel("Job service", { exact: true }).fill("task");
+  await page.getByLabel("Compose file", { exact: true }).fill(jobCompose(`echo ${marker}-stdout; echo ${marker}-stderr >&2`));
+  await page.getByRole("button", { name: "Create resource", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "job-execution", exact: true })).toBeVisible();
+  const url = page.url();
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const headers = { Origin: new URL(url).origin };
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; capabilities: { job_runs?: boolean } | null }[];
+  expect(nodes.find(node => node.id === resource.node_id)?.capabilities?.job_runs).toBe(true);
+
+  const activeOperations = async () => {
+    const response = await page.request.get(`/api/operations?workload_id=${id}`);
+    expect(response.status()).toBe(200);
+    return (await response.json() as { state: string }[]).filter(operation => ["queued", "running"].includes(operation.state)).length;
+  };
+  const idle = async () => expect.poll(activeOperations, { timeout: 120_000 }).toBe(0);
+  const runningContainers = () => execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${id}`], { encoding: "utf8" }).trim();
+
+  const schedule = page.getByRole("region", { name: "Scheduled job", exact: true });
+  const runSection = page.getByRole("region", { name: "Run now", exact: true });
+  const saveExecution = async (overlap: string, timeout: string) => {
+    await page.goto(`${url}/schedule`);
+    const overlapControl = schedule.getByLabel("When a run overlaps", { exact: true });
+    await expect(overlapControl).toBeEnabled({ timeout: 30_000 });
+    await chooseOption(overlapControl, overlap);
+    await schedule.getByLabel("Timeout (seconds)", { exact: true }).fill(timeout);
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}/schedule` && response.request().method() === "PUT");
+    await schedule.getByRole("button", { name: "Save schedule", exact: true }).click();
+    const response = await saved;
+    expect(response.status(), await response.text()).toBe(200);
+    expect(response.request().postDataJSON()).toEqual({ cron: "", timezone: "UTC", overlap_policy: overlap, timeout_seconds: Number(timeout) });
+    await expect(schedule.getByText("Schedule saved", { exact: true })).toBeVisible();
+  };
+  type JobResult = { exit_code?: number; timed_out: boolean; containers_stopped: boolean; logs_unavailable?: boolean };
+  // Queues a run from the schedule page, checks the request the page sent, and waits for the real worker to finish it.
+  const runNow = async () => {
+    await idle();
+    await page.goto(`${url}/schedule`);
+    const button = runSection.getByRole("button", { name: "Run now", exact: true });
+    await expect(button).toBeEnabled({ timeout: 120_000 });
+    await button.click();
+    const queued = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}/operations` && response.request().method() === "POST");
+    await page.getByRole("dialog", { name: "Run job-execution now?" }).getByRole("button", { name: "Run now", exact: true }).click();
+    const response = await queued;
+    expect(response.status()).toBe(202);
+    expect(response.request().postDataJSON()).toEqual({ action: "deploy" });
+    const operation = (await response.json() as { id: string }).id;
+    await expect(runSection.getByText("Run queued", { exact: true })).toBeVisible();
+    const read = async () => await (await page.request.get(`/api/operations/${operation}`)).json() as { state: string; result: { job?: JobResult } | null };
+    await expect.poll(async () => (await read()).state, { timeout: 120_000 }).toMatch(/^(succeeded|failed|cancelled|interrupted)$/);
+    const result = await read();
+    const logs = await (await page.request.get(`/api/operations/${operation}/logs`)).json() as { logs?: string };
+    return { operation, state: result.state, job: result.result?.job, logs: logs.logs ?? "" };
+  };
+
+  // Saved overlap and timeout survive a reload.
+  await saveExecution("queue_one", "60");
+  expect(await (await page.request.get(`/api/workloads/${id}/schedule`)).json()).toMatchObject({ cron: "", timezone: "UTC", overlap_policy: "queue_one", timeout_seconds: 60, pending_since: null });
+  await page.reload();
+  await expect(schedule.getByLabel("When a run overlaps", { exact: true })).toHaveText("Queue one");
+  await expect(schedule.getByLabel("Timeout (seconds)", { exact: true })).toHaveValue("60");
+
+  // A successful run keeps stdout and stderr in the logs and reports Docker's exit status.
+  const success = await runNow();
+  expect(success.state, success.logs).toBe("succeeded");
+  expect(success.job).toMatchObject({ exit_code: 0, timed_out: false, containers_stopped: true });
+  expect(success.logs).toContain(`${marker}-stdout`);
+  expect(success.logs).toContain(`${marker}-stderr`);
+  expect(runningContainers()).toBe("");
+  await page.reload();
+  await expect(runSection.getByText("Exited with code 0.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "job-schedule");
+  await page.goto(`/operations/${success.operation}`);
+  await expect(page.getByText("Exited with code 0.", { exact: true })).toBeVisible();
+  await expect(page.getByText(`${marker}-stderr`).first()).toBeVisible({ timeout: 30_000 });
+
+  // A run past its timeout is stopped together with every container it started.
+  await idle();
+  const updated = await page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "job", job_service: "task", compose: jobCompose(`echo ${marker}-sleeping; sleep 300`) } });
+  expect(updated.status(), await updated.text()).toBe(200);
+  await saveExecution("skip", "5");
+  const timedOut = await runNow();
+  expect(timedOut.state, timedOut.logs).toBe("failed");
+  expect(timedOut.job).toMatchObject({ timed_out: true, containers_stopped: true });
+  expect(timedOut.logs).toContain(`${marker}-sleeping`);
+  expect(runningContainers()).toBe("");
+  await page.goto(`/operations/${timedOut.operation}`);
+  await expect(page.getByText(/^Execution timed out/)).toBeVisible();
+  await expect(page.getByText("All containers from this run are stopped.", { exact: true })).toBeVisible();
+  await capture(page, testInfo, "job-timeout-operation");
+});
+
 test("preview settings keep preview variables separate and fit mobile", async ({ page }, testInfo) => {
   await page.goto("/projects"); await signIn(page);
   await createProject(page, "Preview settings project");

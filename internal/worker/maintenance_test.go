@@ -55,7 +55,7 @@ func TestDrainPreservesQueueAndWaitsForActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.Run = func(_ context.Context, _ string, args, env []string, out io.Writer) error {
-		if handled, err := releaseFixture(args, out); handled {
+		if handled, err := jobFixture("app", args, out); handled {
 			return err
 		}
 		return nil
