@@ -476,12 +476,10 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	if err := s.DB.QueryRow(ctx, "SELECT team_id FROM workloads WHERE id=$1", r.Workload).Scan(&team); err != nil {
 		return err
 	}
-	if r.Action == "deploy" && !r.Preview {
-		resolved, err := s.resolveSharedVariables(ctx, r.Workload, r.Environment)
-		if err != nil {
+	if r.Action == "deploy" {
+		if err := s.resolveDeploymentVariables(ctx, r); err != nil {
 			return err
 		}
-		r.Environment = resolved
 	}
 	if r.Action == "deploy" && r.Registry == nil {
 		var id string

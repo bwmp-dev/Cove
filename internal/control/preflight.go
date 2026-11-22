@@ -3,6 +3,7 @@ package control
 import (
 	"cove/internal/worker"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -31,6 +32,11 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 	// The inspection has no operation row. Preparation enriches only this request;
 	// its persistence UPDATE matches no row, and no deployment is queued.
 	if err = s.prepareInfrastructure(r.Context(), &request); err != nil {
+		var resolution *variableResolutionError
+		if errors.As(err, &resolution) {
+			http.Error(w, resolution.Error(), 409)
+			return
+		}
 		http.Error(w, "check shared variable references, worker capabilities, and selected infrastructure connections", 409)
 		return
 	}

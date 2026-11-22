@@ -9,6 +9,7 @@ import { keys, nodesQuery, operationQuery, workloadOperationsQuery } from "../ap
 import type { Workload, WorkloadInput, DeploymentHooks, FileSecret } from "../api/types";
 import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
+import { BuiltinVariables, EnvironmentFileActions, SecretReferenceBuilder } from "../components/EnvironmentFile";
 import { DatabaseAccess } from "../components/DatabaseAccess";
 import { GitHubSource } from "../components/GitHubApp";
 import { GitDeployKey } from "../components/GitDeployKey";
@@ -30,7 +31,7 @@ import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
-import { formValues, isSSHRepository, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { createRow, formValues, isSSHRepository, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -369,28 +370,35 @@ function SourceForm({ workload }: { workload: Workload }) {
 export function ResourceEnvironment() {
   const workload = useResource();
   const keys = [...workload.environment_keys].sort();
+  const blocked = useSaveBlocked(workload.id);
+  const projects = useQuery(projectsQuery);
+  // Preview resources are temporary; the server refuses to import variables into them.
+  const temporary = Boolean(workload.preview_source_id) || Boolean(findPlacement(projects.data, workload.environment_id, workload.project_id)?.environment?.preview_id);
   if (!can(workload.permissions, "edit")) {
     return (
-      <Section width="form" title="Environment variables" description="Delivered to Compose at deploy time. Values are encrypted at rest and never shown." flush>
-        <div className="border-b border-line p-3">
-          <ViewOnly />
-        </div>
-        {keys.length === 0 ? (
-          <p className="px-4 py-3 text-[13px] text-fg-muted">No variables are saved.</p>
-        ) : (
-          <ul aria-label="Saved variables" className="divide-y divide-line">
-            {keys.map((key) => (
-              <li key={key} className="flex items-center justify-between gap-4 px-4 py-2">
-                <span className="truncate font-mono text-xs text-fg">{key}</span>
-                <span className="text-xs text-fg-subtle">Value hidden</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
+      <div className="space-y-6">
+        <Section width="form" title="Environment variables" description="Delivered to Compose at deploy time. Values are encrypted at rest and never shown." flush>
+          <div className="border-b border-line p-3">
+            <ViewOnly />
+          </div>
+          {keys.length === 0 ? (
+            <p className="px-4 py-3 text-[13px] text-fg-muted">No variables are saved.</p>
+          ) : (
+            <ul aria-label="Saved variables" className="divide-y divide-line">
+              {keys.map((key) => (
+                <li key={key} className="flex items-center justify-between gap-4 px-4 py-2">
+                  <span className="truncate font-mono text-xs text-fg">{key}</span>
+                  <span className="text-xs text-fg-subtle">Value hidden</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Section>
+        <BuiltinVariables workloadId={workload.id} />
+      </div>
     );
   }
-  return <div className="space-y-6"><EnvironmentForm workload={workload} savedKeys={keys} /><ResourceVariables key={workload.id} workloadId={workload.id} /><ResourceFileSecrets key={`files-${workload.id}`} /></div>;
+  return <div className="space-y-6"><EnvironmentForm workload={workload} savedKeys={keys} /><EnvironmentFileActions workload={workload} temporary={temporary} blocked={blocked} /><BuiltinVariables workloadId={workload.id} /><ResourceVariables key={workload.id} workloadId={workload.id} /><ResourceFileSecrets key={`files-${workload.id}`} /></div>;
 }
 
 function EnvironmentForm({ workload, savedKeys }: { workload: Workload; savedKeys: string[] }) {
@@ -473,6 +481,12 @@ function EnvironmentForm({ workload, savedKeys }: { workload: Workload; savedKey
             />
             {errors.environment && <p className="text-xs text-bad">{errors.environment}</p>}
           </div>
+          <SecretReferenceBuilder
+            onAdd={(key, value) => {
+              update.reset();
+              setRows((current) => [...current, createRow(key, value)]);
+            }}
+          />
           <FormError errors={errors} error={update.error} />
         </fieldset>
       </Section>

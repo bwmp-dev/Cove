@@ -81,6 +81,13 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 			return report
 		}
 	}
+	if len(r.BuiltinDefaults) > 0 {
+		_, overridden := r.Environment[CoveCommitSHA]
+		r.Environment, _ = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
+		if !overridden && r.Source != nil {
+			r.Environment[CoveCommitSHA] = report.Revision
+		}
+	}
 	env := []string{}
 	for key, value := range r.Environment {
 		env = append(env, key+"="+value)

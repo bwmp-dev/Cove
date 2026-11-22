@@ -522,6 +522,10 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
 	if !cancelRequested && request.Action != "routes" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
+			var resolution *variableResolutionError
+			if errors.As(err, &resolution) {
+				return s.failOperation(ctx, id, resolution.Error())
+			}
 			if errors.Is(err, errSharedVariables) {
 				return s.failOperation(ctx, id, "Shared variable resolution failed; check for missing names in this resource's team, project, and environment, or values exceeding 64 KiB.")
 			}

@@ -844,6 +844,10 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 		}
 		external := false
 		for _, match := range sharedReference.FindAllStringSubmatch(value, -1) {
+			if match[1] != "resource" {
+				external = true
+				continue
+			}
 			if match[1] == "resource" {
 				if source, ok := bindingSource[match[2]]; ok && inside(source) {
 					allInternal = true
@@ -853,8 +857,8 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 			}
 		}
 		switch {
-		case external:
-			variable.Classification, variable.Mode, variable.Reason = "sensitive", "", "Takes its value from a resource outside this preview."
+		case external || strings.Contains(value, "{{secret."):
+			variable.Classification, variable.Mode, variable.Reason = "sensitive", "", "Uses a shared variable, secret provider or resource outside this preview."
 		case allInternal:
 			variable.Classification, variable.Reason = "internal", "Points at a service inside the preview, which resolves to the preview's own copy."
 		case sensitiveVariable.MatchString(key):

@@ -753,3 +753,10 @@ CREATE TABLE IF NOT EXISTS deploy_hook_receipts (
  cancelled boolean NOT NULL DEFAULT false,
  PRIMARY KEY(hook_id,delivery)
 );
+
+CREATE TABLE IF NOT EXISTS secret_providers (
+    id text PRIMARY KEY,
+    team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    configuration bytea NOT NULL
+);
+CREATE INDEX IF NOT EXISTS secret_providers_team ON secret_providers(team_id);

@@ -2,6 +2,7 @@ import { Plug } from "lucide-react";
 import { GitHubAppSetup } from "../components/GitHubApp";
 import { CloudflareSettings } from "../components/Cloudflare";
 import { GitConnections } from "../components/GitConnections";
+import { SecretProviders } from "../components/SecretProviders";
 import { PageHeader, Section, SectionGrid } from "../components/ui";
 
 export function IntegrationsPage() {
@@ -10,6 +11,7 @@ export function IntegrationsPage() {
     <SectionGrid>
       <Section title="GitHub App" description="One app connects personal and organization repositories. Connect accounts to your user, then share them with teams." flush><GitHubAppSetup /></Section>
       <Section title="Git providers" description="Connect GitLab, Gitea, Forgejo, Codeberg or Bitbucket Cloud with an access token. Connections belong to the current team." flush><GitConnections /></Section>
+      <Section title="Secret providers" description="Read deployment variables from Vault, OpenBao, Infisical, Doppler, 1Password or Bitwarden. Connections belong to the current team." flush><SecretProviders /></Section>
       <Section title="Cloudflare DNS" description="Keep DNS records for shared domains pointed at the workers that serve them." flush><CloudflareSettings /></Section>
     </SectionGrid>
   </>;

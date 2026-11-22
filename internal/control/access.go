@@ -226,7 +226,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			return deny()
 		}
 		return true
-	case strings.HasPrefix(path, "/api/git/"):
+	case strings.HasPrefix(path, "/api/git/") || path == "/api/secret-providers" || strings.HasPrefix(path, "/api/secret-providers/"):
 		level := 1
 		if r.Method != "GET" {
 			level = 3

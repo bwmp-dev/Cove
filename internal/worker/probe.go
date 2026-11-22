@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	BuiltinVariables    bool         `json:"builtin_variables"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
 	GuardedHooks        bool         `json:"guarded_hooks"`
 	Previews            bool         `json:"previews"`
@@ -43,7 +44,7 @@ type Probe struct {
 func Inspect(ctx context.Context) Probe {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	p := Probe{GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
+	p := Probe{BuiltinVariables: true, GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
 	p.Previews = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true

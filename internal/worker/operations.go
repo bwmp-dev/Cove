@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	BuiltinDefaults        map[string]string        `json:"builtin_defaults,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
@@ -85,12 +86,13 @@ type routeRecovery struct {
 	running  bool
 }
 type deployedState struct {
-	Private     *PrivateNetwork     `json:"private,omitempty"`
-	Networks    []NetworkAttachment `json:"networks,omitempty"`
-	Routes      []Route             `json:"routes,omitempty"`
-	Revision    string              `json:"revision,omitempty"`
-	ComposePath string              `json:"compose_path"`
-	Environment map[string]string   `json:"environment"`
+	PublicBuiltins map[string]string   `json:"public_builtins,omitempty"`
+	Private        *PrivateNetwork     `json:"private,omitempty"`
+	Networks       []NetworkAttachment `json:"networks,omitempty"`
+	Routes         []Route             `json:"routes,omitempty"`
+	Revision       string              `json:"revision,omitempty"`
+	ComposePath    string              `json:"compose_path"`
+	Environment    map[string]string   `json:"environment"`
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
@@ -258,6 +260,9 @@ func ValidateRequest(r Request) error {
 		if r.Action == "start" || r.Action == "restart" {
 			return errors.New("deploy a new operation to run a job again")
 		}
+	}
+	if err := validateBuiltins(r.BuiltinDefaults); err != nil {
+		return err
 	}
 	for k, v := range r.Environment {
 		if !environmentIdentifier.MatchString(k) || strings.ContainsRune(v, 0) || len(v) > 65536 {
@@ -676,13 +681,19 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			result = err
 		}
 	}()
+	var publicBuiltins map[string]string
+	if len(r.BuiltinDefaults) > 0 {
+		r.Environment, publicBuiltins = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
+	}
 	env := []string{}
 	if r.Private != nil {
 		log.secrets = append(log.secrets, r.Private.AuthKey)
 	}
 	for k, v := range r.Environment {
 		env = append(env, k+"="+v)
-		log.secrets = append(log.secrets, v)
+		if _, public := publicBuiltins[k]; !public {
+			log.secrets = append(log.secrets, v)
+		}
 	}
 	if r.Registry != nil && r.Action == "deploy" {
 		log.secrets = append(log.secrets, r.Registry.Password)
@@ -804,6 +815,15 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			if err != nil {
 				return err
 			}
+			if _, automatic := publicBuiltins[CoveCommitSHA]; automatic {
+				r.Environment[CoveCommitSHA] = revision
+				publicBuiltins[CoveCommitSHA] = revision
+				for index, value := range env {
+					if strings.HasPrefix(value, CoveCommitSHA+"=") {
+						env[index] = CoveCommitSHA + "=" + revision
+					}
+				}
+			}
 			e.mu.Lock()
 			j, readErr := e.read(r.ID)
 			if readErr == nil {
@@ -853,7 +873,9 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		env = nil
 		for key, value := range release.Environment {
 			env = append(env, key+"="+value)
-			log.secrets = append(log.secrets, value)
+			if public, ok := release.PublicBuiltins[key]; !ok || public != value {
+				log.secrets = append(log.secrets, value)
+			}
 		}
 		args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}
 		if err = e.Run(ctx, dir, args, env, log); err != nil {
@@ -882,11 +904,22 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		env = nil
 		for key, value := range current.Environment {
 			env = append(env, key+"="+value)
-			log.secrets = append(log.secrets, value)
+			if public, ok := current.PublicBuiltins[key]; !ok || public != value {
+				log.secrets = append(log.secrets, value)
+			}
 		}
 	}
 	args := []string{"docker", "compose", "--project-name", "cove-" + strings.ToLower(r.Workload), "--file", composePath}
 	if r.Action == "deploy" {
+		if len(r.BuiltinDefaults) > 0 {
+			prepared, err := e.prepareBuiltinEnvironment(ctx, r, dir, args, env)
+			if err != nil {
+				fmt.Fprintln(log, "Could not prepare built-in variables; check Compose required variables and build settings.")
+				return err
+			}
+			composePath = prepared
+			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+		}
 		if r.Preview {
 			composePath, err = e.preparePreview(r, dir, composePath)
 			if err != nil {
@@ -1008,6 +1041,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 		}
+		state.PublicBuiltins = publicBuiltins
 		state.Networks = r.Networks
 		state.Private = r.Private
 		state.Routes = r.Routes

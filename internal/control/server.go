@@ -43,7 +43,8 @@ type Server struct {
 	SendMail              func(context.Context, string, string, string) error
 	dummyPasswordHash     []byte
 	// workerRPC replaces node transports in tests that simulate several workers.
-	workerRPC func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
+	workerRPC     func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
+	secretCommand secretCommandFunc
 }
 
 func (s *Server) Init(ctx context.Context) error {
@@ -120,6 +121,12 @@ func (s *Server) Handler() http.Handler {
 		}
 		respond(w, 200, map[string]string{"status": "ok"})
 	})
+	for _, pattern := range []string{"GET /api/secret-providers", "POST /api/secret-providers", "PUT /api/secret-providers/{connection}", "DELETE /api/secret-providers/{connection}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.secretProviders)))
+	}
+	mux.Handle("POST /api/workloads/{id}/variables/import", s.admin(http.HandlerFunc(s.environmentFile)))
+	mux.Handle("POST /api/workloads/{id}/variables/export", s.admin(http.HandlerFunc(s.environmentFile)))
+	mux.Handle("GET /api/workloads/{id}/variables/builtins", s.admin(http.HandlerFunc(s.builtinVariables)))
 	mux.Handle("GET /api/git/connections", s.admin(http.HandlerFunc(s.gitConnections)))
 	mux.Handle("POST /api/git/connections", s.admin(http.HandlerFunc(s.gitConnections)))
 	mux.Handle("DELETE /api/git/connections/{connection}", s.admin(http.HandlerFunc(s.gitConnections)))
