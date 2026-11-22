@@ -792,3 +792,19 @@ CREATE INDEX IF NOT EXISTS route_traffic_resource ON route_traffic(workload_id,t
 
 -- Backup transfer bounds.
 ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS backup_transfer_bytes bigint NOT NULL DEFAULT 1073741824 CHECK (backup_transfer_bytes BETWEEN 1048576 AND 68719476736);
+
+-- Host-driven panel backups and recovery.
+CREATE TABLE IF NOT EXISTS panel_recovery (
+ id integer PRIMARY KEY CHECK(id=1),configuration bytea,
+ agent_id text NOT NULL DEFAULT '',checked_at timestamptz,last_scheduled_at timestamptz,
+ updates_paused boolean NOT NULL DEFAULT false,last_error text NOT NULL DEFAULT '',pending_recovery boolean NOT NULL DEFAULT false,pending_remote_job text NOT NULL DEFAULT '',
+ snapshots jsonb NOT NULL DEFAULT '[]' CHECK(jsonb_typeof(snapshots)='array' AND jsonb_array_length(snapshots)<=102)
+);
+INSERT INTO panel_recovery(id) VALUES(1) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS panel_recovery_jobs (
+ id text PRIMARY KEY,actor_id text NOT NULL,action text NOT NULL CHECK(action IN ('backup','restore','resume_updates')),
+ snapshot_id text NOT NULL DEFAULT '',state text NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','succeeded','failed')),
+ requested_at timestamptz NOT NULL DEFAULT now(),finished_at timestamptz,last_error text NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_panel_recovery_job ON panel_recovery_jobs((true)) WHERE state IN ('queued','running');
+CREATE INDEX IF NOT EXISTS panel_recovery_history ON panel_recovery_jobs(requested_at DESC,id DESC);

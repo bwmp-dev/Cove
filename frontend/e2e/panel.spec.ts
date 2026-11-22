@@ -170,6 +170,45 @@ test("first administrator setup and dashboard integration settings", async ({ pa
   }
 });
 
+test("panel recovery settings save locally and wait for the host timer", async ({ page }, testInfo) => {
+  await page.goto("/admin");
+  await signIn(page);
+  const status = page.locator("section", { has: page.getByRole("heading", { name: "Panel recovery", exact: true }) });
+  await expect(status.getByText("Host timer not connected", { exact: true })).toBeVisible();
+  await expect(status.getByText("sudo sh scripts/install-panel-recovery.sh /opt/cove", { exact: true })).toBeVisible();
+  await expect(status.getByRole("button", { name: "Back up now" })).toBeDisabled();
+  await expect(page.getByText("Snapshots appear here once the host timer is installed and has taken a backup.")).toBeVisible();
+  const refused = await page.request.post("/api/settings/panel-backup/actions", { data: { action: "backup" }, headers: { Origin: new URL(page.url()).origin } });
+  expect(refused.status()).toBe(409);
+
+  const form = page.locator("form", { has: page.getByRole("heading", { name: "Panel backup schedule", exact: true }) });
+  await form.getByLabel("Keep at least (snapshots)").fill("101");
+  await form.getByRole("button", { name: "Save changes" }).click();
+  await expect(form.getByText("Enter a whole number from 1 to 100.")).toBeVisible();
+  await expect(form.getByLabel("Keep at least (snapshots)")).toBeFocused();
+  await form.getByLabel("Keep at least (snapshots)").fill("5");
+  await form.getByLabel("Back up every (hours)").fill("12");
+  await form.getByRole("switch", { name: "Scheduled backups" }).check({ force: true });
+  await form.getByRole("button", { name: "Save changes" }).click();
+  await expect(form.getByText("Saved. The host uses these settings on its next check-in.")).toBeVisible();
+  await page.reload();
+  await expect(form.getByLabel("Keep at least (snapshots)")).toHaveValue("5");
+  await expect(form.getByLabel("Back up every (hours)")).toHaveValue("12");
+  await expect(form.getByRole("switch", { name: "Scheduled backups" })).toBeChecked();
+  const saved = await (await page.request.get("/api/settings/panel-backup")).json() as { config: Record<string, unknown>; password_set: boolean };
+  expect(saved.config).toEqual({ enabled: true, interval_hours: 12, keep_last: 5, keep_days: 30, max_bytes: 8589934592, storage_id: "" });
+  expect(saved.password_set).toBe(false);
+
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectNoHorizontalScroll(page);
+    await status.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`panel-recovery-${width}.png`), fullPage: true });
+  }
+  const restored = await page.request.put("/api/settings/panel-backup", { data: { enabled: false, interval_hours: 24, keep_last: 7, keep_days: 30, max_bytes: 8589934592, storage_id: "" }, headers: { Origin: new URL(page.url()).origin } });
+  expect(restored.status()).toBe(200);
+});
+
 test("real session, enrollment, responsive navigation and logout", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

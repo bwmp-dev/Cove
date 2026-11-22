@@ -91,6 +91,7 @@ func (s *Server) Init(ctx context.Context) error {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerPanelRecovery(mux)
 	mux.HandleFunc("GET /metrics", s.prometheus)
 	mux.HandleFunc("GET /api/status/{slug}", s.publicStatusPage)
 	for _, pattern := range []string{"GET /api/settings/metrics-token", "POST /api/settings/metrics-token", "DELETE /api/settings/metrics-token"} {

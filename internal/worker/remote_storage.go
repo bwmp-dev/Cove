@@ -18,6 +18,9 @@ import (
 
 const remoteBackupImage = "cove-backup-remote:restic0.19.1-rclone1.76.0"
 
+const remoteBackupDockerfile = "FROM rclone/rclone:1.76.0 AS rclone\nFROM restic/restic:0.19.1\nCOPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone\nCOPY entrypoint.sh /cove-entrypoint.sh\nENTRYPOINT [\"/bin/sh\",\"/cove-entrypoint.sh\"]\n"
+const remoteBackupEntrypoint = "#!/bin/sh\nset -eu\nif [ -n \"${COVE_REMOTE_PASSWORD:-}\" ]; then export RCLONE_CONFIG_COVE_PASS=\"$(printf '%s' \"$COVE_REMOTE_PASSWORD\" | rclone obscure -)\"; unset COVE_REMOTE_PASSWORD; fi\nif [ \"${1:-}\" = rclone ]; then shift; exec rclone \"$@\"; fi\nexec restic \"$@\"\n"
+
 type StorageLocation struct {
 	CACertificate string `json:"ca_certificate,omitempty"`
 	Protocol      string `json:"protocol"`
@@ -103,12 +106,10 @@ func (e *Engine) remoteBackupHelper(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
-	dockerfile := "FROM rclone/rclone:1.76.0 AS rclone\nFROM restic/restic:0.19.1\nCOPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone\nCOPY entrypoint.sh /cove-entrypoint.sh\nENTRYPOINT [\"/bin/sh\",\"/cove-entrypoint.sh\"]\n"
-	script := "#!/bin/sh\nset -eu\nif [ -n \"${COVE_REMOTE_PASSWORD:-}\" ]; then export RCLONE_CONFIG_COVE_PASS=\"$(printf '%s' \"$COVE_REMOTE_PASSWORD\" | rclone obscure -)\"; unset COVE_REMOTE_PASSWORD; fi\nif [ \"${1:-}\" = rclone ]; then shift; exec rclone \"$@\"; fi\nexec restic \"$@\"\n"
-	if err = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0600); err != nil {
+	if err = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(remoteBackupDockerfile), 0600); err != nil {
 		return err
 	}
-	if err = os.WriteFile(filepath.Join(dir, "entrypoint.sh"), []byte(script), 0600); err != nil {
+	if err = os.WriteFile(filepath.Join(dir, "entrypoint.sh"), []byte(remoteBackupEntrypoint), 0600); err != nil {
 		return err
 	}
 	return e.Run(ctx, dir, []string{"docker", "build", "-t", remoteBackupImage, "."}, nil, out)
@@ -163,19 +164,12 @@ func storageMount(dir string, s *StorageLocation) ([]string, error) {
 	if s.Protocol != "sftp" {
 		return mounts, nil
 	}
-	u, _ := url.Parse(s.Endpoint)
-	host := u.Hostname()
-	if u.Port() != "" && u.Port() != "22" {
-		host = "[" + host + "]:" + u.Port()
-	} else if net.ParseIP(host) != nil && strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(s.HostKey))
+	knownHosts, err := storageKnownHosts(s)
 	if err != nil {
 		return nil, err
 	}
 	file := filepath.Join(dir, "known_hosts")
-	if err = os.WriteFile(file, []byte(fmt.Sprintf("%s %s", host, ssh.MarshalAuthorizedKey(key))), 0600); err != nil {
+	if err = os.WriteFile(file, []byte(knownHosts), 0600); err != nil {
 		return nil, err
 	}
 	return append(mounts, "--mount", "type=bind,source="+file+",target=/storage-known-hosts,readonly"), nil
@@ -215,4 +209,47 @@ func (e *Engine) TestStorage(ctx context.Context, s *StorageLocation) error {
 		return errors.New("storage connection failed; check the path, credentials, TLS, and host key")
 	}
 	return nil
+}
+
+func storageKnownHosts(s *StorageLocation) (string, error) {
+	u, _ := url.Parse(s.Endpoint)
+	host := u.Hostname()
+	if u.Port() != "" && u.Port() != "22" {
+		host = "[" + host + "]:" + u.Port()
+	} else if net.ParseIP(host) != nil && strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(s.HostKey))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s %s", host, ssh.MarshalAuthorizedKey(key)), nil
+}
+
+type PanelStorageTransport struct {
+	Image         string   `json:"image"`
+	Dockerfile    string   `json:"dockerfile,omitempty"`
+	Entrypoint    string   `json:"entrypoint,omitempty"`
+	Environment   []string `json:"environment,omitempty"`
+	CACertificate string   `json:"ca_certificate,omitempty"`
+	KnownHosts    string   `json:"known_hosts,omitempty"`
+	Repository    string   `json:"repository,omitempty"`
+}
+
+func PanelBackupTransport(s *StorageLocation) (PanelStorageTransport, error) {
+	if s == nil {
+		return PanelStorageTransport{Image: "restic/restic:0.19.1"}, nil
+	}
+	env, err := storageEnvironment(s)
+	if err != nil {
+		return PanelStorageTransport{}, err
+	}
+	knownHosts := ""
+	if s.Protocol == "sftp" {
+		knownHosts, err = storageKnownHosts(s)
+		if err != nil {
+			return PanelStorageTransport{}, err
+		}
+	}
+	return PanelStorageTransport{Image: remoteBackupImage, Dockerfile: remoteBackupDockerfile, Entrypoint: remoteBackupEntrypoint, Environment: env, CACertificate: s.CACertificate, KnownHosts: knownHosts, Repository: "rclone:cove:" + s.Path}, nil
 }

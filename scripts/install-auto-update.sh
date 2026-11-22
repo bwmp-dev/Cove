@@ -8,6 +8,7 @@ case "$installation" in *[!a-zA-Z0-9_./-]*) echo 'Installation path must not con
 [ -f "$installation/.env" ] && [ -f "$installation/compose.yaml" ] || { echo 'A configured Cove installation is required.' >&2; exit 1; }
 install -d -m 700 /usr/local/lib/cove
 install -m 700 "$(dirname "$0")/update-panel.py" /usr/local/lib/cove/update-panel.py
+sh "$(dirname "$0")/install-panel-recovery.sh" "$installation"
 python=$(command -v python3)
 cat > /etc/systemd/system/cove-panel-update.service <<SERVICE
 [Unit]

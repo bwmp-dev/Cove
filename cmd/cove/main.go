@@ -27,6 +27,21 @@ func main() {
 	if err != nil {
 		log.Fatal("COVE_ENCRYPTION_KEY must be base64")
 	}
+	if len(os.Args) > 1 && os.Args[1] == "panel-backup-plan" {
+		if len(os.Args) != 3 || os.Args[2] != "seal" && os.Args[2] != "open" {
+			log.Fatal("use panel-backup-plan seal or open")
+		}
+		if localKey := os.Getenv("COVE_PANEL_PLAN_KEY"); localKey != "" {
+			key, err = base64.StdEncoding.DecodeString(localKey)
+			if err != nil {
+				log.Fatal("invalid local panel plan key")
+			}
+		}
+		if err = control.PanelRecoveryPlan(os.Stdin, os.Stdout, key, os.Args[2] == "seal"); err != nil {
+			log.Fatal("panel recovery plan validation failed")
+		}
+		return
+	}
 	db, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatal("invalid database configuration")
