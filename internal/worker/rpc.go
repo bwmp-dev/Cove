@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Snapshot       *VolumeSnapshotConfig `json:"snapshot,omitempty"`
 	Stream         *StreamRequest        `json:"stream,omitempty"`
 	TrafficControl *ProxyTrafficControl  `json:"traffic_control,omitempty"`
 	CleanupControl *CleanupControl       `json:"cleanup_control,omitempty"`
@@ -33,6 +34,7 @@ type RPCRequest struct {
 	ID             string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Snapshot      *SnapshotPreview      `json:"snapshot,omitempty"`
 	TrafficState  *ProxyTrafficState    `json:"traffic_state,omitempty"`
 	TrafficPlan   *ProxyTrafficPlan     `json:"traffic_plan,omitempty"`
 	Traffic       *TrafficReport        `json:"traffic,omitempty"`
@@ -64,6 +66,15 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "snapshot_preview":
+		if r.Snapshot == nil {
+			return RPCResponse{Error: "snapshot options required"}
+		}
+		preview, err := e.SnapshotPreview(ctx, r.ID, r.Snapshot.MaxBytes)
+		if err != nil {
+			return RPCResponse{Error: "snapshot inspection unavailable; check worker state, tools and privileges"}
+		}
+		return RPCResponse{Snapshot: &preview}
 	case "traffic_control":
 		if r.TrafficControl == nil {
 			return RPCResponse{Error: "traffic settings required"}
@@ -340,6 +351,9 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 	defer unlock()
 	recovery, cancelRecovery := context.WithTimeout(ctx, time.Minute)
 	err = e.recoverBackupTransfersOnStartup(recovery)
+	if err == nil {
+		err = e.recoverFilesystemSnapshots(recovery)
+	}
 	cancelRecovery()
 	if err != nil {
 		return err

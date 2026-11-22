@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	FilesystemSnapshots bool         `json:"filesystem_snapshots"`
 	BackupTransfers     bool         `json:"backup_transfers"`
 	StreamedBackups     bool         `json:"extended_logical_backups"`
 	TrafficLogs         bool         `json:"traffic_logs"`
@@ -62,6 +63,7 @@ func Inspect(ctx context.Context) Probe {
 	p.BackupRetention = true
 	p.StreamedBackups = true
 	p.BackupTransfers = true
+	p.FilesystemSnapshots = runtime.GOOS == "linux"
 	p.BackblazeB2 = true
 	p.FileBrowser = true
 	p.CapacityAdvice = true

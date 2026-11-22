@@ -889,6 +889,74 @@ test("restore drills verify copied volume data without restarting the resource",
 
 });
 
+// The harness worker's normal Docker volumes sit on a filesystem without snapshot support, so this covers the stopped fallback.
+test("filesystem snapshot check and backup fall back to the stopped method on an unsupported volume", async ({ page }, testInfo) => {
+  test.setTimeout(360_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Snapshot fallback project");
+  const url = await createResource(page, "snapshot-fallback-app");
+  const id = new URL(url).pathname.split("/")[2];
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  const yaml = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo original > /data/marker; sleep 3600']\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\nvolumes:\n  data: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await page.getByRole("switch", { name: "Use filesystem snapshots" }).check({ force: true });
+  const space = page.getByLabel("LVM snapshot space (MiB)", { exact: true });
+  await expect(space).toHaveValue("1024");
+  await space.fill("32");
+  await page.getByRole("button", { name: "Check volumes", exact: true }).click();
+  await expect(page.getByText("Enter a whole number from 64 to 65,536 MiB.", { exact: true })).toBeVisible();
+  await expect(space).toBeFocused();
+  await space.fill("512");
+
+  const previewResponse = page.waitForResponse(response => response.url().includes(`/api/workloads/${id}/backups/snapshot-preview`));
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Enter");
+  const previewed = await previewResponse;
+  expect(previewed.status(), await previewed.text()).toBe(200);
+  expect(previewed.headers()["cache-control"]).toBe("no-store");
+  expect(new URL(previewed.url()).searchParams.get("max_bytes")).toBe(String(512 * 1024 * 1024));
+  // The reason may be per mount (unsupported filesystem or missing host tools) or host-wide (no systemd manager); either is a 200 advisory result.
+  const preview = await previewed.json() as { available: boolean; reason?: string; mounts: { mount: string; available: boolean; reason?: string }[] };
+  expect(preview.available).toBe(false);
+  expect(preview.reason).toBeTruthy();
+  expect(preview.mounts.length).toBeGreaterThan(0);
+  await expect(page.getByText("Backups will use the stopped method", { exact: true })).toBeVisible();
+  await expect(page.getByText(preview.reason ?? "", { exact: true })).toBeVisible();
+  const checked = page.getByRole("list", { name: "Volumes checked" });
+  for (const mount of preview.mounts) {
+    await expect(checked).toContainText(mount.mount);
+    await expect(checked).toContainText(mount.available ? "Supported" : "Not supported");
+    if (mount.reason) await expect(checked).toContainText(mount.reason);
+  }
+  await capture(page, testInfo, "snapshot-fallback-preview");
+
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-snapshot-fallback-password");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByText(/Filesystem snapshot, stopped fallback/)).toBeVisible();
+  expect(await (await page.request.get(`/api/workloads/${id}/backup-policy`)).json()).toMatchObject({ backup: { volume_snapshot: { max_bytes: 512 * 1024 * 1024 } } });
+
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  let backup: { id: string; state: string } | undefined;
+  await expect.poll(async () => {
+    const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+    backup = operations.find(item => item.action === "backup");
+    return backup && !["queued", "running"].includes(backup.state);
+  }, { timeout: 180_000 }).toBe(true);
+  expect(backup?.state, await (await page.request.get(`/api/operations/${backup?.id}/logs`)).text()).toBe("succeeded");
+  const records = await (await page.request.get(`/api/workloads/${id}/backups`)).json() as { backups: { volume_method?: string; fallback_reason?: string; data_snapshot?: string }[] };
+  expect(records.backups[0]).toMatchObject({ volume_method: "stopped" });
+  expect(records.backups[0]?.fallback_reason).toBeTruthy();
+  await expect(page.getByText("Stopped containers", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(`Snapshots unavailable: ${records.backups[0]?.fallback_reason ?? ""}`, { exact: true })).toBeVisible();
+  await capture(page, testInfo, "snapshot-fallback-history");
+});
+
 test("Redis complete-instance backups verify, restore in place and restore as a new resource", async ({ page }, testInfo) => {
   test.setTimeout(480_000);
   await page.goto("/projects"); await signIn(page);

@@ -117,3 +117,30 @@ export function parseTransferLimit(text: string, saved: number, min: number, max
   if (mib < minMiB || mib > maxMiB) return { error };
   return { bytes: mib * MiB };
 }
+
+export const SNAPSHOT_MIN_BYTES = 64 * MiB;
+export const SNAPSHOT_MAX_BYTES = 64 * 1024 * MiB;
+export const SNAPSHOT_DEFAULT_BYTES = 1024 * MiB;
+
+export const SNAPSHOT_SWITCH_NAME = "volume-snapshot";
+export const SNAPSHOT_SPACE_NAME = "snapshot-space";
+
+export interface VolumeSnapshotPolicy { max_bytes: number }
+
+// The API stores 0 as "use the default". Untouched text keeps the exact saved value, including 0.
+export function parseSnapshotSpace(text: string, saved: VolumeSnapshotPolicy | null | undefined): { bytes: number } | { error: string } {
+  const savedBytes = saved?.max_bytes ?? SNAPSHOT_DEFAULT_BYTES;
+  const effective = savedBytes || SNAPSHOT_DEFAULT_BYTES;
+  const parsed = parseTransferLimit(text, effective, SNAPSHOT_MIN_BYTES, SNAPSHOT_MAX_BYTES);
+  if ("bytes" in parsed && text.trim() === bytesToMiBText(effective)) return { bytes: savedBytes };
+  return parsed;
+}
+
+const filesystemMethodNames: Record<string, string> = { btrfs: "Btrfs", zfs: "ZFS", lvm: "LVM" };
+
+// Records written before filesystem snapshots omit the method; they were stopped-container backups.
+export function volumeMethodLabel(method: string | undefined) {
+  if (!method) return undefined;
+  if (method === "stopped") return "Stopped containers";
+  return `${method.split("+").map((part) => filesystemMethodNames[part] ?? part).join(" + ")} filesystem snapshot`;
+}

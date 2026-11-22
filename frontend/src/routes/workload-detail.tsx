@@ -688,7 +688,7 @@ export function ResourceBackups() {
   }
   return (
     <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, nodeName: node?.name }} />
+      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} />
     </Section>
   );
 }

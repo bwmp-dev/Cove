@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -25,6 +27,11 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) error {
 	e.active[id] = true
 	e.mu.Unlock()
 	defer func() { e.mu.Lock(); delete(e.active, id); e.mu.Unlock() }()
+	if _, err := os.Lstat(filepath.Join(e.Root, "workloads", id, "filesystem-snapshot.json")); err == nil {
+		return errors.New("recover the pending filesystem snapshot before removing this workload")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	containers, err := e.Containers(ctx, id)
 	if err != nil {
 		return err

@@ -25,6 +25,10 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	snapshotMounts         []backupMount
+	snapshotCheck          func(context.Context) error
+	volumeMethod           string
+	snapshotFallback       string
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
@@ -94,8 +98,9 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
-	observationMu sync.Mutex
-	tailSlots     chan struct{}
+	hostHelperBinary string
+	observationMu    sync.Mutex
+	tailSlots        chan struct{}
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -762,6 +767,11 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 	} else if !os.IsNotExist(readErr) {
 		return readErr
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "filesystem-snapshot.json")); err == nil && r.Action != "stop" {
+		return errors.New("restart the worker to recover the pending filesystem snapshot before another operation")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	if r.Action == "drill" {
 		return e.performDrill(ctx, r, log)

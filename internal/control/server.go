@@ -221,6 +221,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/settings/transfer-limits", s.admin(http.HandlerFunc(s.transferLimits)))
 	mux.Handle("GET /api/workloads/{id}/releases", s.admin(http.HandlerFunc(s.workloadReleases)))
 	mux.Handle("GET /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.getBackupPolicy)))
+	mux.Handle("GET /api/workloads/{id}/backups/snapshot-preview", s.admin(http.HandlerFunc(s.backupSnapshotPreview)))
 	mux.Handle("PUT /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.setBackupPolicy)))
 	mux.Handle("GET /api/workloads/{id}/webhook", s.admin(http.HandlerFunc(s.getWebhook)))
 	mux.Handle("POST /api/workloads/{id}/webhook", s.admin(http.HandlerFunc(s.createWebhook)))

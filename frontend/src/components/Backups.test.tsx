@@ -22,11 +22,12 @@ const policy = { repository: "local", keep_last: 5, keep_weekly: 8, interval_hou
 const upgraded: WorkerSupport = { retention: true, instanceEngines: true, nodeName: "edge" };
 
 interface Database { engine: string; service: string; name: string }
-type SavedPolicy = typeof policy & { database?: Database };
-interface Snapshot { id: string; created_at: string; repository: string; database?: Database }
+type SavedPolicy = typeof policy & { database?: Database; volume_snapshot?: { max_bytes: number } | null };
+interface Snapshot { id: string; created_at: string; repository: string; database?: Database; volume_method?: string; fallback_reason?: string }
 
-function renderBackups(saved: SavedPolicy | null, support: WorkerSupport, backups: Snapshot[] = []) {
+function renderBackups(saved: SavedPolicy | null, support: WorkerSupport, backups: Snapshot[] = [], preview: () => Promise<unknown> = () => Promise.reject(new Error("unexpected preview"))) {
   vi.mocked(request).mockImplementation((method: string, path: string) => {
+    if (path.includes("/backups/snapshot-preview")) return preview();
     if (method === "PUT") return Promise.resolve({ ok: true });
     if (method === "POST" && path.endsWith("/restore-copy")) return Promise.resolve({ id: "op1", resource_id: "w2" });
     if (path.endsWith("/backup-policy")) return Promise.resolve({ backup: saved });
@@ -117,7 +118,7 @@ it("blocks instance engines on a worker without support but still allows other m
   expect(method).toHaveAttribute("aria-invalid", "true");
   expect(request).not.toHaveBeenCalledWith("PUT", expect.anything(), expect.anything());
 
-  chooseMethod("Consistent volume snapshot (stops containers)");
+  chooseMethod("Volume snapshot");
   expect(screen.queryByText("Choose another method, or upgrade and verify old-worker first.")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
   expect(await savedPolicy()).toMatchObject({ database: undefined });
@@ -141,4 +142,118 @@ it("describes complete-instance restores and restore copies without database-spe
   fireEvent.click(screen.getByRole("button", { name: "Restore separate resource" }));
   await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/workloads/w1/restore-copy", { name: "cache-copy", backup_id: "snap-redis" }));
   expect(await screen.findByText("Open new resource")).toBeInTheDocument();
+});
+
+const MiB = 1024 * 1024;
+const snapshotWorker: WorkerSupport = { ...upgraded, snapshots: true };
+
+it("keeps an untouched odd saved snapshot size exact", async () => {
+  const odd = 100 * MiB + 1;
+  renderBackups({ ...policy, volume_snapshot: { max_bytes: odd } }, snapshotWorker);
+  expect(await screen.findByText(/Filesystem snapshot, stopped fallback/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Edit policy" }));
+  expect(screen.getByRole("switch", { name: "Use filesystem snapshots" })).toBeChecked();
+  expect(screen.getByLabelText("LVM snapshot space (MiB)")).toHaveValue("100.00");
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  expect(await savedPolicy()).toMatchObject({ volume_snapshot: { max_bytes: odd } });
+});
+
+it("validates snapshot space before saving a volume policy", async () => {
+  renderBackups(null, snapshotWorker);
+  fireEvent.click(await screen.findByRole("button", { name: "Configure backups" }));
+  fireEvent.change(screen.getByLabelText("Encryption password"), { target: { value: "a-long-enough-password" } });
+  expect(screen.queryByLabelText("LVM snapshot space (MiB)")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("switch", { name: "Use filesystem snapshots" }));
+  const space = screen.getByLabelText("LVM snapshot space (MiB)");
+  expect(space).toHaveValue("1024");
+  fireEvent.change(space, { target: { value: "32" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  expect(await screen.findByText("Enter a whole number from 64 to 65,536 MiB.")).toBeInTheDocument();
+  expect(space).toHaveFocus();
+  expect(space).toHaveAttribute("aria-invalid", "true");
+  expect(request).not.toHaveBeenCalledWith("PUT", expect.anything(), expect.anything());
+
+  fireEvent.change(space, { target: { value: "2048" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  expect(await savedPolicy()).toMatchObject({ volume_snapshot: { max_bytes: 2048 * MiB } });
+});
+
+it("sends no snapshot settings for database methods", async () => {
+  renderBackups({ ...policy, volume_snapshot: { max_bytes: 0 } }, snapshotWorker);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit policy" }));
+  chooseMethod("MariaDB logical dump (online, InnoDB only)");
+  expect(screen.queryByRole("switch", { name: "Use filesystem snapshots" })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Database Compose service"), { target: { value: "db" } });
+  fireEvent.change(screen.getByLabelText("Database name"), { target: { value: "app" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  expect(await savedPolicy()).toMatchObject({ volume_snapshot: null, database: { engine: "mariadb" } });
+});
+
+it("explains the upgrade on a worker without filesystem snapshot support", async () => {
+  renderBackups(null, { ...upgraded, snapshots: false, nodeName: "old-worker" });
+  fireEvent.click(await screen.findByRole("button", { name: "Configure backups" }));
+  expect(screen.getByRole("switch", { name: "Use filesystem snapshots" })).toBeDisabled();
+  expect(screen.getByText("Filesystem snapshots need an upgraded worker")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Encryption password"), { target: { value: "a-long-enough-password" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  expect(await savedPolicy()).toMatchObject({ volume_snapshot: null });
+});
+
+it("checks volumes only on request and lists each mount's method or fallback reason", async () => {
+  const preview = vi.fn(() => Promise.resolve({ available: false, reason: "one or more mounts cannot be snapshotted", mounts: [
+    { mount: "app-data", filesystem: "btrfs", method: "btrfs", available: true },
+    { mount: "/srv/uploads", filesystem: "ext4", method: "stopped", available: false, reason: "ext4 is not on a logical volume" },
+  ] }));
+  renderBackups({ ...policy, volume_snapshot: { max_bytes: 0 } }, snapshotWorker, [], preview);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit policy" }));
+  expect(preview).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Check volumes" }));
+  expect(await screen.findByText("Backups will use the stopped method")).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith("GET", "/api/workloads/w1/backups/snapshot-preview");
+  const list = screen.getByRole("list", { name: "Volumes checked" });
+  expect(list).toHaveTextContent("app-data");
+  expect(list).toHaveTextContent("ext4 is not on a logical volume");
+  expect(list).toHaveTextContent("Not supported");
+
+  fireEvent.change(screen.getByLabelText("LVM snapshot space (MiB)"), { target: { value: "512" } });
+  expect(screen.queryByRole("list", { name: "Volumes checked" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Check volumes" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("GET", `/api/workloads/w1/backups/snapshot-preview?max_bytes=${512 * MiB}`));
+});
+
+it("shows a host-level reason when every mount is supported but the host cannot clean up snapshots", async () => {
+  const preview = vi.fn(() => Promise.resolve({ available: false, reason: "A working host systemd manager is required for crash-independent snapshot cleanup", mounts: [{ mount: "app-data", filesystem: "zfs", method: "zfs", available: true }] }));
+  renderBackups({ ...policy, volume_snapshot: { max_bytes: 0 } }, snapshotWorker, [], preview);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit policy" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check volumes" }));
+  expect(await screen.findByText("Backups will use the stopped method")).toBeInTheDocument();
+  expect(screen.getByText(/host systemd manager is required/)).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Volumes checked" })).toHaveTextContent("Supported");
+});
+
+it("refuses an invalid size before checking and shows why volumes could not be checked", async () => {
+  const preview = vi.fn(() => Promise.reject(new Error("verify an upgraded worker and wait for active operations before inspecting snapshots")));
+  renderBackups({ ...policy, volume_snapshot: { max_bytes: 0 } }, snapshotWorker, [], preview);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit policy" }));
+  fireEvent.change(screen.getByLabelText("LVM snapshot space (MiB)"), { target: { value: "abc" } });
+  fireEvent.click(screen.getByRole("button", { name: "Check volumes" }));
+  expect(screen.getByText("Enter a whole number from 64 to 65,536 MiB.")).toBeInTheDocument();
+  expect(screen.getByLabelText("LVM snapshot space (MiB)")).toHaveFocus();
+  expect(preview).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("LVM snapshot space (MiB)"), { target: { value: "1024" } });
+  fireEvent.click(screen.getByRole("button", { name: "Check volumes" }));
+  expect(await screen.findByText("Could not check volumes")).toBeInTheDocument();
+  expect(screen.getByText(/wait for active operations/)).toBeInTheDocument();
+});
+
+it("shows the actual volume method and fallback reason in backup history", async () => {
+  renderBackups({ ...policy, volume_snapshot: { max_bytes: 0 } }, snapshotWorker, [
+    { id: "snap-fs", created_at: "2026-11-21T10:00:00Z", repository: "local", volume_method: "btrfs+zfs" },
+    { id: "snap-stopped", created_at: "2026-11-21T09:00:00Z", repository: "local", volume_method: "stopped", fallback_reason: "/srv/uploads: tmpfs is not supported" },
+    { id: "snap-old", created_at: "2026-11-20T09:00:00Z", repository: "local" },
+  ]);
+  expect(await screen.findByText("Btrfs + ZFS filesystem snapshot")).toBeInTheDocument();
+  expect(screen.getByText("Stopped containers")).toBeInTheDocument();
+  expect(screen.getByText("Snapshots unavailable: /srv/uploads: tmpfs is not supported")).toBeInTheDocument();
+  expect(screen.getAllByText(/filesystem snapshot$|^Stopped containers$/)).toHaveLength(2);
 });

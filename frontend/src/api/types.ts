@@ -21,6 +21,7 @@ export interface Capabilities {
   mount_metrics?: boolean;
   structured_logs?: boolean;
   capacity_advice?: boolean;
+  filesystem_snapshots?: boolean;
   traffic_logs?: boolean;
   protocol: number;
   os: string;
