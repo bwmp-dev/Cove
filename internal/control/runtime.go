@@ -7,6 +7,9 @@ import (
 	"net/http"
 )
 
+func (s *Server) workloadObservations(w http.ResponseWriter, r *http.Request) {
+	s.readRuntime(w, r, "observations")
+}
 func (s *Server) workloadRuntime(w http.ResponseWriter, r *http.Request) {
 	s.readRuntime(w, r, "containers")
 }
@@ -33,6 +36,14 @@ func (s *Server) readRuntime(w http.ResponseWriter, r *http.Request, method stri
 	response, err := s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: method, ID: r.PathValue("id")})
 	if err != nil {
 		http.Error(w, "runtime information is unavailable; check node connectivity and deployment state", 502)
+		return
+	}
+	if method == "observations" {
+		if response.Error != "" || response.Observations == nil {
+			http.Error(w, "upgrade and verify worker for resource observations", 502)
+			return
+		}
+		respond(w, 200, response.Observations)
 		return
 	}
 	if method == "releases" {

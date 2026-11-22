@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadObservations, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -14,6 +14,7 @@ export const keys = {
   workloadRuntime: (id: string) => ["workloads", id, "runtime"] as const,
   workloadLogs: (id: string) => ["workloads", id, "logs"] as const,
   workloadOwner: (id: string) => ["workloads", id, "owner"] as const,
+  workloadObservations: (id: string) => ["workloads", id, "observations"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -120,6 +121,17 @@ export const workloadRuntimeQuery = (id: string, operationActive: boolean) =>
     queryFn: ({ signal }) => request<WorkloadRuntime>("GET", `/api/workloads/${encodeURIComponent(id)}/runtime`, undefined, signal),
     refetchInterval: operationActive ? 3_000 : 15_000,
     staleTime: 0,
+    retry: false,
+  });
+
+// Read only when someone asks, so each result is a fresh inspection with its own timestamp.
+export const workloadObservationsQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.workloadObservations(id),
+    queryFn: ({ signal }) => request<WorkloadObservations>("GET", `/api/workloads/${encodeURIComponent(id)}/observations`, undefined, signal),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
   });
 

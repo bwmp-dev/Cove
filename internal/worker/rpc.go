@@ -29,30 +29,37 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
-	Files         *FileResponse        `json:"files,omitempty"`
-	Telemetry     *Telemetry           `json:"telemetry,omitempty"`
-	Links         *LinkStatus          `json:"links,omitempty"`
-	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
-	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
-	IngressResult *IngressConfigResult `json:"ingress_result,omitempty"`
-	RestoreCopy   *RestoreCopy         `json:"restore_copy,omitempty"`
-	Images        map[string]string    `json:"images,omitempty"`
-	Inventory     *PreviewInventory    `json:"inventory,omitempty"`
-	Cleanup       *CleanupPreview      `json:"cleanup,omitempty"`
-	Preflight     *PreflightReport     `json:"preflight,omitempty"`
-	Terminal      *TerminalResponse    `json:"terminal,omitempty"`
-	Releases      []Release            `json:"releases,omitempty"`
-	Backups       []BackupRecord       `json:"backups,omitempty"`
-	Maintenance   *Maintenance         `json:"maintenance,omitempty"`
-	Probe         *Probe               `json:"probe,omitempty"`
-	Operation     *Operation           `json:"operation,omitempty"`
-	Logs          string               `json:"logs,omitempty"`
-	Error         string               `json:"error,omitempty"`
-	Containers    []Container          `json:"containers,omitempty"`
+	Observations  *WorkloadObservations `json:"observations,omitempty"`
+	Files         *FileResponse         `json:"files,omitempty"`
+	Telemetry     *Telemetry            `json:"telemetry,omitempty"`
+	Links         *LinkStatus           `json:"links,omitempty"`
+	Ingress       *IngressConfigState   `json:"ingress,omitempty"`
+	IngressFile   *IngressConfigFile    `json:"ingress_file,omitempty"`
+	IngressResult *IngressConfigResult  `json:"ingress_result,omitempty"`
+	RestoreCopy   *RestoreCopy          `json:"restore_copy,omitempty"`
+	Images        map[string]string     `json:"images,omitempty"`
+	Inventory     *PreviewInventory     `json:"inventory,omitempty"`
+	Cleanup       *CleanupPreview       `json:"cleanup,omitempty"`
+	Preflight     *PreflightReport      `json:"preflight,omitempty"`
+	Terminal      *TerminalResponse     `json:"terminal,omitempty"`
+	Releases      []Release             `json:"releases,omitempty"`
+	Backups       []BackupRecord        `json:"backups,omitempty"`
+	Maintenance   *Maintenance          `json:"maintenance,omitempty"`
+	Probe         *Probe                `json:"probe,omitempty"`
+	Operation     *Operation            `json:"operation,omitempty"`
+	Logs          string                `json:"logs,omitempty"`
+	Error         string                `json:"error,omitempty"`
+	Containers    []Container           `json:"containers,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "observations":
+		result, err := e.ObserveWorkload(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: "resource observations unavailable"}
+		}
+		return RPCResponse{Observations: result}
 	case "files":
 		if r.Files == nil {
 			return RPCResponse{Error: "file request required"}

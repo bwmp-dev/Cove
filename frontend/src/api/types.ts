@@ -10,6 +10,7 @@ export interface Capabilities {
   backup_retention?: boolean;
   backblaze_b2?: boolean;
   file_browser?: boolean;
+  alert_observations?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -154,6 +155,17 @@ export interface WorkloadInput {
 }
 
 export interface Route { domain: string; service: string; port: number }
+
+// Raw worker diagnostics, read before the panel removes events inside operation windows, so these are not alert counts.
+export interface WorkloadObservations {
+  sampled_at: string;
+  containers: { id: string; restart_count: number; oom_killed: boolean; exit_code: number; exited: boolean; expected_completed: boolean }[];
+  certificates: { domain: string; expires_at: string | null }[];
+  events_available: boolean;
+  restart_events: number;
+  oom_events: number;
+  crash_events: number;
+}
 
 export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";

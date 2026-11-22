@@ -284,6 +284,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
 	mux.Handle("DELETE /api/notifications/rules/{id}", s.admin(http.HandlerFunc(s.thresholdRules)))
 	mux.Handle("GET /api/workloads/{id}/owner", s.admin(http.HandlerFunc(s.workloadOwner)))
+	mux.Handle("GET /api/workloads/{id}/observations", s.admin(http.HandlerFunc(s.workloadObservations)))
 	mux.Handle("GET /api/workloads/{id}/files", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("GET /api/workloads/{id}/files/targets", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("GET /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))

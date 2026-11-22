@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	AlertObservations   bool         `json:"alert_observations"`
 	FileBrowser         bool         `json:"file_browser"`
 	BackblazeB2         bool         `json:"backblaze_b2"`
 	BackupRetention     bool         `json:"backup_retention"`
@@ -53,6 +54,7 @@ func Inspect(ctx context.Context) Probe {
 	p.BackupRetention = true
 	p.BackblazeB2 = true
 	p.FileBrowser = true
+	p.AlertObservations = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Output(); err == nil {

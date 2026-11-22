@@ -1223,6 +1223,77 @@ test("administrators browse, edit, download and delete container files on the re
   await expect(page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true })).toHaveCount(0);
 });
 
+test("alert observations inspect a real service and certificate and container rules target it", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  await page.goto("/projects");
+  await signIn(page);
+  await createProject(page, "Alerts project");
+  const url = await createResource(page, "alerts-service");
+  const id = new URL(url).pathname.split("/")[2];
+  const hostname = `alerts-${Date.now()}.cove.test`;
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // Store exact Compose text and a route through the API; this test covers alerting, not editor input.
+  const restarting = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo alerts; sleep 300; echo stopped']\n    restart: unless-stopped\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: restarting, routes: [{ domain: hostname, service: "app", port: 8080 }] } })).status()).toBe(200);
+  await page.reload();
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+  const container = containers(url).split("|")[0] ?? "";
+  // Ending the main process outside a Cove operation makes Docker's restart policy restart the container.
+  execFileSync("docker", ["exec", container, "pkill", "sleep"]);
+  await expect.poll(() => execFileSync("docker", ["inspect", "--format", "{{.RestartCount}}", container], { encoding: "utf8" }).trim(), { timeout: 30_000 }).toBe("1");
+
+  await page.goto(`${url}/troubleshooting`);
+  const observations = page.getByRole("region", { name: "Alert observations", exact: true });
+  await expect(observations.getByText(/Not inspected yet/)).toBeVisible();
+  await observations.getByRole("button", { name: "Inspect", exact: true }).click();
+  await expect(observations.getByText(/^Inspected /)).toBeVisible({ timeout: 30_000 });
+  await expect(observations.getByRole("list", { name: "Inspected containers" }).getByText("Docker restart count 1", { exact: true })).toBeVisible();
+  await expect(observations.getByText("Automatic restarts", { exact: true })).toBeVisible();
+  const certificate = observations.getByRole("list", { name: "Inspected certificates" }).getByRole("listitem").filter({ hasText: hostname });
+  await expect(certificate.getByText(/^Unknown\./).or(certificate.getByText(/when inspected$/))).toBeVisible();
+  await observations.getByRole("button", { name: "Inspect again", exact: true }).click();
+  await expect(observations.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled({ timeout: 30_000 });
+  await capture(page, testInfo, "alert-observations");
+
+  await page.goto("/notifications");
+  await page.getByRole("button", { name: "Add notification", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Alert fixture webhook");
+  await page.getByLabel("Webhook URL", { exact: true }).fill("https://notify.example.com/alerts-fixture");
+  await page.getByLabel("Enable notifications", { exact: true }).uncheck();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Alert fixture webhook", exact: true })).toBeVisible();
+  const rules = page.getByRole("region", { name: "Threshold rules", exact: true });
+  await rules.getByRole("button", { name: "New rule", exact: true }).click();
+  await rules.getByLabel("Name", { exact: true }).fill("Certificate expiring");
+  await chooseOption(rules.getByLabel("Metric", { exact: true }), "certificate");
+  await chooseOption(rules.getByLabel("Service", { exact: true }), id ?? "");
+  await chooseOption(rules.getByLabel("Domain", { exact: true }), hostname);
+  await rules.getByLabel("Threshold (days)", { exact: true }).fill("14");
+  await rules.getByRole("checkbox", { name: /Alert fixture webhook/ }).check();
+  await capture(page, testInfo, "certificate-rule-form");
+  await rules.getByRole("button", { name: "Create rule", exact: true }).click();
+  const list = rules.getByRole("list", { name: "Threshold rules" });
+  await expect(list.getByText(new RegExp(String.raw`^Certificate expiry for ${hostname.replaceAll(".", String.raw`\.`)} at or below 14 days for 5 minutes on alerts-service \(Alerts project / [^)]+\) · repeats at most every 1 hour$`))).toBeVisible();
+  await rules.getByRole("button", { name: "New rule", exact: true }).click();
+  await rules.getByLabel("Name", { exact: true }).fill("Restart loop");
+  await chooseOption(rules.getByLabel("Metric", { exact: true }), "restarts");
+  await chooseOption(rules.getByLabel("Service", { exact: true }), id ?? "");
+  await rules.getByLabel("Threshold (events)", { exact: true }).fill("2.5");
+  await rules.getByRole("checkbox", { name: /Alert fixture webhook/ }).check();
+  await rules.getByRole("button", { name: "Create rule", exact: true }).click();
+  await expect(rules.getByText("Enter a whole number from 1 to 1000.", { exact: true })).toBeVisible();
+  await rules.getByLabel("Threshold (events)", { exact: true }).fill("3");
+  await rules.getByRole("button", { name: "Create rule", exact: true }).click();
+  await expect(list.getByText(/^Container restarts at or above 3 in ten minutes for 5 minutes on alerts-service \(Alerts project \/ [^)]+\) · repeats at most every 1 hour$/)).toBeVisible();
+  await capture(page, testInfo, "resource-threshold-rules");
+  for (const name of ["Certificate expiring", "Restart loop"]) {
+    await rules.getByRole("button", { name: `Delete ${name}`, exact: true }).click();
+    await page.getByRole("dialog", { name: `Delete ${name}?` }).getByRole("button", { name: "Delete rule", exact: true }).click();
+    await expect(rules.getByText(name, { exact: true })).toHaveCount(0);
+  }
+});
+
 test("every page adapts to phone tablet laptop and wide desktop", async ({ page, browser }, testInfo) => {
   test.setTimeout(300_000);
   await page.goto("/projects");

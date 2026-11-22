@@ -721,3 +721,11 @@ ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_since timestamptz;
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_checked_at timestamptz;
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_limited boolean NOT NULL DEFAULT false;
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_error text NOT NULL DEFAULT '';
+
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS workload_id text REFERENCES workloads(id) ON DELETE CASCADE;
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS domain text NOT NULL DEFAULT '';
+ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_metric_check;
+ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_metric_check CHECK(metric IN ('cpu','memory','disk','certificate','restarts','oom','crashes'));
+ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_threshold_check;
+ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_threshold_check CHECK(threshold>0 AND threshold<=100000);
+CREATE INDEX IF NOT EXISTS threshold_rules_workload ON threshold_rules(workload_id) WHERE workload_id IS NOT NULL;

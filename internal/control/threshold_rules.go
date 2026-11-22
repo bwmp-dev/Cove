@@ -3,11 +3,11 @@ package control
 import (
 	"context"
 	"cove/internal/worker"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +15,8 @@ import (
 )
 
 type thresholdRule struct {
+	WorkloadID   string   `json:"workload_id"`
+	Domain       string   `json:"domain"`
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	NodeID       string   `json:"node_id"`
@@ -28,7 +30,7 @@ type thresholdRule struct {
 func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 	ctx, team := r.Context(), actor(r).Team
 	if r.Method == http.MethodGet {
-		rows, err := s.DB.Query(ctx, `SELECT id,name,node_id,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids FROM threshold_rules WHERE team_id=$1 ORDER BY name,id`, team)
+		rows, err := s.DB.Query(ctx, `SELECT id,name,node_id,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids,COALESCE(workload_id,''),domain FROM threshold_rules WHERE team_id=$1 ORDER BY name,id`, team)
 		if err != nil {
 			http.Error(w, "rules unavailable", 503)
 			return
@@ -37,7 +39,7 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		out := []thresholdRule{}
 		for rows.Next() {
 			var rule thresholdRule
-			if err = rows.Scan(&rule.ID, &rule.Name, &rule.NodeID, &rule.Metric, &rule.Threshold, &rule.Confirmation, &rule.Repeat, &rule.Channels); err != nil {
+			if err = rows.Scan(&rule.ID, &rule.Name, &rule.NodeID, &rule.Metric, &rule.Threshold, &rule.Confirmation, &rule.Repeat, &rule.Channels, &rule.WorkloadID, &rule.Domain); err != nil {
 				http.Error(w, "rules unavailable", 503)
 				return
 			}
@@ -81,10 +83,11 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rule.Name = strings.TrimSpace(rule.Name)
-	if rule.Name == "" || len(rule.Name) > 120 || !slices.Contains([]string{"cpu", "memory", "disk"}, rule.Metric) || math.IsNaN(rule.Threshold) || rule.Threshold <= 0 || rule.Threshold > 100 || rule.Confirmation < 60 || rule.Confirmation > 3600 || rule.Repeat < 300 || rule.Repeat > 604800 || len(rule.Channels) == 0 || len(rule.Channels) > 32 {
-		http.Error(w, "select a name, metric, percentage, 60–3600 second confirmation, 300–604800 second repeat and 1–32 channels", 400)
+	if !validThresholdRule(rule) {
+		http.Error(w, "select a valid metric, target, threshold, confirmation, repeat and 1-32 channels", 400)
 		return
 	}
+
 	var found string
 	if err = tx.QueryRow(ctx, `SELECT id FROM teams WHERE id=$1 FOR UPDATE`, team).Scan(&found); err != nil {
 		http.Error(w, "team unavailable", 503)
@@ -99,6 +102,37 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a team may have at most 100 threshold rules", 409)
 		return
 	}
+	if rule.WorkloadID != "" {
+		var configuration []byte
+		var kind string
+		err = tx.QueryRow(ctx, `SELECT node_id,kind,configuration FROM workloads WHERE id=$1 AND team_id=$2 FOR SHARE`, rule.WorkloadID, team).Scan(&rule.NodeID, &kind, &configuration)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && kind != "service" {
+			http.Error(w, "select a service in this team", 400)
+			return
+		}
+		if err != nil {
+			http.Error(w, "resource unavailable", 503)
+			return
+		}
+		if rule.Metric == "certificate" {
+			plain, openErr := unseal(s.Key, configuration)
+			var config workloadInput
+			if openErr != nil || json.Unmarshal(plain, &config) != nil {
+				http.Error(w, "resource unavailable", 503)
+				return
+			}
+			foundRoute := false
+			for _, route := range config.Routes {
+				if route.Domain == rule.Domain {
+					foundRoute = true
+				}
+			}
+			if !foundRoute {
+				http.Error(w, "select a configured resource route", 400)
+				return
+			}
+		}
+	}
 	err = tx.QueryRow(ctx, `SELECT n.id FROM nodes n JOIN team_nodes t ON t.node_id=n.id WHERE n.id=$1 AND t.team_id=$2 FOR SHARE OF n,t`, rule.NodeID, team).Scan(&found)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "select a node assigned to this team", 400)
@@ -107,6 +141,18 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "node unavailable", 503)
 		return
+	}
+
+	if rule.WorkloadID != "" {
+		var supported bool
+		if err = tx.QueryRow(ctx, `SELECT COALESCE((capabilities->>'alert_observations')::boolean,false) FROM nodes WHERE id=$1`, rule.NodeID).Scan(&supported); err != nil {
+			http.Error(w, "node unavailable", 503)
+			return
+		}
+		if !supported {
+			http.Error(w, "upgrade and verify the worker for certificate and container alerts", 409)
+			return
+		}
 	}
 	seen := map[string]bool{}
 	for _, id := range rule.Channels {
@@ -126,7 +172,7 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rule.ID = resourceID()
-	_, err = tx.Exec(ctx, `INSERT INTO threshold_rules(id,team_id,node_id,name,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, rule.ID, team, rule.NodeID, rule.Name, rule.Metric, rule.Threshold, rule.Confirmation, rule.Repeat, rule.Channels)
+	_, err = tx.Exec(ctx, `INSERT INTO threshold_rules(id,team_id,node_id,name,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids,workload_id,domain) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11)`, rule.ID, team, rule.NodeID, rule.Name, rule.Metric, rule.Threshold, rule.Confirmation, rule.Repeat, rule.Channels, rule.WorkloadID, rule.Domain)
 	if err == nil {
 		err = tx.Commit(ctx)
 	}
@@ -141,7 +187,7 @@ func (s *Server) evaluateThresholdSample(ctx context.Context, node string, sampl
 	if sample.SampledAt.IsZero() || time.Since(sample.SampledAt) > 2*time.Minute || sample.SampledAt.After(time.Now().Add(time.Minute)) {
 		return nil
 	}
-	rows, err := s.DB.Query(ctx, `SELECT r.id,r.team_id,r.name,r.metric,r.threshold FROM threshold_rules r JOIN team_nodes t ON t.team_id=r.team_id AND t.node_id=r.node_id WHERE r.node_id=$1`, node)
+	rows, err := s.DB.Query(ctx, `SELECT r.id,r.team_id,r.name,r.metric,r.threshold FROM threshold_rules r JOIN team_nodes t ON t.team_id=r.team_id AND t.node_id=r.node_id WHERE r.node_id=$1 AND r.workload_id IS NULL`, node)
 	if err != nil {
 		return err
 	}
