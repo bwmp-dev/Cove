@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"cove/internal/outbound"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,16 @@ func (e *Engine) TestRegistry(ctx context.Context, r *Registry) error {
 	}
 	defer os.RemoveAll(dir)
 	command := exec.CommandContext(ctx, "docker", "--config", dir, "login", r.Server, "--username", r.Username, "--password-stdin")
+	proxyData, readErr := os.ReadFile(filepath.Join(e.Root, "outbound-proxy.json"))
+	if readErr == nil {
+		var proxy outbound.Config
+		if json.Unmarshal(proxyData, &proxy) != nil || proxy.Validate() != nil {
+			return errors.New("invalid outbound configuration")
+		}
+		command.Env = append(os.Environ(), proxy.Env()...)
+	} else if !os.IsNotExist(readErr) {
+		return errors.New("outbound configuration unavailable")
+	}
 	command.Stdin = strings.NewReader(r.Password)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard

@@ -109,7 +109,11 @@ func (s *Server) deliverAudit(ctx context.Context, c auditExportConfig, destinat
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-Cove-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 		request.Header.Set("X-Cove-Delivery", strconv.FormatInt(id, 10))
-		transport := publicWebhookTransport()
+		config, err := s.outboundConfig(ctx)
+		if err != nil {
+			return errors.New("outbound configuration unavailable")
+		}
+		transport := publicWebhookTransport(config)
 		defer transport.CloseIdleConnections()
 		client := &http.Client{Transport: transport, Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		if s.NotificationTransport != nil {

@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"cove/internal/outbound"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 )
 
 type RPCRequest struct {
+	Proxy     *outbound.Config      `json:"outbound_proxy,omitempty"`
 	Links     *LinkConfig           `json:"links,omitempty"`
 	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
 	Tunnel    *TunnelRequest        `json:"tunnel,omitempty"`
@@ -48,6 +50,14 @@ type RPCResponse struct {
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
+	if r.Proxy != nil {
+		if r.Proxy.Validate() != nil {
+			return RPCResponse{Error: "invalid outbound proxy configuration"}
+		}
+		if err := writeJSON(filepath.Join(e.Root, "outbound-proxy.json"), r.Proxy); err != nil {
+			return RPCResponse{Error: "could not save outbound proxy configuration"}
+		}
+	}
 	switch r.Method {
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()

@@ -58,6 +58,9 @@ func (e *Engine) checkout(ctx context.Context, r Request, root string, out io.Wr
 		return "", "", err
 	}
 	environment := []string{"GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	if r.OutboundProxy != nil {
+		environment = append(environment, r.OutboundProxy.Env()...)
+	}
 	args := []string{"git"}
 	if r.Source.Token != "" {
 		environment = append(environment, "COVE_GIT_TOKEN="+r.Source.Token)

@@ -82,6 +82,12 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 		}
 	}
 	env := []string{}
+	if r.OutboundProxy != nil {
+		env = append(env, r.OutboundProxy.Env()...)
+		if r.OutboundProxy.HTTP != "" || r.OutboundProxy.HTTPS != "" {
+			add("Docker daemon proxy", "warning", "Registry pulls run in dockerd. Configure its http-proxy, https-proxy and no-proxy host settings explicitly; request proxy variables do not configure dockerd. Use scripts/configure-docker-proxy.py --apply only during an operator-approved maintenance window.")
+		}
+	}
 	for key, value := range r.Environment {
 		env = append(env, key+"="+value)
 	}

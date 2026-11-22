@@ -156,3 +156,29 @@ export const securityPostureQuery = queryOptions({
   queryKey: ["security-posture"],
   queryFn: ({ signal }) => request<{ checks: SecurityCheck[] | null }>("GET", "/api/settings/security-posture", undefined, signal),
 });
+
+export interface OutboundProxySettings {
+  // Origins without credentials; whether credentials are saved is reported separately.
+  http_proxy: string;
+  https_proxy: string;
+  no_proxy: string;
+  http_credentials_set: boolean;
+  https_credentials_set: boolean;
+}
+
+// An omitted field keeps the saved value, including credentials; an empty string clears it.
+export type OutboundProxyInput = Partial<Pick<OutboundProxySettings, "http_proxy" | "https_proxy" | "no_proxy">>;
+
+export const outboundProxyQuery = queryOptions({
+  queryKey: ["outbound-proxy"],
+  queryFn: ({ signal }) => request<OutboundProxySettings>("GET", "/api/settings/outbound-proxy", undefined, signal),
+});
+
+export function useUpdateOutboundProxy() {
+  const client = useQueryClient();
+  return useMutation({
+    gcTime: 0,
+    mutationFn: (input: OutboundProxyInput) => request<OutboundProxySettings>("PUT", "/api/settings/outbound-proxy", input),
+    onSuccess: (settings) => client.setQueryData(outboundProxyQuery.queryKey, settings),
+  });
+}

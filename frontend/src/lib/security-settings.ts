@@ -78,3 +78,20 @@ export const panelAllowlistLimit = 128;
 export function parseAllowlist(value: string) {
   return [...new Set(value.split(/[\s,]+/).filter(Boolean))];
 }
+
+// Mirrors the API: an http(s) origin, optionally with user:password@, and nothing after the host and port.
+// The message never repeats the value, because it may contain credentials.
+export function proxyOriginError(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (trimmed === "") return "Enter a proxy URL, or use Clear to remove the saved proxy.";
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return "Enter a URL such as http://proxy.example.com:3128.";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return "Use an http:// or https:// proxy URL.";
+  if (url.hostname === "" || /\s/.test(trimmed)) return "Enter a URL such as http://proxy.example.com:3128.";
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "" || trimmed.includes("?") || trimmed.includes("#")) return "Enter only the scheme, optional credentials, host and port, without a path.";
+  return undefined;
+}

@@ -815,3 +815,15 @@ CREATE OR REPLACE FUNCTION cove_access(actor text,team text,project text,environ
 $$;
 
 ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_allowlist text[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS outbound_proxy bytea;
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_backup_at timestamptz;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS latest_panel_version text NOT NULL DEFAULT '';
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_update_checked_at timestamptz;
+CREATE TABLE IF NOT EXISTS workload_security_observations (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ observed_at timestamptz NOT NULL DEFAULT now(), exposed boolean NOT NULL
+);
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_update_channel text NOT NULL DEFAULT '';

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extraScopes, generateSecret, parseScopes, validateAuditExport, validateProvider } from "./security-settings";
+import { extraScopes, generateSecret, parseScopes, proxyOriginError, validateAuditExport, validateProvider } from "./security-settings";
 
 describe("identity provider form", () => {
   const valid = { display_name: "Corp", issuer: "https://login.example.com", client_id: "cove", scopes: "groups" };
@@ -47,5 +47,20 @@ describe("audit export form", () => {
   it("generates 32 random bytes as hex", () => {
     expect(generateSecret()).toMatch(/^[0-9a-f]{64}$/);
     expect(generateSecret()).not.toBe(generateSecret());
+  });
+});
+
+describe("outbound proxy URL", () => {
+  it("accepts http(s) origins with optional credentials", () => {
+    expect(proxyOriginError("http://proxy.example.com:3128")).toBeUndefined();
+    expect(proxyOriginError("https://user:p%40ss@proxy.example.com/")).toBeUndefined();
+  });
+
+  it("refuses other schemes, paths, queries and fragments without echoing the value", () => {
+    for (const value of ["", "socks5://proxy:1080", "proxy.example.com:3128", "http://u:secret@proxy/path", "http://proxy?x=1", "http://proxy#x"]) {
+      const error = proxyOriginError(value);
+      expect(error).toBeDefined();
+      expect(error).not.toContain("secret");
+    }
   });
 });

@@ -51,8 +51,9 @@ func (s *Server) securityPosture(w http.ResponseWriter, r *http.Request) {
 	add("host_checks", stale, "Enrolled nodes checked within the last 15 minutes.", "Inspect disconnected nodes and run Verify after resolving SSH or worker failures.")
 	add("token_expiry", expiring, "Workload API token expiry evaluated; the host administrator token is a separate permanent recovery credential.", "Revoke tokens without expiry and replace them with short-lived scoped tokens; protect the host administrator token.")
 	add("audit_export_retention", audit, "Audit export and bounded retention configuration evaluated.", "Enable an audit export destination and choose a retention period in Settings → Audit export.")
-	add("panel_backup", false, "Panel backups run on the host; this API cannot verify the host schedule or repository.", "Configure scripts/backup-panel.py on the host, copy its encrypted repository off-host, and restore-test a snapshot.")
-	add("updates", false, "Update availability requires comparing the selected channel with its published image; no registry freshness check was performed.", "Review Settings → Updates and run the host updater; verify workers report the bundled version.")
-	add("port_exposure", false, "Port exposure is evaluated on each resource's preflight and live runtime; fleet-wide absence has not been established.", "Review Exposure preflight warnings and runtime ports. Use Bind published ports to preview and confirm changes, then deploy.")
+	if err := s.observedPosture(r.Context(), add); err != nil {
+		http.Error(w, "security observations unavailable", 503)
+		return
+	}
 	respond(w, 200, map[string]any{"checks": checks})
 }

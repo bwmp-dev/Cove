@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"cove/internal/outbound"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	OutboundProxy          *outbound.Config         `json:"outbound_proxy,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
@@ -167,6 +169,11 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.OutboundProxy != nil {
+		if err := r.OutboundProxy.Validate(); err != nil {
+			return err
+		}
+	}
 	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
 		return errors.New("preview deployment must use a pinned revision and isolated configuration")
 	}
@@ -677,6 +684,10 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 	}()
 	env := []string{}
+	if r.OutboundProxy != nil {
+		env = append(env, r.OutboundProxy.Env()...)
+		log.secrets = append(log.secrets, r.OutboundProxy.Secrets()...)
+	}
 	if r.Private != nil {
 		log.secrets = append(log.secrets, r.Private.AuthKey)
 	}

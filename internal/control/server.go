@@ -27,6 +27,7 @@ import (
 var assets embed.FS
 
 type Server struct {
+	outboundState         *outboundProxyState
 	CloudflareTransport   http.RoundTripper
 	NotificationTransport http.RoundTripper
 	DB                    *pgxpool.Pool
@@ -47,6 +48,7 @@ type Server struct {
 }
 
 func (s *Server) Init(ctx context.Context) error {
+	s.outboundState = &outboundProxyState{}
 	u, err := url.Parse(s.PublicURL)
 	if err != nil || strings.ContainsAny(s.PublicURL, "'\"\\ \t\r\n") || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
 		return errors.New("COVE_PUBLIC_URL must be an HTTPS origin without a path")
@@ -85,11 +87,19 @@ func (s *Server) Init(ctx context.Context) error {
 	if err = s.importIntegrationSettings(ctx); err != nil {
 		return err
 	}
+	if _, err = s.outboundConfig(ctx); err != nil {
+		return err
+	}
 	s.dummyPasswordHash, err = bcrypt.GenerateFromPassword([]byte(randomToken()), 12)
 	return err
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("POST /api/settings/update-status", s.admin(http.HandlerFunc(s.reportUpdateStatus)))
+	mux.Handle("GET /api/settings/outbound-proxy/environment", s.admin(http.HandlerFunc(s.hostProxyEnvironment)))
+	for _, method := range []string{"GET", "PUT"} {
+		mux.Handle(method+" /api/settings/outbound-proxy", s.admin(http.HandlerFunc(s.outboundProxy)))
+	}
 	mux.Handle("GET /api/settings/security-posture", s.admin(http.HandlerFunc(s.securityPosture)))
 	mux.Handle("POST /api/workloads/{id}/port-bindings", s.admin(http.HandlerFunc(s.portBindings)))
 	mux.Handle("GET /api/settings/panel-access", s.admin(http.HandlerFunc(s.panelAccess)))

@@ -46,6 +46,32 @@ def latest_release(channel="release"):
     return version
 
 
+def host_settings(installation):
+    config = json.loads(run(["docker", "compose", "config", "--format", "json"], cwd=installation,
+                            capture_output=True, text=True).stdout)
+    return config["services"]["cove"]["environment"]
+
+
+def host_request(installation, path, payload=None):
+    env = host_settings(installation)
+    origin = env["COVE_PUBLIC_URL"]
+    if not origin.startswith("https://"):
+        raise ValueError("The panel must use HTTPS.")
+    headers = {"Authorization": "Bearer " + env["COVE_ADMIN_TOKEN"], "Content-Type": "application/json"}
+    request = urllib.request.Request(origin.rstrip("/") + path, headers=headers,
+                                     data=json.dumps(payload).encode() if payload is not None else None)
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+
+
+def load_outbound_proxy(installation):
+    config = host_request(installation, "/api/settings/outbound-proxy/environment")
+    for field, name in [("http_proxy", "HTTP_PROXY"), ("https_proxy", "HTTPS_PROXY"), ("no_proxy", "NO_PROXY")]:
+        os.environ[name] = config[field]
+        os.environ[name.lower()] = config[field]
+    urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler()))
+
+
 def selected_channel(installation):
     config = json.loads(run(["docker", "compose", "config", "--format", "json"], cwd=installation,
                             capture_output=True, text=True).stdout)
@@ -85,7 +111,7 @@ def drain(compose):
     raise RuntimeError("Worker is still busy; update cancelled.")
 
 
-def update(installation, version):
+def update(installation, version, offline_images=None):
     import fcntl
 
     images = release_images(version)
@@ -111,8 +137,13 @@ def update(installation, version):
             previous[service] = {"image": run(["docker", "inspect", "--format", "{{.Image}}", container],
                                               capture_output=True, text=True).stdout.strip()}
             # Resolve tags to immutable local IDs before restarting anything.
-            run(["docker", "pull", images[service]])
-            verify_image(images[service])
+            if offline_images is None:
+                run(["docker", "pull", images[service]])
+                verify_image(images[service])
+            else:
+                if service not in offline_images or not re.fullmatch(r"sha256:[a-f0-9]{64}", offline_images[service]):
+                    raise ValueError("Invalid verified offline image identity")
+                images[service] = offline_images[service]
             config["services"][service]["image"] = run(
                 ["docker", "image", "inspect", "--format", "{{.Id}}", images[service]],
                 capture_output=True, text=True).stdout.strip()
@@ -189,7 +220,11 @@ if __name__ == "__main__":
         parser.error("--channel requires --latest.")
     try:
         installation = args.installation.resolve()
-        version = latest_release(args.channel or selected_channel(installation)) if args.latest else args.version
+        load_outbound_proxy(installation)
+        channel = args.channel or selected_channel(installation) if args.latest else None
+        version = latest_release(channel) if args.latest else args.version
+        if args.latest:
+            host_request(installation, "/api/settings/update-status", {"version": version, "channel": channel})
         update(installation, version)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
         sys.exit("Update failed. Inspect .cove-updates recovery files and service logs; credentials were not printed.")

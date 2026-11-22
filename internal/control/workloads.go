@@ -308,6 +308,11 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, out)
 }
 func (s *Server) nodeRPC(ctx context.Context, nodeID string, request worker.RPCRequest) (worker.RPCResponse, error) {
+	proxy, proxyErr := s.outboundConfig(ctx)
+	if proxyErr != nil {
+		return worker.RPCResponse{}, proxyErr
+	}
+	request.Proxy = &proxy
 	if s.workerRPC != nil {
 		return s.workerRPC(ctx, nodeID, request)
 	}

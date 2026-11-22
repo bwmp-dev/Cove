@@ -8,6 +8,14 @@ case "$(uname -m)" in
  aarch64) arch=arm64 ;;
  *) echo 'Unsupported CPU architecture.' >&2; exit 1 ;;
 esac
+if [ -f /var/lib/cove/outbound-proxy.json ]; then
+ HTTP_PROXY=$(jq -er '.http_proxy // ""' /var/lib/cove/outbound-proxy.json)
+ HTTPS_PROXY=$(jq -er '.https_proxy // ""' /var/lib/cove/outbound-proxy.json)
+ NO_PROXY=$(jq -er '.no_proxy // ""' /var/lib/cove/outbound-proxy.json)
+ export HTTP_PROXY HTTPS_PROXY NO_PROXY
+ http_proxy=$HTTP_PROXY; https_proxy=$HTTPS_PROXY; no_proxy=$NO_PROXY
+ export http_proxy https_proxy no_proxy
+fi
 scratch=$(mktemp -d)
 drained=false
 replaced=false
@@ -52,7 +60,9 @@ curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=
 printf '%s  %s\n' "$checksum" "$scratch/worker" | sha256sum -c -
 command -v cosign >/dev/null || { echo 'Install a trusted Cosign v3+ before updating.' >&2; exit 1; }
 curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=https' '{{.URL}}/releases/worker/'"$arch/$checksum/signature" -o "$scratch/worker.sigstore.json"
-cosign verify-blob --bundle "$scratch/worker.sigstore.json" --certificate-identity 'https://github.com/bwmp-dev/Cove/.github/workflows/images.yml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$scratch/worker" >/dev/null
+set --
+if [ -f /etc/cove/sigstore-trusted-root.json ]; then set -- --trusted-root /etc/cove/sigstore-trusted-root.json --offline; fi
+cosign verify-blob "$@" --bundle "$scratch/worker.sigstore.json" --certificate-identity 'https://github.com/bwmp-dev/Cove/.github/workflows/images.yml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$scratch/worker" >/dev/null
 cp /usr/local/bin/cove-worker "$scratch/previous"
 drained=true
 attempts=0
