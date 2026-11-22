@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import { expect, test, type Page, type TestInfo, type Locator } from "@playwright/test";
 import { spawn, execFileSync } from "node:child_process";
-import { fillComposeEditor } from "./compose-editor";
 
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
 const compose = (marker: string) =>
@@ -92,7 +91,7 @@ async function createResource(page: Page, name: string) {
   await page.getByRole("button", { name: "Custom Compose or Git" }).click();
   await page.getByLabel("Name", { exact: true }).fill(name);
   await chooseOption(page.getByLabel("Node", { exact: true }), { label: "ready-browser-worker" });
-  await fillComposeEditor(page.getByLabel("Compose file", { exact: true }), compose(name));
+  await page.getByLabel("Compose file", { exact: true }).fill(compose(name));
   await page.getByRole("button", { name: "Create resource", exact: true }).click();
   await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
   return page.url();
@@ -311,7 +310,7 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await expect(source.getByRole("textbox", { name: /^Watch paths/ })).toHaveValue("src/**\n!**/*.test.ts");
   await capture(page, testInfo, "watch-paths");
   await source.getByRole("radio", { name: "Manage in Cove" }).check();
-  await fillComposeEditor(source.getByLabel("Compose file", { exact: true }), originalCompose);
+  await source.getByLabel("Compose file", { exact: true }).fill(originalCompose);
   await source.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(source.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
   await page.reload();
@@ -325,7 +324,7 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await source.getByRole("button", { name: "Discard changes", exact: true }).click();
   await expect(source.getByRole("textbox", { name: /^Watch paths/ })).toHaveValue("src/**\n!**/*.test.ts");
   await source.getByRole("radio", { name: /^Compose file/ }).check();
-  await fillComposeEditor(source.getByLabel("Compose file", { exact: true }), originalCompose);
+  await source.getByLabel("Compose file", { exact: true }).fill(originalCompose);
   await source.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(source.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
 
@@ -712,7 +711,7 @@ test("private networking, logical backup policy and ordered migration deployment
   await chooseOption(page.getByLabel("Node", { exact: true }), { label: "ready-browser-worker" });
   await page.getByRole("radio", { name: /^Job/ }).check();
   await page.getByLabel("Job service", { exact: true }).fill("migrate");
-  await fillComposeEditor(page.getByLabel("Compose file", { exact: true }), "services:\n  migrate:\n    image: busybox:1.37\n    command: [sh, -c, 'echo migration-complete']\n");
+  await page.getByLabel("Compose file", { exact: true }).fill("services:\n  migrate:\n    image: busybox:1.37\n    command: [sh, -c, 'echo migration-complete']\n");
   await page.getByRole("button", { name: "Create resource", exact: true }).click();
   await expect(page.getByRole("heading", { name: "ordered-migration", exact: true })).toBeVisible();
   const jobId = new URL(page.url()).pathname.split("/")[2];
