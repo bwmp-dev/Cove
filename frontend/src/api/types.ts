@@ -203,6 +203,8 @@ export interface Container {
   state: string;
   status: string;
   ports: string;
+  // True when Docker publishes at least one port on every interface (0.0.0.0 or ::).
+  exposed_ports?: boolean;
 }
 
 export interface WorkloadRuntime {

@@ -2,6 +2,7 @@
 set -eu
 [ "$(id -u)" = 0 ] || exit 1
 [ -f /etc/cove/node-id ] && [ -x /usr/local/bin/cove-worker ] || { echo 'Enroll this node before enabling updates.' >&2; exit 1; }
+command -v cosign >/dev/null || { echo 'Install a trusted Cosign v3+ before enabling updates.' >&2; exit 1; }
 command -v flock >/dev/null
 command -v curl >/dev/null
 command -v jq >/dev/null

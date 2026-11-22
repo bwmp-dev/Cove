@@ -156,6 +156,9 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 				if published != "" && published != "0" {
 					protocol, _ := port["protocol"].(string)
 					host, _ := port["host_ip"].(string)
+					if host == "" || host == "0.0.0.0" || host == "::" {
+						add("Exposure: "+name, "warning", "This service publishes a host port on all interfaces. Bind to loopback or a private address unless public access is intended.")
+					}
 					key := host + ":" + protocol + ":" + published
 					if ports[key] {
 						add("Ports: "+name, "error", "Multiple services publish the same host port; review their bindings.")

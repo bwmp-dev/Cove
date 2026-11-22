@@ -12,6 +12,7 @@ import { ResourceVariables } from "../components/ResourceVariables";
 import { DatabaseAccess } from "../components/DatabaseAccess";
 import { GitHubSource } from "../components/GitHubApp";
 import { Networks } from "../components/Networks";
+import { PortBindings } from "../components/PortBindings";
 import { PrivateNetwork } from "../components/PrivateNetwork";
 import { ResourceRegistry } from "../components/ResourceRegistry";
 import { RouteEditor } from "../components/RouteEditor";
@@ -632,7 +633,8 @@ function DomainsForm({ workload }: { workload: Workload }) {
 
 export function ResourceNetworking() {
   const workload = useResource();
-  return <div className="space-y-6"><Networks workload={workload} /><PrivateNetwork id={workload.id} canEdit={can(workload.permissions, "edit")} />{can(workload.permissions,"edit") && <DatabaseAccess id={workload.id} />}</div>;
+  const active = useActiveOperation(workload.id);
+  return <div className="space-y-6"><Networks workload={workload} /><PrivateNetwork id={workload.id} canEdit={can(workload.permissions, "edit")} />{can(workload.permissions, "edit") && <PortBindings workload={workload} busy={Boolean(active)} />}{can(workload.permissions,"edit") && <DatabaseAccess id={workload.id} />}</div>;
 }
 
 export function ResourceRegistryPage() {

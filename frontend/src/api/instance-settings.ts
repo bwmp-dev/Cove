@@ -118,3 +118,41 @@ export function useUpdateAuditExport() {
     onSuccess: (settings) => client.setQueryData(auditExportQuery.queryKey, settings),
   });
 }
+
+export interface PanelAccess {
+  allowlist: string[];
+  // COVE_PANEL_ALLOWLIST on the host replaces the saved list while it is set.
+  environment_override: boolean;
+  client_address: string;
+}
+
+export const panelAccessQuery = queryOptions({
+  queryKey: ["panel-access"],
+  queryFn: async ({ signal }) => {
+    const access = await request<PanelAccess>("GET", "/api/settings/panel-access", undefined, signal);
+    return { ...access, allowlist: access.allowlist ?? [] };
+  },
+});
+
+export function useUpdatePanelAccess() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (allowlist: string[]) => request<PanelAccess>("PUT", "/api/settings/panel-access", { allowlist }),
+    onSuccess: (access) => {
+      client.setQueryData(panelAccessQuery.queryKey, { ...access, allowlist: access.allowlist ?? [] });
+      void client.invalidateQueries({ queryKey: securityPostureQuery.queryKey });
+    },
+  });
+}
+
+export interface SecurityCheck {
+  id: string;
+  status: "pass" | "warn";
+  message: string;
+  remediation: string;
+}
+
+export const securityPostureQuery = queryOptions({
+  queryKey: ["security-posture"],
+  queryFn: ({ signal }) => request<{ checks: SecurityCheck[] | null }>("GET", "/api/settings/security-posture", undefined, signal),
+});

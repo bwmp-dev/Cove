@@ -18,11 +18,26 @@ def release_images(version):
             "worker": f"ghcr.io/bwmp-dev/cove-worker:{version}"}
 
 
+def verify_image(image):
+    repository = image.rsplit(":", 1)[0]
+    digests = json.loads(run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image],
+                             capture_output=True, text=True).stdout)
+    matches = [digest for digest in digests or [] if re.fullmatch(re.escape(repository) + r"@sha256:[a-f0-9]{64}", digest)]
+    if len(matches) != 1:
+        raise RuntimeError("Expected one immutable release image digest.")
+    run(["cosign", "verify", "--certificate-identity",
+         "https://github.com/bwmp-dev/Cove/.github/workflows/images.yml@refs/heads/main",
+         "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", matches[0]],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return matches[0]
+
+
 def latest_release(channel="release"):
     if channel not in ("beta", "release"):
         raise ValueError("Choose beta or release.")
     image = "ghcr.io/bwmp-dev/cove:" + ("beta" if channel == "beta" else "release")
     run(["docker", "pull", image])
+    verify_image(image)
     version = run(["docker", "image", "inspect", "--format", '{{index .Config.Labels "org.opencontainers.image.version"}}', image],
                   capture_output=True, text=True).stdout.strip()
     pattern = r"beta-[a-f0-9]{40}" if channel == "beta" else r"v[0-9]+\.[0-9]+\.[0-9]+"
@@ -97,6 +112,7 @@ def update(installation, version):
                                               capture_output=True, text=True).stdout.strip()}
             # Resolve tags to immutable local IDs before restarting anything.
             run(["docker", "pull", images[service]])
+            verify_image(images[service])
             config["services"][service]["image"] = run(
                 ["docker", "image", "inspect", "--format", "{{.Id}}", images[service]],
                 capture_output=True, text=True).stdout.strip()

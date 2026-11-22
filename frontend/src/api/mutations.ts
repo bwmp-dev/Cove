@@ -127,3 +127,22 @@ export function useRollback(workloadId: string) {
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
   });
 }
+
+export interface PortBindingRewrite {
+  compose: string;
+  changed: number;
+  revision: string;
+  saved: boolean;
+}
+
+// Previews with confirm false; saving needs confirm true and the revision the preview returned.
+export function usePortBindings(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    ...transient,
+    mutationFn: (input: { address: string; confirm: boolean; revision?: string }) => request<PortBindingRewrite>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/port-bindings`, input),
+    onSuccess: (result) => {
+      if (result.saved) void client.invalidateQueries({ queryKey: keys.workload(workloadId) });
+    },
+  });
+}

@@ -21,6 +21,8 @@ with (root / "calls").open("a") as log:
     log.write(json.dumps([name] + args) + "\n")
 if name == "id":
     print("0")
+elif name == "cosign":
+    if os.environ.get("BAD_SIGNATURE"): sys.exit(1)
 elif name == "systemctl":
     if "docker" in args:
         (root / "docker-running").touch()
@@ -42,7 +44,7 @@ elif name == "curl":
         assert url.startswith(prefix), url
         relative = url.removeprefix(prefix)
         assert relative in ["compose.yaml", "deploy/traefik.yaml", "deploy/traefik-panel.yaml", "scripts/configure.sh", "scripts/update-panel.py", "scripts/install-auto-update.sh"]
-        content = (pathlib.Path(os.environ["SOURCE"]) / relative).read_bytes().decode()
+        content = (pathlib.Path(os.environ["SOURCE"]) / relative).read_text()
         content = content.replace("/usr/local/lib/cove", str(root / "lib"))
         content = content.replace("/etc/systemd/system", str(root / "units"))
         target.write_text(content)
@@ -50,7 +52,7 @@ elif name == "docker":
     if args[0] == "info" and not (root / "docker-running").exists():
         sys.exit(1)
     if args[:2] == ["image", "inspect"]:
-        print("a" * 40 if "revision" in args[3] else "beta-" + "a" * 40)
+        print("ghcr.io/bwmp-dev/cove@sha256:" + "a" * 64 if "RepoDigests" in args[3] else "a" * 40 if "revision" in args[3] else "beta-" + "a" * 40)
 elif name == "python3":
     class Response:
         status = 200
@@ -87,13 +89,13 @@ class InstallerTests(unittest.TestCase):
         helper = "#!" + sys.executable + "\n" + HELPER
         (self.root / "helper").write_text(helper)
         (self.root / "helper").chmod(0o700)
-        for command in ["id", "apt-get", "systemctl", "dpkg", "ss", "curl", "python3"]:
+        for command in ["id", "apt-get", "cosign", "systemctl", "dpkg", "ss", "curl", "python3"]:
             shutil.copy(self.root / "helper", self.bin / command)
         for command in ["sh", "uname", "install", "chmod", "grep", "openssl", "dirname", "mktemp", "ln", "rm", "cat", "mkdir"]:
             executable = shutil.which(command)
             self.assertIsNotNone(executable, command)
             (self.bin / command).symlink_to(executable)
-        script = (ROOT / "scripts/install.sh").read_bytes().decode()
+        script = (ROOT / "scripts/install.sh").read_text()
         for old, new in [("/run/systemd/system", "systemd"), ("/etc/os-release", "os-release"), ("/etc/apt", "apt")]:
             script = script.replace(old, str(self.root / new))
         self.script = self.root / "install.sh"
@@ -105,6 +107,12 @@ class InstallerTests(unittest.TestCase):
 
     def calls(self):
         return [json.loads(line) for line in (self.root / "calls").read_text().splitlines()]
+
+    def test_bad_signature_refuses_installation(self):
+        self.env["BAD_SIGNATURE"] = "1"
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "installation").exists())
 
     def test_fresh_host_generates_credentials_installs_services_and_updates(self):
         result = self.run_installer()

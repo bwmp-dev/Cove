@@ -70,3 +70,28 @@ func (s *Server) workerRelease(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(data)
 }
+
+func (s *Server) workerSignature(w http.ResponseWriter, r *http.Request) {
+	arch := r.PathValue("arch")
+	if arch != "amd64" && arch != "arm64" {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(s.BinaryDir, "cove-worker-linux-"+arch))
+	if err != nil {
+		http.Error(w, "worker release unavailable", 503)
+		return
+	}
+	sum := sha256.Sum256(data)
+	if r.PathValue("checksum") != hex.EncodeToString(sum[:]) {
+		http.NotFound(w, r)
+		return
+	}
+	bundle, err := os.ReadFile(filepath.Join(s.BinaryDir, "cove-worker-linux-"+arch+".sigstore.json"))
+	if err != nil {
+		http.Error(w, "signed worker release unavailable", 503)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(bundle)
+}

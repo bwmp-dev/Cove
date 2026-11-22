@@ -813,3 +813,5 @@ CREATE OR REPLACE FUNCTION cove_access(actor text,team text,project text,environ
  CASE WHEN cove_permission(actor,team,project,environment,'edit_configuration') AND cove_permission(actor,team,project,environment,'read_secrets') AND cove_permission(actor,team,project,environment,'manage_backups') AND cove_permission(actor,team,project,environment,'operate') THEN 3
  WHEN cove_permission(actor,team,project,environment,'operate') THEN 2 ELSE 1 END ELSE 0 END
 $$;
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_allowlist text[] NOT NULL DEFAULT '{}';

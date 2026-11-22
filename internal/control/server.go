@@ -90,6 +90,10 @@ func (s *Server) Init(ctx context.Context) error {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /api/settings/security-posture", s.admin(http.HandlerFunc(s.securityPosture)))
+	mux.Handle("POST /api/workloads/{id}/port-bindings", s.admin(http.HandlerFunc(s.portBindings)))
+	mux.Handle("GET /api/settings/panel-access", s.admin(http.HandlerFunc(s.panelAccess)))
+	mux.Handle("PUT /api/settings/panel-access", s.admin(http.HandlerFunc(s.panelAccess)))
 	for _, method := range []string{"GET", "POST"} {
 		mux.Handle(method+" /api/teams/{id}/roles", s.admin(http.HandlerFunc(s.customRoles)))
 	}
@@ -321,6 +325,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/terminal/{id}", s.admin(http.HandlerFunc(s.terminalSession)))
 	mux.HandleFunc("GET /install.sh", s.install)
 	mux.HandleFunc("GET /releases/worker/{arch}", s.workerRelease)
+	mux.HandleFunc("GET /releases/worker/{arch}/{checksum}/signature", s.workerSignature)
 	mux.HandleFunc("GET /releases/worker/install.sh", s.workerUpdateInstaller)
 	mux.HandleFunc("GET /releases/worker/{arch}/{checksum}", s.workerRelease)
 	mux.HandleFunc("GET /bootstrap/worker/{arch}", s.binary)
@@ -331,7 +336,7 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		mux.ServeHTTP(w, r)
+		s.restrictPanel(mux).ServeHTTP(w, r)
 	})
 }
 func bearer(r *http.Request) string {

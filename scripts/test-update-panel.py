@@ -14,27 +14,44 @@ spec.loader.exec_module(updater)
 
 
 class UpdateTests(unittest.TestCase):
+    def test_signature_verification_requires_expected_repository_digest(self):
+        with patch.object(updater, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps(["ghcr.io/attacker/cove@sha256:" + "a" * 64]))
+            with self.assertRaises(RuntimeError):
+                updater.verify_image("ghcr.io/bwmp-dev/cove:v1.2.3")
+            self.assertEqual(run.call_count, 1)
+
+    def test_signature_failure_is_propagated(self):
+        with patch.object(updater, "run") as run:
+            run.side_effect = [subprocess.CompletedProcess([], 0, stdout=json.dumps(["ghcr.io/bwmp-dev/cove@sha256:" + "a" * 64])), subprocess.CalledProcessError(1, ["cosign"])]
+            with self.assertRaises(subprocess.CalledProcessError):
+                updater.verify_image("ghcr.io/bwmp-dev/cove:v1.2.3")
+
+    def verified_latest(self, channel="release"):
+        with patch.object(updater, "verify_image"):
+            return updater.latest_release(channel)
+
     @patch.object(updater, "run")
     def test_latest_accepts_only_stable_release_label(self, run):
         for version in ["main", "v1.2.3-beta.1", "", "1.2.3"]:
             run.return_value = subprocess.CompletedProcess([], 0, stdout=version)
             with self.assertRaises(ValueError):
-                updater.latest_release()
+                self.verified_latest()
         run.return_value = subprocess.CompletedProcess([], 0, stdout="v1.2.3\n")
-        self.assertEqual(updater.latest_release(), "v1.2.3")
+        self.assertEqual(self.verified_latest(), "v1.2.3")
 
     @patch.object(updater, "run")
     def test_beta_channel_resolves_immutable_version(self, run):
         version = "beta-" + "a" * 40
         run.return_value = subprocess.CompletedProcess([], 0, stdout=version)
-        self.assertEqual(updater.latest_release("beta"), version)
+        self.assertEqual(self.verified_latest("beta"), version)
         self.assertEqual(updater.release_images(version)["cove"], "ghcr.io/bwmp-dev/cove:" + version)
         run.return_value = subprocess.CompletedProcess([], 0, stdout="v1.2.3")
         with self.assertRaises(ValueError):
-            updater.latest_release("beta")
+            self.verified_latest("beta")
         run.return_value = subprocess.CompletedProcess([], 0, stdout=version)
         with self.assertRaises(ValueError):
-            updater.latest_release("release")
+            self.verified_latest("release")
 
     def exercise_update(self, failure=False, local=False, unchanged=False):
         with tempfile.TemporaryDirectory() as directory:
@@ -68,7 +85,7 @@ class UpdateTests(unittest.TestCase):
 
             previous = Path.cwd()
             try:
-                with patch.object(updater, "run", side_effect=run), patch.dict("sys.modules", {"fcntl": types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
+                with patch.object(updater, "verify_image"), patch.object(updater, "run", side_effect=run), patch.dict("sys.modules", {"fcntl": types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
                     if failure:
                         with self.assertRaises(subprocess.CalledProcessError):
                             updater.update(root, "v1.2.3")

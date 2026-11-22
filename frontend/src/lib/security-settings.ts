@@ -71,3 +71,10 @@ export function generateSecret() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
+
+export const panelAllowlistLimit = 128;
+
+// One address or CIDR range per line; commas and spaces also separate entries. The API validates and canonicalizes each one.
+export function parseAllowlist(value: string) {
+  return [...new Set(value.split(/[\s,]+/).filter(Boolean))];
+}

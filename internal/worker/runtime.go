@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Container struct {
+	ExposedPorts       bool              `json:"exposed_ports"`
 	ExpectedCompleted  bool              `json:"expected_completed,omitempty"`
 	Metrics            *ContainerMetrics `json:"metrics,omitempty"`
 	MetricsUnavailable bool              `json:"metrics_unavailable,omitempty"`
@@ -54,7 +56,7 @@ func (e *Engine) Containers(ctx context.Context, id string) ([]Container, error)
 		if err != nil {
 			return nil, err
 		}
-		containers = append(containers, Container{ID: docker.ID, Name: docker.Names, Image: docker.Image, State: docker.State, Status: docker.Status, Ports: docker.Ports})
+		containers = append(containers, Container{ID: docker.ID, Name: docker.Names, Image: docker.Image, State: docker.State, Status: docker.Status, Ports: docker.Ports, ExposedPorts: strings.Contains(docker.Ports, "0.0.0.0:") || strings.Contains(docker.Ports, "[::]:") || strings.Contains(docker.Ports, ":::")})
 	}
 
 	return containers, nil

@@ -22,6 +22,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     strategy:
       matrix:
         target: [panel, worker]
@@ -46,11 +47,31 @@ jobs:
           image="ghcr.io/${REPOSITORY,,}"
           if [ "$TARGET" = worker ]; then image="$image-worker"; fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@v4
+        if: inputs.publish
+      - name: Sign bundled executables
+        if: inputs.publish
+        env:
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ inputs.revision }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          for arch in amd64 arm64; do
+            docker buildx build --target binaries --platform "linux/$arch" --build-arg "BUILD_VERSION=$VERSION" --build-arg "BUILD_REVISION=$REVISION" --build-arg "BUILD_CHANNEL=$CHANNEL" --output "type=local,dest=/tmp/cove-binaries-$arch" .
+            cosign sign-blob --yes --bundle "release-signatures/cove-linux-$arch.sigstore.json" "/tmp/cove-binaries-$arch/cove"
+          done
+          for arch in amd64 arm64; do
+            cosign sign-blob --yes --bundle "release-signatures/cove-worker-linux-$arch.sigstore.json" "/tmp/cove-binaries-amd64/cove-worker-linux-$arch"
+          done
+          chmod 0644 release-signatures/*.sigstore.json
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
+          sbom: true
+          provenance: mode=max
           push: ${{ inputs.publish }}
           tags: ${{ steps.names.outputs.image }}:${{ inputs.version }}
           labels: |
@@ -63,6 +84,12 @@ jobs:
             BUILD_CHANNEL=${{ inputs.channel }}
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+      - name: Sign published image index
+        if: inputs.publish
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
   promote:
     needs: images
     if: inputs.publish
@@ -70,7 +97,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
+      - uses: sigstore/cosign-installer@v4
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -95,4 +124,5 @@ jobs:
           for suffix in '' '-worker'; do
             image="ghcr.io/${REPOSITORY,,}$suffix"
             docker buildx imagetools create --tag "$image:$CHANNEL" "$image:$VERSION"
+            cosign sign --yes "$image:$CHANNEL"
           done

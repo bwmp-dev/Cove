@@ -20,6 +20,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags "-
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /out/cove-worker-linux-amd64 ./cmd/cove-worker \
  && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /out/cove-worker-linux-arm64 ./cmd/cove-worker
 
+FROM scratch AS binaries
+COPY --from=backend /out/ /
+
 FROM docker:29-cli AS worker
 ARG TARGETARCH
 ENV DOCKER_CONFIG=/tmp/docker-config
@@ -31,6 +34,7 @@ FROM alpine:3.23 AS panel
 RUN apk add --no-cache ca-certificates && adduser -D -u 10001 cove
 WORKDIR /app
 COPY --from=backend /out/ /app/bin/
+COPY release-signatures/ /app/bin/
 COPY --from=frontend /src/frontend/dist/ /app/frontend/dist/
 USER cove
 ENV COVE_LISTEN=0.0.0.0:8080

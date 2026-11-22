@@ -14,6 +14,7 @@ case "$channel" in release|beta) ;; *) fail 'Choose release or beta.';; esac
 case "$installation" in /*) ;; *) fail 'Use an absolute installation directory.';; esac
 case "$installation" in /|*/../*|*/..|*[!a-zA-Z0-9_./-]*) fail 'Use a simple absolute installation directory.';; esac
 [ ! -e "$installation" ] || fail 'Installation directory already exists. Existing installations must use the updater.'
+command -v cosign >/dev/null || fail 'Install a trusted Cosign v3+ before installing Cove.'
 command -v systemctl >/dev/null || fail 'A systemd host is required.'
 [ -d /run/systemd/system ] || fail 'Systemd must be running.'
 . /etc/os-release
@@ -47,6 +48,9 @@ fi
 
 image="ghcr.io/bwmp-dev/cove:$channel"
 docker pull "$image" || fail "No published $channel image is available. Try beta if no stable release has been published yet."
+digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")
+case "$digest" in ghcr.io/bwmp-dev/cove@sha256:*) ;; *) fail 'Expected a release image digest.';; esac
+cosign verify --certificate-identity 'https://github.com/bwmp-dev/Cove/.github/workflows/images.yml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$digest" >/dev/null || fail 'Image signature verification failed.'
 revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
 version=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image")
 python3 - "$revision" "$version" "$channel" <<'PY'

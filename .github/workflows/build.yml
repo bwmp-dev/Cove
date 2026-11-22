@@ -60,6 +60,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     with:
       channel: beta
       version: beta-${{ github.sha }}
@@ -72,6 +73,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     with:
       channel: release
       version: ${{ needs.release-please.outputs.tag_name }}
