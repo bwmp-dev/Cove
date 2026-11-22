@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -319,8 +320,12 @@ func (s *Server) invitations(w http.ResponseWriter, r *http.Request) {
 	}
 	url := s.PublicURL + "/invite#" + token
 	sent := false
-	if s.SendMail != nil {
-		sent = s.SendMail(r.Context(), email, "Invitation to Cove", "You have been invited to a Cove team. Accept within seven days:\n\n"+url+"\n\nShared workers do not isolate teams from a hostile container administrator.") == nil
+	sendMail, mailErr := s.mailer(r.Context())
+	if mailErr != nil {
+		slog.Error("invitation email settings unavailable")
+	}
+	if sendMail != nil {
+		sent = sendMail(r.Context(), email, "Invitation to Cove", "You have been invited to a Cove team. Accept within seven days:\n\n"+url+"\n\nShared workers do not isolate teams from a hostile container administrator.") == nil
 	}
 	respond(w, 201, map[string]any{"id": id, "url": url, "expires_at": expiry, "email_sent": sent})
 }

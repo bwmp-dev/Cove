@@ -138,6 +138,8 @@ ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT 'b
 ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS team_id text NOT NULL DEFAULT 'default' REFERENCES teams(id);
 ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS team_id text REFERENCES teams(id);
 ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS registration_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS integration_settings bytea;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS setup_completed boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS invitations (
  id text PRIMARY KEY,token_hash bytea UNIQUE NOT NULL,team_id text NOT NULL REFERENCES teams(id),
  email text NOT NULL,role text NOT NULL CHECK(role IN ('admin','member')),grants jsonb NOT NULL,

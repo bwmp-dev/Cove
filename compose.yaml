@@ -20,15 +20,7 @@ services:
       DATABASE_URL: postgres://cove:${POSTGRES_PASSWORD}@database:5432/cove?sslmode=disable
       COVE_ENCRYPTION_KEY: ${COVE_ENCRYPTION_KEY:?Run scripts/configure.sh first}
       COVE_ADMIN_TOKEN: ${COVE_ADMIN_TOKEN:?Run scripts/configure.sh first}
-      COVE_ADMIN_PASSWORD: ${COVE_ADMIN_PASSWORD:?Run scripts/configure.sh first}
       COVE_PUBLIC_URL: https://${COVE_DOMAIN:?Set COVE_DOMAIN}
-      COVE_GITHUB_CLIENT_ID: ${COVE_GITHUB_CLIENT_ID:-}
-      COVE_GITHUB_CLIENT_SECRET: ${COVE_GITHUB_CLIENT_SECRET:-}
-      COVE_SMTP_HOST: ${COVE_SMTP_HOST:-}
-      COVE_SMTP_PORT: ${COVE_SMTP_PORT:-}
-      COVE_SMTP_USERNAME: ${COVE_SMTP_USERNAME:-}
-      COVE_SMTP_PASSWORD: ${COVE_SMTP_PASSWORD:-}
-      COVE_SMTP_FROM: ${COVE_SMTP_FROM:-}
     depends_on:
       database:
         condition: service_healthy

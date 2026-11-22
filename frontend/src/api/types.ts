@@ -62,6 +62,7 @@ export interface TeamMembership {
 }
 
 export interface AuthConfig {
+  setup_required: boolean;
   registration_enabled: boolean;
   github_enabled: boolean;
   email_enabled: boolean;

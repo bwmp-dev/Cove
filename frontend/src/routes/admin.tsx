@@ -1,3 +1,4 @@
+import { InstanceIntegrations } from "../components/InstanceIntegrations";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -54,10 +55,10 @@ function SignInSettings() {
   return (
     <div className="space-y-4">
       <SettingRows>
-        <SettingRow label="Email delivery" description="Verification, invitations and password resets. Configured on the control plane host.">
+        <SettingRow label="Email delivery" description="Verification, invitations and password resets. Configure below.">
           <Configured enabled={email} />
         </SettingRow>
-        <SettingRow label="GitHub sign-in" description="Configured on the control plane host.">
+        <SettingRow label="GitHub sign-in" description="Configure below.">
           <Configured enabled={github} />
         </SettingRow>
         <SettingRow
@@ -206,6 +207,7 @@ export function AdminPage() {
       <Section title="Sign-in" width="form">
         <SignInSettings />
       </Section>
+      <InstanceIntegrations />
       <Section title="Updates" width="form"><UpdateChannel /></Section>
     </>
   );

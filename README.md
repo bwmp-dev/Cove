@@ -4,14 +4,18 @@ A self-hosted control panel for deploying Compose applications to Linux workers 
 
 ## Setup
 
-On a Linux host with Docker Compose:
+On a fresh Ubuntu or Debian host with systemd (amd64 or arm64), point a hostname at the server and make ports 80 and 443 reachable:
 
 ```sh
-sh scripts/configure.sh cove.example.com
-docker compose up -d --build
+curl -fsSLo cove-install.sh https://raw.githubusercontent.com/bwmp-dev/Cove/main/scripts/install.sh
+sudo sh cove-install.sh cove.example.com beta
 ```
 
-Configure DNS for the panel hostname and make ports 80 and 443 reachable. The initial administrator password is stored in `.env`; keep that file private and back it up securely.
+Use `release` instead of `beta` for published stable builds. The installer installs Docker Compose and prerequisites, starts PostgreSQL, Cove and HTTPS ingress, generates private database credentials and encryption keys, and enables automatic updates. It refuses to overwrite an existing installation.
+
+Open the displayed URL and register immediately. The first account becomes the instance administrator; further registration stays closed until enabled in Settings. Configure SMTP and GitHub sign-in in **Settings**, and repository access in **Integrations**. Keep `/opt/cove/.env` private and back it up securely: the encryption key is required to recover saved secrets.
+
+For an existing checkout with Docker Compose, run `sh scripts/configure.sh cove.example.com` followed by `docker compose up -d --build`. No administrator password or integration credentials are needed in Compose.
 
 ## Documentation
 

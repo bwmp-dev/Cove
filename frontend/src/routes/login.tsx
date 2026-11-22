@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
+import { getRouteApi, Link, Navigate, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { useGitHubStart } from "../api/auth";
 import { ApiError, errorMessage } from "../api/client";
@@ -69,6 +69,8 @@ export function LoginPage() {
     });
   }
 
+  if (config.data?.setup_required) return <Navigate to="/register" replace />;
+
   const error = login.isError ? loginError(login.error) : null;
   const oauthError = search.error ? (oauthErrors[search.error] ?? "Sign-in did not complete. Try again.") : null;
 
@@ -77,7 +79,7 @@ export function LoginPage() {
       <div className="space-y-5">
         {oauthError && <Notice tone="error">{oauthError}</Notice>}
         <form onSubmit={submit} className="space-y-4" noValidate>
-          <Field id="email" label="Email" hint="Leave empty only when signing in with the initial administrator password.">
+          <Field id="email" label="Email" hint="Use your registered email. Older installations may use a password-only administrator.">
             <input
               id="email"
               type="email"

@@ -18,7 +18,12 @@ import (
 )
 
 func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
-	if s.GithubClientID == "" || s.GithubClientSecret == "" {
+	config, _, configErr := s.integrationConfig(r.Context(), s.DB)
+	if configErr != nil {
+		http.Error(w, "GitHub settings unavailable", 503)
+		return
+	}
+	if config.Github.ClientID == "" || config.Github.ClientSecret == "" {
 		http.Error(w, "GitHub sign-in is not configured", 409)
 		return
 	}
@@ -79,7 +84,7 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: "__Host-cove-oauth", Value: browser, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 600})
 	challenge := sha256.Sum256([]byte(verifier))
-	q := url.Values{"client_id": {s.GithubClientID}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "scope": {"read:user user:email"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
+	q := url.Values{"client_id": {config.Github.ClientID}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "scope": {"read:user user:email"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
 	respond(w, 200, map[string]string{"url": "https://github.com/login/oauth/authorize?" + q.Encode()})
 }
 func (s *Server) githubRequest(r *http.Request, method, endpoint, token string, form url.Values, out any) error {
@@ -120,8 +125,13 @@ func (s *Server) githubRequest(r *http.Request, method, endpoint, token string, 
 }
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	fail := func(code string) { http.Redirect(w, r, "/login?error="+code, http.StatusSeeOther) }
+	config, _, configErr := s.integrationConfig(r.Context(), s.DB)
+	if configErr != nil {
+		fail("oauth_failed")
+		return
+	}
 	cookie, err := r.Cookie("__Host-cove-oauth")
-	if err != nil || s.GithubClientID == "" || s.GithubClientSecret == "" {
+	if err != nil || config.Github.ClientID == "" || config.Github.ClientSecret == "" {
 		fail("oauth_failed")
 		return
 	}
@@ -143,7 +153,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"access_token"`
 		Type  string `json:"token_type"`
 	}
-	err = s.githubRequest(r, "POST", "https://github.com/login/oauth/access_token", "", url.Values{"client_id": {s.GithubClientID}, "client_secret": {s.GithubClientSecret}, "code": {r.URL.Query().Get("code")}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "code_verifier": {string(verifier)}}, &access)
+	err = s.githubRequest(r, "POST", "https://github.com/login/oauth/access_token", "", url.Values{"client_id": {config.Github.ClientID}, "client_secret": {config.Github.ClientSecret}, "code": {r.URL.Query().Get("code")}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "code_verifier": {string(verifier)}}, &access)
 	if err != nil || access.Token == "" || !strings.EqualFold(access.Type, "bearer") {
 		fail("oauth_failed")
 		return

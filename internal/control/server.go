@@ -39,6 +39,7 @@ type Server struct {
 	GithubClientID        string
 	GithubClientSecret    string
 	OAuthClient           *http.Client
+	SMTP                  SMTPConfig
 	SendMail              func(context.Context, string, string, string) error
 	dummyPasswordHash     []byte
 	// workerRPC replaces node transports in tests that simulate several workers.
@@ -52,9 +53,6 @@ func (s *Server) Init(ctx context.Context) error {
 	}
 	if len(s.Key) != 32 || len(s.AdminToken) < 32 {
 		return errors.New("a 32-byte encryption key and at least 32-character admin token are required")
-	}
-	if (s.GithubClientID == "") != (s.GithubClientSecret == "") {
-		return errors.New("both COVE_GITHUB_CLIENT_ID and COVE_GITHUB_CLIENT_SECRET are required")
 	}
 	sql, err := assets.ReadFile("schema.sql")
 	if err != nil {
@@ -71,6 +69,9 @@ func (s *Server) Init(ctx context.Context) error {
 	if _, err = s.DB.Exec(ctx, "INSERT INTO control_settings(id,encryption_check) VALUES(1,$1) ON CONFLICT DO NOTHING", check); err != nil {
 		return err
 	}
+	if _, err = s.DB.Exec(ctx, "UPDATE control_settings SET setup_completed=true WHERE id=1 AND NOT setup_completed AND EXISTS(SELECT 1 FROM users WHERE id<>'bootstrap' OR password_hash IS NOT NULL)"); err != nil {
+		return err
+	}
 	if err = s.DB.QueryRow(ctx, "SELECT encryption_check FROM control_settings WHERE id=1").Scan(&check); err != nil {
 		return err
 	}
@@ -79,6 +80,9 @@ func (s *Server) Init(ctx context.Context) error {
 		return errors.New("COVE_ENCRYPTION_KEY does not match this database")
 	}
 	if err = s.initializeQuotaUsage(ctx); err != nil {
+		return err
+	}
+	if err = s.importIntegrationSettings(ctx); err != nil {
 		return err
 	}
 	s.dummyPasswordHash, err = bcrypt.GenerateFromPassword([]byte(randomToken()), 12)
@@ -225,6 +229,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/teams/{id}/invitations/{invite}", s.admin(http.HandlerFunc(s.invitations)))
 	mux.Handle("GET /api/teams/{id}/nodes", s.admin(http.HandlerFunc(s.teamNodes)))
 	mux.Handle("PUT /api/teams/{id}/nodes", s.admin(http.HandlerFunc(s.teamNodes)))
+	mux.Handle("POST /api/settings/smtp/test", s.admin(http.HandlerFunc(s.testEmail)))
+	mux.Handle("GET /api/settings/integrations", s.admin(http.HandlerFunc(s.integrations)))
+	mux.Handle("PUT /api/settings/integrations", s.admin(http.HandlerFunc(s.integrations)))
 	mux.Handle("GET /api/settings", s.admin(http.HandlerFunc(s.settings)))
 	mux.Handle("GET /api/updates", s.admin(http.HandlerFunc(s.updateSettings)))
 	mux.Handle("PUT /api/updates", s.admin(http.HandlerFunc(s.updateSettings)))

@@ -12,7 +12,6 @@ printf 'COVE_DOMAIN=%s\n' "$domain" > "$temporary"
 printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> "$temporary"
 printf 'COVE_ENCRYPTION_KEY=%s\n' "$(openssl rand -base64 32)" >> "$temporary"
 printf 'COVE_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" >> "$temporary"
-printf 'COVE_ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> "$temporary"
 ln "$temporary" .env
 echo 'Created .env with private credentials. Back it up securely, then run docker compose up -d --build.'
-echo 'The initial dashboard password is COVE_ADMIN_PASSWORD in .env.'
+echo "Open https://$domain/register to create the first administrator account."

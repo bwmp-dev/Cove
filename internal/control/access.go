@@ -235,7 +235,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case strings.HasPrefix(path, "/api/account/sessions") || path == "/api/session" || path == "/api/account" || path == "/api/password" || path == "/api/teams":
 		return true
-	case strings.HasPrefix(path, "/api/users") || path == "/api/settings" || path == "/api/updates":
+	case strings.HasPrefix(path, "/api/users") || (path == "/api/settings" || strings.HasPrefix(path, "/api/settings/")) || path == "/api/updates":
 		if !p.Admin {
 			return deny()
 		}

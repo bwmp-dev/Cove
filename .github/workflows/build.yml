@@ -36,7 +36,8 @@ jobs:
         working-directory: frontend
       - run: python3 scripts/test-update-panel.py
       - run: python3 scripts/test-worker-update.py
-      - run: sh -n scripts/install-auto-update.sh
+      - run: python3 scripts/test-install.py
+      - run: sh -n scripts/install-auto-update.sh && sh -n scripts/install.sh && sh -n scripts/configure.sh
       - run: go test -race ./... -timeout 10m
       - run: go vet ./...
   release-please:

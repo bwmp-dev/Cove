@@ -24,9 +24,13 @@ export interface InvitationDetails {
 }
 
 export function useRegister() {
+  const client = useQueryClient();
   return useMutation({
     ...transient,
-    mutationFn: (input: { email: string; name: string; password: string }) => request<{ ok: boolean }>("POST", "/auth/register", input),
+    mutationFn: (input: { email: string; name: string; password: string }) => request<{ ok: boolean; setup_complete?: boolean }>("POST", "/auth/register", input),
+    onSuccess: (data) => {
+      if (data.setup_complete) { rememberTeam(null); client.clear(); }
+    },
   });
 }
 

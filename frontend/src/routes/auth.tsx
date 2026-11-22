@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState, type FormEvent } from "react";
 import { useAcceptInvitation, useForgotPassword, useInvitationDetails, useRegister, useResetPassword, useVerifyEmail, type InvitationDetails } from "../api/auth";
+import type { AuthConfig } from "../api/types";
 import { errorMessage } from "../api/client";
 import { authConfigQuery, sessionQuery } from "../api/queries";
 import { AuthFrame } from "../components/AuthFrame";
@@ -57,15 +58,7 @@ function PasswordFields({ id, password, confirmation, onPassword, onConfirmation
 }
 
 export function RegisterPage() {
-  const id = useId();
   const config = useQuery(authConfigQuery);
-  const register = useRegister();
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmation, setConfirmation] = useState("");
-  const [error, setError] = useState<string>();
-
   if (config.isPending) return <AuthFrame title="Create an account">Loading</AuthFrame>;
   if (config.isError || !config.data.registration_enabled) {
     return (
@@ -80,12 +73,25 @@ export function RegisterPage() {
     );
   }
 
+  return <RegistrationForm config={config.data} />;
+}
+
+function RegistrationForm({ config }: { config: AuthConfig }) {
+  const navigate = useNavigate();
+  const id = useId();
+  const register = useRegister();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string>();
+
   if (register.isSuccess) {
     return (
       <AuthFrame title="Check your email">
         <div className="space-y-4">
           <p className="text-[13px] text-fg-muted">
-            {config.data.email_enabled
+            {config.email_enabled
               ? "If this address can be registered, a verification link is on its way. Follow it before signing in."
               : "If this address can be registered, the account is ready. Sign in with your email and password."}
           </p>
@@ -100,11 +106,11 @@ export function RegisterPage() {
     const problem = passwordError(password, confirmation);
     setError(problem ?? undefined);
     if (problem) return;
-    register.mutate({ name: name.trim(), email: email.trim(), password }, { onSettled: () => { setPassword(""); setConfirmation(""); } });
+    register.mutate({ name: name.trim(), email: email.trim(), password }, { onSuccess: data => { if (data.setup_complete) void navigate({ to: "/", replace: true }); }, onSettled: () => { setPassword(""); setConfirmation(""); } });
   }
 
   return (
-    <AuthFrame title="Create an account" description="Accounts start without access. A team owner or admin invites you to their projects, or you create your own team.">
+    <AuthFrame title={config.setup_required ? "Set up Cove" : "Create an account"} description={config.setup_required ? "Create the first account to administer this instance. Email delivery can be configured after setup." : "Accounts start without access. A team owner or admin invites you to their projects, or you create your own team."}>
       <form className="space-y-4" onSubmit={submit}>
         <Field id={`${id}-name`} label="Name">
           <input id={`${id}-name`} className={inputClass} autoComplete="name" required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
@@ -115,12 +121,12 @@ export function RegisterPage() {
         <PasswordFields id={id} password={password} confirmation={confirmation} onPassword={setPassword} onConfirmation={setConfirmation} error={error} />
         {register.isError && <Notice tone="error" title="Could not register">{errorMessage(register.error)}</Notice>}
         <Button type="submit" variant="primary" className="w-full" pending={register.isPending}>
-          Create account
+          {config.setup_required ? "Create administrator account" : "Create account"}
         </Button>
-        <div className="space-y-3 border-t border-line pt-4">
-          <GitHubButton config={config.data} label="Sign up with GitHub" />
+        {!config.setup_required && <div className="space-y-3 border-t border-line pt-4">
+          <GitHubButton config={config} label="Sign up with GitHub" />
           <SignInLink>I already have an account</SignInLink>
-        </div>
+        </div>}
       </form>
     </AuthFrame>
   );

@@ -84,7 +84,7 @@ func auditTeam(r *http.Request) any {
 	if strings.HasPrefix(r.URL.Path, "/api/teams/") {
 		return r.PathValue("id")
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/nodes") || strings.HasPrefix(r.URL.Path, "/api/users") || r.URL.Path == "/api/settings" || r.URL.Path == "/api/updates" {
+	if strings.HasPrefix(r.URL.Path, "/api/nodes") || strings.HasPrefix(r.URL.Path, "/api/users") || (r.URL.Path == "/api/settings" || strings.HasPrefix(r.URL.Path, "/api/settings/")) || r.URL.Path == "/api/updates" {
 		return nil
 	}
 	p, _ := r.Context().Value(identityKey{}).(*identity)

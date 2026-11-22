@@ -41,10 +41,7 @@ func main() {
 	s.LocalSocket = os.Getenv("COVE_LOCAL_SOCKET")
 	s.GithubClientID = os.Getenv("COVE_GITHUB_CLIENT_ID")
 	s.GithubClientSecret = os.Getenv("COVE_GITHUB_CLIENT_SECRET")
-	s.SendMail, err = control.SMTPMailer(os.Getenv("COVE_SMTP_HOST"), os.Getenv("COVE_SMTP_PORT"), os.Getenv("COVE_SMTP_USERNAME"), os.Getenv("COVE_SMTP_PASSWORD"), os.Getenv("COVE_SMTP_FROM"))
-	if err != nil {
-		log.Fatal(err)
-	}
+	s.SMTP = control.SMTPConfig{Host: os.Getenv("COVE_SMTP_HOST"), Port: os.Getenv("COVE_SMTP_PORT"), Username: os.Getenv("COVE_SMTP_USERNAME"), Password: os.Getenv("COVE_SMTP_PASSWORD"), From: os.Getenv("COVE_SMTP_FROM")}
 	if err = s.Init(ctx); err != nil {
 		log.Fatal(err)
 	}

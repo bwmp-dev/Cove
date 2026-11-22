@@ -20,6 +20,9 @@ func (s *Server) InitAdministrator(ctx context.Context, password string) error {
 	if len(hash) > 0 {
 		return nil
 	}
+	if password == "" {
+		return nil
+	}
 	if len(password) < 16 || len(password) > 72 {
 		return errors.New("initial COVE_ADMIN_PASSWORD must contain 16 to 72 bytes")
 	}
@@ -27,7 +30,25 @@ func (s *Server) InitAdministrator(ctx context.Context, password string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, "UPDATE users SET password_hash=$1 WHERE id='bootstrap' AND password_hash IS NULL", hash)
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var completed bool
+	if err = tx.QueryRow(ctx, "SELECT setup_completed FROM control_settings WHERE id=1 FOR UPDATE").Scan(&completed); err != nil {
+		return err
+	}
+	if completed {
+		return nil
+	}
+	_, err = tx.Exec(ctx, "UPDATE users SET password_hash=$1 WHERE id='bootstrap' AND password_hash IS NULL", hash)
+	if err == nil {
+		_, err = tx.Exec(ctx, "UPDATE control_settings SET setup_completed=true WHERE id=1")
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
 	return err
 }
 

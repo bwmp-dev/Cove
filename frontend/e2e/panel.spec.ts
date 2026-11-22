@@ -97,6 +97,70 @@ async function createResource(page: Page, name: string) {
   return page.url();
 }
 
+test("first administrator setup and dashboard integration settings", async ({ page }, testInfo) => {
+  const database = process.env.COVE_BROWSER_DATABASE;
+  if (!database || !/^cove-browser-[a-f0-9]+-db$/.test(database)) throw new Error("Isolated browser database required");
+  const sql = (query: string) => execFileSync("docker", ["exec", database, "psql", "-U", "postgres", "-d", "cove", "-Atc", query], { encoding: "utf8" }).trim();
+  expect(sql("SELECT count(*) FROM users")).toBe("1");
+  const previousHash = sql("SELECT encode(password_hash,'hex') FROM users WHERE id='bootstrap'");
+  expect(previousHash).toMatch(/^[a-f0-9]+$/);
+  const membership = sql("SELECT count(*) FROM team_members WHERE team_id='default' AND user_id='bootstrap'");
+  try {
+    sql("UPDATE users SET password_hash=NULL WHERE id='bootstrap'; UPDATE control_settings SET setup_completed=false,registration_enabled=false");
+    await page.goto("/login");
+    await expect(page).toHaveURL(/\/register$/);
+    await expect(page.getByRole("heading", { name: "Set up Cove" })).toBeVisible();
+    for (const width of [320, 390, 768, 1280, 1920]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expectNoHorizontalScroll(page);
+      await page.screenshot({ path: testInfo.outputPath(`first-setup-${width}.png`), fullPage: true });
+    }
+    await page.getByLabel("Name", { exact: true }).fill("Instance owner");
+    await page.getByLabel("Email", { exact: true }).fill("owner@example.com");
+    await page.getByLabel("Password", { exact: true }).fill(password);
+    await page.getByLabel("Confirm password", { exact: true }).fill(password);
+    await page.getByRole("button", { name: "Create administrator account" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.goto("/admin");
+    await page.getByLabel("SMTP host", { exact: true }).fill("smtp.example.com");
+    await page.getByLabel("SMTP port", { exact: true }).fill("465");
+    await page.getByLabel("Sender email", { exact: true }).fill("cove@example.com");
+    await page.getByLabel("SMTP username", { exact: false }).fill("fixture-mailer");
+    await page.getByLabel("SMTP password", { exact: false }).fill("fixture-smtp-password");
+    await page.locator("form").filter({ has: page.getByLabel("SMTP host", { exact: true }) }).getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByText("Email settings saved", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("SMTP password", { exact: false })).toHaveValue("");
+    await page.getByLabel("Client ID", { exact: true }).fill("fixture-oauth-client");
+    await page.getByLabel("Client secret", { exact: true }).fill("fixture-oauth-secret");
+    await page.locator("form").filter({ has: page.getByLabel("Client ID", { exact: true }) }).getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByText("GitHub settings saved", { exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByLabel("SMTP host", { exact: true })).toHaveValue("smtp.example.com");
+    await expect(page.getByLabel("Client ID", { exact: true })).toHaveValue("fixture-oauth-client");
+    const settings = await (await page.request.get("/api/settings/integrations")).json() as { smtp: { password_set: boolean; password?: string }; github: { client_secret_set: boolean; client_secret?: string } };
+    expect(settings.smtp.password_set).toBe(true);
+    expect(settings.smtp.password).toBeUndefined();
+    expect(settings.github.client_secret_set).toBe(true);
+    expect(settings.github.client_secret).toBeUndefined();
+    await page.getByRole("button", { name: "Disable email", exact: true }).click();
+    const emailDialog = page.getByRole("dialog", { name: "Disable email delivery?" });
+    await expect(emailDialog).toBeVisible();
+    await emailDialog.press("Escape");
+    await expect(emailDialog).not.toBeVisible();
+    await expect(page.getByLabel("SMTP host", { exact: true })).toHaveValue("smtp.example.com");
+    await page.getByRole("button", { name: "Disable email", exact: true }).click();
+    await emailDialog.getByRole("button", { name: "Disable email", exact: true }).click();
+    await expect(page.getByLabel("SMTP host", { exact: true })).toHaveValue("");
+    await page.getByRole("button", { name: "Disable GitHub sign-in", exact: true }).click();
+    await page.getByRole("dialog", { name: "Disable GitHub sign-in?" }).getByRole("button", { name: "Disable GitHub sign-in", exact: true }).click();
+    await expect(page.getByLabel("Client ID", { exact: true })).toHaveValue("");
+    await expectNoHorizontalScroll(page);
+  } finally {
+    sql(`UPDATE users SET email=NULL,name='Administrator',password_hash=decode('${previousHash}','hex') WHERE id='bootstrap'; DELETE FROM sessions WHERE user_id='bootstrap'; UPDATE control_settings SET setup_completed=true,registration_enabled=false,integration_settings=NULL`);
+    if (membership === "0") sql("DELETE FROM team_members WHERE team_id='default' AND user_id='bootstrap'");
+  }
+});
+
 test("real session, enrollment, responsive navigation and logout", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

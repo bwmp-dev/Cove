@@ -95,13 +95,26 @@ func (s *Server) publicAccount(next http.HandlerFunc) http.HandlerFunc {
 		s.authenticated(next, w, r, "account authentication")
 	}
 }
+
+const setupRequiredSQL = "NOT setup_completed AND NOT EXISTS(SELECT 1 FROM users WHERE id<>'bootstrap' OR password_hash IS NOT NULL)"
+
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
-	var enabled bool
-	if s.DB.QueryRow(r.Context(), "SELECT registration_enabled FROM control_settings WHERE id=1").Scan(&enabled) != nil {
+	var enabled, setup bool
+	if s.DB.QueryRow(r.Context(), "SELECT registration_enabled,"+setupRequiredSQL+" FROM control_settings WHERE id=1").Scan(&enabled, &setup) != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	respond(w, 200, map[string]bool{"registration_enabled": enabled && s.SendMail != nil, "github_enabled": s.GithubClientID != "" && s.GithubClientSecret != "", "email_enabled": s.SendMail != nil})
+	config, _, err := s.integrationConfig(r.Context(), s.DB)
+	if err != nil {
+		http.Error(w, "settings unavailable", 503)
+		return
+	}
+	sendMail, err := s.mailer(r.Context())
+	if err != nil {
+		http.Error(w, "email settings unavailable", 503)
+		return
+	}
+	respond(w, 200, map[string]bool{"setup_required": setup, "registration_enabled": setup || enabled && sendMail != nil, "github_enabled": config.Github.ClientID != "" && config.Github.ClientSecret != "", "email_enabled": sendMail != nil})
 }
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
@@ -114,11 +127,31 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	if in.Enabled && s.SendMail == nil {
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
+		http.Error(w, "settings unavailable", 503)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var id int
+	if err = tx.QueryRow(r.Context(), "SELECT id FROM control_settings WHERE id=1 FOR UPDATE").Scan(&id); err != nil {
+		http.Error(w, "settings unavailable", 503)
+		return
+	}
+	config, saved, err := s.integrationConfig(r.Context(), tx)
+	if err != nil {
+		http.Error(w, "settings unavailable", 503)
+		return
+	}
+	if in.Enabled && config.SMTP.Host == "" && (saved || s.SendMail == nil) {
 		http.Error(w, "configure email delivery before enabling registration", 409)
 		return
 	}
-	if _, err := s.DB.Exec(r.Context(), "UPDATE control_settings SET registration_enabled=$1 WHERE id=1", in.Enabled); err != nil {
+	_, err = tx.Exec(r.Context(), "UPDATE control_settings SET registration_enabled=$1 WHERE id=1", in.Enabled)
+	if err == nil {
+		err = tx.Commit(r.Context())
+	}
+	if err != nil {
 		http.Error(w, "could not update settings", 500)
 		return
 	}
@@ -138,21 +171,60 @@ func (s *Server) registerAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "valid email, name and password of 16 to 72 bytes required", 400)
 		return
 	}
-	var enabled bool
-	if s.DB.QueryRow(r.Context(), "SELECT registration_enabled FROM control_settings WHERE id=1").Scan(&enabled) != nil {
-		http.Error(w, "database unavailable", 503)
-		return
-	}
-	if !enabled || s.SendMail == nil {
-		http.Error(w, "registration is closed", 403)
-		return
-	}
 	if !s.limitAttempts(w, r, emailRateKey("registration", email), 5) {
+		return
+	}
+	sendMail, err := s.mailer(r.Context())
+	if err != nil {
+		http.Error(w, "email settings unavailable", 503)
 		return
 	}
 	hash, valid := passwordHash(in.Password)
 	if !valid {
 		http.Error(w, "could not protect password", 500)
+		return
+	}
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
+		http.Error(w, "registration unavailable", 503)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var enabled, setup bool
+	if err = tx.QueryRow(r.Context(), "SELECT registration_enabled,"+setupRequiredSQL+" FROM control_settings WHERE id=1 FOR UPDATE").Scan(&enabled, &setup); err != nil {
+		http.Error(w, "registration unavailable", 503)
+		return
+	}
+	if setup {
+		token := randomToken()
+		expiry := time.Now().Add(12 * time.Hour)
+		_, err = tx.Exec(r.Context(), "UPDATE users SET email=$1,name=$2,password_hash=$3,email_verified=true,is_admin=true WHERE id='bootstrap'", email, strings.TrimSpace(in.Name), hash)
+		if err == nil {
+			_, err = tx.Exec(r.Context(), "INSERT INTO team_members(team_id,user_id,role) VALUES('default','bootstrap','owner') ON CONFLICT DO NOTHING")
+		}
+		if err == nil {
+			_, err = tx.Exec(r.Context(), "UPDATE control_settings SET setup_completed=true,registration_enabled=false WHERE id=1")
+		}
+		if err == nil {
+			_, err = tx.Exec(r.Context(), "INSERT INTO sessions(token_hash,expires_at,user_id,user_agent) VALUES($1,$2,'bootstrap',$3)", tokenHash(token), expiry, sessionUserAgent(r))
+		}
+		if err == nil {
+			err = tx.Commit(r.Context())
+		}
+		if err != nil {
+			http.Error(w, "setup could not be completed", 503)
+			return
+		}
+		setSession(w, token, expiry)
+		respond(w, 200, map[string]bool{"ok": true, "setup_complete": true})
+		return
+	}
+	if !enabled || sendMail == nil {
+		http.Error(w, "registration is closed", 403)
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		http.Error(w, "registration unavailable", 503)
 		return
 	}
 	token := randomToken()
@@ -162,7 +234,7 @@ func (s *Server) registerAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if res.RowsAffected() > 0 {
-		if err = s.SendMail(r.Context(), email, "Verify your Cove account", "Verify your email within one hour:\n\n"+s.PublicURL+"/verify#"+token); err != nil {
+		if err = sendMail(r.Context(), email, "Verify your Cove account", "Verify your email within one hour:\n\n"+s.PublicURL+"/verify#"+token); err != nil {
 			_, _ = s.DB.Exec(r.Context(), "DELETE FROM account_actions WHERE token_hash=$1", tokenHash(token))
 			slog.Error("account verification email delivery failed")
 		}
@@ -252,6 +324,11 @@ func (s *Server) createReset(r *http.Request, user string) (string, time.Time, e
 	return s.PublicURL + "/reset-password#" + token, expiry, err
 }
 func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
+	sendMail, mailErr := s.mailer(r.Context())
+	if mailErr != nil {
+		http.Error(w, "email settings unavailable", 503)
+		return
+	}
 	var in struct {
 		Email string `json:"email"`
 	}
@@ -262,7 +339,7 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	if valid && !s.limitAttempts(w, r, emailRateKey("reset", email), 5) {
 		return
 	}
-	if valid && s.SendMail != nil {
+	if valid && sendMail != nil {
 		var id string
 		err := s.DB.QueryRow(r.Context(), "SELECT id FROM users WHERE email=$1 AND email_verified AND NOT disabled", email).Scan(&id)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -275,7 +352,7 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "authentication unavailable", 503)
 				return
 			}
-			if e = s.SendMail(r.Context(), email, "Reset your Cove password", "Reset your password within one hour:\n\n"+url); e != nil {
+			if e = sendMail(r.Context(), email, "Reset your Cove password", "Reset your password within one hour:\n\n"+url); e != nil {
 				slog.Error("password reset email delivery failed")
 			}
 		}
@@ -332,6 +409,11 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
+	sendMail, mailErr := s.mailer(r.Context())
+	if mailErr != nil {
+		http.Error(w, "email settings unavailable", 503)
+		return
+	}
 	if !s.authLimit(w, r) {
 		return
 	}
@@ -367,7 +449,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "current password is incorrect", 400)
 		return
 	}
-	if email != currentEmail && s.SendMail == nil {
+	if email != currentEmail && sendMail == nil {
 		http.Error(w, "configure email delivery to verify an email change", 409)
 		return
 	}
@@ -392,7 +474,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if email != currentEmail {
-		if err = s.SendMail(r.Context(), email, "Verify your Cove email", "Verify your new email within one hour:\n\n"+s.PublicURL+"/verify#"+token); err != nil {
+		if err = sendMail(r.Context(), email, "Verify your Cove email", "Verify your new email within one hour:\n\n"+s.PublicURL+"/verify#"+token); err != nil {
 			http.Error(w, "email delivery unavailable", 503)
 			return
 		}

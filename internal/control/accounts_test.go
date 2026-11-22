@@ -173,6 +173,9 @@ func TestTeamAuthorizationIntegration(t *testing.T) {
 
 func TestAccountLifecycleIntegration(t *testing.T) {
 	f := newAccountFixture(t)
+	if err := f.s.InitAdministrator(context.Background(), randomToken()); err != nil {
+		t.Fatal(err)
+	}
 	password := randomToken()
 	f.call("", "", "POST", "/auth/register", map[string]string{"email": "new@example.com", "name": "New", "password": password}, 403)
 	f.call("root", "", "PUT", "/api/settings", map[string]bool{"registration_enabled": true}, 200)
