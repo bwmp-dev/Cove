@@ -152,6 +152,10 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 	}
 	sort.Strings(workloads)
 	for _, workload := range workloads {
+		suspension, err := e.readSuspension(workload)
+		if err != nil {
+			return "", err
+		}
 		traffic, err := e.loadTraffic(workload)
 		if err != nil {
 			return "", err
@@ -162,7 +166,7 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 				before[name] = true
 			}
 			config.addRoute(workload, route)
-			if len(traffic) == 0 {
+			if len(traffic) == 0 && suspension == nil {
 				continue
 			}
 			name := ""
@@ -176,6 +180,18 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 				return "", errors.New("traffic router was not generated")
 			}
 			router, base := config.HTTP.Routers[name], config.HTTP.Services[name]
+			if suspension != nil && suspension.Phase != "awake" {
+				sum := sha256.Sum256([]byte(suspension.Operation + suspension.Phase))
+				key := name + "-paused-" + hex.EncodeToString(sum[:6])
+				delete(config.HTTP.Services, name)
+				config.HTTP.Services[key] = ingressService{LoadBalancer: &ingressLoadBalancer{Servers: []map[string]string{}}}
+				router.Service = key
+				config.HTTP.Routers[name] = router
+				continue
+			}
+			if len(traffic) == 0 {
+				continue
+			}
 			targets := []Route{{Service: route.Service, Port: route.Port}}
 			if route.Policy != nil {
 				for _, upstream := range route.Policy.Upstreams {

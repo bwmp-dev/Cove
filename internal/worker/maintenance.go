@@ -29,13 +29,13 @@ func (e *Engine) Maintenance(drain bool) (Maintenance, error) {
 		}
 	}
 	e.draining = drain
-	return Maintenance{Draining: drain, Active: len(e.active) + e.recoveringJobCount(), Queued: len(e.pending)}, nil
+	return Maintenance{Draining: drain, Active: len(e.active) + e.recoveringWorkloadCount(), Queued: len(e.pending)}, nil
 }
 
-func (e *Engine) recoveringJobCount() int {
+func (e *Engine) recoveringWorkloadCount() int {
 	count := 0
 	for _, recovery := range e.recovering {
-		if recovery.job {
+		if recovery.activeSlot {
 			count++
 		}
 	}

@@ -126,13 +126,58 @@ func (s *Server) assignEnvironment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := s.DB.Exec(r.Context(), "UPDATE workloads SET environment_id=NULLIF($2,''),project_id=$3 WHERE id=$1", r.PathValue("id"), in.Environment, project)
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
+		http.Error(w, "database unavailable", 503)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var previous string
+	if err = tx.QueryRow(r.Context(), `SELECT COALESCE(environment_id,'') FROM workloads WHERE id=$1 FOR UPDATE`, r.PathValue("id")).Scan(&previous); err != nil {
+		groupError(w, err)
+		return
+	}
+	rows, err := tx.Query(r.Context(), `SELECT paused FROM environments WHERE id IN ($1,$2) ORDER BY id FOR SHARE`, previous, in.Environment)
+	if err != nil {
+		http.Error(w, "environment state unavailable", 503)
+		return
+	}
+	blocked := false
+	for rows.Next() {
+		var paused bool
+		if err = rows.Scan(&paused); err != nil {
+			break
+		}
+		blocked = blocked || paused
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		http.Error(w, "environment state unavailable", 503)
+		return
+	}
+	var checkpoint bool
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM environment_suspensions WHERE workload_id=$1)`, r.PathValue("id")).Scan(&checkpoint); err != nil {
+		http.Error(w, "environment state unavailable", 503)
+		return
+	}
+	if blocked || checkpoint {
+		http.Error(w, "finish resuming the environment before moving its resources", 409)
+		return
+	}
+	result, err := tx.Exec(r.Context(), "UPDATE workloads SET environment_id=NULLIF($2,''),project_id=$3 WHERE id=$1", r.PathValue("id"), in.Environment, project)
 	if err != nil {
 		groupError(w, err)
 		return
 	}
 	if result.RowsAffected() == 0 {
 		http.NotFound(w, r)
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		http.Error(w, "could not save placement", 503)
 		return
 	}
 	respond(w, 200, map[string]bool{"ok": true})

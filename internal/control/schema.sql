@@ -698,3 +698,27 @@ ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_unhealthy_restart_at timesta
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_operation_id text REFERENCES operations(id) ON DELETE SET NULL;
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_error text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS unhealthy_restart_attempts ON operations(workload_id,created_at) WHERE action='restart_unhealthy';
+
+-- Deploy track: desired environment suspension and worker-confirmed resource checkpoints.
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS paused boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS environment_suspensions (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ environment_id text NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+ suspended boolean NOT NULL DEFAULT false,
+ resume_wanted boolean NOT NULL DEFAULT false,
+ operation_id text REFERENCES operations(id),
+ action text NOT NULL DEFAULT '' CHECK (action IN ('','suspend','resume')),
+ error text NOT NULL DEFAULT ''
+);
+CREATE OR REPLACE FUNCTION cove_cancel_paused_operation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE held boolean;
+BEGIN
+ IF NEW.action IN ('deploy','rollback','start','restart','restart_unhealthy','rollout_promote','restore','drill') THEN
+  SELECT e.paused INTO held FROM environments e JOIN workloads w ON w.environment_id=e.id WHERE w.id=NEW.workload_id FOR SHARE OF e;
+  IF held THEN NEW.cancel_requested := true; END IF;
+ END IF;
+ RETURN NEW;
+END
+$$;
+DROP TRIGGER IF EXISTS cove_paused_operation ON operations;
+CREATE TRIGGER cove_paused_operation BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_cancel_paused_operation();

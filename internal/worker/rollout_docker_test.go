@@ -24,6 +24,20 @@ func TestMain(m *testing.M) {
 		e, err := NewEngine(os.Args[2])
 		if err == nil {
 			e.ACMEDirectory = "https://127.0.0.1:9/directory"
+			if gate := os.Getenv("COVE_TEST_SUSPENSION_GATE"); gate != "" {
+				run := e.Run
+				e.Run = func(ctx context.Context, dir string, args, env []string, out io.Writer) error {
+					err := run(ctx, dir, args, env, out)
+					if err == nil && len(args) > 2 && args[1] == "update" && (gate == "pause" && args[2] == "--restart=no" || gate == "resume" && strings.HasPrefix(args[2], "--restart=") && args[2] != "--restart=no") {
+						if err := os.WriteFile(filepath.Join(e.Root, "pause-gate"), []byte("ready"), 0600); err != nil {
+							return err
+						}
+						<-ctx.Done()
+						return ctx.Err()
+					}
+					return err
+				}
+			}
 			err = e.Listen(context.Background(), filepath.Join(e.Root, "worker.sock"))
 		}
 		if err != nil {

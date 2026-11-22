@@ -16,10 +16,15 @@ export function isActive(state: OperationState) {
   return state === "queued" || state === "running";
 }
 
-// Image checks and builds never change what is deployed, so deployment summaries skip them.
-// Operation lists, details and active progress still show them.
+// Image checks and builds never change what is deployed, and environment pause and resume only stop and start the
+// deployed containers, so deployment summaries and release lists skip them. Operation lists, details and active progress still show them.
 export function isHousekeeping(operation: Operation) {
-  return operation.action === "image_check" || operation.action === "build";
+  return operation.action === "image_check" || operation.action === "build" || isSuspensionAction(operation.action);
+}
+
+// Queued only by the control plane when an environment is paused or resumed; people cannot queue or cancel them.
+export function isSuspensionAction(action: OperationAction) {
+  return action === "suspend" || action === "resume";
 }
 
 // The newest operation that changed or acted on the resource, ignoring housekeeping.
@@ -70,6 +75,8 @@ export const actionLabels = {
   rollout_promote: "Promote rollout",
   rollout_abort: "Abort rollout",
   restart_unhealthy: "Restart unhealthy containers",
+  suspend: "Pause environment resource",
+  resume: "Resume environment resource",
 } as const satisfies Record<OperationAction, string>;
 
 export const stateLabels: Record<OperationState, string> = {

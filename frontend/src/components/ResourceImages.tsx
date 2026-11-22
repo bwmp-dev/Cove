@@ -4,6 +4,8 @@ import { DownloadCloud, ScanSearch } from "lucide-react";
 import { useId, useState } from "react";
 import { errorMessage, isStatus } from "../api/client";
 import { useQueueOperation } from "../api/mutations";
+import { useEnvironmentHold } from "./EnvironmentSuspension";
+import { holdReason } from "../lib/suspension";
 import { nodesQuery, workloadImagesQuery, workloadOperationsQuery } from "../api/queries";
 import type { ImageStatus, Workload } from "../api/types";
 import { useOnline } from "../lib/hooks";
@@ -125,6 +127,8 @@ export function ResourceImages({ workload }: { workload: Workload }) {
   const supported = Boolean(node?.capabilities?.image_lifecycle);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const pendingRollout = usePendingRollout(workload, Boolean(active));
+  const { hold } = useEnvironmentHold(workload);
+  const held = holdReason(hold, "deploy", "Pulling images and redeploying");
   const blocked = !online || !ready || !supported || Boolean(active) || queue.isPending || operations.isPending;
   const reason = !online
     ? "You are offline. Image actions are available when the connection returns."
@@ -152,7 +156,7 @@ export function ResourceImages({ workload }: { workload: Workload }) {
             </Button>
             <Button
               size="sm"
-              disabled={blocked || Boolean(pendingRollout)}
+              disabled={blocked || Boolean(pendingRollout) || Boolean(held)}
               pending={queue.isPending && queue.variables.action === "deploy"}
               aria-describedby={statusId}
               onClick={() => setConfirmPull(true)}
@@ -176,6 +180,7 @@ export function ResourceImages({ workload }: { workload: Workload }) {
           </Notice>
         )}
         {canOperate && reason && <p className="text-xs text-fg-muted">{reason}</p>}
+        {canOperate && held && <p className="text-xs text-fg-muted">{held}</p>}
         {canOperate && !active && pendingRollout && <PendingRolloutMessage workloadId={workload.id} action="pull images and redeploy" />}
         {canOperate && active && (
           <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">

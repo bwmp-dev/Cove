@@ -177,6 +177,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/projects/{id}/environments", s.admin(http.HandlerFunc(s.createEnvironment)))
 	mux.Handle("DELETE /api/projects/{id}", s.admin(http.HandlerFunc(s.deleteProject)))
 	mux.Handle("DELETE /api/environments/{id}", s.admin(http.HandlerFunc(s.deleteEnvironment)))
+	mux.Handle("GET /api/environments/{id}/suspension", s.admin(http.HandlerFunc(s.environmentSuspension)))
+	mux.Handle("PUT /api/environments/{id}/suspension", s.admin(http.HandlerFunc(s.environmentSuspension)))
 	mux.Handle("PUT /api/workloads/{id}/environment", s.admin(http.HandlerFunc(s.assignEnvironment)))
 	mux.Handle("POST /api/workloads", s.admin(http.HandlerFunc(s.createWorkload)))
 	mux.Handle("GET /api/workloads/{id}", s.admin(http.HandlerFunc(s.getWorkload)))

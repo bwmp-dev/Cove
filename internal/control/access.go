@@ -296,6 +296,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return s.requireAccess(w, r, "project", id, 3)
 	case strings.HasPrefix(path, "/api/environments/"):
+		if strings.HasSuffix(path, "/suspension") {
+			needed := 1
+			if r.Method != "GET" {
+				needed = 2
+			}
+			return s.requireAccess(w, r, "environment", id, needed)
+		}
 		if r.Method != "GET" {
 			var preview bool
 			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM environment_previews WHERE environment_id=$1)`, id).Scan(&preview); err != nil {

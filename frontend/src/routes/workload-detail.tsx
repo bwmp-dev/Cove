@@ -39,6 +39,7 @@ import type { Operation, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
+import { EnvironmentHoldNotice, useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
 import { OperationsTable } from "../components/OperationsTable";
@@ -50,7 +51,8 @@ import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList,
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can } from "../lib/permissions";
-import { actionLabels, activeOperation, allowedActions, isActive, latestDeploymentOperation, stateLabels, workloadKind } from "../lib/operations";
+import { actionLabels, activeOperation, allowedActions, isActive, isSuspensionAction, latestDeploymentOperation, stateLabels, workloadKind } from "../lib/operations";
+import { holdBlocks, holdReason, type EnvironmentHold } from "../lib/suspension";
 import { resultSummary } from "../lib/rollouts";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
@@ -150,6 +152,8 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
   const [confirm, setConfirm] = useState(false);
   const label = kind === "job" && operation.action === "deploy" ? "Run" : actionLabels[operation.action];
   const requested = operation.cancel_requested || cancel.isSuccess;
+  // Pause and resume operations belong to the environment; they are changed from its page, not cancelled here.
+  const environmentOwned = isSuspensionAction(operation.action);
   return (
     <div id={id} className="flex max-w-md flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted md:justify-end md:text-right">
       <span>
@@ -159,14 +163,14 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
         <Link to="/operations/$operationId" params={{ operationId: operation.id }} className={linkClass}>
           View operation
         </Link>
-        <button
+        {!environmentOwned && <button
           type="button"
           className={`${linkClass} disabled:cursor-not-allowed disabled:text-fg-disabled disabled:no-underline`}
           disabled={!online || cancel.isPending || requested}
           onClick={() => setConfirm(true)}
         >
           {requested ? "Cancellation requested" : "Cancel operation"}
-        </button>
+        </button>}
       </span>
       {cancel.isError && <span role="alert" className="text-bad">Could not request cancellation: {errorMessage(cancel.error)}</span>}
       <ConfirmDialog open={confirm} title="Cancel this operation?" confirmLabel="Cancel operation" danger onCancel={() => setConfirm(false)} onConfirm={() => { setConfirm(false); cancel.mutate(); }}>
@@ -176,7 +180,7 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
   );
 }
 
-function useResourceActions(workload: Workload) {
+function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: string) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
@@ -197,12 +201,13 @@ function useResourceActions(workload: Workload) {
             const pending = queue.isPending && queue.variables.action === action;
             const label = kind === "job" && action === "deploy" ? "Deploy and run" : actionLabels[action];
             const waitsForRollout = action === "deploy" && Boolean(pendingRollout);
+            const held = action !== "stop" && holdBlocks(hold, action);
             return (
               <Button
                 key={action}
                 variant={action === "deploy" ? "primary" : "secondary"}
-                disabled={blocked || waitsForRollout}
-                aria-describedby={active ? statusId : waitsForRollout ? rolloutId : undefined}
+                disabled={blocked || waitsForRollout || held}
+                aria-describedby={active ? statusId : held && hold.kind !== "loading" ? holdId : waitsForRollout ? rolloutId : undefined}
                 pending={pending}
                 onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate({ action }))}
               >
@@ -258,7 +263,9 @@ function ResourceHeader({ workload }: { workload: Workload }) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const nodes = useQuery(nodesQuery);
   const projects = useQuery(projectsQuery);
-  const actions = useResourceActions(workload);
+  const { hold, state: holdState } = useEnvironmentHold(workload);
+  const holdId = useId();
+  const actions = useResourceActions(workload, hold, holdId);
   const kind = workloadKind(workload.kind);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   const placement = findPlacement(projects.data, workload.environment_id, workload.project_id);
@@ -335,6 +342,19 @@ function ResourceHeader({ workload }: { workload: Workload }) {
       />
       <div className="space-y-2 px-4 pt-4 empty:hidden sm:px-6" aria-live="polite">
         {actions.feedback}
+        <EnvironmentHoldNotice
+          id={holdId}
+          hold={hold}
+          onRetry={() => void holdState.refetch()}
+          retrying={holdState.isFetching}
+          environment={
+            placement?.environment && (
+              <Link to="/projects/$projectId/environments/$environmentId" params={{ projectId: placement.project.id, environmentId: placement.environment.id }} className={buttonClass("secondary")}>
+                Open {placement.environment.name}
+              </Link>
+            )
+          }
+        />
         {workload.preview_source_id && <Notice>This is a temporary preview. Its configuration is managed by <Link to="/resources/$resourceId/previews" params={{ resourceId: workload.preview_source_id }} className="underline">the source resource</Link>. Closing it deletes its preview data.</Notice>}
         {node && node.state !== "ready" && (
           <Notice
@@ -667,12 +687,13 @@ export function ResourceBackups() {
   const workload = useResource();
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const { hold } = useEnvironmentHold(workload);
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
     <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts. Containers stop briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} />
+      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} restoreHeld={holdReason(hold, "restore", "Restoring, verifying and copying backups")} verifyHeld={holdReason(hold, "drill", "Verifying and copying backups")} />
     </Section>
   );
 }
@@ -680,6 +701,8 @@ export function ResourceBackups() {
 function PlacementForm({ workload }: { workload: Workload }) {
   const projects = useQuery(projectsQuery);
   const assign = useAssignEnvironment(workload.id);
+  const { hold } = useEnvironmentHold(workload);
+  const held = holdBlocks(hold, "placement");
   const online = useOnline();
   const [selected, setSelected] = useState(`${workload.project_id}:${workload.environment_id ?? ""}`);
   const current = `${workload.project_id}:${workload.environment_id ?? ""}`;
@@ -701,7 +724,8 @@ function PlacementForm({ workload }: { workload: Workload }) {
         </Notice>
       )}
       {assign.isSuccess && selected === current && <Notice tone="success" title="Placement saved" />}
-      <Button type="submit" variant="primary" disabled={!online || !selected || selected === current} pending={assign.isPending}>
+      {held && <Notice tone="info" title="Placement is locked while the environment is paused or resuming">Resume the environment and let it finish before moving this resource.</Notice>}
+      <Button type="submit" variant="primary" disabled={!online || !selected || selected === current || held} pending={assign.isPending}>
         Save placement
       </Button>
     </form>

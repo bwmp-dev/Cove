@@ -5,6 +5,8 @@ import { Play } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 import { errorMessage, isStatus, request } from "../api/client";
 import { useQueueOperation } from "../api/mutations";
+import { useEnvironmentHold } from "../components/EnvironmentSuspension";
+import { holdReason } from "../lib/suspension";
 import { nodesQuery, workloadOperationsQuery } from "../api/queries";
 import type { JobOverlapPolicy, JobSchedule as Schedule, JobScheduleInput, Node, Operation, Workload } from "../api/types";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -281,7 +283,8 @@ function RunNow({ resource, schedule, node, nodes, supported }: { resource: Work
   const statusId = useId();
   const canOperate = can(resource.permissions, "operate");
   const active = operations.data ? activeOperation(operations.data, resource.id) : undefined;
-  const reason = runBlocker({
+  const { hold } = useEnvironmentHold(resource);
+  const reason = holdReason(hold, "deploy", "Running the job") ?? runBlocker({
     online,
     operations: loadState(operations),
     active,

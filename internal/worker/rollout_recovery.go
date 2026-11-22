@@ -155,6 +155,11 @@ func (e *Engine) performRolloutAction(ctx context.Context, r Request, out io.Wri
 		} else if !change.Committed {
 			result = errors.Join(result, e.recordRolloutResult(r.ID, RolloutStatus{Operation: r.ID, Release: change.Origin, Strategy: change.Options.Strategy, Phase: "aborted", CandidatePercent: 0}))
 		}
+		if result == nil {
+			if err := e.pruneSuspension(r.Workload, &change); err != nil {
+				result = errors.Join(errRolloutUnresolved, err)
+			}
+		}
 	}()
 	if r.Action == "rollout_abort" {
 		return nil
@@ -180,6 +185,9 @@ func (e *Engine) settleRollout(ctx context.Context, id, state string) error {
 		err = e.finishRollout(cleanup, j.Request.Workload, id, j.RolloutChange, io.Discard)
 	}
 	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := e.pruneSuspension(j.Request.Workload, j.RolloutChange); err != nil {
 		return err
 	}
 	e.mu.Lock()

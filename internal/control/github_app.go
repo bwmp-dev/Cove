@@ -629,7 +629,7 @@ func (s *Server) githubAppWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), "SELECT w.id,w.configuration,g.repository FROM github_sources g JOIN workloads w ON w.id=g.workload_id JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.installation_id=$1 AND g.repository_id=$2 AND g.automatic AND NOT w.manually_stopped FOR UPDATE OF w", event.Installation.ID, event.Repository.ID)
+	rows, err := tx.Query(r.Context(), "SELECT w.id,w.configuration,g.repository FROM github_sources g JOIN workloads w ON w.id=g.workload_id JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.installation_id=$1 AND g.repository_id=$2 AND g.automatic AND NOT w.manually_stopped AND NOT EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) AND NOT EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id) FOR UPDATE OF w", event.Installation.ID, event.Repository.ID)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return

@@ -37,6 +37,7 @@ function serve({ schedule = saved, put, nodes = [node()], operations = [], post 
     if (path === "/api/workloads/job-1/schedule") return method === "GET" ? Promise.resolve(schedule) : (put?.(body) ?? Promise.resolve({ ...schedule, ...(body as object), pending_since: null }));
     if (path === "/api/nodes") return nodes instanceof Error ? Promise.reject(nodes) : Promise.resolve(nodes);
     if (path.startsWith("/api/operations")) return operations instanceof Error ? Promise.reject(operations) : Promise.resolve(operations);
+    if (path === "/api/environments/e1/suspension") return Promise.resolve({ paused: true, phase: "paused", resources: [{ id: "job-1", name: "nightly", kind: "job", node_id: "n1", supported: true, phase: "paused", resume_wanted: false }] });
     if (method === "POST" && path === "/api/workloads/job-1/operations") return post?.() ?? Promise.resolve({ id: "op-run", state: "queued" });
     return Promise.reject(new Error(`unexpected ${method} ${path}`));
   });
@@ -270,4 +271,12 @@ it("explains that only jobs can be scheduled", async () => {
   renderSchedule();
   expect(await screen.findByText(/Create a one-shot job resource/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Run now" })).not.toBeInTheDocument();
+});
+
+it("blocks Run now while the job's environment is paused", async () => {
+  resource = { ...base, environment_id: "e1", environment_paused: true };
+  serve();
+  renderSchedule();
+  expect(await screen.findByText("The environment is paused. Running the job is available after it resumes.")).toBeInTheDocument();
+  expect(runButton()).toBeDisabled();
 });

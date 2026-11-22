@@ -93,7 +93,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var encrypted, configuration []byte
 	var stopped bool
-	err = tx.QueryRow(r.Context(), "SELECT webhook_secret,configuration,manually_stopped FROM workloads WHERE id=$1 FOR UPDATE", r.PathValue("id")).Scan(&encrypted, &configuration, &stopped)
+	err = tx.QueryRow(r.Context(), "SELECT webhook_secret,configuration,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=workloads.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=workloads.id)) FROM workloads WHERE id=$1 FOR UPDATE", r.PathValue("id")).Scan(&encrypted, &configuration, &stopped)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && len(encrypted) == 0 {
 		http.NotFound(w, r)
 		return
@@ -229,7 +229,7 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 	var enabled bool
 	var configuration []byte
-	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic)),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
+	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND NOT EXISTS(SELECT 1 FROM environments e WHERE e.id=workloads.environment_id AND e.paused) AND NOT EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=workloads.id) AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic)),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
 		return err
 	}
 	if !enabled {

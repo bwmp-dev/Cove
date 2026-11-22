@@ -4,6 +4,8 @@ import { ArrowUpCircle, Undo2 } from "lucide-react";
 import { useId, useState } from "react";
 import { errorMessage, isStatus } from "../api/client";
 import { useQueueOperation } from "../api/mutations";
+import { holdReason } from "../lib/suspension";
+import { useEnvironmentHold } from "./EnvironmentSuspension";
 import { nodesQuery, workloadOperationsQuery, workloadRuntimeQuery } from "../api/queries";
 import type { RolloutStatus, Workload } from "../api/types";
 import { useOnline } from "../lib/hooks";
@@ -81,6 +83,8 @@ export function StagedRollout({ workload, operationActive }: { workload: Workloa
   const online = useOnline();
   const statusId = useId();
   const [confirm, setConfirm] = useState<"rollout_promote" | "rollout_abort" | null>(null);
+  const { hold } = useEnvironmentHold(workload);
+  const holdId = useId();
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   // A failed operations read leaves the active operation unknown, so earlier data must not count as idle.
   const active = operations.data && !operations.isError ? activeOperation(operations.data, workload.id) : undefined;
@@ -104,6 +108,8 @@ export function StagedRollout({ workload, operationActive }: { workload: Workloa
   const supported = Boolean(node?.capabilities?.rollouts);
   const ready = node?.state === "ready";
   const blocked = !online || !ready || !supported || Boolean(active) || queue.isPending || operations.isPending || operations.isError;
+  // Abort stays available while the environment is paused; only Promote waits for the resume.
+  const promoteHeld = holdReason(hold, "rollout_promote", "Promote");
   const reason = !online
     ? "You are offline. Promote and abort are available when the connection returns."
     : operations.isError
@@ -128,7 +134,7 @@ export function StagedRollout({ workload, operationActive }: { workload: Workloa
               <Undo2 aria-hidden className="size-3.5" />
               Abort
             </Button>
-            <Button variant="primary" disabled={blocked} pending={queue.isPending && queue.variables.action === "rollout_promote"} aria-describedby={reason ? statusId : undefined} onClick={() => setConfirm("rollout_promote")}>
+            <Button variant="primary" disabled={blocked || Boolean(promoteHeld)} pending={queue.isPending && queue.variables.action === "rollout_promote"} aria-describedby={reason ? statusId : promoteHeld ? holdId : undefined} onClick={() => setConfirm("rollout_promote")}>
               <ArrowUpCircle aria-hidden className="size-3.5" />
               Promote
             </Button>
@@ -145,6 +151,11 @@ export function StagedRollout({ workload, operationActive }: { workload: Workloa
         {waiting && canOperate && reason && (
           <p id={statusId} className="text-xs text-fg-muted">
             {reason}
+          </p>
+        )}
+        {waiting && canOperate && promoteHeld && (
+          <p id={holdId} className="text-xs text-fg-muted">
+            {promoteHeld} Abort stays available.
           </p>
         )}
         {queue.isSuccess && (

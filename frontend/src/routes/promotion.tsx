@@ -11,6 +11,8 @@ import { actionLabels, activeOperation, stateLabels } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { inputClass, linkClass } from "../lib/styles";
 import { useResource } from "./workload-detail";
+import { useEnvironmentHold } from "../components/EnvironmentSuspension";
+import { holdReason } from "../lib/suspension";
 
 // The server rejects promotion while either resource has a queued or running operation, so the form
 // waits for both. An unknown status (loading or failed) also blocks, because it may hide an active one.
@@ -36,6 +38,7 @@ export function Promotion() {
  const releases = useQuery({ queryKey: ["promotion-releases", source], queryFn: ({ signal }) => request<{ releases: { id: string; created_at: string }[] }>("GET", `/api/workloads/${source}/releases`, undefined, signal), enabled: Boolean(source) });
  const sourceGate = useOperationGate(source, "source resource");
  const targetGate = useOperationGate(target.id, "target resource");
+ const held = holdReason(useEnvironmentHold(target).hold, "promote_release", "Promoting a release");
  const promote = useMutation({
   mutationFn: (input: { source_id: string; release: string; registry_repository: string }) => request<{ id: string }>("POST", `/api/workloads/${target.id}/promote`, input),
   onSuccess: async () => { await client.invalidateQueries({ queryKey: keys.operations }); },
@@ -52,8 +55,8 @@ export function Promotion() {
    {(resources.isError || releases.isError) && <Notice tone="error">{errorMessage(resources.error ?? releases.error)}</Notice>}
    {promote.isError && <Notice tone={isStatus(promote.error, 409) ? "warn" : "error"}>{errorMessage(promote.error)}</Notice>}
    {promote.data && <Notice title="Promotion queued"><Link to="/operations/$operationId" params={{ operationId: promote.data.id }} className="underline">View deployment</Link></Notice>}
-   <div id={statusId} className="space-y-2 empty:hidden">{sourceGate.status}{targetGate.status}</div>
-   <Button type="submit" pending={promote.isPending} disabled={!online || !source || !can(target.permissions, "edit") || sourceGate.blocked || targetGate.blocked} aria-describedby={statusId} variant="primary">Promote release</Button>
+   <div id={statusId} className="space-y-2 empty:hidden">{held && <p className="text-xs text-fg-muted">{held}</p>}{sourceGate.status}{targetGate.status}</div>
+   <Button type="submit" pending={promote.isPending} disabled={!online || !source || !can(target.permissions, "edit") || sourceGate.blocked || targetGate.blocked || Boolean(held)} aria-describedby={statusId} variant="primary">Promote release</Button>
    {promote.isPending && <p className="text-sm text-fg-muted">Preparing immutable image references. Publishing images can take several minutes.</p>}
   </form>
  </Section>;

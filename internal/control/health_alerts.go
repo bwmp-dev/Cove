@@ -206,7 +206,7 @@ func (s *Server) nodeHealth(ctx context.Context, id, state string, p *worker.Pro
 }
 
 func (s *Server) checkResourceHealth(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,manually_stopped FROM workloads w WHERE kind='service' AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
+	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)) FROM workloads w WHERE kind='service' AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
 	if err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func (s *Server) checkResourceHealth(ctx context.Context) error {
 		}
 		// An operator may have stopped or redeployed it while the SSH read was in flight.
 		var suppressed bool
-		if err = s.DB.QueryRow(ctx, `SELECT manually_stopped OR EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) FROM workloads w WHERE id=$1`, i.id).Scan(&suppressed); errors.Is(err, pgx.ErrNoRows) {
+		if err = s.DB.QueryRow(ctx, `SELECT manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id) OR EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) FROM workloads w WHERE id=$1`, i.id).Scan(&suppressed); errors.Is(err, pgx.ErrNoRows) {
 			continue
 		} else if err != nil {
 			return err

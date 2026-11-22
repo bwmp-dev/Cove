@@ -14,27 +14,31 @@ import { OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { shortId } from "../lib/format";
 import { formatAbsolute, formatDuration } from "../lib/format";
-import { actionLabels, durationMs, isActive } from "../lib/operations";
+import { actionLabels, durationMs, isActive, isSuspensionAction } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
 import { resultSummary } from "../lib/rollouts";
 import { linkClass } from "../lib/styles";
 import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
-import type { WorkloadSummary } from "../api/types";
+import type { SuspensionResult, WorkloadSummary } from "../api/types";
+import { useEnvironmentHold } from "../components/EnvironmentSuspension";
+import { holdReason } from "../lib/suspension";
 
 const route = getRouteApi("/app/operations/$operationId");
 
 function RollbackRelease({ workload, release }: { workload: WorkloadSummary; release: string }) {
   const workloadId = workload.id;
   const pendingRollout = usePendingRollout(workload);
+  const held = holdReason(useEnvironmentHold(workload).hold, "rollback", "Rolling back");
   const retained = useQuery({ queryKey: ["releases", workloadId], queryFn: ({ signal }) => request<{ releases: { id: string }[] }>("GET", `/api/workloads/${workloadId}/releases`, undefined, signal) });
   const rollback = useRollback(workloadId);
   const [confirm, setConfirm] = useState(false);
   const online = useOnline();
   const navigate = useNavigate();
   return <>
-    <Button disabled={!online || rollback.isPending || Boolean(pendingRollout) || retained.isError || !retained.data?.releases.some((item) => item.id === release)} onClick={() => setConfirm(true)}>Roll back to this release</Button>
+    <Button disabled={!online || rollback.isPending || Boolean(pendingRollout) || Boolean(held) || retained.isError || !retained.data?.releases.some((item) => item.id === release)} onClick={() => setConfirm(true)}>Roll back to this release</Button>
     {pendingRollout && <PendingRolloutMessage workloadId={workloadId} action="roll back" />}
+    {held && <p className="text-xs text-fg-muted">{held}</p>}
     {retained.isError && <Notice tone="error">Could not verify whether this release is retained.</Notice>}
     {retained.data && !retained.data.releases.some((item) => item.id === release) && <p className="text-xs text-fg-muted">This release is no longer retained on the worker.</p>}
     {rollback.isError && <Notice tone="error" title="Could not queue rollback">{errorMessage(rollback.error)}</Notice>}
@@ -45,6 +49,26 @@ function RollbackRelease({ workload, release }: { workload: WorkloadSummary; rel
       This restores the saved Compose configuration and local images. It does not restore database contents or volumes, undo migrations, or edit your saved resource configuration. The worker must still have this release and its images.
     </ConfirmDialog>
   </>;
+}
+
+const suspensionPhases: Record<SuspensionResult["phase"], string> = {
+  pausing: "Pausing",
+  paused: "Paused",
+  resuming: "Resuming",
+  resumed: "Resumed",
+  stopped: "Left stopped",
+};
+
+function SuspensionOutcome({ suspension }: { suspension: SuspensionResult }) {
+  return (
+    <div className="space-y-1">
+      <p>{suspensionPhases[suspension.phase] ?? suspension.phase}</p>
+      <p className="text-xs text-fg-muted">
+        {suspension.captured} {suspension.captured === 1 ? "container" : "containers"} captured, {suspension.previously_running} running before the pause.
+        {suspension.phase === "stopped" && " It was stopped manually while paused, so the resume left it stopped."}
+      </p>
+    </div>
+  );
 }
 
 const stateDescriptions = {
@@ -123,7 +147,7 @@ export function OperationPage() {
           ) : back
         }
         actions={
-          active && can(workload?.permissions, "operate") ? (
+          active && can(workload?.permissions, "operate") && !isSuspensionAction(operation.action) ? (
             <Button disabled={!online || cancel.isPending || operation.cancel_requested || cancel.isSuccess} onClick={() => setConfirmCancel(true)}>
               {operation.cancel_requested || cancel.isSuccess ? "Cancellation requested" : "Cancel operation"}
             </Button>
@@ -139,6 +163,23 @@ export function OperationPage() {
       />
 
       {operation.approval_required && !operation.approved_at && operation.state === "queued" && <div className="px-4 pt-4 sm:px-6"><Notice title="Approval required"><p>A team administrator must approve this deployment before it can start.</p>{operation.can_approve && <Button disabled={!online || operation.cancel_requested} pending={approve.isPending} onClick={() => approve.mutate()}>Approve deployment</Button>}{approve.isError && <p>{errorMessage(approve.error)}</p>}</Notice></div>}
+      {isSuspensionAction(operation.action) && (
+        <div className="px-4 pt-4 sm:px-6">
+          <Notice title={operation.action === "suspend" ? "Queued by an environment pause" : "Queued by an environment resume"}>
+            {placement?.environment ? (
+              <>
+                The control plane runs this operation for the resource's environment. Pause, resume or retry it from{" "}
+                <Link to="/projects/$projectId/environments/$environmentId" params={{ projectId: placement.project.id, environmentId: placement.environment.id }} className={linkClass}>
+                  {placement.environment.name}
+                </Link>
+                .
+              </>
+            ) : (
+              "The control plane runs this operation for the resource's environment. Pause, resume or retry it from the environment page."
+            )}
+          </Notice>
+        </div>
+      )}
       {operations.isRefetchError && (
         <div className="px-4 pt-4 sm:px-6">
           <QueryError what="the latest status" error={operations.error} onRetry={() => void operations.refetch()} retrying={operations.isFetching} />
@@ -207,6 +248,7 @@ export function OperationPage() {
                     },
                   ]
                 : []),
+              ...(result?.suspension ? [{ term: "Environment pause", value: <SuspensionOutcome suspension={result.suspension} /> }] : []),
               ...(result?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{result.revision}</span> }] : []),
               ...(!result ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),
             ]}

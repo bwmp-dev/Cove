@@ -2,8 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import { errorMessage, isStatus } from "../api/client";
 import { workloadLogsQuery, workloadRuntimeQuery } from "../api/queries";
-import type { Container } from "../api/types";
+import type { Container, ResourceSuspension } from "../api/types";
 import { formatRelative } from "../lib/format";
+import { countLabel } from "../lib/hierarchy";
 import { useNow } from "../lib/hooks";
 import { LogPanel } from "./LogViewer";
 import { Button, MetaList, Notice, Spinner } from "./ui";
@@ -12,8 +13,8 @@ import { tableHeadClass, tableRowClass } from "../lib/styles";
 
 const toneClass: Record<Tone, string> = { ok: "bg-ok", warn: "bg-warn", bad: "bg-bad", neutral: "bg-fg-subtle" };
 
-function ContainerRow({ container, kind, manuallyStopped }: { container: Container; kind: "service" | "job"; manuallyStopped: boolean }) {
-  const { tone, label } = containerStatus(container, kind, { manuallyStopped });
+function ContainerRow({ container, kind, manuallyStopped, environmentPaused }: { container: Container; kind: "service" | "job"; manuallyStopped: boolean; environmentPaused: boolean }) {
+  const { tone, label } = containerStatus(container, kind, { manuallyStopped, environmentPaused });
   return (
     <tr className={tableRowClass}>
       <td className="py-2.5 pr-4 pl-4">
@@ -46,6 +47,16 @@ function ContainerRow({ container, kind, manuallyStopped }: { container: Contain
         {container.ports ? <span className="break-words">{container.ports}</span> : <span className="font-sans whitespace-nowrap text-fg-subtle">None published</span>}
       </td>
     </tr>
+  );
+}
+
+function SuspensionSummary({ suspension }: { suspension: ResourceSuspension }) {
+  return (
+    <p className="border-b border-line px-4 py-2 text-xs text-fg-muted">
+      {suspension.phase === "resuming"
+        ? `The worker is resuming this resource for its environment: ${countLabel(suspension.previously_running, "container")} that ran before the pause start again.`
+        : `${suspension.phase === "pausing" ? "The worker is pausing" : "The environment paused"} this resource: ${countLabel(suspension.captured, "container")} captured, ${suspension.previously_running} of them running before the pause.`}
+    </p>
   );
 }
 
@@ -86,10 +97,13 @@ export function RuntimeContainers({ workloadId, kind, operationActive, manuallyS
       </>
     );
   }
-  const containers = runtime.data.containers;
+  const { containers, suspension } = runtime.data;
+  // Only the worker's own report marks stopped containers as paused; the environment's requested state alone does not.
+  const environmentPaused = suspension?.phase === "paused" || suspension?.phase === "pausing";
   return (
     <>
       {header}
+      {suspension && <SuspensionSummary suspension={suspension} />}
       {containers.length === 0 ? (
         <p className="px-4 py-3 text-[13px] text-fg-muted">
           {kind === "job"
@@ -117,7 +131,7 @@ export function RuntimeContainers({ workloadId, kind, operationActive, manuallyS
           </thead>
           <tbody>
             {containers.map((container) => (
-              <ContainerRow key={container.id} container={container} kind={kind} manuallyStopped={manuallyStopped} />
+              <ContainerRow key={container.id} container={container} kind={kind} manuallyStopped={manuallyStopped} environmentPaused={environmentPaused} />
             ))}
           </tbody>
         </table>

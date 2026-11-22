@@ -143,7 +143,7 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,w.job_cron,w.manually_stopped,w.job_timezone,w.job_overlap_policy,w.job_pending_at,w.next_job_at<=now(),COALESCE((n.capabilities->>'job_runs')::boolean,false) FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.job_cron<>'' AND (w.next_job_at<=now() OR w.job_pending_at IS NOT NULL) ORDER BY COALESCE(w.job_pending_at,w.next_job_at) LIMIT 16 FOR UPDATE OF w SKIP LOCKED`)
+	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,w.job_cron,(w.manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)),w.job_timezone,w.job_overlap_policy,w.job_pending_at,w.next_job_at<=now(),COALESCE((n.capabilities->>'job_runs')::boolean,false) FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.job_cron<>'' AND (w.next_job_at<=now() OR w.job_pending_at IS NOT NULL) ORDER BY COALESCE(w.job_pending_at,w.next_job_at) LIMIT 16 FOR UPDATE OF w SKIP LOCKED`)
 	if err != nil {
 		return err
 	}

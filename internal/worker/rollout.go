@@ -686,7 +686,11 @@ func (e *Engine) finishRollout(ctx context.Context, workload, id string, change 
 			}
 		}
 	} else {
-		if change.Previous != nil {
+		suspension, err := e.readSuspension(workload)
+		if err != nil {
+			return err
+		}
+		if change.Previous != nil && (suspension == nil || suspension.Phase == "awake") {
 			previous := change.Previous
 			env := []string{}
 			for key, value := range previous.Environment {

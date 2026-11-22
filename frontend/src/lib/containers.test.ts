@@ -64,3 +64,17 @@ describe("containerStatus with older workers", () => {
     expect(containerStatus(container("restarting", "Restarting (1) 5 seconds ago"), "service")).toEqual({ tone: "warn", label: "Restarting" });
   });
 });
+
+describe("containerStatus while the environment is paused", () => {
+  const paused = { environmentPaused: true };
+  it("shows intentionally stopped containers as paused rather than failed", () => {
+    expect(containerStatus(container("exited", "Exited (137) 1 minute ago", { exit_code: 137 }), "service", paused)).toEqual({ tone: "neutral", label: "Paused" });
+    expect(containerStatus(container("dead", "Dead", { exit_code: 137 }), "service", paused)).toEqual({ tone: "neutral", label: "Paused" });
+  });
+
+  it("keeps completed jobs and init containers and live health", () => {
+    expect(containerStatus(container("exited", "Exited (0)", { exit_code: 0, expected_completed: true }), "service", paused)).toEqual({ tone: "ok", label: "Completed" });
+    expect(containerStatus(container("exited", "Exited (0)", { exit_code: 0 }), "job", paused)).toEqual({ tone: "ok", label: "Completed" });
+    expect(containerStatus(container("running", "Up", { health: "unhealthy" }), "service", paused)).toEqual({ tone: "bad", label: "Unhealthy" });
+  });
+});

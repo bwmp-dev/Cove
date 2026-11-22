@@ -28,6 +28,7 @@ type RPCRequest struct {
 }
 type RPCResponse struct {
 	Rollout       *RolloutStatus       `json:"rollout,omitempty"`
+	Suspension    *SuspensionStatus    `json:"suspension,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
 	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
 	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
@@ -207,7 +208,11 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		if err != nil {
 			return RPCResponse{Error: "could not inspect deployment traffic state"}
 		}
-		return RPCResponse{Containers: containers, Rollout: rollout}
+		suspension, err := e.suspensionStatus(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect resource suspension"}
+		}
+		return RPCResponse{Containers: containers, Rollout: rollout, Suspension: suspension}
 	case "container_logs":
 		logs, err := e.ContainerLogs(ctx, r.ID)
 		if err != nil {

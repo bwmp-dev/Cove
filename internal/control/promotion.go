@@ -65,6 +65,10 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	src, dst := resources[in.Source], resources[target]
+	if _, err = environmentOperationGate(r.Context(), tx, target, "rollout_promote"); err != nil {
+		http.Error(w, "resume the target environment before promoting a release", 409)
+		return
+	}
 	if src.project != dst.project {
 		http.Error(w, "promotion requires resources in the same project", 400)
 		return

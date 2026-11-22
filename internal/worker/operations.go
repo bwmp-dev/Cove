@@ -25,6 +25,8 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	Suspension             *SuspensionOptions       `json:"suspension,omitempty"`
+	ResumeSuspended        bool                     `json:"resume_suspended,omitempty"`
 	Job                    *JobOptions              `json:"job,omitempty"`
 	Rollout                *RolloutOptions          `json:"rollout,omitempty"`
 	Build                  *BuildOptions            `json:"build,omitempty"`
@@ -55,28 +57,30 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
-	Job        *JobResult     `json:"job,omitempty"`
-	Rollout    *RolloutStatus `json:"rollout,omitempty"`
-	Build      *BuildResult   `json:"build,omitempty"`
-	ImageCheck *ImageCheck    `json:"image_check,omitempty"`
-	ID         string         `json:"id"`
-	Workload   string         `json:"workload"`
-	Action     string         `json:"action"`
-	State      string         `json:"state"`
-	CreatedAt  time.Time      `json:"created_at"`
-	FinishedAt *time.Time     `json:"finished_at,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	Revision   string         `json:"revision,omitempty"`
-	Preview    *PreviewReport `json:"environment_preview,omitempty"`
+	Suspension *SuspensionStatus `json:"suspension,omitempty"`
+	Job        *JobResult        `json:"job,omitempty"`
+	Rollout    *RolloutStatus    `json:"rollout,omitempty"`
+	Build      *BuildResult      `json:"build,omitempty"`
+	ImageCheck *ImageCheck       `json:"image_check,omitempty"`
+	ID         string            `json:"id"`
+	Workload   string            `json:"workload"`
+	Action     string            `json:"action"`
+	State      string            `json:"state"`
+	CreatedAt  time.Time         `json:"created_at"`
+	FinishedAt *time.Time        `json:"finished_at,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	Revision   string            `json:"revision,omitempty"`
+	Preview    *PreviewReport    `json:"environment_preview,omitempty"`
 }
 type journal struct {
-	JobRun          *jobRun        `json:"job_run,omitempty"`
-	RolloutChange   *rolloutChange `json:"rollout_change,omitempty"`
-	CancelRequested bool           `json:"cancel_requested,omitempty"`
-	RouteChange     *routeChange   `json:"route_change,omitempty"`
-	Operation       Operation      `json:"operation"`
-	Request         Request        `json:"request"`
-	Digest          string         `json:"digest"`
+	SuspensionChange *suspensionChange `json:"suspension_change,omitempty"`
+	JobRun           *jobRun           `json:"job_run,omitempty"`
+	RolloutChange    *rolloutChange    `json:"rollout_change,omitempty"`
+	CancelRequested  bool              `json:"cancel_requested,omitempty"`
+	RouteChange      *routeChange      `json:"route_change,omitempty"`
+	Operation        Operation         `json:"operation"`
+	Request          Request           `json:"request"`
+	Digest           string            `json:"digest"`
 }
 
 // routeChange is journaled by a route operation before it changes the proxy. Until Committed, the
@@ -89,11 +93,11 @@ type routeChange struct {
 // routeRecovery tracks a running route operation without an executor whose outcome must still be
 // settled from its journal: restored to the previous routes, or completed once committed.
 type routeRecovery struct {
-	job      bool
-	workload string
-	state    string
-	next     time.Time
-	running  bool
+	activeSlot bool
+	workload   string
+	state      string
+	next       time.Time
+	running    bool
 }
 type deployedState struct {
 	Traffic     trafficState        `json:"traffic,omitempty"`
@@ -181,6 +185,12 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if err := validateSuspensionRequest(r); err != nil {
+		return err
+	}
+	if r.ResumeSuspended && r.Action != "deploy" && r.Action != "start" && r.Action != "restart" && r.Action != "restore" {
+		return errors.New("resuming a suspension requires an explicit deploy, start, restart or restore")
+	}
 	if r.Job != nil && (r.Kind != "job" || r.Action != "deploy" || jobTimeout(r.Job) < 5 || jobTimeout(r.Job) > 86400) {
 		return errors.New("job execution settings require a job deployment and timeout from 5 to 86400 seconds")
 	}
@@ -260,6 +270,7 @@ func ValidateRequest(r Request) error {
 			return errors.New("compose is required and must not exceed 1 MiB")
 		}
 	case "stop", "start", "restart":
+	case "suspend", "resume":
 	case "restart_unhealthy":
 		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
 			return errors.New("health restarts require a service outside managed previews")
@@ -436,11 +447,15 @@ func (e *Engine) Recover() error {
 		if err != nil {
 			return err
 		}
+		if j.Operation.State == "running" && j.SuspensionChange != nil {
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
+			continue
+		}
 		if j.Operation.State == "running" && j.Request.Kind == "job" && j.Request.Action == "deploy" {
 			if j.JobRun == nil {
 				j.JobRun = &jobRun{Legacy: true, Started: j.Operation.CreatedAt, Deadline: j.Operation.CreatedAt.Add(30 * time.Minute)}
 			}
-			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", job: true}
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
 			j.Operation.Error = "Recovering the existing job run; a second run will not start until it settles."
 			if err := writeJSON(e.path(id), j); err != nil {
 				return err
@@ -573,7 +588,7 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 	sort.Slice(e.pending, func(i, j int) bool { return e.pending[i].CreatedAt.Before(e.pending[j].CreatedAt) })
 	remaining := make([]Operation, 0, len(e.pending))
 	for _, op := range e.pending {
-		if e.busy(op.Workload) || len(e.active)+e.recoveringJobCount() >= 4 {
+		if e.busy(op.Workload) || len(e.active)+e.recoveringWorkloadCount() >= 4 {
 			remaining = append(remaining, op)
 			continue
 		}
@@ -688,6 +703,7 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	committed := false
 	persisted, readErr := e.read(j.Request.ID)
 	if readErr == nil {
+		j.SuspensionChange, j.Operation.Suspension = persisted.SuspensionChange, persisted.Operation.Suspension
 		j.Operation.Job = persisted.Operation.Job
 		j.JobRun = persisted.JobRun
 		j.Operation.Revision = persisted.Operation.Revision
@@ -699,13 +715,16 @@ func (e *Engine) execute(parent context.Context, j journal) {
 		j.CancelRequested = persisted.CancelRequested
 		committed = persisted.RouteChange != nil && persisted.RouteChange.Committed
 	}
-	if errors.Is(err, errRoutesUnresolved) || errors.Is(err, errRolloutUnresolved) || errors.Is(err, errJobUnresolved) {
+	if errors.Is(err, errRoutesUnresolved) || errors.Is(err, errRolloutUnresolved) || errors.Is(err, errJobUnresolved) || errors.Is(err, errSuspensionUnresolved) {
 		// The operation stays running, which keeps its hostnames claimed until recovery settles it.
-		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed", job: j.JobRun != nil}
+		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed", activeSlot: j.JobRun != nil || j.SuspensionChange != nil}
 		if readErr == nil && !committed {
 			persisted.Operation.Error = routeRestoring
 			if j.JobRun != nil {
 				persisted.Operation.Error = "Waiting for the worker to confirm the existing job outcome and stop its containers."
+			}
+			if j.SuspensionChange != nil {
+				persisted.Operation.Error = "Waiting for the worker to confirm the suspension outcome."
 			}
 			readErr = writeJSON(e.path(j.Request.ID), persisted)
 		}
@@ -746,6 +765,9 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	}
 	if j.Operation.Job != nil && j.Operation.Job.TimedOut && j.Operation.State != "cancelled" {
 		j.Operation.State, j.Operation.Error = "failed", "Job exceeded its execution timeout; its containers were stopped."
+	}
+	if j.SuspensionChange != nil && (j.SuspensionChange.ExposureCommitted || j.SuspensionChange.Action == "suspend" && j.SuspensionChange.Complete) && j.SuspensionChange.Failure == "" {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
 	}
 	if saveErr := writeJSON(e.path(j.Request.ID), j); saveErr != nil {
 		fmt.Fprintln(os.Stderr, "could not persist operation result:", saveErr)
@@ -834,11 +856,23 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		return err
 	}
 	if r.Action == "rollout_promote" || r.Action == "rollout_abort" {
+		if r.Action == "rollout_promote" {
+			state, err := e.readSuspension(r.Workload)
+			if err != nil {
+				return err
+			}
+			if state != nil && state.Phase != "awake" {
+				return errors.New("resume the suspended environment before promoting its rollout")
+			}
+		}
 		err := e.performRolloutAction(ctx, r, log)
 		if err != nil {
 			fmt.Fprintln(log, err)
 		}
 		return err
+	}
+	if r.Action == "suspend" {
+		return e.performSuspension(ctx, r, false, log)
 	}
 	if r.Action == "restore_copy" {
 		return e.performRestoreCopy(ctx, r, log)
@@ -885,6 +919,12 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 	} else if !os.IsNotExist(readErr) {
 		return readErr
+	}
+	if handled, err := e.suspensionGate(ctx, r, log); handled || err != nil {
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
 	}
 	if r.Action == "drill" {
 		return e.performDrill(ctx, r, log)

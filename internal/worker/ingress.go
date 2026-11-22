@@ -306,6 +306,13 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 		}
 	}
 	for workload, list := range routes {
+		suspension, err := e.readSuspension(workload)
+		if err != nil {
+			return err
+		}
+		if suspension != nil && suspension.Phase != "awake" {
+			continue
+		}
 		for _, route := range routeTargets(list) {
 			selected, err := e.trafficContainers(ctx, workload, route.Service, false)
 			if err != nil {
@@ -374,7 +381,14 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route, out io.Writer) error {
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
+	suspension, err := e.readSuspension(workload)
+	if err != nil {
+		return err
+	}
 	for _, route := range routeTargets(list) {
+		if suspension != nil && suspension.Phase != "awake" {
+			continue
+		}
 		ids, err := e.trafficContainers(ctx, workload, route.Service, false)
 		if err != nil {
 			return err
@@ -577,6 +591,9 @@ func (e *Engine) settleRoutes(ctx context.Context, id, state string) error {
 	e.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if j.SuspensionChange != nil {
+		return e.settleSuspension(ctx, id)
 	}
 	if j.JobRun != nil {
 		return e.settleJob(ctx, id, state)

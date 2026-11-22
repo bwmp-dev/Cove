@@ -142,6 +142,8 @@ test("environment previews: recipe from a real deployment, preview states and co
     for (const project of projects) if (project.id === projectId) project.environments.push({ id: "p-ready-env", name: "Preview checkout-redesign", preview_id: "p-ready", permissions: ["read", "operate", "edit"] });
     await route.fulfill({ response, json: projects });
   });
+  // Fixture: the intercepted preview environment does not exist in the database, so its pause state is intercepted too.
+  await page.route("**/api/environments/p-ready-env/suspension", (route) => route.fulfill({ json: { paused: false, phase: "active", resources: [] } }));
   await page.goto(`/projects/${projectId}/environments/p-ready-env`);
   await expect(page.getByRole("heading", { name: "Preview checkout-redesign" })).toBeVisible();
   await expect(page.getByText("14 tables and 182340 rows verified", { exact: false }).first()).toBeAttached();
@@ -149,6 +151,8 @@ test("environment previews: recipe from a real deployment, preview states and co
   await expect(page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Previews" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Project sections" }).getByRole("link", { name: /Previews/ })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("button", { name: "New connection" })).toHaveCount(0);
+  await expect(page.getByText(/paused, redeployed and removed through their preview/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pause environment" })).toHaveCount(0);
   await captureWidths(page, (width) => testInfo.outputPath(`preview-environment-${width}.png`));
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });

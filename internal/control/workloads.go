@@ -205,6 +205,15 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "configuration unavailable", 500)
 		return
 	}
+	repair, err := environmentOperationGate(r.Context(), tx, r.PathValue("id"), in.Action)
+	if err != nil {
+		if errors.Is(err, errEnvironmentPaused) {
+			http.Error(w, err.Error(), 409)
+		} else {
+			http.Error(w, "environment state unavailable", 503)
+		}
+		return
+	}
 	id := resourceID()
 	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
@@ -231,6 +240,7 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		request = worker.Request{ID: id, Workload: request.Workload, Action: in.Action, Kind: "service"}
 	}
 	request.Build = in.Build
+	request.ResumeSuspended = repair
 	if request.Rollout != nil || in.Action == "rollout_promote" || in.Action == "rollout_abort" {
 		var supported bool
 		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'rollouts')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
@@ -348,12 +358,22 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if repair && in.Action != "restore" {
+		if _, err = tx.Exec(r.Context(), `UPDATE environment_suspensions SET operation_id=$2,action='resume',error='' WHERE workload_id=$1`, request.Workload, id); err != nil {
+			http.Error(w, "could not queue environment repair", 503)
+			return
+		}
+	}
 	if in.Action == "stop" || in.Action == "start" || in.Action == "restart" || in.Action == "deploy" || in.Action == "rollback" {
 		if _, err = tx.Exec(r.Context(), "UPDATE workloads SET manually_stopped=$2 WHERE id=$1", request.Workload, in.Action == "stop"); err != nil {
 			http.Error(w, "could not save workload intent", 500)
 			return
 		}
 		if in.Action == "stop" {
+			if _, err = tx.Exec(r.Context(), `UPDATE environment_suspensions SET resume_wanted=false WHERE workload_id=$1`, request.Workload); err != nil {
+				http.Error(w, "could not save stop intent", 503)
+				return
+			}
 			if _, err = tx.Exec(r.Context(), `UPDATE workloads SET job_pending_at=NULL WHERE id=$1`, request.Workload); err != nil {
 				http.Error(w, "could not pause scheduled jobs", 503)
 				return
@@ -485,6 +505,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := owner.Ping(ctx); err != nil {
 			return err
 		}
+		if err := s.reconcileEnvironmentSuspensions(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchOperations(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -613,7 +636,7 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		return err
 	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
-	if !cancelRequested && request.Action != "routes" {
+	if !cancelRequested && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
 			if errors.Is(err, errSharedVariables) {
 				return s.failOperation(ctx, id, "Shared variable resolution failed; check for missing names in this resource's team, project, and environment, or values exceeding 64 KiB.")

@@ -9,6 +9,7 @@ export const keys = {
   authConfig: ["auth-config"] as const,
   nodes: ["nodes"] as const,
   projects: ["projects"] as const,
+  environmentSuspension: (id: string) => ["environments", id, "suspension"] as const,
   workloads: ["workloads"] as const,
   workload: (id: string) => ["workloads", id] as const,
   workloadRuntime: (id: string) => ["workloads", id, "runtime"] as const,

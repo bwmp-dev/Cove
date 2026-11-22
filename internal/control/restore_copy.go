@@ -37,6 +37,10 @@ func (s *Server) restoreCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upgrade and verify the worker before restoring a separate resource", 409)
 		return
 	}
+	if _, err = environmentOperationGate(r.Context(), tx, r.PathValue("id"), "restore"); err != nil {
+		http.Error(w, "resume the environment before restoring a resource copy", 409)
+		return
+	}
 	var active bool
 	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND state IN ('queued','running'))`, r.PathValue("id")).Scan(&active); err != nil {
 		http.Error(w, "operations unavailable", 503)
