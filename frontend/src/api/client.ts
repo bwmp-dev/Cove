@@ -56,8 +56,8 @@ function parseRetryAfter(response: Response): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
+async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
+  const headers: Record<string, string> = { Accept: accept };
   const team = selectedTeam();
   if (team) {
     headers["X-Cove-Team"] = team;
@@ -84,8 +84,25 @@ export async function request<T>(method: string, path: string, body?: unknown, s
   if (!response.ok) {
     throw new ApiError(response.status, await readErrorMessage(response), parseRetryAfter(response));
   }
+  return response;
+}
+
+export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await send(method, path, "application/json", body, signal);
   try {
     return (await response.json()) as T;
+  } catch {
+    throw new ApiError(response.status, "The server returned an unreadable response.");
+  }
+}
+
+// For attachments such as archives. The caller saves the blob and drops it; nothing is cached.
+export async function requestFile(method: string, path: string, body?: unknown): Promise<{ blob: Blob; filename: string | null }> {
+  const response = await send(method, path, "*/*", body);
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1]?.trim() ?? null;
+  try {
+    return { blob: await response.blob(), filename };
   } catch {
     throw new ApiError(response.status, "The server returned an unreadable response.");
   }

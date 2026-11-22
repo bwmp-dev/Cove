@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rememberTeam } from "../lib/team";
-import { ApiError, request } from "./client";
+import { ApiError, request, requestFile } from "./client";
 
 function respond(status: number, body: string, type: string, headers: Record<string, string> = {}) {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(body, { status, headers: { "content-type": type, ...headers } }))));
@@ -57,5 +57,22 @@ describe("request", () => {
     const error = (await request("GET", "/api/nodes").catch((caught: unknown) => caught)) as ApiError;
     expect(error).toBeInstanceOf(ApiError);
     expect(error.isNetwork).toBe(true);
+  });
+});
+
+describe("requestFile", () => {
+  it("returns the attachment and its server-chosen name without caching", async () => {
+    respond(200, "PK", "application/zip", { "content-disposition": 'attachment; filename="shop-configuration.zip"' });
+    const { blob, filename } = await requestFile("POST", "/api/projects/p/configuration/export", {});
+    expect(filename).toBe("shop-configuration.zip");
+    expect(await blob.text()).toBe("PK");
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(init.cache).toBe("no-store");
+    expect(init.body).toBe("{}");
+  });
+
+  it("reports plain-text errors like JSON requests", async () => {
+    respond(409, "required shared variable is missing", "text/plain");
+    await expect(requestFile("POST", "/api/projects/p/configuration/export", {})).rejects.toEqual(new ApiError(409, "Required shared variable is missing"));
   });
 });

@@ -173,6 +173,9 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			config.Kind = "service"
 		}
 		if !in.IncludeSecrets {
+			if config.ComposeBundle != nil && (len(config.ComposeBundle.Files) > 0 || len(config.ComposeBundle.Assets) > 0) {
+				config.ComposeBundle = nil
+			}
 			config.Environment = nil
 			if config.Source != nil {
 				config.Source.Token = ""

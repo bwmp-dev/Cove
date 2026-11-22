@@ -73,7 +73,7 @@ func (s *Server) queueDeploymentPlan(w http.ResponseWriter, r *http.Request) {
 	for _, id := range in.Workloads {
 		c := configs[id]
 		op := resourceID()
-		request := worker.Request{ID: op, Workload: id, Action: "deploy", Compose: c.Compose, Environment: c.Environment, Source: c.Source, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy}
+		request := worker.Request{ID: op, Workload: id, Action: "deploy", ComposeBundle: c.ComposeBundle, Compose: c.Compose, Environment: c.Environment, Source: c.Source, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy}
 		if err = loadNetworkRequest(r.Context(), tx, &request); err != nil {
 			http.Error(w, "network configuration unavailable", 409)
 			return

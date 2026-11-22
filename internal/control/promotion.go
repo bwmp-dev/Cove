@@ -115,7 +115,7 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source images unavailable; verify the retained release and registry publication settings", 502)
 		return
 	}
-	request := worker.Request{ID: resourceID(), Workload: target, Action: "deploy", Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, ImagePins: result.Images, Registry: export.Registry}
+	request := worker.Request{ID: resourceID(), Workload: target, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, ImagePins: result.Images, Registry: export.Registry}
 	if err = loadNetworkRequest(r.Context(), tx, &request); err != nil {
 		http.Error(w, "target networking unavailable", 409)
 		return

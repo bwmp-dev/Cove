@@ -24,7 +24,7 @@ func validateWorkload(in workloadInput) error {
 	if strings.TrimSpace(in.Name) == "" || len(in.Name) > 120 {
 		return errors.New("a name of at most 120 characters is required")
 	}
-	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy})
+	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", ComposeBundle: in.ComposeBundle, Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy})
 }
 func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	var encrypted []byte
@@ -137,7 +137,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "wait for the active operation before editing", 409)
 		return
 	}
-	if in.Source != nil && in.Source.InlineCompose {
+	if in.ComposeBundle != nil || in.Source != nil && in.Source.InlineCompose {
 		var saved []byte
 		err := tx.QueryRow(r.Context(), "SELECT configuration FROM preview_policies WHERE workload_id=$1", r.PathValue("id")).Scan(&saved)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -152,7 +152,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if policy.Enabled {
-				http.Error(w, "disable previews before switching to Cove-managed Compose", 409)
+				http.Error(w, "disable previews before selecting Cove-managed Compose, multiple files or profiles", 409)
 				return
 			}
 		}
@@ -183,6 +183,9 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.GuardedDeploy == nil {
 			in.GuardedDeploy = old.GuardedDeploy
+		}
+		if in.ComposeBundle == nil {
+			in.ComposeBundle = old.ComposeBundle
 		}
 		if in.Environment == nil {
 			in.Environment = old.Environment

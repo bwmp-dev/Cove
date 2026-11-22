@@ -16,6 +16,7 @@ import { GitDeployKey } from "../components/GitDeployKey";
 import { GitProviderSource } from "../components/GitProviderSource";
 import { SourceTrigger } from "../components/SourceTrigger";
 import { DeployHook } from "../components/DeployHook";
+import { ComposeBundleSection } from "../components/ComposeBundle";
 import { projectsQuery } from "../api/projects";
 import { findPlacement } from "../lib/hierarchy";
 import { providerSourceQuery } from "../api/git-providers";
@@ -256,6 +257,7 @@ export function ResourceSource() {
   return (
     <>
       {editable ? <SourceForm workload={workload} /> : <SourceSummary workload={workload} />}
+      {(projects.data !== undefined || temporary) && <ComposeBundleSection workload={workload} editable={editable} temporary={temporary} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
       {editable && !workload.preview_source_id && <GitDeployKey workload={workload} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
       {editable && workload.source && provider.data === null && (
         <Section width="form" title="Automatic deployments">

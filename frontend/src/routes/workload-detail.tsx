@@ -38,7 +38,8 @@ import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queri
 import { ResourceExec } from "../components/ResourceExec";
 import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
-import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
+import { DeployReview } from "../components/DeployReview";
 import { DeleteResource } from "../components/DeleteResource";
 import { LogViewer } from "../components/LogViewer";
 import { OperationsTable } from "../components/OperationsTable";
@@ -167,6 +168,7 @@ function useResourceActions(workload: Workload) {
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
   const [confirmStop, setConfirmStop] = useState(false);
+  const [reviewDeploy, setReviewDeploy] = useState(false);
   const kind = workloadKind(workload.kind);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const blocked = !online || Boolean(active) || queue.isPending || operations.isPending;
@@ -187,7 +189,7 @@ function useResourceActions(workload: Workload) {
                 disabled={blocked}
                 aria-describedby={active ? statusId : undefined}
                 pending={pending}
-                onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate(action))}
+                onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? setReviewDeploy(true) : queue.mutate(action))}
               >
                 {!pending && <Icon aria-hidden className="size-3.5" />}
                 {label}
@@ -200,6 +202,17 @@ function useResourceActions(workload: Workload) {
     ),
     feedback: (
       <>
+        <Dialog open={reviewDeploy} title={kind === "job" ? `Deploy and run ${workload.name}?` : `Deploy ${workload.name}?`} onClose={() => setReviewDeploy(false)}>
+          <DeployReview
+            workloadId={workload.id}
+            confirmLabel={kind === "job" ? "Deploy and run" : "Deploy"}
+            onCancel={() => setReviewDeploy(false)}
+            onConfirm={() => {
+              setReviewDeploy(false);
+              queue.mutate("deploy");
+            }}
+          />
+        </Dialog>
         <ConfirmDialog
           open={confirmStop}
           title={`Stop ${workload.name}?`}

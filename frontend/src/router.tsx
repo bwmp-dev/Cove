@@ -80,6 +80,7 @@ const projectRoute = createRoute({ getParentRoute: () => appRoute, path: "/proje
 const projectOverviewRoute = createRoute({ getParentRoute: () => projectRoute, path: "/", component: lazyRouteComponent(() => import("./routes/project"), "ProjectOverview") });
 const environmentRoute = createRoute({ getParentRoute: () => projectRoute, path: "/environments/$environmentId", component: lazyRouteComponent(() => import("./routes/project"), "EnvironmentPage") });
 const projectPreviewsRoute = createRoute({ getParentRoute: () => projectRoute, path: "/previews", component: lazyRouteComponent(() => import("./routes/project-previews"), "ProjectPreviews") });
+const projectConfigurationRoute = createRoute({ getParentRoute: () => projectRoute, path: "/configuration", component: lazyRouteComponent(() => import("./routes/project-configuration"), "ProjectConfiguration") });
 
 const resourcesRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources", component: lazyRouteComponent(() => import("./routes/workloads"), "WorkloadsPage") });
 const resourceNewRoute = createRoute({
@@ -156,7 +157,7 @@ const routeTree = rootRoute.addChildren([
     storageRoute,
     notificationsRoute,
     projectsRoute,
-    projectRoute.addChildren([projectOverviewRoute, environmentRoute, projectPreviewsRoute]),
+    projectRoute.addChildren([projectOverviewRoute, environmentRoute, projectPreviewsRoute, projectConfigurationRoute]),
     resourcesRoute,
     resourceNewRoute,
     resourceRoute.addChildren([

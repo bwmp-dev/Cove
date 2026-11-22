@@ -4,7 +4,7 @@ import { DependencyMap } from "../components/DependencyMap";
 import { EnvironmentResources } from "../components/PrivateConnections";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
-import { Folder, GitBranch, Layers, Plus } from "lucide-react";
+import { FileCog, Folder, GitBranch, Layers, Plus } from "lucide-react";
 import { createContext, Fragment, use, useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import { projectsQuery, useCreateEnvironment, useDeleteEnvironment, useDeleteProject, type Environment, type Project } from "../api/projects";
@@ -16,7 +16,7 @@ import { CloneForm } from "../components/Clone";
 import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { PlacementRow } from "../components/EnvironmentList";
 import { Breadcrumbs, Button, EmptyState, Field, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section, SectionGrid, TabNav } from "../components/ui";
-import { countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
+import { canCompareEnvironments, countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can, canCreateProjects } from "../lib/permissions";
 import { useSession } from "../lib/session";
@@ -30,7 +30,7 @@ interface ProjectContextValue {
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
 
-function useProject() {
+export function useProject() {
   const value = use(ProjectContext);
   if (!value) throw new Error("Project pages must render inside the project layout.");
   return value;
@@ -331,6 +331,12 @@ function ProjectTabs({ project, resources, inPreview }: { project: Project; reso
         Previews
         {previews.length > 0 && <span className="text-xs font-normal text-fg-subtle tabular-nums">{previews.length}</span>}
       </Link>
+      {(can(project.permissions, "read") || canCompareEnvironments(project)) && (
+        <Link to="/projects/$projectId/configuration" params={{ projectId: project.id }} className={tabLinkClass}>
+          <FileCog aria-hidden className="size-3.5" />
+          Configuration
+        </Link>
+      )}
     </TabNav>
   );
 }

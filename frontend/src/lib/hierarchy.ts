@@ -17,6 +17,11 @@ export function productionEnvironments(project: Project) {
   return project.environments.filter((environment) => !environment.preview_id);
 }
 
+// Comparing needs read access to both environments, not to the project.
+export function canCompareEnvironments(project: Project) {
+  return productionEnvironments(project).filter((environment) => environment.permissions.includes("read")).length >= 2;
+}
+
 export function previewEnvironments(project: Project) {
   return project.environments.filter((environment) => environment.preview_id);
 }

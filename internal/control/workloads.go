@@ -23,6 +23,7 @@ func resourceID() string {
 }
 
 type workloadInput struct {
+	ComposeBundle    *worker.ComposeBundle           `json:"compose_bundle,omitempty"`
 	GuardedDeploy    *bool                           `json:"guarded_deploy,omitempty"`
 	FileSecrets      []worker.FileSecret             `json:"file_secrets,omitempty"`
 	Hooks            *worker.DeploymentHooks         `json:"hooks,omitempty"`
@@ -199,7 +200,13 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := resourceID()
-	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	if in.Action != "deploy" {
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'drift')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&request.RecordDrift); err != nil {
+			http.Error(w, "worker capabilities unavailable", 503)
+			return
+		}
+	}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
 	if in.Action == "drill" {
 		var supported bool
@@ -380,6 +387,13 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	dnsDone := make(chan error, 1)
 	go func() { dnsDone <- s.runDNS(dnsContext) }()
 	defer func() { stopDNS(); <-dnsDone }()
+	gitOpsContext, stopGitOps := context.WithCancel(ctx)
+	gitOpsDone := make(chan error, 1)
+	go func() {
+		defer close(gitOpsDone)
+		gitOpsDone <- s.runProjectGitOps(gitOpsContext)
+	}()
+	defer func() { stopGitOps(); <-gitOpsDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {
@@ -441,6 +455,8 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		select {
+		case err := <-gitOpsDone:
+			return err
 		case <-ctx.Done():
 			return nil
 		case <-timer.C:

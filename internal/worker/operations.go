@@ -25,6 +25,8 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	RecordDrift            bool                     `json:"record_drift,omitempty"`
+	ComposeBundle          *ComposeBundle           `json:"compose_bundle,omitempty"`
 	BuiltinDefaults        map[string]string        `json:"builtin_defaults,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
@@ -86,13 +88,14 @@ type routeRecovery struct {
 	running  bool
 }
 type deployedState struct {
-	PublicBuiltins map[string]string   `json:"public_builtins,omitempty"`
-	Private        *PrivateNetwork     `json:"private,omitempty"`
-	Networks       []NetworkAttachment `json:"networks,omitempty"`
-	Routes         []Route             `json:"routes,omitempty"`
-	Revision       string              `json:"revision,omitempty"`
-	ComposePath    string              `json:"compose_path"`
-	Environment    map[string]string   `json:"environment"`
+	AdditionalSecrets []string            `json:"additional_secrets,omitempty"`
+	PublicBuiltins    map[string]string   `json:"public_builtins,omitempty"`
+	Private           *PrivateNetwork     `json:"private,omitempty"`
+	Networks          []NetworkAttachment `json:"networks,omitempty"`
+	Routes            []Route             `json:"routes,omitempty"`
+	Revision          string              `json:"revision,omitempty"`
+	ComposePath       string              `json:"compose_path"`
+	Environment       map[string]string   `json:"environment"`
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
@@ -211,6 +214,15 @@ func ValidateRequest(r Request) error {
 	}
 	if !identifier.MatchString(r.ID) || !workloadIdentifier.MatchString(r.Workload) {
 		return errors.New("invalid operation or workload ID")
+	}
+	if err := ValidateComposeBundle(r.ComposeBundle, r.Source, r.Preview); err != nil {
+		return err
+	}
+	if r.ComposeBundle != nil {
+		encoded, err := json.Marshal(r)
+		if err != nil || len(encoded) > (2<<20)-(16<<10) {
+			return errors.New("Compose bundle and environment exceed the worker request limit")
+		}
 	}
 	switch r.Action {
 	case "preview_data", "environment_preview_remove":
@@ -604,6 +616,24 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 	err := e.perform(ctx, j.Request)
+	baselineFailed := false
+	if err == nil && j.Request.Kind != "job" {
+		switch j.Request.Action {
+		case "deploy", "stop", "start", "restart", "rollback", "routes", "restore", "restore_copy":
+			record := j.Request.RecordDrift
+			if !record {
+				_, baselineErr := os.Stat(filepath.Join(e.Root, "workloads", j.Request.Workload, "drift.json"))
+				record = baselineErr == nil
+				if baselineErr != nil && !os.IsNotExist(baselineErr) {
+					err = baselineErr
+				}
+			}
+			if record && err == nil {
+				err = e.recordDriftBaseline(ctx, j.Request)
+			}
+			baselineFailed = err != nil
+		}
+	}
 	// Containers may have been recreated; attach them to their private links again.
 	defer e.kickLinks()
 	e.mu.Lock()
@@ -640,6 +670,9 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	if err != nil {
 		j.Operation.State = "failed"
 		j.Operation.Error = "Operation failed; inspect the operation log."
+		if baselineFailed {
+			j.Operation.Error = "The operation completed, but its runtime configuration baseline could not be recorded; inspect the resource before retrying."
+		}
 		if ctx.Err() != nil {
 			j.Operation.State = "interrupted"
 			j.Operation.Error = "Execution interrupted; inspect workload before retrying."
@@ -682,6 +715,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			result = err
 		}
 	}()
+	var bundleSecrets []string
 	var publicBuiltins map[string]string
 	if len(r.BuiltinDefaults) > 0 {
 		r.Environment, publicBuiltins = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
@@ -872,6 +906,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		composePath = release.ComposePath
 		env = nil
+		log.secrets = append(log.secrets, release.AdditionalSecrets...)
 		for key, value := range release.Environment {
 			env = append(env, key+"="+value)
 			if public, ok := release.PublicBuiltins[key]; !ok || public != value {
@@ -903,6 +938,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		composePath = current.ComposePath
 		env = nil
+		log.secrets = append(log.secrets, current.AdditionalSecrets...)
 		for key, value := range current.Environment {
 			env = append(env, key+"="+value)
 			if public, ok := current.PublicBuiltins[key]; !ok || public != value {
@@ -920,11 +956,18 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
 		}
-		composePath, err = normalizeComposeFile(composePath)
+		composePath, err = e.prepareComposeBundle(ctx, r, dir, composePath, env)
 		if err != nil {
 			return err
 		}
 		args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+		if r.ComposeBundle != nil {
+			bundleSecrets, err = composeBundleSecrets(composePath)
+			if err != nil {
+				return errors.New("could not prepare Compose bundle log redaction")
+			}
+			log.secrets = append(log.secrets, bundleSecrets...)
+		}
 		if len(r.BuiltinDefaults) > 0 {
 			prepared, err := e.prepareBuiltinEnvironment(ctx, r, dir, args, env)
 			if err != nil {
@@ -1047,6 +1090,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 		}
+		state.AdditionalSecrets = bundleSecrets
 		state.PublicBuiltins = publicBuiltins
 		state.Networks = r.Networks
 		state.Private = r.Private

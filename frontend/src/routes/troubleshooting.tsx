@@ -5,9 +5,10 @@ import { errorMessage, request } from "../api/client";
 import { nodesQuery, workloadOperationsQuery, workloadRuntimeQuery } from "../api/queries";
 import { ContainerLogs } from "../components/Runtime";
 import { LogViewer } from "../components/LogViewer";
+import { RuntimeDrift } from "../components/RuntimeDrift";
 import { Button, Notice, Section } from "../components/ui";
 import { containerTone } from "../lib/containers";
-import { isActive } from "../lib/operations";
+import { isActive, workloadKind } from "../lib/operations";
 import { useResource } from "./workload-detail";
 
 export function Troubleshooting() {
@@ -31,6 +32,7 @@ export function Troubleshooting() {
    </ul>
    <div className="flex flex-wrap gap-4 border-t border-line pt-3 text-sm"><Link to="/resources/$resourceId/preflight" params={{ resourceId: resource.id }} className="underline">Run deployment preflight</Link><Link to="/resources/$resourceId/configuration-history" params={{ resourceId: resource.id }} className="underline">Inspect configuration changes</Link><Link to="/resources/$resourceId/domains" params={{ resourceId: resource.id }} className="underline">Inspect domains</Link></div>
   </Section>
+  {workloadKind(resource.kind) === "service" && <RuntimeDrift workloadId={resource.id} />}
   <Button onClick={() => setLogs(!logs)}>{logs ? "Hide diagnostic logs" : "Show diagnostic logs"}</Button>
   {logs && <><Section title="Current container logs"><ContainerLogs workloadId={resource.id} /></Section>{latest && <Section title="Latest operation logs"><LogViewer operationId={latest.id} active={isActive(latest.state)} /></Section>}</>}
  </div>;

@@ -28,6 +28,8 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Drift         *DriftReport         `json:"drift,omitempty"`
+	SourceFiles   *SourceFiles         `json:"source_files,omitempty"`
 	Exec          *ExecResult          `json:"exec,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
 	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
@@ -51,6 +53,21 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "drift":
+		report, err := e.Drift(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Drift: &report}
+	case "source_files":
+		if r.Request == nil {
+			return RPCResponse{Error: "source selection required"}
+		}
+		files, err := e.ReadSourceFiles(ctx, *r.Request)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{SourceFiles: files}
 	case "exec":
 		if r.Exec == nil {
 			return RPCResponse{Error: "command required"}
@@ -328,7 +345,7 @@ func RPCTimeout(method string) time.Duration {
 		return 5 * time.Minute
 	case "links_apply":
 		return 4 * time.Minute
-	case "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
+	case "source_files", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
 		return 3 * time.Minute
 	}
 	return 30 * time.Second

@@ -81,11 +81,6 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 			return report
 		}
 	}
-	composePath, err = normalizeComposeFile(composePath)
-	if err != nil {
-		add("Compose", "error", "Cannot normalize Compose configuration.")
-		return report
-	}
 	if len(r.BuiltinDefaults) > 0 {
 		_, overridden := r.Environment[CoveCommitSHA]
 		r.Environment, _ = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
@@ -104,6 +99,11 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 			return report
 		}
 		env = append(env, "DOCKER_CONFIG="+config)
+	}
+	composePath, err = e.prepareComposeBundle(ctx, r, dir, composePath, env)
+	if err != nil {
+		add("Compose", "error", "Cannot resolve selected Compose files and profiles.")
+		return report
 	}
 	args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath, "config", "--format", "json"}
 	resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}

@@ -689,7 +689,7 @@ func (s *Server) githubAppPush(w http.ResponseWriter, r *http.Request, body []by
 		}
 		c.Source.Revision = event.After
 		c.Source.Token = ""
-		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Source: c.Source, Compose: c.Compose, Environment: c.Environment, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy})
+		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Source: c.Source, ComposeBundle: c.ComposeBundle, Compose: c.Compose, Environment: c.Environment, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy})
 	}
 	if err == nil {
 		err = rows.Err()

@@ -205,6 +205,10 @@ func (s *Server) previews(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "previews require a repository Compose file; Cove-managed configuration is not shared with pull requests", 409)
 			return
 		}
+		if config.ComposeBundle != nil {
+			http.Error(w, "restricted pull-request previews require one repository Compose file without profiles", 409)
+			return
+		}
 	}
 	if in.Enabled && (!connected || !capable) {
 		http.Error(w, "connect a managed Git repository and upgrade and verify the worker before enabling previews", 409)

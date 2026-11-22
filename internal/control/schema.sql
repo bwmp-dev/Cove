@@ -772,3 +772,50 @@ CREATE TABLE IF NOT EXISTS access_tokens (
 );
 CREATE INDEX IF NOT EXISTS access_tokens_owner ON access_tokens(user_id);
 ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS mcp_enabled boolean NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS configuration_resource_keys (
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ key text NOT NULL,
+ workload_id text NOT NULL UNIQUE REFERENCES workloads(id) ON DELETE CASCADE,
+ PRIMARY KEY(project_id,key)
+);
+CREATE TABLE IF NOT EXISTS configuration_drafts (
+ id text PRIMARY KEY,
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ creator_id text NOT NULL,
+ payload bytea NOT NULL,
+ base_version text NOT NULL,
+ changes jsonb NOT NULL,
+ operation_ids jsonb NOT NULL DEFAULT '[]',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ applied_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS configuration_drafts_project ON configuration_drafts(project_id,created_at DESC);
+
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS declared_payload bytea;
+CREATE OR REPLACE FUNCTION cove_declared_operation_payload() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ NEW.declared_payload=NEW.payload;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS declared_operation_payload ON operations;
+CREATE TRIGGER declared_operation_payload BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_declared_operation_payload();
+
+CREATE TABLE IF NOT EXISTS configuration_gitops (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ path text NOT NULL DEFAULT 'cove.yaml',
+ automatic boolean NOT NULL DEFAULT false,
+ creator_id text NOT NULL,
+ last_revision text NOT NULL DEFAULT '',
+ desired_payload bytea,
+ last_draft_id text REFERENCES configuration_drafts(id) ON DELETE SET NULL,
+ last_error text NOT NULL DEFAULT '',
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ synced_at timestamptz,
+ next_scan_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS configuration_gitops_due ON configuration_gitops(next_scan_at) WHERE automatic;
+
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS drift_prepared boolean NOT NULL DEFAULT false;

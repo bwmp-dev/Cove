@@ -65,3 +65,26 @@ it("replaces the environment sections instead of accumulating them when switchin
   expect(screen.queryByRole("link", { name: "web" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: "api" })).toBeInTheDocument();
 });
+
+it.each([
+  { readable: ["read"], shown: true },
+  { readable: [], shown: false },
+])("shows the Configuration tab without project read only when two environments are readable ($shown)", async ({ readable, shown }) => {
+  route.environmentId = "e1";
+  const limited = { ...project, permissions: [], environments: [{ id: "e1", name: "production", permissions: ["read"] }, { id: "e2", name: "staging", permissions: readable }] };
+  vi.mocked(request).mockImplementation((_method: string, path: string) => {
+    if (path === "/api/projects") return Promise.resolve([limited]);
+    if (path === "/api/workloads") return Promise.resolve([]);
+    if (path === "/api/operations") return Promise.resolve([]);
+    if (path === "/api/session") return Promise.resolve({ teams: [], is_admin: false });
+    if (path.startsWith("/api/projects/p/connections")) return Promise.resolve({ resources: [], connections: [], shared_networks: [] });
+    return Promise.reject(new Error(`unexpected ${path}`));
+  });
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <ProjectLayout />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("heading", { name: "Resources in production" });
+  expect(screen.queryByRole("link", { name: "Configuration" }) !== null).toBe(shown);
+});

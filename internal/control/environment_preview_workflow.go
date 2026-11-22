@@ -909,7 +909,7 @@ func (s *Server) previewDeployRequest(ctx context.Context, tx pgx.Tx, p *preview
 	if err := s.unsealJSON(raw, &config); err != nil {
 		return worker.Request{}, err
 	}
-	request := worker.Request{ID: resourceID(), Workload: resource.ResourceID, Action: "deploy", Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets}
+	request := worker.Request{ID: resourceID(), Workload: resource.ResourceID, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets}
 	isolation := resource.Isolation
 	isolation.Images = nil
 	isolation.Refresh = false

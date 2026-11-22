@@ -11,6 +11,9 @@ import (
 )
 
 type Probe struct {
+	Drift               bool         `json:"drift"`
+	SourceFiles         bool         `json:"source_files"`
+	ComposeBundles      bool         `json:"compose_bundles"`
 	Exec                bool         `json:"exec"`
 	BuiltinVariables    bool         `json:"builtin_variables"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
@@ -45,7 +48,7 @@ type Probe struct {
 func Inspect(ctx context.Context) Probe {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	p := Probe{Exec: true, BuiltinVariables: true, GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
+	p := Probe{Drift: true, SourceFiles: true, ComposeBundles: true, Exec: true, BuiltinVariables: true, GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
 	p.Previews = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true

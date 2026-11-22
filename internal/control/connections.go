@@ -354,6 +354,35 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	var driftPrepared bool
+	err := s.DB.QueryRow(ctx, `SELECT drift_prepared FROM operations WHERE id=$1`, r.ID).Scan(&driftPrepared)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if !driftPrepared {
+		// Previously prepared requests may already exist on a worker with a recorded digest.
+		if !r.InfrastructurePrepared && r.Action == "deploy" {
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'drift')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&r.RecordDrift); err != nil {
+				return err
+			}
+		}
+		payload, err := s.sealJSON(r)
+		if err != nil {
+			return err
+		}
+		if _, err = s.DB.Exec(ctx, `UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1`, r.ID, payload); err != nil {
+			return err
+		}
+	}
+	if r.Action == "deploy" && r.ComposeBundle != nil {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'compose_bundles')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before deploying multiple Compose files or profiles")
+		}
+	}
 	if r.Action == "deploy" && r.Hooks != nil && (len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil) {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'guarded_hooks')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
@@ -398,7 +427,7 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			if err != nil {
 				return err
 			}
-			if _, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2 WHERE id=$1", r.ID, sealed); err != nil {
+			if _, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1", r.ID, sealed); err != nil {
 				return err
 			}
 		}
@@ -515,6 +544,6 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2 WHERE id=$1", r.ID, encrypted)
+	_, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1", r.ID, encrypted)
 	return err
 }

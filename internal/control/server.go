@@ -134,6 +134,22 @@ func (s *Server) Handler() http.Handler {
 	for _, pattern := range []string{"GET /api/secret-providers", "POST /api/secret-providers", "PUT /api/secret-providers/{connection}", "DELETE /api/secret-providers/{connection}"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.secretProviders)))
 	}
+	for _, pattern := range []string{"GET /api/projects/{id}/configuration/gitops", "PUT /api/projects/{id}/configuration/gitops", "DELETE /api/projects/{id}/configuration/gitops"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.projectGitOps)))
+	}
+	mux.Handle("POST /api/projects/{id}/configuration/gitops/sync", s.admin(http.HandlerFunc(s.syncProjectGitOps)))
+	mux.Handle("GET /api/workloads/{id}/configuration-diff", s.admin(http.HandlerFunc(s.workloadConfigurationDiff)))
+	mux.Handle("GET /api/workloads/{id}/drift", s.admin(http.HandlerFunc(s.workloadDrift)))
+	mux.Handle("GET /api/projects/{id}/configuration/compare", s.admin(http.HandlerFunc(s.compareEnvironments)))
+	mux.Handle("POST /api/projects/{id}/configuration/export", s.admin(http.HandlerFunc(s.exportProjectConfiguration)))
+	mux.Handle("GET /api/projects/{id}/configuration", s.admin(http.HandlerFunc(s.projectConfigurationHandler)))
+	for _, pattern := range []string{"GET /api/projects/{id}/configuration/drafts", "POST /api/projects/{id}/configuration/drafts", "DELETE /api/projects/{id}/configuration/drafts/{draft}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.configurationDrafts)))
+	}
+	mux.Handle("POST /api/projects/{id}/configuration/drafts/{draft}/apply", s.admin(http.HandlerFunc(s.applyConfigurationDraft)))
+	for _, pattern := range []string{"GET /api/workloads/{id}/compose-bundle", "PUT /api/workloads/{id}/compose-bundle", "POST /api/workloads/{id}/compose-bundle/export"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.composeBundle)))
+	}
 	mux.Handle("POST /api/workloads/{id}/variables/import", s.admin(http.HandlerFunc(s.environmentFile)))
 	mux.Handle("POST /api/workloads/{id}/variables/export", s.admin(http.HandlerFunc(s.environmentFile)))
 	mux.Handle("GET /api/workloads/{id}/variables/builtins", s.admin(http.HandlerFunc(s.builtinVariables)))

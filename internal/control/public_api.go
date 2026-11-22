@@ -68,6 +68,25 @@ func (s *Server) publicRoutes() []publicRoute {
 		{"GET", "/environments/{id}", "projects:read", "Read an environment", nil, map[string]string{}, 200, s.publicGroup},
 		{"PUT", "/environments/{id}", "projects:write", "Rename an environment", apiNameInput{}, apiID{}, 200, s.publicGroup},
 		{"DELETE", "/environments/{id}", "projects:write", "Delete an empty environment", nil, apiOK{}, 200, s.deleteEnvironment},
+		{"GET", "/projects/{id}/configuration", "projects:read", "Read the canonical project declaration with secret values omitted", nil, struct {
+			Version     string               `json:"version"`
+			ResourceIDs map[string]string    `json:"resource_ids"`
+			Manifest    projectConfiguration `json:"manifest"`
+		}{}, 200, s.projectConfigurationHandler},
+		{"POST", "/projects/{id}/configuration/export", "secrets:read", "Export an audited private ZIP of cove.yaml, plain Compose files and resolved .env files; Git supporting files require the pinned repository working tree", struct {
+			EnvironmentID string `json:"environment_id,omitempty"`
+		}{}, struct{}{}, 200, s.exportProjectConfiguration},
+		{"GET", "/projects/{id}/configuration/compare", "projects:read", "Compare two persistent environments by resource name; secret values are omitted", nil, map[string]any{}, 200, s.compareEnvironments},
+		{"GET", "/projects/{id}/configuration/drafts", "configuration:write", "List redacted saved diffs", nil, []map[string]any{}, 200, s.configurationDrafts},
+		{"POST", "/projects/{id}/configuration/drafts", "configuration:write", "Validate cove.yaml and save an encrypted draft without applying or deploying", struct {
+			Content string `json:"content"`
+		}{}, map[string]any{}, 201, s.configurationDrafts},
+		{"DELETE", "/projects/{id}/configuration/drafts/{draft}", "configuration:write", "Delete a saved configuration draft", nil, apiOK{}, 200, s.configurationDrafts},
+		{"POST", "/projects/{id}/configuration/drafts/{draft}/apply", "configuration:write", "Apply a reviewed declaration if its baseline is current; route changes may queue normal route operations, deployments remain explicit", nil, map[string]any{}, 200, s.applyConfigurationDraft},
+		{"GET", "/projects/{id}/configuration/gitops", "projects:read", "Read GitOps status and declaration drift without values", nil, map[string]any{}, 200, s.projectGitOps},
+		{"PUT", "/projects/{id}/configuration/gitops", "configuration:write", "Connect cove.yaml from an existing project Git resource; automatic configuration apply is explicitly opt-in", gitOpsInput{}, map[string]any{}, 200, s.projectGitOps},
+		{"DELETE", "/projects/{id}/configuration/gitops", "configuration:write", "Disconnect a GitOps source without changing workloads", nil, apiOK{}, 200, s.projectGitOps},
+		{"POST", "/projects/{id}/configuration/gitops/sync", "configuration:write", "Fetch cove.yaml and stage a pending diff, applying only if automatic apply is enabled", nil, map[string]any{}, 200, s.syncProjectGitOps},
 		{"GET", "/workloads", "workloads:read", "List accessible resources", nil, []map[string]any{}, 200, s.listWorkloads},
 		{"POST", "/workloads", "workloads:write", "Create a resource without deploying", workloadInput{}, apiID{}, 201, s.createWorkload},
 		{"GET", "/workloads/{id}", "workloads:read", "Read resource configuration with secret values omitted", nil, workloadView{}, 200, s.getWorkload},
@@ -77,6 +96,15 @@ func (s *Server) publicRoutes() []publicRoute {
 			Routes []worker.Route `json:"routes"`
 		}{}, map[string]any{}, 200, s.updateRoutes},
 		{"POST", "/workloads/{id}/operations", "workloads:operate", "Queue an operation; restore/drill additionally require workloads:restore", apiOperationInput{}, apiID{}, 202, s.queueOperation},
+		{"GET", "/workloads/{id}/configuration-diff", "workloads:read", "Compare saved configuration with the last successful deployment declaration; secret values are omitted", nil, map[string]any{}, 200, s.workloadConfigurationDiff},
+		{"GET", "/workloads/{id}/drift", "workloads:read", "Inspect runtime configuration changes since the last successful Cove operation without returning values", nil, worker.DriftReport{}, 200, s.workloadDrift},
+		{"GET", "/workloads/{id}/compose-bundle", "workloads:read", "Read ordered Compose selection metadata without file contents", nil, map[string]any{}, 200, s.composeBundle},
+		{"PUT", "/workloads/{id}/compose-bundle", "workloads:write", "Save ordered Compose overrides and profiles without deploying; null bundle clears the selection", struct {
+			Bundle *worker.ComposeBundle `json:"bundle"`
+		}{}, map[string]any{}, 200, s.composeBundle},
+		{"POST", "/workloads/{id}/compose-bundle/export", "secrets:read", "Explicit audited read of private Compose override and ancillary-file contents", nil, struct {
+			Bundle *worker.ComposeBundle `json:"bundle"`
+		}{}, 200, s.composeBundle},
 		{"GET", "/workloads/{id}/runtime", "workloads:read", "Read current container metadata", nil, struct {
 			Containers []worker.Container `json:"containers"`
 		}{}, 200, s.workloadRuntime},
@@ -196,10 +224,13 @@ func (s *Server) openAPIDocument() map[string]any {
 			paths[route.Path] = entry
 		}
 		responses := map[string]any{fmt.Sprint(route.Status): map[string]any{"description": "Success", "content": map[string]any{"application/json": map[string]any{"schema": apiSchema(reflect.TypeOf(route.Output))}}}}
+		if route.Path == "/projects/{id}/configuration/export" {
+			responses["200"] = map[string]any{"description": "Private ZIP archive", "content": map[string]any{"application/zip": map[string]any{"schema": map[string]any{"type": "string", "format": "binary"}}}}
+		}
 		if route.Method == "PUT" && route.Path == "/workloads/{id}/routes" {
 			responses["202"] = responses["200"]
 		}
-		for _, code := range []int{400, 401, 403, 404, 409, 429, 500, 502, 503} {
+		for _, code := range []int{400, 401, 403, 404, 409, 413, 429, 500, 502, 503} {
 			responses[fmt.Sprint(code)] = map[string]any{"description": http.StatusText(code), "content": map[string]any{"text/plain": map[string]any{"schema": map[string]any{"type": "string"}}}}
 		}
 		operation := map[string]any{"summary": route.Summary, "operationId": strings.ToLower(route.Method) + strings.NewReplacer("/", "_", "{", "", "}", "").Replace(route.Path), "x-cove-scope": route.Scope, "security": []any{map[string]any{"bearer": []any{}}}, "responses": responses}
@@ -207,6 +238,11 @@ func (s *Server) openAPIDocument() map[string]any {
 		for _, part := range strings.Split(route.Path, "/") {
 			if strings.HasPrefix(part, "{") {
 				params = append(params, map[string]any{"name": strings.Trim(part, "{}"), "in": "path", "required": true, "schema": map[string]any{"type": "string"}})
+			}
+		}
+		if route.Path == "/projects/{id}/configuration/compare" {
+			for _, name := range []string{"from", "to"} {
+				params = append(params, map[string]any{"name": name, "in": "query", "required": true, "schema": map[string]any{"type": "string"}})
 			}
 		}
 		operation["parameters"] = params

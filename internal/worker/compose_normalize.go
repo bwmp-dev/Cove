@@ -22,15 +22,40 @@ func normalizeComposeFile(path string) (string, error) {
 	if closeErr != nil {
 		return "", closeErr
 	}
-	if len(data) > 1<<20 {
+	normalizedText, err := NormalizeComposeText(string(data))
+	if err != nil {
+		return "", err
+	}
+	if normalizedText == string(data) {
+		return path, nil
+	}
+	data = []byte(normalizedText)
+	// Keep relative include, extends, env_file and build paths beside the original file.
+	normalized, err := os.CreateTemp(filepath.Dir(path), ".cove-normalized-*.yaml")
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := normalized.Write(data)
+	closeErr = normalized.Close()
+	if writeErr != nil {
+		return "", writeErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return normalized.Name(), nil
+}
+
+func NormalizeComposeText(content string) (string, error) {
+	if len(content) > 1<<20 {
 		return "", errors.New("Compose file exceeds 1 MiB")
 	}
 	var document yaml.Node
-	if err = yaml.Unmarshal(data, &document); err != nil {
+	if err := yaml.Unmarshal([]byte(content), &document); err != nil {
 		return "", err
 	}
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return path, nil
+		return content, nil
 	}
 	changed := false
 	root := document.Content[0]
@@ -54,24 +79,11 @@ func normalizeComposeFile(path string) (string, error) {
 		}
 	}
 	if !changed {
-		return path, nil
+		return content, nil
 	}
-	data, err = yaml.Marshal(&document)
+	data, err := yaml.Marshal(&document)
 	if err != nil {
 		return "", err
 	}
-	// Keep relative include, extends, env_file and build paths beside the original file.
-	normalized, err := os.CreateTemp(filepath.Dir(path), ".cove-normalized-*.yaml")
-	if err != nil {
-		return "", err
-	}
-	_, writeErr := normalized.Write(data)
-	closeErr = normalized.Close()
-	if writeErr != nil {
-		return "", writeErr
-	}
-	if closeErr != nil {
-		return "", closeErr
-	}
-	return normalized.Name(), nil
+	return string(data), nil
 }

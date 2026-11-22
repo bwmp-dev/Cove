@@ -85,6 +85,7 @@ func (e *Engine) ContainerLogs(ctx context.Context, id string) (string, error) {
 	}
 	var output bytes.Buffer
 	log := &boundedLog{file: &output, remaining: 65536}
+	log.secrets = append(log.secrets, current.AdditionalSecrets...)
 	var environment []string
 	for key, value := range current.Environment {
 		environment = append(environment, key+"="+value)

@@ -28,7 +28,7 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "configuration unavailable", 503)
 		return
 	}
-	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Compose: c.Compose, Source: c.Source, Environment: c.Environment, Limits: c.Limits, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy}
+	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", ComposeBundle: c.ComposeBundle, Compose: c.Compose, Source: c.Source, Environment: c.Environment, Limits: c.Limits, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy}
 	// The inspection has no operation row. Preparation enriches only this request;
 	// its persistence UPDATE matches no row, and no deployment is queued.
 	if err = s.prepareInfrastructure(r.Context(), &request); err != nil {
