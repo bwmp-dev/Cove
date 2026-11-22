@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { fillComposeEditor } from "./compose-editor";
 
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
 const widths = [320, 390, 768, 1280, 1920];
@@ -55,7 +56,7 @@ test("environment previews: recipe from a real deployment, preview states and co
   await page.getByRole("button", { name: "Custom Compose or Git" }).click();
   await page.getByLabel("Name", { exact: true }).fill("preview-api");
   await chooseOption(page.getByLabel("Node", { exact: true }), "ready-browser-worker");
-  await page.getByLabel("Compose file", { exact: true }).fill("services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'sleep 300']\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n");
+  await fillComposeEditor(page.getByLabel("Compose file", { exact: true }), "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'sleep 300']\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n");
   await page.getByRole("button", { name: "Create resource", exact: true }).click();
   await expect(page.getByRole("heading", { name: "preview-api", exact: true })).toBeVisible();
   const url = page.url();
