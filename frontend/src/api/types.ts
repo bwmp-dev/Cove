@@ -6,6 +6,7 @@ export interface Capabilities {
   shared_host?: { coolify_detected: boolean; cleanup_verified: boolean };
   resource_limits?: boolean;
   terminal?: boolean;
+  exec?: boolean;
   infrastructure?: boolean;
   protocol: number;
   os: string;
@@ -214,7 +215,11 @@ export interface Container {
   state: string;
   status: string;
   ports: string;
+  service?: string;
 }
+
+export interface ExecRequest { service: string; container?: string; command: string[]; timeout_seconds: number }
+export interface ExecResult { output: string; exit_code: number; truncated: boolean; timed_out: boolean }
 
 export interface WorkloadRuntime {
   containers: Container[];

@@ -35,6 +35,7 @@ import { errorMessage, isStatus } from "../api/client";
 import { useCancelOperation, useQueueOperation } from "../api/mutations";
 import { projectsQuery, useAssignEnvironment, type Project } from "../api/projects";
 import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
+import { ResourceExec } from "../components/ResourceExec";
 import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -615,10 +616,21 @@ export function ResourceOverview() {
 
 export function ResourceLogs() {
   const workload = useResource();
+  const operations = useQuery(workloadOperationsQuery(workload.id));
+  const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   return (
-    <Section title="Container logs" description="Recent output from the resource's containers on the node.">
-      <ContainerLogs workloadId={workload.id} />
-    </Section>
+    <>
+      <Section title="Container logs" description="Recent output from the resource's containers on the node.">
+        <ContainerLogs workloadId={workload.id} />
+      </Section>
+      <Section title="Run a command" width="form" description="Run one bounded command in a running container of this resource, for example a migration or a status check. Only editors can run commands.">
+        {can(workload.permissions, "edit") ? (
+          <ResourceExec key={workload.id} workload={workload} operationActive={Boolean(active)} />
+        ) : (
+          <p className="text-[13px] text-fg-muted">Your access to this resource does not include running commands. Ask a team administrator for editor access.</p>
+        )}
+      </Section>
+    </>
   );
 }
 

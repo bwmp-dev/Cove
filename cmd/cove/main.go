@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"cove/internal/cli"
 	"cove/internal/connect"
 	"cove/internal/control"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"net/http"
@@ -20,6 +23,17 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "connect" {
 		if err := connect.Run(ctx, os.Args[2:]); err != nil {
 			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 {
+		if err := cli.Run(ctx, os.Args[1:]); err != nil {
+			var exit *cli.ExitError
+			if errors.As(err, &exit) {
+				os.Exit(exit.Code)
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
 		return
 	}

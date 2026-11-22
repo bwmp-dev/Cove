@@ -1,0 +1,8 @@
+# Swagger UI's dependencies ship install scripts that the browser bundle does not need
+# (usage telemetry, native parser builds and a postinstall banner).
+allowBuilds:
+  '@scarf/scarf': false
+  '@tree-sitter-grammars/tree-sitter-yaml': false
+  core-js-pure: false
+  tree-sitter: false
+  tree-sitter-json: false

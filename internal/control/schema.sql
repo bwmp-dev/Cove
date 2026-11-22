@@ -760,3 +760,15 @@ CREATE TABLE IF NOT EXISTS secret_providers (
     configuration bytea NOT NULL
 );
 CREATE INDEX IF NOT EXISTS secret_providers_team ON secret_providers(team_id);
+CREATE TABLE IF NOT EXISTS access_tokens (
+ id text PRIMARY KEY,
+ name text NOT NULL,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ team_id text REFERENCES teams(id) ON DELETE CASCADE,
+ scopes text[] NOT NULL,
+ token_hash bytea NOT NULL UNIQUE,
+ expires_at timestamptz NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS access_tokens_owner ON access_tokens(user_id);
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS mcp_enabled boolean NOT NULL DEFAULT false;

@@ -208,6 +208,10 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
+	case path == "/api/access-tokens" || strings.HasPrefix(path, "/api/access-tokens/"):
+		return true
+	case path == "/api/mcp":
+		return p.Admin || deny()
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):
 		return true
 	case path == "/api/github/app" || path == "/api/github/app/connect" || strings.HasPrefix(path, "/api/github/app/installations/") && r.Method == "PUT":
@@ -290,6 +294,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		// Each preview is filtered by access to its production environment.
 		return true
 	case strings.HasPrefix(path, "/api/projects/"):
+		if r.Method == "GET" && r.Context().Value(apiRouteKey{}) != nil {
+			return s.requireAccess(w, r, "project", id, 1)
+		}
 		if r.Method == "GET" && strings.HasSuffix(path, "/connections") {
 			// Environment-scoped members view their environment's graph; each resource is still filtered by access.
 			if environment := r.URL.Query().Get("environment"); environment != "" {
@@ -302,6 +309,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return s.requireAccess(w, r, "project", id, 3)
 	case strings.HasPrefix(path, "/api/environments/"):
+		if r.Method == "GET" && r.Context().Value(apiRouteKey{}) != nil {
+			return s.requireAccess(w, r, "environment", id, 1)
+		}
 		if r.Method != "GET" {
 			var preview bool
 			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM environment_previews WHERE environment_id=$1)`, id).Scan(&preview); err != nil {

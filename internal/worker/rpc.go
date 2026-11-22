@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Exec      *ExecRequest          `json:"exec,omitempty"`
 	Links     *LinkConfig           `json:"links,omitempty"`
 	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
 	Tunnel    *TunnelRequest        `json:"tunnel,omitempty"`
@@ -27,6 +28,7 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Exec          *ExecResult          `json:"exec,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
 	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
 	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
@@ -49,6 +51,16 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "exec":
+		if r.Exec == nil {
+			return RPCResponse{Error: "command required"}
+		}
+		result, err := e.Exec(ctx, *r.Exec)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Exec: &result}
+
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()
 		if err != nil {

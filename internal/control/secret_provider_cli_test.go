@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -105,5 +106,12 @@ func TestOnePasswordServiceTokensCannotSelectArbitraryHosts(t *testing.T) {
 		if validOnePasswordServiceToken(token) {
 			t.Fatal("unsafe CLI destination accepted", host)
 		}
+	}
+}
+
+func TestSecretCommandOutputCannotBypassLimitThroughStringWriter(t *testing.T) {
+	output := &secretOutput{}
+	if _, err := io.WriteString(output, strings.Repeat("x", 2*1024*1024+1)); err == nil {
+		t.Fatal("CLI string output bypassed bound")
 	}
 }

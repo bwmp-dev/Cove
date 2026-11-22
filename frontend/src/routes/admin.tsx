@@ -1,4 +1,5 @@
 import { InstanceIntegrations } from "../components/InstanceIntegrations";
+import { McpSettings } from "../components/McpSettings";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -203,11 +204,14 @@ export function AdminPage() {
   }
   return (
     <>
-      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in and update settings for this Cove instance." />
+      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, MCP and update settings for this Cove instance." />
       <Section title="Sign-in" width="form">
         <SignInSettings />
       </Section>
       <InstanceIntegrations />
+      <Section title="MCP server" width="form" description="Let MCP clients use the public API with scoped API keys. Off by default.">
+        <McpSettings />
+      </Section>
       <Section title="Updates" width="form"><UpdateChannel /></Section>
     </>
   );

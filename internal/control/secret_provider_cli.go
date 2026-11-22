@@ -51,13 +51,13 @@ type cliVariableSource struct {
 	command secretCommandFunc
 }
 
-type secretOutput struct{ bytes.Buffer }
+type secretOutput struct{ data bytes.Buffer }
 
 func (b *secretOutput) Write(value []byte) (int, error) {
-	if b.Len()+len(value) > 2*1024*1024 {
+	if b.data.Len()+len(value) > 2*1024*1024 {
 		return 0, errors.New("secret response exceeds limit")
 	}
-	return b.Buffer.Write(value)
+	return b.data.Write(value)
 }
 func runSecretCommand(ctx context.Context, name string, args, environment []string) ([]byte, error) {
 	if _, err := exec.LookPath(name); err != nil {
@@ -72,7 +72,7 @@ func runSecretCommand(ctx context.Context, name string, args, environment []stri
 	if err := command.Run(); err != nil {
 		return nil, errSecretUnavailable
 	}
-	return output.Bytes(), nil
+	return output.data.Bytes(), nil
 }
 
 var secretUUID = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)

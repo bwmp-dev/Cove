@@ -1,4 +1,6 @@
-import { KeyRound } from "lucide-react";
+import { BookOpen, KeyRound } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { ApiKeyList, CreateApiKey } from "../components/ApiKeys";
 import { Select } from "../components/Select";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -8,7 +10,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
 import { Button, Field, LoadingRows, Notice, PageHeader, Section, SectionGrid } from "../components/ui";
 import { useOnline } from "../lib/hooks";
-import { inputClass, tableHeadClass, tableRowClass } from "../lib/styles";
+import { buttonClass, inputClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { formatAbsolute } from "../lib/format";
 import { can } from "../lib/permissions";
 
@@ -39,7 +41,7 @@ function CreateToken() {
   }, [token]);
   if (create.data) return <div className="min-w-0 space-y-3">
     <Notice title="Copy this token now">It will not be shown again. It grants access only to the selected resource.</Notice>
-    <Field id="issued-token" label="New API token"><input id="issued-token" ref={issued} className={inputClass} readOnly type="password" value={create.data.token} /></Field>
+    <Field id="issued-token" label="New resource token"><input id="issued-token" ref={issued} className={inputClass} readOnly type="password" value={create.data.token} /></Field>
     <div className="flex gap-2"><CopyButton text={create.data.token} label="Copy token" /><Button onClick={() => create.reset()}>Close</Button></div>
   </div>;
   return <form className="min-w-0 space-y-4" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
@@ -61,18 +63,27 @@ export function TokensPage() {
   const [selected, setSelected] = useState<Token | null>(null);
   const revoke = useMutation({ mutationFn: (id: string) => request("DELETE", `/api/tokens/${encodeURIComponent(id)}`), onSuccess: () => client.invalidateQueries({ queryKey: tokenKey }) });
   return <>
-    <PageHeader icon={<KeyRound aria-hidden />} title="API tokens" description="Give automation access to one resource in this team, with a fixed permission and expiry. Tokens never exceed your own access." />
+    <PageHeader
+      icon={<KeyRound aria-hidden />}
+      title="API keys and tokens"
+      description="API keys use the versioned API, CLI and MCP with chosen permissions. Resource tokens give automation access to one resource. Neither exceeds your own access."
+      actions={<Link to="/api-docs" className={buttonClass()}><BookOpen aria-hidden className="size-3.5" />API reference</Link>}
+    />
     <SectionGrid>
-      <Section title="Create token"><CreateToken /></Section>
-      <Section title="Existing tokens" flush>
+      <Section title="Create API key" description="For the /api/v1 API, the cove CLI and MCP clients."><CreateApiKey /></Section>
+      <Section title="API keys" flush><ApiKeyList /></Section>
+    </SectionGrid>
+    <SectionGrid>
+      <Section title="Create resource token" description="For existing automation that deploys or reads one resource through /api."><CreateToken /></Section>
+      <Section title="Resource tokens" flush>
         {tokens.isPending && <LoadingRows label="Loading tokens" />}
         {(tokens.isError || revoke.isError) && <div className="space-y-2 p-3">
           {tokens.isError && <Notice tone="error" title="Could not load tokens">{errorMessage(tokens.error)}</Notice>}
           {revoke.isError && <Notice tone="error" title="Could not revoke token">{errorMessage(revoke.error)}</Notice>}
         </div>}
-        {tokens.data?.length === 0 && <p className="px-4 py-3 text-[13px] text-fg-muted">No API tokens created.</p>}
+        {tokens.data?.length === 0 && <p className="px-4 py-3 text-[13px] text-fg-muted">No resource tokens created.</p>}
         {tokens.data && tokens.data.length > 0 && <table className="w-full text-left">
-          <caption className="sr-only">Existing tokens</caption>
+          <caption className="sr-only">Resource tokens</caption>
           <thead>
             <tr className={tableHeadClass}>
               <th scope="col" className="pr-4 pl-4">Name</th>
@@ -101,6 +112,6 @@ export function TokensPage() {
         </table>}
       </Section>
     </SectionGrid>
-    <ConfirmDialog open={selected !== null} title="Revoke this API token?" confirmLabel="Revoke token" danger onCancel={() => setSelected(null)} onConfirm={() => { if (selected) revoke.mutate(selected.id); setSelected(null); }}>Automation using this token will lose access immediately. Already accepted operations will continue.</ConfirmDialog>
+    <ConfirmDialog open={selected !== null} title="Revoke this resource token?" confirmLabel="Revoke token" danger onCancel={() => setSelected(null)} onConfirm={() => { if (selected) revoke.mutate(selected.id); setSelected(null); }}>Automation using this token will lose access immediately. Already accepted operations will continue.</ConfirmDialog>
   </>;
 }

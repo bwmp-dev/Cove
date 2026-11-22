@@ -24,5 +24,5 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	respond(w, 200, map[string]any{"id": id, "workload_id": workload, "action": action, "state": state, "result": result, "created_at": created, "cancel_requested": cancelRequested, "approval_required": approvalRequired, "approved_at": approvedAt, "can_approve": s.teamAdmin(r, actor(r).Team)})
+	respond(w, 200, operationView{ID: id, WorkloadID: workload, Action: action, State: state, Result: result, CreatedAt: created, CancelRequested: cancelRequested, ApprovalRequired: approvalRequired, ApprovedAt: approvedAt, CanApprove: s.teamAdmin(r, actor(r).Team)})
 }

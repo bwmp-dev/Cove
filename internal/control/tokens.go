@@ -10,6 +10,10 @@ import (
 )
 
 func (s *Server) scopedToken(next http.Handler, w http.ResponseWriter, r *http.Request) {
+	if route, ok := r.Context().Value(apiRouteKey{}).(publicRoute); ok {
+		s.authenticatePublicToken(next, w, r, route)
+		return
+	}
 	var id, workload, permission, userID, teamID string
 	err := s.DB.QueryRow(r.Context(), "SELECT id,workload_id,permission,user_id,team_id FROM api_tokens WHERE token_hash=$1 AND expires_at>now()", tokenHash(bearer(r))).Scan(&id, &workload, &permission, &userID, &teamID)
 	if errors.Is(err, pgx.ErrNoRows) {

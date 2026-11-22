@@ -91,6 +91,16 @@ func (s *Server) Init(ctx context.Context) error {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerPublicAPI(mux)
+	mux.Handle("GET /api/mcp", s.admin(http.HandlerFunc(s.mcpSettings)))
+	mux.Handle("PUT /api/mcp", s.admin(http.HandlerFunc(s.mcpSettings)))
+	for _, method := range []string{"GET", "POST", "DELETE"} {
+		mux.HandleFunc(method+" /mcp", s.mcpHTTP)
+	}
+	for _, pattern := range []string{"GET /api/access-tokens", "POST /api/access-tokens", "GET /api/access-tokens/scopes", "DELETE /api/access-tokens/{token}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.accessTokens)))
+	}
+	mux.Handle("POST /api/workloads/{id}/exec", s.admin(http.HandlerFunc(s.workloadExec)))
 	for _, pattern := range []string{"GET /api/cloudflare/connections", "POST /api/cloudflare/connections", "PUT /api/cloudflare/connections/{connection}/credentials"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.cloudflareAccounts)))
 	}

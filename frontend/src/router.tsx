@@ -133,6 +133,7 @@ const operationsRoute = createRoute({
 });
 const operationRoute = createRoute({ getParentRoute: () => appRoute, path: "/operations/$operationId", component: lazyRouteComponent(() => import("./routes/operation-detail"), "OperationPage") });
 const tokensRoute = createRoute({ getParentRoute: () => appRoute, path: "/tokens", component: lazyRouteComponent(() => import("./routes/tokens"), "TokensPage") });
+const apiDocsRoute = createRoute({ getParentRoute: () => appRoute, path: "/api-docs", component: lazyRouteComponent(() => import("./routes/api-docs"), "ApiDocsPage") });
 const accountRoute = createRoute({ getParentRoute: () => appRoute, path: "/account", component: lazyRouteComponent(() => import("./routes/account"), "AccountPage") });
 const teamRoute = createRoute({ getParentRoute: () => appRoute, path: "/team", component: lazyRouteComponent(() => import("./routes/team"), "TeamPage") });
 const adminRoute = createRoute({ getParentRoute: () => appRoute, path: "/admin", component: lazyRouteComponent(() => import("./routes/admin"), "AdminPage") });
@@ -188,6 +189,7 @@ const routeTree = rootRoute.addChildren([
     operationsRoute,
     operationRoute,
     tokensRoute,
+    apiDocsRoute,
     accountRoute,
     teamRoute,
     adminRoute,

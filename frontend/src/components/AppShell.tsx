@@ -105,6 +105,7 @@ function Navigation() {
   const team = currentTeam(session);
   const manager = managesTeam(team) || Boolean(session?.is_admin);
   const placedResource = usePlacedResourceOpen();
+  const apiDocs = useRouterState({ select: (state) => state.location.pathname === "/api-docs" });
   return (
     <nav aria-label="Primary" className="space-y-5 px-2 py-3">
       <TeamSwitcher />
@@ -139,7 +140,7 @@ function Navigation() {
           Team settings
         </Link>
         {manager && <Link to="/notifications" className={navItemClass}><Bell aria-hidden className="size-4 shrink-0" />Notifications</Link>}
-        <Link to="/tokens" className={navItemClass}>
+        <Link to="/tokens" className={navItemClass} data-section={apiDocs || undefined}>
           <KeyRound aria-hidden className="size-4 shrink-0" />
           API keys and tokens
         </Link>
