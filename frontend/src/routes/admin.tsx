@@ -1,4 +1,5 @@
 import { InstanceIntegrations } from "../components/InstanceIntegrations";
+import { StorageUsage, TelemetryRetention } from "../components/TelemetryRetention";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -203,12 +204,14 @@ export function AdminPage() {
   }
   return (
     <>
-      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in and update settings for this Cove instance." />
+      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, update and data retention settings for this Cove instance." />
       <Section title="Sign-in" width="form">
         <SignInSettings />
       </Section>
       <InstanceIntegrations />
       <Section title="Updates" width="form"><UpdateChannel /></Section>
+      <TelemetryRetention />
+      <StorageUsage />
     </>
   );
 }

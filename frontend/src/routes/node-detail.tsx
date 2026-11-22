@@ -10,6 +10,7 @@ import { nodesQuery, workloadsQuery } from "../api/queries";
 import type { Node, NodeState } from "../api/types";
 import { EnrollmentPanel } from "../components/EnrollmentPanel";
 import { NodeLinks } from "../components/NodeLinks";
+import { NodeMetricHistory } from "../components/MetricHistory";
 import { NodeForm } from "../components/NodeForm";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
@@ -254,6 +255,11 @@ function NodeDetail({ node }: { node: Node }) {
         )}
         </div>
       </SectionGrid>
+      {admin && (
+        <Section title="Usage history" description="Host usage recorded by Cove from this node's worker." flush>
+          <NodeMetricHistory nodeId={node.id} />
+        </Section>
+      )}
     </>
   );
 }

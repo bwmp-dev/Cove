@@ -11,6 +11,8 @@ import (
 )
 
 type NodeMetrics struct {
+	NetworkRX       *uint64   `json:"network_rx,omitempty"`
+	NetworkTX       *uint64   `json:"network_tx,omitempty"`
 	SampledAt       time.Time `json:"sampled_at"`
 	CPUPercent      float64   `json:"cpu_percent"`
 	MemoryTotal     uint64    `json:"memory_total"`
@@ -59,18 +61,20 @@ func (e *Engine) containerMetrics(ctx context.Context, containers []Container) e
 		for i := range containers {
 			if strings.HasPrefix(sample.ID, containers[i].ID) {
 				containers[i].Metrics = &ContainerMetrics{CPU: sample.CPUPerc, Memory: sample.MemUsage, MemoryPercent: sample.MemPerc, Network: sample.NetIO, DiskIO: sample.BlockIO, PIDs: sample.PIDs}
+				containers[i].Metrics.Usage = containerUsage(containers[i].Metrics)
 			}
 		}
 	}
 }
 
 type ContainerMetrics struct {
-	CPU           string `json:"cpu"`
-	Memory        string `json:"memory"`
-	MemoryPercent string `json:"memory_percent"`
-	Network       string `json:"network"`
-	DiskIO        string `json:"disk_io"`
-	PIDs          string `json:"pids"`
+	Usage         *ContainerUsage `json:"usage,omitempty"`
+	CPU           string          `json:"cpu"`
+	Memory        string          `json:"memory"`
+	MemoryPercent string          `json:"memory_percent"`
+	Network       string          `json:"network"`
+	DiskIO        string          `json:"disk_io"`
+	PIDs          string          `json:"pids"`
 }
 
 func (e *Engine) HealthContainers(ctx context.Context, workload string) ([]Container, error) {

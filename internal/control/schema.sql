@@ -697,3 +697,27 @@ CREATE TABLE IF NOT EXISTS threshold_rules (
  channel_ids text[] NOT NULL CHECK(cardinality(channel_ids) BETWEEN 1 AND 32)
 );
 CREATE INDEX IF NOT EXISTS threshold_rules_node ON threshold_rules(node_id);
+
+CREATE TABLE IF NOT EXISTS telemetry_settings (
+ id integer PRIMARY KEY CHECK(id=1), configuration jsonb NOT NULL
+);
+INSERT INTO telemetry_settings(id,configuration) VALUES(1,'{"metric_rows":200000,"metric_bytes":268435456,"log_rows":200000,"log_bytes":134217728,"log_days":7,"audit_rows":100000,"audit_days":90,"raw_days":1,"hour_days":30,"day_days":365}') ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS metric_samples (
+ id bigserial PRIMARY KEY, node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ workload_id text REFERENCES workloads(id) ON DELETE CASCADE, series text NOT NULL,
+ tier text NOT NULL CHECK(tier IN ('minute','hour','day')), bucket timestamptz NOT NULL,
+ sampled_at timestamptz NOT NULL, payload jsonb NOT NULL CHECK(octet_length(payload::text)<=32768)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS metric_samples_series ON metric_samples(node_id,COALESCE(workload_id,''),series,tier,bucket);
+CREATE INDEX IF NOT EXISTS metric_samples_recent ON metric_samples(sampled_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS workload_log_entries (
+ id text PRIMARY KEY, workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ container_id text NOT NULL, container text NOT NULL, timestamp timestamptz NOT NULL,
+ message text NOT NULL CHECK(octet_length(message)<=8192), clipped boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS workload_logs_recent ON workload_log_entries(timestamp DESC,id DESC);
+CREATE INDEX IF NOT EXISTS workload_logs_resource ON workload_log_entries(workload_id,timestamp DESC,id DESC);
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_since timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_checked_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_limited boolean NOT NULL DEFAULT false;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_error text NOT NULL DEFAULT '';

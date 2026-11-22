@@ -1,6 +1,6 @@
 export type NodeState = "pending" | "enrolled" | "unreachable" | "ssh_verified" | "ready";
 
-export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number }
+export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number; network_rx?: number; network_tx?: number }
 export interface Capabilities {
   metrics?: NodeMetrics;
   shared_host?: { coolify_detected: boolean; cleanup_verified: boolean };
@@ -191,8 +191,20 @@ export interface OperationLogs {
   error?: string;
 }
 
+// Parsed numeric usage. Bytes except CPU, which is a percentage of one core and can exceed 100. Network and
+// block I/O are cumulative counters. Fields the worker could not parse are omitted, never zero.
+export interface ContainerUsage {
+  cpu_percent?: number;
+  memory_used?: number;
+  memory_limit?: number;
+  network_rx?: number;
+  network_tx?: number;
+  block_read?: number;
+  block_written?: number;
+}
+
 export interface Container {
-  metrics?: { cpu: string; memory: string; memory_percent: string; network: string; disk_io: string; pids: string };
+  metrics?: { cpu: string; memory: string; memory_percent: string; network: string; disk_io: string; pids: string; usage?: ContainerUsage };
   metrics_unavailable?: boolean;
   id: string;
   name: string;

@@ -15,6 +15,8 @@ it("saves the chosen update channel and shows the installed version", async () =
   vi.mocked(request).mockImplementation((method, path) => {
     if (path === "/api/settings/integrations") return Promise.resolve({ smtp: { host: "", port: "", username: "", from: "", password_set: false }, github: { client_id: "", client_secret_set: false, callback_url: "https://cove.example.com/auth/github/callback" } });
     if (path === "/api/settings") return Promise.resolve({ registration_enabled: false, email_enabled: false, github_enabled: false });
+    if (path === "/api/settings/retention") return Promise.resolve({ metric_rows: 200000, metric_bytes: 268435456, log_rows: 200000, log_bytes: 134217728, log_days: 7, audit_rows: 100000, audit_days: 90, raw_days: 1, hour_days: 30, day_days: 365 });
+    if (path === "/api/settings/storage-usage") return Promise.resolve({ metrics: { rows: 0, bytes: 0, basis: "" }, logs: { rows: 0, bytes: 0, basis: "" }, audit: { rows: 0, bytes: 0, basis: "" }, operations: { rows: 0, bytes: 0, basis: "" } });
     return Promise.resolve({ channel: method === "PUT" ? "beta" : "release", version: "v0.1.0", build_channel: "release", revision: "abc" });
   });
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AdminPage /></QueryClientProvider>);

@@ -94,6 +94,7 @@ const resourceNewRoute = createRoute({
 const resourceRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources/$resourceId", component: lazyRouteComponent(() => import("./routes/workload-detail"), "WorkloadPage") });
 const resourceOverviewRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceOverview") });
 const resourceLogsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/logs", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceLogs") });
+const resourceMetricsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/metrics", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceMetrics") });
 const resourceOperationsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/operations", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceOperations") });
 // Configuration used to be one page; keep its address working for saved links.
 const resourceConfigurationRoute = createRoute({
@@ -161,6 +162,7 @@ const routeTree = rootRoute.addChildren([
     resourceRoute.addChildren([
       resourceOverviewRoute,
       resourceLogsRoute,
+      resourceMetricsRoute,
       resourceOperationsRoute,
       resourceConfigurationRoute,
       resourceGeneralRoute,

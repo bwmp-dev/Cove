@@ -47,7 +47,12 @@ func (s *Server) refreshNodes(ctx context.Context) error {
 				result, updateErr := s.DB.Exec(ctx, "UPDATE nodes SET state=$1,capabilities=$2,last_checked_at=now() WHERE id=$3 AND address=$4 AND port=$5", state, data, n.id, n.address, n.port)
 				err = updateErr
 				if err == nil && result.RowsAffected() == 1 {
-					err = s.nodeHealth(ctx, n.id, state, response.Probe)
+					if response.Probe != nil {
+						err = s.storeNodeMetric(ctx, n.id, response.Probe.Metrics)
+					}
+					if err == nil {
+						err = s.nodeHealth(ctx, n.id, state, response.Probe)
+					}
 				}
 			}
 			if err != nil {

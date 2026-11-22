@@ -274,6 +274,12 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("GET /api/notifications/history", s.admin(http.HandlerFunc(s.notificationHistory)))
 	mux.Handle("GET /api/notifications/events", s.admin(http.HandlerFunc(s.notificationCatalogue)))
+	mux.Handle("GET /api/workloads/{id}/metrics", s.admin(http.HandlerFunc(s.metricHistory)))
+	mux.Handle("GET /api/nodes/{id}/metrics", s.admin(http.HandlerFunc(s.metricHistory)))
+	mux.Handle("GET /api/workloads/{id}/log-history", s.admin(http.HandlerFunc(s.logHistory)))
+	mux.Handle("GET /api/settings/retention", s.admin(http.HandlerFunc(s.telemetryRetention)))
+	mux.Handle("PUT /api/settings/retention", s.admin(http.HandlerFunc(s.telemetryRetention)))
+	mux.Handle("GET /api/settings/storage-usage", s.admin(http.HandlerFunc(s.telemetryStorageUsage)))
 	mux.Handle("GET /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
 	mux.Handle("POST /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
 	mux.Handle("DELETE /api/notifications/rules/{id}", s.admin(http.HandlerFunc(s.thresholdRules)))

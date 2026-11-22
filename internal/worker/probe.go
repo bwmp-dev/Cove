@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	Telemetry           bool         `json:"telemetry"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
 	GuardedHooks        bool         `json:"guarded_hooks"`
 	Previews            bool         `json:"previews"`
@@ -45,6 +46,7 @@ func Inspect(ctx context.Context) Probe {
 	defer cancel()
 	p := Probe{GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
 	p.Previews = true
+	p.Telemetry = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Output(); err == nil {

@@ -56,8 +56,8 @@ function parseRetryAfter(response: Response): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
+async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
+  const headers: Record<string, string> = { Accept: accept };
   const team = selectedTeam();
   if (team) {
     headers["X-Cove-Team"] = team;
@@ -84,8 +84,23 @@ export async function request<T>(method: string, path: string, body?: unknown, s
   if (!response.ok) {
     throw new ApiError(response.status, await readErrorMessage(response), parseRetryAfter(response));
   }
+  return response;
+}
+
+export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await send(method, path, "application/json", body, signal);
   try {
     return (await response.json()) as T;
+  } catch {
+    throw new ApiError(response.status, "The server returned an unreadable response.");
+  }
+}
+
+// Plain-text GET for exports, sent with the same session and team headers as JSON requests.
+export async function requestText(path: string, signal?: AbortSignal): Promise<string> {
+  const response = await send("GET", path, "text/plain", undefined, signal);
+  try {
+    return await response.text();
   } catch {
     throw new ApiError(response.status, "The server returned an unreadable response.");
   }

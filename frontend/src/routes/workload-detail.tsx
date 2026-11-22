@@ -16,6 +16,7 @@ import {
   History,
   KeyRound,
   LayoutDashboard,
+  ChartLine,
   Network,
   Play,
   RotateCcw,
@@ -39,7 +40,9 @@ import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
+import { LogHistory } from "../components/LogHistory";
 import { LogViewer } from "../components/LogViewer";
+import { WorkloadMetricHistory } from "../components/MetricHistory";
 import { OperationsTable } from "../components/OperationsTable";
 import { RelativeTime } from "../components/RelativeTime";
 import { ContainerLogs, RuntimeContainers } from "../components/Runtime";
@@ -382,6 +385,7 @@ export function WorkloadPage() {
 type ResourcePath =
   | "/resources/$resourceId"
   | "/resources/$resourceId/logs"
+  | "/resources/$resourceId/metrics"
   | "/resources/$resourceId/operations"
   | "/resources/$resourceId/limits"
   | "/resources/$resourceId/general"
@@ -416,6 +420,7 @@ function resourceSections(workload: Workload): { label: string; links: ResourceS
       label: "Monitor",
       links: [
         { to: "/resources/$resourceId", label: "Overview", icon: LayoutDashboard, exact: true },
+        { to: "/resources/$resourceId/metrics", label: "Metrics", icon: ChartLine },
         { to: "/resources/$resourceId/logs", label: "Logs", icon: ScrollText },
         { to: "/resources/$resourceId/operations", label: "Operations", icon: History },
         { to: "/resources/$resourceId/troubleshooting", label: "Troubleshooting", icon: Stethoscope },
@@ -616,8 +621,22 @@ export function ResourceOverview() {
 export function ResourceLogs() {
   const workload = useResource();
   return (
-    <Section title="Container logs" description="Recent output from the resource's containers on the node.">
-      <ContainerLogs workloadId={workload.id} />
+    <>
+      <Section title="Live tail" description="Recent output read directly from the containers on the node. Not stored by Cove.">
+        <ContainerLogs workloadId={workload.id} />
+      </Section>
+      <Section title="Stored log history" description="Lines Cove collected from the containers and kept under the instance retention settings. Search and filters apply to all stored lines, 500 per page." flush>
+        <LogHistory workloadId={workload.id} />
+      </Section>
+    </>
+  );
+}
+
+export function ResourceMetrics() {
+  const workload = useResource();
+  return (
+    <Section title="Metric history" description="Container usage recorded by Cove, with deploys and rollbacks." flush>
+      <WorkloadMetricHistory workloadId={workload.id} />
     </Section>
   );
 }

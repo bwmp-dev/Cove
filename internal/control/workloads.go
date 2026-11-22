@@ -417,6 +417,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if time.Now().After(nextHealthCheck) {
+			if err := s.collectTelemetry(ctx); err != nil && ctx.Err() == nil {
+				return err
+			}
 			if err := s.checkBackupHealth(ctx); err != nil && ctx.Err() == nil {
 				return err
 			}

@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Telemetry *TelemetryRequest     `json:"telemetry,omitempty"`
 	Links     *LinkConfig           `json:"links,omitempty"`
 	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
 	Tunnel    *TunnelRequest        `json:"tunnel,omitempty"`
@@ -27,6 +28,7 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Telemetry     *Telemetry           `json:"telemetry,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
 	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
 	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
@@ -49,6 +51,15 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "telemetry":
+		if r.Telemetry == nil {
+			return RPCResponse{Error: "telemetry request required"}
+		}
+		result, err := e.CollectTelemetry(ctx, r.ID, r.Telemetry.Since)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Telemetry: result}
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()
 		if err != nil {
