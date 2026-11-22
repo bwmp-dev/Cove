@@ -30,6 +30,22 @@ export function formatAbsolute(iso: string) {
   return Number.isFinite(time) ? absolute.format(time) : "Unknown time";
 }
 
+// Returns null when this browser's time zone data does not know the zone, so callers can fall back to local time.
+export function formatAbsoluteInZone(iso: string, timeZone: string) {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) {
+    return "Unknown time";
+  }
+  try {
+    return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "long", timeZone }).format(time);
+  } catch (error) {
+    if (error instanceof RangeError) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export function formatDuration(ms: number) {
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) {

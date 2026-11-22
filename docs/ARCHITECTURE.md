@@ -57,6 +57,8 @@ Private connections are explicit, directional TCP grants from one source service
 
 Managed HTTP routes optionally carry a validated policy for path prefixes, request/response headers, source CIDR restrictions, hostname redirects, ACME selection, sticky sessions and additional upstream Compose services on the same worker. Policies travel in the existing encrypted workload configuration and durable route journal; no separate route database is introduced. Policy-derived proxy object names make stale middleware/upstream configurations fail live confirmation. Workers advertise `route_policies`; older workers cannot deploy policies. This extension does not create replicas or change proxy entrypoints.
 
+Runtime inspection exposes Docker health separately from lifecycle state and reports exit codes plus successful Compose init completion. Job schedules use a saved IANA timezone (UTC for existing schedules), with embedded timezone data in the control plane. These changes do not alter container restart policies or replace the guarded-deploy algorithm: guarded deploys test a stateless candidate, then perform ordinary Compose replacement with a possible brief interruption; they are not zero-downtime route handoffs.
+
 ## Completion requirement
 
 The user explicitly requires a fully fleshed-out, production-ready product, not a proof of concept. The delivery order above describes implementation increments, not acceptable stopping points. Release acceptance must cover authenticated dashboard workflows, durable execution and recovery, secret handling, Git/build deployment, routing, backup/restore, installation/upgrades, and real Linux validation. Unverified production behavior must remain explicitly identified.

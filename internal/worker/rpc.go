@@ -193,7 +193,7 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 		return RPCResponse{Containers: containers}
 	case "containers":
-		containers, err := e.Containers(ctx, r.ID)
+		containers, err := e.HealthContainers(ctx, r.ID)
 		if err != nil {
 			return RPCResponse{Error: "could not inspect workload containers"}
 		}

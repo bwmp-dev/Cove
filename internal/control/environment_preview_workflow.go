@@ -497,7 +497,27 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 		if src.Kind == "job" && policy.Schedule {
 			cron = src.JobCron
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='' THEN NULL ELSE now()+interval '1 minute' END)`, target, src.Node, src.Name, encrypted, config.Kind, environment, p.Team, p.Project, cpu, memory, cron); err != nil {
+		zone := src.JobTimezone
+		if zone == "" {
+			zone = "UTC"
+		}
+		var nextJob *time.Time
+		if cron != "" {
+			schedule, err := parseCron(cron)
+			if err != nil {
+				return err
+			}
+			schedule.location, err = time.LoadLocation(zone)
+			if err != nil {
+				return err
+			}
+			next, err := schedule.next(time.Now())
+			if err != nil {
+				return err
+			}
+			nextJob = &next
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at,job_timezone) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, target, src.Node, src.Name, encrypted, config.Kind, environment, p.Team, p.Project, cpu, memory, cron, nextJob, zone); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.ConstraintName == "cove_team_quota" {
 				tx.Rollback(ctx)

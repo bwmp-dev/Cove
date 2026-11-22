@@ -8,10 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Container struct {
+	Health             string            `json:"health,omitempty"`
+	ExitCode           *int              `json:"exit_code,omitempty"`
+	Service            string            `json:"service,omitempty"`
 	ExpectedCompleted  bool              `json:"expected_completed,omitempty"`
 	Metrics            *ContainerMetrics `json:"metrics,omitempty"`
 	MetricsUnavailable bool              `json:"metrics_unavailable,omitempty"`
@@ -22,6 +26,57 @@ type Container struct {
 	Status             string            `json:"status"`
 	Ports              string            `json:"ports"`
 }
+
+func (e *Engine) inspectContainerStates(ctx context.Context, containers []Container) error {
+	if len(containers) == 0 {
+		return nil
+	}
+	args := []string{"docker", "inspect", "--format", `{"id":{{json .Id}},"state":{{json .State}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}`}
+	for _, container := range containers {
+		args = append(args, container.ID)
+	}
+	out := &limitedBuffer{Limit: 2 * 1024 * 1024}
+	if err := e.Run(ctx, e.Root, args, nil, out); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(&out.data)
+	seen := map[string]bool{}
+	for {
+		var detail struct {
+			ID      string
+			Service string
+			State   struct {
+				Status   string
+				ExitCode int
+				Health   *struct{ Status string }
+			}
+		}
+		if err := decoder.Decode(&detail); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return err
+		}
+		for i := range containers {
+			if detail.ID == "" || !strings.HasPrefix(detail.ID, containers[i].ID) {
+				continue
+			}
+			containers[i].State, containers[i].Service = detail.State.Status, detail.Service
+			if detail.State.Health != nil {
+				containers[i].Health = detail.State.Health.Status
+			}
+			if detail.State.Status == "exited" || detail.State.Status == "dead" {
+				code := detail.State.ExitCode
+				containers[i].ExitCode = &code
+			}
+			seen[containers[i].ID] = true
+		}
+	}
+	if len(seen) != len(containers) {
+		return errors.New("container state inspection was incomplete")
+	}
+	return nil
+}
+
 type limitedBuffer struct {
 	data  bytes.Buffer
 	Limit int

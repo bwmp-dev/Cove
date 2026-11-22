@@ -223,6 +223,13 @@ export interface Container {
   state: string;
   status: string;
   ports: string;
+  // Docker healthcheck result; omitted when the container has no healthcheck or the worker predates typed health.
+  health?: "starting" | "healthy" | "unhealthy";
+  // Present only for exited or dead containers, including 0.
+  exit_code?: number;
+  service?: string;
+  // True for exited (0) init services that other services wait on with service_completed_successfully.
+  expected_completed?: boolean;
 }
 
 export interface WorkloadRuntime {

@@ -245,7 +245,7 @@ func (s *Server) checkResourceHealth(ctx context.Context) error {
 		}
 		bad := len(response.Containers) == 0
 		for _, container := range response.Containers {
-			if !container.ExpectedCompleted && (container.State != "running" || strings.Contains(container.Status, "(unhealthy)")) {
+			if !container.ExpectedCompleted && (container.State != "running" || container.Health == "unhealthy" || strings.Contains(container.Status, "(unhealthy)")) {
 				bad = true
 			}
 		}

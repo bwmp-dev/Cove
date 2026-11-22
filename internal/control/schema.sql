@@ -674,3 +674,6 @@ LANGUAGE sql STABLE AS $$
   g->>'scope'='team' OR (g->>'scope'='project' AND g->>'scope_id'=project) OR
   (g->>'scope'='environment' AND g->>'scope_id'=s.scope))
 $$;
+
+-- Deploy track: per-job calendar timezone. Existing schedules retain UTC semantics.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timezone text NOT NULL DEFAULT 'UTC';

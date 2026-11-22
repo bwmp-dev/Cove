@@ -227,6 +227,7 @@ type previewSource struct {
 	DeployedRevision                    string
 	DeployedAt                          *time.Time
 	JobCron                             string
+	JobTimezone                         string
 	Inventory                           *worker.PreviewInventory
 	InventoryError                      string
 }
@@ -358,7 +359,7 @@ func (s *Server) loadPreviewSources(ctx context.Context, team, environment strin
  COALESCE((n.capabilities->>'environment_previews')::boolean,false),n.state='ready',
  COALESCE(g.repository_id,0),COALESCE(g.repository,''),COALESCE(g.installation_id,0),
  EXISTS(SELECT 1 FROM github_installation_teams i WHERE i.installation_id=g.installation_id AND i.team_id=w.team_id),
- COALESCE(o.id,''),COALESCE(o.action,''),o.payload,COALESCE(o.result->>'revision',''),o.updated_at
+ COALESCE(o.id,''),COALESCE(o.action,''),o.payload,COALESCE(o.result->>'revision',''),o.updated_at,w.job_timezone
  FROM workloads w JOIN nodes n ON n.id=w.node_id LEFT JOIN github_sources g ON g.workload_id=w.id
  LEFT JOIN LATERAL (SELECT id,action,payload,result,updated_at FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1) o ON true
  WHERE w.team_id=$1 AND w.environment_id=$2 AND NOT EXISTS(SELECT 1 FROM environment_preview_resources r WHERE r.resource_id=w.id)
@@ -371,7 +372,7 @@ func (s *Server) loadPreviewSources(ctx context.Context, team, environment strin
 		var src previewSource
 		var config, payload []byte
 		var updated *time.Time
-		if err = rows.Scan(&src.ID, &src.Name, &src.Kind, &src.Node, &src.Project, &config, &src.JobCron, &src.Capable, &src.NodeReady, &src.Repository, &src.RepositoryName, &src.Installation, &src.InstallationAssigned, &src.Release, &src.ReleaseAction, &payload, &src.DeployedRevision, &updated); err != nil {
+		if err = rows.Scan(&src.ID, &src.Name, &src.Kind, &src.Node, &src.Project, &config, &src.JobCron, &src.Capable, &src.NodeReady, &src.Repository, &src.RepositoryName, &src.Installation, &src.InstallationAssigned, &src.Release, &src.ReleaseAction, &payload, &src.DeployedRevision, &updated, &src.JobTimezone); err != nil {
 			rows.Close()
 			return nil, err
 		}

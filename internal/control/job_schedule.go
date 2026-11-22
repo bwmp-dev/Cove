@@ -11,34 +11,21 @@ import (
 func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if r.Method == "GET" {
-		var expression string
+		var expression, timezone string
 		var next *time.Time
-		if err := s.DB.QueryRow(r.Context(), `SELECT job_cron,next_job_at FROM workloads WHERE id=$1`, id).Scan(&expression, &next); err != nil {
+		if err := s.DB.QueryRow(r.Context(), `SELECT job_cron,next_job_at,job_timezone FROM workloads WHERE id=$1`, id).Scan(&expression, &next, &timezone); err != nil {
 			http.Error(w, "schedule unavailable", 503)
 			return
 		}
-		respond(w, 200, map[string]any{"cron": expression, "next_run_at": next})
+		respond(w, 200, map[string]any{"cron": expression, "timezone": timezone, "next_run_at": next})
 		return
 	}
 	var in struct {
-		Cron string `json:"cron"`
+		Cron     string  `json:"cron"`
+		Timezone *string `json:"timezone"`
 	}
 	if !decode(w, r, &in) {
 		return
-	}
-	var next *time.Time
-	if in.Cron != "" {
-		schedule, err := parseCron(in.Cron)
-		if err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		value, err := schedule.next(time.Now())
-		if err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		next = &value
 	}
 	tx, err := s.DB.Begin(r.Context())
 	if err != nil {
@@ -47,7 +34,8 @@ func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var encrypted []byte
-	if err = tx.QueryRow(r.Context(), `SELECT configuration FROM workloads WHERE id=$1 FOR UPDATE`, id).Scan(&encrypted); err != nil {
+	var timezone string
+	if err = tx.QueryRow(r.Context(), `SELECT configuration,job_timezone FROM workloads WHERE id=$1 FOR UPDATE`, id).Scan(&encrypted, &timezone); err != nil {
 		http.Error(w, "schedule unavailable", 503)
 		return
 	}
@@ -61,7 +49,34 @@ func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "schedules require a one-shot job resource", 400)
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `UPDATE workloads SET job_cron=$2,next_job_at=$3 WHERE id=$1`, id, in.Cron, next); err != nil {
+	if in.Timezone != nil {
+		timezone = *in.Timezone
+	}
+	if timezone == "" || timezone == "Local" || len(timezone) > 128 {
+		http.Error(w, "use UTC or an IANA timezone such as America/Los_Angeles", 400)
+		return
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		http.Error(w, "unknown schedule timezone", 400)
+		return
+	}
+	var next *time.Time
+	if in.Cron != "" {
+		schedule, err := parseCron(in.Cron)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		schedule.location = location
+		value, err := schedule.next(time.Now())
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		next = &value
+	}
+	if _, err = tx.Exec(r.Context(), `UPDATE workloads SET job_cron=$2,next_job_at=$3,job_timezone=$4 WHERE id=$1`, id, in.Cron, next, timezone); err != nil {
 		http.Error(w, "could not save schedule", 503)
 		return
 	}
@@ -69,7 +84,7 @@ func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not save schedule", 503)
 		return
 	}
-	respond(w, 200, map[string]any{"cron": in.Cron, "next_run_at": next})
+	respond(w, 200, map[string]any{"cron": in.Cron, "timezone": timezone, "next_run_at": next})
 }
 
 func (s *Server) scheduleJobs(ctx context.Context) error {
@@ -78,7 +93,7 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT id,configuration,job_cron,manually_stopped FROM workloads WHERE job_cron<>'' AND next_job_at<=now() ORDER BY next_job_at LIMIT 16 FOR UPDATE SKIP LOCKED`)
+	rows, err := tx.Query(ctx, `SELECT id,configuration,job_cron,manually_stopped,job_timezone FROM workloads WHERE job_cron<>'' AND next_job_at<=now() ORDER BY next_job_at LIMIT 16 FOR UPDATE SKIP LOCKED`)
 	if err != nil {
 		return err
 	}
@@ -86,11 +101,12 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 		id, cron      string
 		configuration []byte
 		stopped       bool
+		timezone      string
 	}
 	jobs := []due{}
 	for rows.Next() {
 		var j due
-		if err = rows.Scan(&j.id, &j.configuration, &j.cron, &j.stopped); err != nil {
+		if err = rows.Scan(&j.id, &j.configuration, &j.cron, &j.stopped, &j.timezone); err != nil {
 			break
 		}
 		jobs = append(jobs, j)
@@ -104,6 +120,10 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 	}
 	for _, j := range jobs {
 		cron, err := parseCron(j.cron)
+		if err != nil {
+			return err
+		}
+		cron.location, err = time.LoadLocation(j.timezone)
 		if err != nil {
 			return err
 		}

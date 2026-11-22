@@ -5,18 +5,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 type cronSchedule struct {
+	location                  *time.Location
 	fields                    [5]map[int]bool
 	dayWildcard, weekWildcard bool
 }
 
 func parseCron(expression string) (cronSchedule, error) {
-	var schedule cronSchedule
+	schedule := cronSchedule{location: time.UTC}
 	fields := strings.Fields(expression)
 	if len(fields) != 5 || len(expression) > 256 {
-		return schedule, errors.New("use five UTC cron fields: minute hour day month weekday")
+		return schedule, errors.New("use five cron fields: minute hour day month weekday")
 	}
 	bounds := [5][2]int{{0, 59}, {0, 23}, {1, 31}, {1, 12}, {0, 6}}
 	for index, field := range fields {
@@ -66,12 +68,13 @@ func (c cronSchedule) next(after time.Time) (time.Time, error) {
 	candidate := after.UTC().Truncate(time.Minute).Add(time.Minute)
 	limit := candidate.AddDate(5, 0, 0)
 	for candidate.Before(limit) {
-		day, week := c.fields[2][candidate.Day()], c.fields[4][int(candidate.Weekday())]
+		local := candidate.In(c.location)
+		day, week := c.fields[2][local.Day()], c.fields[4][int(local.Weekday())]
 		dayMatch := day && week
 		if !c.dayWildcard && !c.weekWildcard {
 			dayMatch = day || week
 		}
-		if c.fields[3][int(candidate.Month())] && dayMatch && c.fields[1][candidate.Hour()] && c.fields[0][candidate.Minute()] {
+		if c.fields[3][int(local.Month())] && dayMatch && c.fields[1][local.Hour()] && c.fields[0][local.Minute()] {
 			return candidate, nil
 		}
 		candidate = candidate.Add(time.Minute)

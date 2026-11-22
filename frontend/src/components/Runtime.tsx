@@ -7,13 +7,13 @@ import { formatRelative } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { LogPanel } from "./LogViewer";
 import { Button, MetaList, Notice, Spinner } from "./ui";
-import { containerTone, type ContainerTone as Tone } from "../lib/containers";
+import { containerStatus, type ContainerTone as Tone } from "../lib/containers";
 import { tableHeadClass, tableRowClass } from "../lib/styles";
 
 const toneClass: Record<Tone, string> = { ok: "bg-ok", warn: "bg-warn", bad: "bg-bad", neutral: "bg-fg-subtle" };
 
 function ContainerRow({ container, kind }: { container: Container; kind: "service" | "job" }) {
-  const tone = containerTone(container, kind);
+  const { tone, label } = containerStatus(container, kind);
   return (
     <tr className={tableRowClass}>
       <td className="py-2.5 pr-4 pl-4">
@@ -37,7 +37,7 @@ function ContainerRow({ container, kind }: { container: Container; kind: "servic
         <span className="inline-flex items-start gap-2 text-[13px] text-fg">
           <span aria-hidden className={`mt-1.5 size-2 shrink-0 rounded-full ${toneClass[tone]}`} />
           <span>
-            <span className="whitespace-nowrap capitalize">{container.state || "unknown"}</span>
+            <span className="whitespace-nowrap">{label}</span>
             {container.status && <span className="block text-xs text-fg-muted">{container.status}</span>}
           </span>
         </span>
