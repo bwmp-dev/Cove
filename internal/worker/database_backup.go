@@ -33,7 +33,7 @@ func validateDatabaseBackup(d *DatabaseBackup) error {
 }
 
 func (e *Engine) databaseContainer(ctx context.Context, r Request) (string, error) {
-	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+r.Workload, "--filter", "label=com.docker.compose.service="+r.Backup.Database.Service)
+	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service="+r.Backup.Database.Service)
 	if err != nil {
 		return "", err
 	}
@@ -106,7 +106,7 @@ func (e *Engine) performDatabaseBackup(ctx context.Context, r Request, out io.Wr
 			}
 			if recovery.DatabaseContainer != "" {
 				owner, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "com.docker.compose.project"}}`, recovery.DatabaseContainer)
-				if err != nil || owner != "cove-"+r.Workload {
+				if err != nil || owner != e.composeProject(r.Workload) {
 					return errors.New("database recovery container ownership changed")
 				}
 				if err := e.Run(ctx, e.Root, []string{"docker", "start", recovery.DatabaseContainer}, nil, out); err != nil {

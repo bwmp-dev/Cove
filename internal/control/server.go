@@ -27,6 +27,7 @@ import (
 var assets embed.FS
 
 type Server struct {
+	requestGuardSlots     chan struct{}
 	CloudflareTransport   http.RoundTripper
 	NotificationTransport http.RoundTripper
 	DB                    *pgxpool.Pool
@@ -147,6 +148,9 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.configurationDrafts)))
 	}
 	mux.Handle("POST /api/projects/{id}/configuration/drafts/{draft}/apply", s.admin(http.HandlerFunc(s.applyConfigurationDraft)))
+	for _, pattern := range []string{"GET /api/projects/{id}/imports", "POST /api/projects/{id}/imports/coolify", "GET /api/projects/{id}/imports/{import}", "DELETE /api/projects/{id}/imports/{import}", "POST /api/projects/{id}/imports/{import}/dry-run"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.migrationImports)))
+	}
 	for _, pattern := range []string{"GET /api/workloads/{id}/compose-bundle", "PUT /api/workloads/{id}/compose-bundle", "POST /api/workloads/{id}/compose-bundle/export"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.composeBundle)))
 	}
@@ -232,6 +236,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/projects/{id}", s.admin(http.HandlerFunc(s.deleteProject)))
 	mux.Handle("DELETE /api/environments/{id}", s.admin(http.HandlerFunc(s.deleteEnvironment)))
 	mux.Handle("PUT /api/workloads/{id}/environment", s.admin(http.HandlerFunc(s.assignEnvironment)))
+	mux.Handle("POST /api/workloads/{id}/move/preview", s.admin(http.HandlerFunc(s.moveResource)))
+	mux.Handle("POST /api/workloads/{id}/move", s.admin(http.HandlerFunc(s.moveResource)))
+	for _, pattern := range []string{"GET /api/nodes/{id}/adoptions", "POST /api/nodes/{id}/adoptions/discover", "POST /api/nodes/{id}/adoptions", "GET /api/nodes/{id}/adoptions/{adoption}", "DELETE /api/nodes/{id}/adoptions/{adoption}", "POST /api/nodes/{id}/adoptions/{adoption}/adopt", "POST /api/nodes/{id}/adoptions/{adoption}/refresh"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.composeAdoptions)))
+	}
 	mux.Handle("POST /api/workloads", s.admin(http.HandlerFunc(s.createWorkload)))
 	mux.Handle("GET /api/workloads/{id}", s.admin(http.HandlerFunc(s.getWorkload)))
 	mux.Handle("PUT /api/workloads/{id}", s.admin(http.HandlerFunc(s.updateWorkload)))
@@ -377,9 +386,7 @@ func (s *Server) admin(next http.Handler) http.Handler {
 			}
 			if err == nil && (r.Method == "GET" || s.sameOrigin(r)) {
 				r = r.WithContext(context.WithValue(r.Context(), identityKey{}, p))
-				if s.authorize(w, r) {
-					s.authenticated(next, w, r, "user "+p.ID)
-				}
+				s.serveAuthorized(next, w, r, "user "+p.ID)
 				return
 			}
 			http.Error(w, "unauthorized", 401)
@@ -392,9 +399,7 @@ func (s *Server) admin(next http.Handler) http.Handler {
 		}
 		p.Admin = true
 		r = r.WithContext(context.WithValue(r.Context(), identityKey{}, p))
-		if s.authorize(w, r) {
-			s.authenticated(next, w, r, "administrator API token")
-		}
+		s.serveAuthorized(next, w, r, "administrator API token")
 	})
 }
 func respond(w http.ResponseWriter, status int, v any) {

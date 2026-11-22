@@ -164,7 +164,7 @@ func (s *Server) exportProjectConfiguration(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		var release string
-		err = s.DB.QueryRow(ctx, `SELECT id FROM operations WHERE workload_id=$1 AND state='succeeded' AND action IN ('deploy','rollback') ORDER BY updated_at DESC LIMIT 1`, id).Scan(&release)
+		err = s.DB.QueryRow(ctx, `SELECT id FROM operations WHERE workload_id=$1 AND state='succeeded' AND action IN ('deploy','rollback','adopt') ORDER BY updated_at DESC LIMIT 1`, id).Scan(&release)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "release metadata unavailable", 503)
 			return

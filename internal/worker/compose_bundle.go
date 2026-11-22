@@ -182,7 +182,7 @@ func (e *Engine) prepareComposeBundle(ctx context.Context, r Request, directory,
 			files = append(files, candidate)
 		}
 	}
-	args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload}
+	args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload)}
 	for _, name := range files {
 		normalized, err := normalizeComposeFile(name)
 		if err != nil {

@@ -37,7 +37,7 @@ func (s *Server) workloadConfigurationDiff(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var operation, revision string
-	err := s.DB.QueryRow(r.Context(), `SELECT id,declared_payload,COALESCE(result->>'revision','') FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1`, id).Scan(&operation, &encrypted, &revision)
+	err := s.DB.QueryRow(r.Context(), `SELECT id,declared_payload,COALESCE(result->>'revision','') FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback','adopt') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1`, id).Scan(&operation, &encrypted, &revision)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "deployment baseline unavailable", 503)
 		return
@@ -61,7 +61,7 @@ func (s *Server) workloadConfigurationDiff(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			seen[request.Release] = true
-			err = s.DB.QueryRow(r.Context(), `SELECT declared_payload FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback')`, request.Release, id).Scan(&encrypted)
+			err = s.DB.QueryRow(r.Context(), `SELECT declared_payload FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback','adopt')`, request.Release, id).Scan(&encrypted)
 			if errors.Is(err, pgx.ErrNoRows) || err == nil && len(encrypted) == 0 {
 				hasBaseline = false
 				break

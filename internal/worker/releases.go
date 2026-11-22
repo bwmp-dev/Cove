@@ -183,7 +183,7 @@ func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args
 			continue
 		}
 		ids := &limitedBuffer{Limit: 65536}
-		if err := e.Run(ctx, dir, []string{"docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-" + r.Workload, "--filter", "label=com.docker.compose.service=" + name, "--filter", "label=com.docker.compose.oneoff=False"}, nil, ids); err != nil {
+		if err := e.Run(ctx, dir, []string{"docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=" + e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service=" + name, "--filter", "label=com.docker.compose.oneoff=False"}, nil, ids); err != nil {
 			return deployedState{}, err
 		}
 		containers := strings.Fields(ids.data.String())

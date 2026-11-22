@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rememberTeam } from "../lib/team";
-import { ApiError, request, requestFile } from "./client";
+import { ApiError, request, requestFile, requestForTeam } from "./client";
 
 function respond(status: number, body: string, type: string, headers: Record<string, string> = {}) {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(body, { status, headers: { "content-type": type, ...headers } }))));
@@ -29,6 +29,20 @@ describe("request", () => {
     await request("GET", "/api/projects");
     const teams = (vi.mocked(fetch).mock.calls as [string, RequestInit][]).map(([, init]) => new Headers(init.headers).get("x-cove-team"));
     expect(teams).toEqual([null, "team-b"]);
+  });
+
+  it("names an explicit team without changing the selected team", async () => {
+    respond(200, "[]", "application/json");
+    rememberTeam("team-a");
+    await requestForTeam("team-b", "GET", "/api/projects");
+    await request("GET", "/api/projects");
+    const teams = (vi.mocked(fetch).mock.calls as [string, RequestInit][]).map(([, init]) => new Headers(init.headers).get("x-cove-team"));
+    expect(teams).toEqual(["team-b", "team-a"]);
+  });
+
+  it("keeps structured JSON error bodies with a generic message", async () => {
+    respond(409, '{"version":"v2","blockers":["Detach networks"]}', "application/json");
+    await expect(request("POST", "/x")).rejects.toMatchObject({ status: 409, message: "The request conflicts with the current state.", details: { version: "v2", blockers: ["Detach networks"] } });
   });
 
   it("explains authorization refusals without a server message", async () => {

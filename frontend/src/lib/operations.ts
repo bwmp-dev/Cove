@@ -1,4 +1,4 @@
-import type { Operation, OperationState } from "../api/types";
+import type { Operation, OperationAction, OperationState } from "../api/types";
 import type { Tone } from "./nodes";
 
 // Lifecycle tones shared by operations, resources, nodes and connections: ok is healthy or done, info is
@@ -53,7 +53,9 @@ export const actionLabels = {
   stop: "Stop",
   restart: "Restart",
   routes: "Update routes",
-} as const;
+  // Records ownership of running containers; no deployment runs.
+  adopt: "Adopt",
+} as const satisfies Record<OperationAction, string>;
 
 export const stateLabels: Record<OperationState, string> = {
   cancelled: "Cancelled",

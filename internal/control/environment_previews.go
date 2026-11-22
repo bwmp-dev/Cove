@@ -360,7 +360,7 @@ func (s *Server) loadPreviewSources(ctx context.Context, team, environment strin
  EXISTS(SELECT 1 FROM github_installation_teams i WHERE i.installation_id=g.installation_id AND i.team_id=w.team_id),
  COALESCE(o.id,''),COALESCE(o.action,''),o.payload,COALESCE(o.result->>'revision',''),o.updated_at
  FROM workloads w JOIN nodes n ON n.id=w.node_id LEFT JOIN github_sources g ON g.workload_id=w.id
- LEFT JOIN LATERAL (SELECT id,action,payload,result,updated_at FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1) o ON true
+ LEFT JOIN LATERAL (SELECT id,action,payload,result,updated_at FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1) o ON true
  WHERE w.team_id=$1 AND w.environment_id=$2 AND NOT EXISTS(SELECT 1 FROM environment_preview_resources r WHERE r.resource_id=w.id)
  ORDER BY w.name,w.id`, team, environment)
 	if err != nil {

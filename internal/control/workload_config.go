@@ -84,11 +84,19 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview metadata unavailable", 503)
 		return
 	}
+	var pendingAdoption string
+	if err = s.DB.QueryRow(r.Context(), `SELECT COALESCE((SELECT id FROM compose_adoptions WHERE status='applying' AND resource_ids ? $1 LIMIT 1),'')`, r.PathValue("id")).Scan(&pendingAdoption); err != nil {
+		http.Error(w, "adoption metadata unavailable", 503)
+		return
+	}
+	if pendingAdoption != "" {
+		level = 1
+	}
 	// Protected preview routes keep their password hash on the server.
 	for i := range configuration.Routes {
 		configuration.Routes[i].Auth = ""
 	}
-	respond(w, 200, workloadView{ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: configuration.Kind, JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: permissions(level), ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
+	respond(w, 200, workloadView{PendingAdoptionID: pendingAdoption, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: configuration.Kind, JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: permissions(level), ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
 }
 func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 	var in workloadInput
@@ -100,7 +108,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.EnvironmentID != "" || in.ProjectID != "" {
-		http.Error(w, "use the environment endpoint to change project placement", 400)
+		http.Error(w, "use the reviewed resource move endpoint to change project placement", 400)
 		return
 	}
 	if in.Environment != nil && in.EnvironmentPatch != nil {

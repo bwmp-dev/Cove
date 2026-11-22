@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
 import { CleanupPreview } from "../components/CleanupPreview";
-import { getRouteApi, Link } from "@tanstack/react-router";
+import { ComposeAdoption, reviewFromHash } from "../components/ComposeAdoption";
+import { getRouteApi, Link, useLocation } from "@tanstack/react-router";
 import { KeyRound, Network, Pencil, RefreshCw, Server } from "lucide-react";
 import { useState } from "react";
 import { errorMessage } from "../api/client";
@@ -83,6 +84,7 @@ function NodeDetail({ node }: { node: Node }) {
   const [renewedFrom, setRenewedFrom] = useState<NodeState>("pending");
   const ssh = node.mode === "ssh";
   const admin = useSession()?.is_admin ?? false;
+  const hash = useLocation({ select: (location) => location.hash });
   const info = nodeStates[node.state];
 
   return (
@@ -254,6 +256,7 @@ function NodeDetail({ node }: { node: Node }) {
         )}
         </div>
       </SectionGrid>
+      {admin && <ComposeAdoption node={node} initialReview={reviewFromHash(hash)} />}
     </>
   );
 }

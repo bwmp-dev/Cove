@@ -45,7 +45,7 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	networks, err := e.output(ctx, "docker", "network", "ls", "-q", "--filter", "label=com.docker.compose.project=cove-"+id)
+	networks, err := e.output(ctx, "docker", "network", "ls", "-q", "--filter", "label=com.docker.compose.project="+e.composeProject(id))
 	if err != nil {
 		return err
 	}

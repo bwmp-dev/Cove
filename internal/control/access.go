@@ -422,6 +422,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		if !s.requireAccess(w, r, "workload", id, needed) {
 			return false
 		}
+		if r.Method != "GET" && !s.requireAdoptionComplete(w, r, id) {
+			return false
+		}
 		if strings.HasSuffix(path, "/environment") {
 			v, ok := bodyFields(w, r)
 			if !ok {

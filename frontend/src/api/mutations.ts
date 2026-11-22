@@ -105,7 +105,7 @@ export function useUpdateRoutes(workloadId: string) {
 export function useQueueOperation(workloadId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (action: Exclude<OperationAction, "routes">) =>
+    mutationFn: (action: Exclude<OperationAction, "routes" | "adopt">) =>
       request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, { action }),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
   });

@@ -286,7 +286,7 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	}
 	for workload, list := range routes {
 		for _, route := range list {
-			ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
+			ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+e.composeProject(workload), "--filter", "label=com.docker.compose.service="+route.Service)
 			if err != nil {
 				return err
 			}
@@ -346,7 +346,7 @@ func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
 	for _, route := range list {
-		ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
+		ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+e.composeProject(workload), "--filter", "label=com.docker.compose.service="+route.Service)
 		if err != nil {
 			return err
 		}

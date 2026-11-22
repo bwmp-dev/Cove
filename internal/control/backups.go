@@ -216,7 +216,7 @@ func (s *Server) scheduleBackups(ctx context.Context) error {
 			return err
 		}
 		result, err := tx.Exec(ctx, `INSERT INTO operations(id,workload_id,action,payload)
-		 SELECT $1,$2,'backup',$3 WHERE EXISTS(SELECT 1 FROM operations WHERE workload_id=$2 AND action IN ('deploy','rollback') AND state='succeeded')
+		 SELECT $1,$2,'backup',$3 WHERE EXISTS(SELECT 1 FROM operations WHERE workload_id=$2 AND action IN ('deploy','rollback','adopt') AND state='succeeded')
 		 ON CONFLICT DO NOTHING`, request.ID, job.id, payload)
 		if err != nil {
 			return err

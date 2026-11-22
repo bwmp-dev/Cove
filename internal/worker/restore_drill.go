@@ -141,7 +141,7 @@ func (e *Engine) performDrill(ctx context.Context, r Request, out io.Writer) (re
 		return nil
 	}
 	d := manifest.Record.Database
-	ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+r.Workload, "--filter", "label=com.docker.compose.service="+d.Service)
+	ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service="+d.Service)
 	if err != nil || len(strings.Fields(ids)) != 1 {
 		return errors.New("database drill requires the original database service container to identify its image")
 	}

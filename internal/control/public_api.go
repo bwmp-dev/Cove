@@ -59,6 +59,16 @@ func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
 		{"GET", "/session", "", "Read the token creator and selected team", nil, identity{}, 200, s.sessionInfo},
 		{"GET", "/nodes", "workloads:read", "List accessible worker metadata", nil, []map[string]any{}, 200, s.listNodes},
+		{"GET", "/nodes/{id}/adoptions", "migration:adopt", "List node adoption reviews and recovery state; instance administrators only", nil, []map[string]any{}, 200, s.composeAdoptions},
+		{"POST", "/nodes/{id}/adoptions/discover", "migration:adopt", "Inspect unmanaged Compose project metadata without secrets", nil, map[string]any{}, 200, s.composeAdoptions},
+		{"POST", "/nodes/{id}/adoptions", "migration:adopt", "Map source projects into a reviewed canonical configuration without changing containers", composeAdoptionInput{}, map[string]any{}, 201, s.composeAdoptions},
+		{"GET", "/nodes/{id}/adoptions/{adoption}", "migration:adopt", "Read a redacted adoption review", nil, map[string]any{}, 200, s.composeAdoptions},
+		{"DELETE", "/nodes/{id}/adoptions/{adoption}", "migration:adopt", "Delete an unstarted adoption review", nil, apiOK{}, 200, s.composeAdoptions},
+		{"POST", "/nodes/{id}/adoptions/{adoption}/refresh", "migration:adopt", "Reconcile worker ownership and refresh pending source reviews without changing source containers; review and confirm adoption again afterwards", nil, map[string]any{}, 200, s.composeAdoptions},
+		{"POST", "/nodes/{id}/adoptions/{adoption}/adopt", "migration:adopt", "Explicitly adopt reviewed containers without restarting them; retry the same review after interruption", struct {
+			Acknowledge   bool `json:"acknowledge"`
+			ManagerPaused bool `json:"manager_paused"`
+		}{}, map[string]any{}, 200, s.composeAdoptions},
 		{"GET", "/projects", "projects:read", "List accessible projects and environments", nil, []project{}, 200, s.listProjects},
 		{"POST", "/projects", "projects:write", "Create a project", apiNameInput{}, apiID{}, 201, s.createProject},
 		{"GET", "/projects/{id}", "projects:read", "Read a project", nil, map[string]string{}, 200, s.publicGroup},
@@ -83,6 +93,13 @@ func (s *Server) publicRoutes() []publicRoute {
 		}{}, map[string]any{}, 201, s.configurationDrafts},
 		{"DELETE", "/projects/{id}/configuration/drafts/{draft}", "configuration:write", "Delete a saved configuration draft", nil, apiOK{}, 200, s.configurationDrafts},
 		{"POST", "/projects/{id}/configuration/drafts/{draft}/apply", "configuration:write", "Apply a reviewed declaration if its baseline is current; route changes may queue normal route operations, deployments remain explicit", nil, map[string]any{}, 200, s.applyConfigurationDraft},
+		{"GET", "/projects/{id}/imports", "configuration:write", "List unexpired import session identifiers", nil, []map[string]any{}, 200, s.migrationImports},
+		{"POST", "/projects/{id}/imports/coolify", "configuration:write", "Discover Coolify Compose API exports without contacting the source", struct {
+			Items []coolifyImportItem `json:"items"`
+		}{}, map[string]any{}, 201, s.migrationImports},
+		{"GET", "/projects/{id}/imports/{import}", "configuration:write", "Read import candidate metadata without source secrets", nil, map[string]any{}, 200, s.migrationImports},
+		{"DELETE", "/projects/{id}/imports/{import}", "configuration:write", "Delete an import session without changing drafts or source workloads", nil, apiOK{}, 200, s.migrationImports},
+		{"POST", "/projects/{id}/imports/{import}/dry-run", "configuration:write", "Map selected imports and stage an encrypted canonical configuration draft; no containers are changed", importDryRunInput{}, map[string]any{}, 201, s.migrationImports},
 		{"GET", "/projects/{id}/configuration/gitops", "projects:read", "Read GitOps status and declaration drift without values", nil, map[string]any{}, 200, s.projectGitOps},
 		{"PUT", "/projects/{id}/configuration/gitops", "configuration:write", "Connect cove.yaml from an existing project Git resource; automatic configuration apply is explicitly opt-in", gitOpsInput{}, map[string]any{}, 200, s.projectGitOps},
 		{"DELETE", "/projects/{id}/configuration/gitops", "configuration:write", "Disconnect a GitOps source without changing workloads", nil, apiOK{}, 200, s.projectGitOps},
@@ -91,6 +108,8 @@ func (s *Server) publicRoutes() []publicRoute {
 		{"POST", "/workloads", "workloads:write", "Create a resource without deploying", workloadInput{}, apiID{}, 201, s.createWorkload},
 		{"GET", "/workloads/{id}", "workloads:read", "Read resource configuration with secret values omitted", nil, workloadView{}, 200, s.getWorkload},
 		{"PUT", "/workloads/{id}", "workloads:write", "Update saved configuration without deploying", workloadInput{}, apiID{}, 200, s.updateWorkload},
+		{"POST", "/workloads/{id}/move/preview", "configuration:write", "Review a resource placement or ownership transfer without changing containers", resourceMoveInput{}, resourceMoveReview{}, 200, s.moveResource},
+		{"POST", "/workloads/{id}/move", "configuration:write", "Apply a reviewed resource transfer; cross-team transfers require administration on both teams", resourceMoveInput{}, map[string]any{}, 200, s.moveResource},
 		{"DELETE", "/workloads/{id}", "workloads:write", "Delete a stopped resource", nil, apiOK{}, 200, s.deleteWorkload},
 		{"PUT", "/workloads/{id}/routes", "workloads:write", "Replace public routes using normal ingress reconciliation", struct {
 			Routes []worker.Route `json:"routes"`

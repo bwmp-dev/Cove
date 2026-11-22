@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { gitOpsQuery, projectConfigurationQuery } from "../api/project-configuration";
 import { ConfigurationDrafts } from "../components/ConfigurationDrafts";
 import { ConfigurationExport } from "../components/ConfigurationExport";
+import { CoolifyImport } from "../components/CoolifyImport";
 import { EnvironmentCompare } from "../components/EnvironmentCompare";
 import { GitOpsSource } from "../components/GitOpsSource";
 import { ProjectManifest } from "../components/ProjectManifest";
@@ -45,6 +46,7 @@ export function ProjectConfiguration() {
       )}
       <ProjectManifest configuration={configuration} />
       {editable && <ConfigurationDrafts projectId={project.id} currentVersion={configuration.data?.version} online={online} gitOpsDraft={gitops.data?.connected ? gitops.data.draft_id : undefined} />}
+      {editable && <CoolifyImport project={project} configuration={configuration} online={online} />}
       <SectionGrid>
         <GitOpsSource project={project} resources={resources} configuration={configuration} editable={editable} online={online} individualAccount={Boolean(session?.email)} />
         {editable && <ConfigurationExport project={project} environments={environments} online={online} />}

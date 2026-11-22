@@ -27,7 +27,26 @@ function useCanManageTeamKeys() {
   return Boolean(session?.is_admin) || managesTeam(currentTeam(session));
 }
 
-function ScopeChoices({ scopes, selected, onToggle }: { scopes: ApiScope[]; selected: ReadonlySet<string>; onToggle: (name: string) => void }) {
+// The server refuses these scopes for other accounts or owners; the reason is shown on the disabled choice.
+function unavailableReason(scope: ApiScope, admin: boolean, owner: AccessToken["scope"]) {
+  if (scope.instance_admin && !admin) return "Only instance administrators can grant this permission.";
+  if (scope.personal_only && owner !== "user") return "Available on personal keys only.";
+  return undefined;
+}
+
+function availableSelection(selected: ReadonlySet<string>, scopes: ApiScope[] | undefined, admin: boolean, owner: AccessToken["scope"]) {
+  const allowed = new Set(scopes?.filter((scope) => unavailableReason(scope, admin, owner) === undefined).map((scope) => scope.name));
+  return new Set([...selected].filter((name) => allowed.has(name)));
+}
+
+interface ScopeChoicesProps {
+  scopes: ApiScope[];
+  selected: ReadonlySet<string>;
+  onToggle: (name: string) => void;
+  unavailable: (scope: ApiScope) => string | undefined;
+}
+
+function ScopeChoices({ scopes, selected, onToggle, unavailable }: ScopeChoicesProps) {
   return (
     <fieldset className="space-y-3">
       <legend className="text-[13px] font-medium text-fg">Permissions</legend>
@@ -43,17 +62,31 @@ function ScopeChoices({ scopes, selected, onToggle }: { scopes: ApiScope[]; sele
               {levelLabels[level].title} · {levelLabels[level].description}
             </p>
             <div className="grid gap-1.5">
-              {group.map((scope) => (
-                <label key={scope.name} className={`${choiceClass} items-start`}>
-                  <Checkbox className="mt-0.5" checked={selected.has(scope.name)} onChange={() => onToggle(scope.name)} aria-describedby={`scope-${scope.name}-description`} />
-                  <span className="min-w-0 font-mono text-xs text-fg">
-                    {scope.name}
-                    <span id={`scope-${scope.name}-description`} className="block font-sans text-fg-muted">
-                      {scope.description}
+              {group.map((scope) => {
+                const reason = unavailable(scope);
+                return (
+                  <label key={scope.name} className={`${choiceClass} items-start`}>
+                    <Checkbox
+                      className="mt-0.5"
+                      checked={selected.has(scope.name)}
+                      disabled={reason !== undefined}
+                      onChange={() => onToggle(scope.name)}
+                      aria-describedby={reason ? `scope-${scope.name}-description scope-${scope.name}-reason` : `scope-${scope.name}-description`}
+                    />
+                    <span className="min-w-0 font-mono text-xs text-fg">
+                      {scope.name}
+                      <span id={`scope-${scope.name}-description`} className="block font-sans text-fg-muted">
+                        {scope.description}
+                      </span>
+                      {reason && (
+                        <span id={`scope-${scope.name}-reason`} className="block font-sans text-fg-muted">
+                          {reason}
+                        </span>
+                      )}
                     </span>
-                  </span>
-                </label>
-              ))}
+                  </label>
+                );
+              })}
             </div>
           </div>
         );
@@ -92,6 +125,9 @@ export function CreateApiKey() {
   const [days, setDays] = useState(30);
   const [submitted, setSubmitted] = useState(false);
   const team = currentTeam(session);
+  const admin = session?.is_admin === true;
+  const owner = teamAdmin ? scope : "user";
+  const unavailable = (item: ApiScope) => unavailableReason(item, admin, owner);
   // Verified legacy accounts can still carry the bootstrap ID; the backend refuses only when no individual email is known.
   const bootstrap = session?.user_id === "bootstrap" && !session.email;
 
@@ -131,7 +167,7 @@ export function CreateApiKey() {
         event.preventDefault();
         setSubmitted(true);
         if (nameError || daysError || scopesError) return;
-        create.mutate({ name: name.trim(), scope: teamAdmin ? scope : "user", scopes: scopes.data?.filter((item) => selected.has(item.name)).map((item) => item.name) ?? [], days });
+        create.mutate({ name: name.trim(), scope: owner, scopes: scopes.data?.filter((item) => selected.has(item.name)).map((item) => item.name) ?? [], days });
       }}
     >
       {bootstrap && (
@@ -152,7 +188,10 @@ export function CreateApiKey() {
           legend="Owner"
           name="key-scope"
           value={scope}
-          onChange={setScope}
+          onChange={(value) => {
+            setScope(value);
+            setSelected((current) => availableSelection(current, scopes.data, admin, value));
+          }}
           choices={[
             { value: "user", label: "Personal", description: "Acts as you in any team you select with the request." },
             { value: "team", label: "Team", description: `Fixed to ${team?.name ?? "the current team"}. Team administrators can see and revoke it.` },
@@ -163,7 +202,7 @@ export function CreateApiKey() {
       )}
       {scopes.isPending && <LoadingRows label="Loading permissions" rows={3} />}
       {scopes.isError && <QueryError what="permissions" error={scopes.error} onRetry={() => void scopes.refetch()} retrying={scopes.isFetching} />}
-      {scopes.data && <ScopeChoices scopes={scopes.data} selected={selected} onToggle={toggle} />}
+      {scopes.data && <ScopeChoices scopes={scopes.data} selected={selected} onToggle={toggle} unavailable={unavailable} />}
       {submitted && scopesError && (
         <p role="alert" className="text-xs text-bad">
           {scopesError}

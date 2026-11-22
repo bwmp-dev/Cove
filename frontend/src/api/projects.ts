@@ -55,12 +55,3 @@ export function useDeleteEnvironment() {
     onSettled: () => client.invalidateQueries({ queryKey: keys.projects }),
   });
 }
-
-export function useAssignEnvironment(workloadId: string) {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (placement: { project_id: string; environment_id: string }) =>
-      request<{ ok: boolean }>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/environment`, placement),
-    onSettled: () => client.invalidateQueries({ queryKey: keys.workloads }),
-  });
-}

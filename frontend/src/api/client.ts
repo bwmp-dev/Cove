@@ -3,12 +3,15 @@ import { selectedTeam } from "../lib/team";
 export class ApiError extends Error {
   readonly status: number;
   readonly retryAfter: number | null;
+  // A structured error body, for endpoints that explain a refusal with JSON (such as a review whose blockers changed).
+  readonly details: unknown;
 
-  constructor(status: number, message: string, retryAfter: number | null = null) {
+  constructor(status: number, message: string, retryAfter: number | null = null, details?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.retryAfter = retryAfter;
+    this.details = details;
   }
 
   get isNetwork() {
@@ -56,9 +59,18 @@ function parseRetryAfter(response: Response): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
+async function readErrorDetails(response: Response): Promise<unknown> {
+  if (!(response.headers.get("content-type") ?? "").startsWith("application/json")) return undefined;
+  try {
+    return await response.clone().json();
+  } catch {
+    return undefined;
+  }
+}
+
+async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal, teamOverride?: string): Promise<Response> {
   const headers: Record<string, string> = { Accept: accept };
-  const team = selectedTeam();
+  const team = teamOverride ?? selectedTeam();
   if (team) {
     headers["X-Cove-Team"] = team;
   }
@@ -82,13 +94,23 @@ async function send(method: string, path: string, accept: string, body?: unknown
     throw new ApiError(0, "Cannot reach the control plane. Check your connection.");
   }
   if (!response.ok) {
-    throw new ApiError(response.status, await readErrorMessage(response), parseRetryAfter(response));
+    const details = await readErrorDetails(response);
+    throw new ApiError(response.status, await readErrorMessage(response), parseRetryAfter(response), details);
   }
   return response;
 }
 
-export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const response = await send(method, path, "application/json", body, signal);
+export function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  return requestJSON<T>(method, path, body, signal);
+}
+
+// Reads another team's data, such as destinations for a transfer, without changing the selected team.
+export function requestForTeam<T>(team: string, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  return requestJSON<T>(method, path, body, signal, team);
+}
+
+async function requestJSON<T>(method: string, path: string, body: unknown, signal: AbortSignal | undefined, team?: string): Promise<T> {
+  const response = await send(method, path, "application/json", body, signal, team);
   try {
     return (await response.json()) as T;
   } catch {

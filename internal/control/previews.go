@@ -26,6 +26,9 @@ type previewPolicy struct {
 }
 
 func (s *Server) requirePersistentResource(w http.ResponseWriter, r *http.Request, id string) bool {
+	if !s.requireAdoptionComplete(w, r, id) {
+		return false
+	}
 	var preview bool
 	if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM previews WHERE workload_id=$1) OR EXISTS(SELECT 1 FROM environment_preview_resources WHERE resource_id=$1)`, id).Scan(&preview); err != nil {
 		http.Error(w, "resource metadata unavailable", 503)

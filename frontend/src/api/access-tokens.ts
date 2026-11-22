@@ -2,7 +2,7 @@ import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query
 import { request } from "./client";
 
 export type ApiScopeLevel = 1 | 2 | 3;
-export interface ApiScope { name: string; level: ApiScopeLevel; description: string }
+export interface ApiScope { name: string; level: ApiScopeLevel; description: string; instance_admin: boolean; personal_only: boolean }
 export interface AccessToken { id: string; name: string; user_id: string; team_id: string; scope: "user" | "team"; scopes: string[]; expires_at: string }
 export interface AccessTokenInput { name: string; scope: AccessToken["scope"]; scopes: string[]; days: number }
 export interface IssuedAccessToken { id: string; token: string; expires_at: string }

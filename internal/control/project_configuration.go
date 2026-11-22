@@ -191,7 +191,7 @@ func (s *Server) readProjectConfiguration(ctx context.Context, tx pgx.Tx, team, 
 	if err != nil {
 		return manifest, err
 	}
-	rows, err = tx.Query(ctx, `SELECT w.id,COALESCE(k.key,w.id),COALESCE(w.environment_id,''),w.configuration,COALESCE((SELECT o.result->>'revision' FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','rollback') AND o.state='succeeded' ORDER BY o.updated_at DESC LIMIT 1),'') FROM workloads w LEFT JOIN configuration_resource_keys k ON k.workload_id=w.id WHERE w.project_id=$1 AND w.team_id=$2 AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) AND NOT EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) ORDER BY COALESCE(k.key,w.id)`, project, team)
+	rows, err = tx.Query(ctx, `SELECT w.id,COALESCE(k.key,w.id),COALESCE(w.environment_id,''),w.configuration,COALESCE((SELECT o.result->>'revision' FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','rollback','adopt') AND o.state='succeeded' ORDER BY o.updated_at DESC LIMIT 1),'') FROM workloads w LEFT JOIN configuration_resource_keys k ON k.workload_id=w.id WHERE w.project_id=$1 AND w.team_id=$2 AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) AND NOT EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) ORDER BY COALESCE(k.key,w.id)`, project, team)
 	if err != nil {
 		return manifest, err
 	}

@@ -7,6 +7,7 @@ import (
 )
 
 type workloadView struct {
+	PendingAdoptionID    string                          `json:"pending_adoption_id,omitempty"`
 	ID                   string                          `json:"id"`
 	Name                 string                          `json:"name"`
 	NodeID               string                          `json:"node_id"`

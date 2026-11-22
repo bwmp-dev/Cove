@@ -80,7 +80,7 @@ func (e *Engine) InventoryPreviewSource(ctx context.Context, workload string, da
 		env = append(env, key+"="+value)
 	}
 	resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}
-	if err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", "cove-" + workload, "--file", current.ComposePath, "config", "--format", "json"}, env, resolved); err != nil {
+	if err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", e.composeProject(workload), "--file", current.ComposePath, "config", "--format", "json"}, env, resolved); err != nil {
 		return nil, errors.New("the deployed release configuration could not be read")
 	}
 	var config struct {
@@ -201,7 +201,7 @@ func (e *Engine) InventoryPreviewSource(ctx context.Context, workload string, da
 		if strings.HasPrefix(network.Name, "cove-shared-") || strings.HasPrefix(network.Name, "cove-link-") || network.Name == "cove-ingress" {
 			continue
 		}
-		if network.External || (network.Name != "" && !strings.HasPrefix(network.Name, "cove-"+workload+"_")) {
+		if network.External || (network.Name != "" && !strings.HasPrefix(network.Name, e.composeProject(workload)+"_")) {
 			inventory.ExternalNetworks = append(inventory.ExternalNetworks, name)
 		}
 	}
@@ -549,7 +549,7 @@ func (e *Engine) removeEnvironmentPreview(ctx context.Context, r Request, out io
 			return err
 		}
 	}
-	ids, err := e.output(ctx, "docker", "network", "ls", "-q", "--filter", "label=com.docker.compose.project=cove-"+r.Workload)
+	ids, err := e.output(ctx, "docker", "network", "ls", "-q", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload))
 	if err != nil {
 		return err
 	}

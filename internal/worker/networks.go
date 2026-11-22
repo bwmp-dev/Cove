@@ -109,7 +109,7 @@ func (e *Engine) prepareNetworks(ctx context.Context, r Request, dir string, arg
 				if !ok {
 					return errors.New("could not inspect connected network aliases")
 				}
-				if owner == "cove-"+r.Workload {
+				if owner == e.composeProject(r.Workload) {
 					continue
 				}
 				var connected map[string]struct{ Aliases []string }

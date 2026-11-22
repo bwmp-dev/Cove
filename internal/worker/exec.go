@@ -72,7 +72,7 @@ func (e *Engine) Exec(ctx context.Context, r ExecRequest) (ExecResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(r.TimeoutSeconds)*time.Second)
 	defer cancel()
 	selection := &limitedBuffer{Limit: 8192}
-	args := []string{"docker", "ps", "--no-trunc", "--filter", "label=com.docker.compose.project=cove-" + r.Workload, "--filter", "label=com.docker.compose.service=" + r.Service, "--format", "{{.ID}}"}
+	args := []string{"docker", "ps", "--no-trunc", "--filter", "label=com.docker.compose.project=" + e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service=" + r.Service, "--format", "{{.ID}}"}
 	if err := e.Run(ctx, e.Root, args, nil, selection); err != nil {
 		return ExecResult{}, errors.New("could not inspect resource containers")
 	}

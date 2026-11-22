@@ -41,7 +41,7 @@ type DriftReport struct {
 }
 
 func (e *Engine) runtimeConfiguration(ctx context.Context, workload string) (map[string]driftContainer, error) {
-	ids, err := e.output(ctx, "docker", "ps", "-aq", "--no-trunc", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.oneoff=False")
+	ids, err := e.output(ctx, "docker", "ps", "-aq", "--no-trunc", "--filter", "label=com.docker.compose.project="+e.composeProject(workload), "--filter", "label=com.docker.compose.oneoff=False")
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func (e *Engine) runtimeConfiguration(ctx context.Context, workload string) (map
 		config, _ := container["Config"].(map[string]any)
 		labels, _ := config["Labels"].(map[string]any)
 		service, _ := labels["com.docker.compose.service"].(string)
-		if !selected[id] || result[id].Fields != nil || labels["com.docker.compose.project"] != "cove-"+workload || !serviceIdentifier.MatchString(service) || config == nil || container["HostConfig"] == nil {
+		if !selected[id] || result[id].Fields != nil || labels["com.docker.compose.project"] != e.composeProject(workload) || !serviceIdentifier.MatchString(service) || config == nil || container["HostConfig"] == nil {
 			return nil, errors.New("runtime configuration is not owned by this resource")
 		}
 		state, _ := container["State"].(map[string]any)

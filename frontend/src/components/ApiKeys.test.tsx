@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { ApiScope } from "../api/access-tokens";
 import { request } from "../api/client";
 import { ApiKeyList, CreateApiKey } from "./ApiKeys";
 
@@ -24,10 +25,11 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
   this.open = false;
 };
 
-const scopes = [
-  { name: "workloads:read", level: 1, description: "Read accessible resources, runtime and release metadata." },
-  { name: "workloads:operate", level: 2, description: "Deploy, restart, stop, start, roll back and back up resources." },
-  { name: "exec:run", level: 3, description: "Run a bounded one-off command in a resource container." },
+const scopes: ApiScope[] = [
+  { name: "workloads:read", level: 1, description: "Read accessible resources, runtime and release metadata.", instance_admin: false, personal_only: false },
+  { name: "workloads:operate", level: 2, description: "Deploy, restart, stop, start, roll back and back up resources.", instance_admin: false, personal_only: false },
+  { name: "exec:run", level: 3, description: "Run a bounded one-off command in a resource container.", instance_admin: false, personal_only: false },
+  { name: "migration:adopt", level: 3, description: "Instance administrators only: inspect and adopt unmanaged Compose projects; personal tokens only.", instance_admin: true, personal_only: true },
 ];
 
 function wrap(children: ReactNode) {
@@ -42,6 +44,38 @@ function mockApi(post: () => Promise<unknown>) {
     return post();
   });
 }
+
+it("offers restricted scopes only on an instance administrator's personal key", async () => {
+  const user = userEvent.setup();
+  session.value = { ...memberOf("owner"), is_admin: true };
+  mockApi(() => Promise.resolve({ id: "k1", token: "cove_secret_value", expires_at: "2027-01-01T00:00:00Z" }));
+  wrap(<CreateApiKey />);
+  const adopt = await screen.findByRole("checkbox", { name: /migration:adopt/ });
+  expect(adopt).toBeEnabled();
+  await user.click(adopt);
+  await user.click(screen.getByRole("checkbox", { name: /workloads:read/ }));
+
+  await user.click(screen.getByRole("radio", { name: /Team/ }));
+  expect(adopt).toBeDisabled();
+  expect(adopt).not.toBeChecked();
+  expect(adopt).toHaveAccessibleDescription(expect.stringContaining("Available on personal keys only."));
+  await user.click(screen.getByRole("radio", { name: /Personal/ }));
+  expect(adopt).toBeEnabled();
+  expect(adopt).not.toBeChecked();
+
+  await user.click(screen.getByRole("radio", { name: /Team/ }));
+  await user.type(screen.getByLabelText("Name"), "Fleet bot");
+  await user.click(screen.getByRole("button", { name: "Create API key" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/access-tokens", { name: "Fleet bot", scope: "team", scopes: ["workloads:read"], days: 30 }));
+});
+
+it("disables instance administrator scopes for other accounts", async () => {
+  mockApi(() => Promise.reject(new Error("unexpected")));
+  wrap(<CreateApiKey />);
+  const adopt = await screen.findByRole("checkbox", { name: /migration:adopt/ });
+  expect(adopt).toBeDisabled();
+  expect(adopt).toHaveAccessibleDescription(expect.stringContaining("Only instance administrators can grant this permission."));
+});
 
 it("creates a team key with explicit permissions and shows the key only until dismissed", async () => {
   const user = userEvent.setup();

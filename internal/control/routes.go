@@ -112,7 +112,7 @@ func deployedWorkload(ctx context.Context, db interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workload string) (bool, error) {
 	var deployed bool
-	err := db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback') AND state='succeeded')", workload).Scan(&deployed)
+	err := db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback','adopt') AND state='succeeded')", workload).Scan(&deployed)
 	return deployed, err
 }
 
@@ -121,7 +121,7 @@ func deployedWorkload(ctx context.Context, db interface {
 // can change routes from then on; saving them directly would release hostnames the proxy may serve.
 func deployAttempted(ctx context.Context, tx pgx.Tx, workload string) (bool, error) {
 	var attempted bool
-	err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback'))", workload).Scan(&attempted)
+	err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback','adopt'))", workload).Scan(&attempted)
 	return attempted, err
 }
 

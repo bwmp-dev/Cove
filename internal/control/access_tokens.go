@@ -12,24 +12,27 @@ import (
 )
 
 type apiScope struct {
-	Name        string `json:"name"`
-	Level       int    `json:"level"`
-	Description string `json:"description"`
+	Name          string `json:"name"`
+	Level         int    `json:"level"`
+	Description   string `json:"description"`
+	InstanceAdmin bool   `json:"instance_admin"`
+	PersonalOnly  bool   `json:"personal_only"`
 }
 
 var apiScopes = []apiScope{
-	{"projects:read", 1, "Read accessible projects and environments."},
-	{"projects:write", 3, "Create, rename and delete projects and environments."},
-	{"configuration:write", 3, "Save and apply project declarations, variables, routes and GitOps settings; policies also require team administration."},
-	{"workloads:read", 1, "Read accessible resources, runtime and release metadata."},
-	{"workloads:write", 3, "Create, configure and delete resources and routes."},
-	{"workloads:operate", 2, "Deploy, restart, stop, start, roll back and back up resources."},
-	{"workloads:restore", 3, "Restore resource data."},
-	{"logs:read", 1, "Read operation and container logs."},
-	{"secrets:read", 3, "Read audited variable and configuration-file exports."},
-	{"secrets:write", 3, "Update resource variables."},
-	{"exec:run", 3, "Run a bounded one-off command in a resource container."},
-	{"tunnels:write", 3, "Create and revoke temporary service tunnel leases."},
+	{"projects:read", 1, "Read accessible projects and environments.", false, false},
+	{"projects:write", 3, "Create, rename and delete projects and environments.", false, false},
+	{"configuration:write", 3, "Save and apply project declarations, imports and resource moves; policies and ownership transfers also require team administration.", false, false},
+	{"migration:adopt", 3, "Instance administrators only: inspect and adopt unmanaged Compose projects; personal tokens only.", true, true},
+	{"workloads:read", 1, "Read accessible resources, runtime and release metadata.", false, false},
+	{"workloads:write", 3, "Create, configure and delete resources and routes.", false, false},
+	{"workloads:operate", 2, "Deploy, restart, stop, start, roll back and back up resources.", false, false},
+	{"workloads:restore", 3, "Restore resource data.", false, false},
+	{"logs:read", 1, "Read operation and container logs.", false, false},
+	{"secrets:read", 3, "Read audited variable and configuration-file exports.", false, false},
+	{"secrets:write", 3, "Update resource variables.", false, false},
+	{"exec:run", 3, "Run a bounded one-off command in a resource container.", false, false},
+	{"tunnels:write", 3, "Create and revoke temporary service tunnel leases.", false, false},
 }
 
 func apiScopeLevel(name string) int {
@@ -44,6 +47,7 @@ func apiScopeLevel(name string) int {
 type apiRouteKey struct{}
 type apiCredential struct {
 	ID     string
+	Team   string
 	Scopes []string
 }
 type apiCredentialKey struct{}
@@ -78,11 +82,9 @@ func (s *Server) authenticatePublicToken(next http.Handler, w http.ResponseWrite
 		return
 	}
 	ctx := context.WithValue(r.Context(), identityKey{}, p)
-	ctx = context.WithValue(ctx, apiCredentialKey{}, apiCredential{ID: id, Scopes: scopes})
+	ctx = context.WithValue(ctx, apiCredentialKey{}, apiCredential{ID: id, Team: team, Scopes: scopes})
 	r = r.WithContext(ctx)
-	if s.authorize(w, r) {
-		s.authenticated(next, w, r, "API token "+id)
-	}
+	s.serveAuthorized(next, w, r, "API token "+id)
 }
 
 func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +165,12 @@ func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seen[scope] = true
+		for _, permission := range apiScopes {
+			if permission.Name == scope && (permission.InstanceAdmin && !p.Admin || permission.PersonalOnly && in.Scope != "user") {
+				http.Error(w, "this permission requires an instance administrator's personal API key", 403)
+				return
+			}
+		}
 		required = max(required, level)
 	}
 	var available int

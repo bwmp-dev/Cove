@@ -116,26 +116,16 @@ func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) assignEnvironment(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Environment string `json:"environment_id"`
 		Project     string `json:"project_id"`
+		Environment string `json:"environment_id"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	project, ok := s.resourceProject(w, r, in.Project, in.Environment)
-	if !ok {
+	if _, ok := s.resourceProject(w, r, in.Project, in.Environment); !ok {
 		return
 	}
-	result, err := s.DB.Exec(r.Context(), "UPDATE workloads SET environment_id=NULLIF($2,''),project_id=$3 WHERE id=$1", r.PathValue("id"), in.Environment, project)
-	if err != nil {
-		groupError(w, err)
-		return
-	}
-	if result.RowsAffected() == 0 {
-		http.NotFound(w, r)
-		return
-	}
-	respond(w, 200, map[string]bool{"ok": true})
+	http.Error(w, "review and confirm placement changes through the resource move endpoint", 409)
 }
 
 func (s *Server) resourceProject(w http.ResponseWriter, r *http.Request, project, environment string) (string, bool) {

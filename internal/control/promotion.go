@@ -74,7 +74,7 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var valid, active bool
-	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback')),EXISTS(SELECT 1 FROM operations WHERE workload_id IN ($2,$3) AND state IN ('queued','running'))`, in.Release, in.Source, target).Scan(&valid, &active); err != nil {
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback','adopt')),EXISTS(SELECT 1 FROM operations WHERE workload_id IN ($2,$3) AND state IN ('queued','running'))`, in.Release, in.Source, target).Scan(&valid, &active); err != nil {
 		http.Error(w, "operations unavailable", 503)
 		return
 	}

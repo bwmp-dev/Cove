@@ -99,7 +99,9 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
-	execRunning int
+	adoptionMu      sync.RWMutex
+	adoptedProjects map[string]adoptedProject
+	execRunning     int
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -149,6 +151,9 @@ func NewEngine(root string) (*Engine, error) {
 		return nil, err
 	}
 	e := &Engine{Root: root, Run: RunCommand, active: map[string]bool{}, cancels: map[string]context.CancelFunc{}, recovering: map[string]routeRecovery{}, fatal: make(chan error, 1), linkKick: make(chan struct{}, 1)}
+	if err := e.loadAdoptedProjects(); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(filepath.Join(root, "draining.json")); err == nil {
 		e.draining = true
 	} else if !os.IsNotExist(err) {
@@ -709,7 +714,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 	}
 	defer file.Close()
 	// This generated Docker project name is public even when an environment value happens to match part of it.
-	log := &boundedLog{file: file, remaining: 4 * 1024 * 1024, publicIdentifiers: []string{"cove-" + r.Workload}}
+	log := &boundedLog{file: file, remaining: 4 * 1024 * 1024, publicIdentifiers: []string{e.composeProject(r.Workload)}}
 	defer func() {
 		if err := log.flush(true); err != nil && result == nil {
 			result = err
@@ -913,7 +918,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				log.secrets = append(log.secrets, value)
 			}
 		}
-		args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}
+		args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}
 		if err = e.Run(ctx, dir, args, env, log); err != nil {
 			return err
 		}
@@ -946,7 +951,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 		}
 	}
-	args := []string{"docker", "compose", "--project-name", "cove-" + strings.ToLower(r.Workload), "--file", composePath}
+	args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 	if r.Action == "deploy" {
 		if r.Preview {
 			composePath, err = e.preparePreview(r, dir, composePath)
@@ -954,13 +959,13 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				fmt.Fprintln(log, err)
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		composePath, err = e.prepareComposeBundle(ctx, r, dir, composePath, env)
 		if err != nil {
 			return err
 		}
-		args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+		args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		if r.ComposeBundle != nil {
 			bundleSecrets, err = composeBundleSecrets(composePath)
 			if err != nil {
@@ -975,7 +980,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 			composePath = prepared
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if r.Source != nil {
 			resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}
@@ -994,21 +999,21 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				fmt.Fprintln(log, err)
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if len(r.FileSecrets) > 0 {
 			composePath, err = e.prepareFileSecrets(ctx, r, dir, args, env)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if len(r.Networks) > 0 {
 			composePath, err = e.prepareNetworks(ctx, r, dir, args, env, log)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if !r.Preview {
 			linkedPath, linked, err := e.prepareLinks(ctx, r, dir, args, env)
@@ -1018,7 +1023,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			if linked {
 				composePath = linkedPath
-				args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+				args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 			}
 		}
 		if r.Private != nil {
@@ -1026,21 +1031,21 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if len(r.Limits) > 0 {
 			composePath, err = e.prepareLimits(ctx, r, dir, args, env, log)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if len(r.ImagePins) > 0 {
 			composePath, err = e.preparePromotion(ctx, r, dir, args, env)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), "config", "--quiet"), env, log); err != nil {
 			return err
@@ -1066,7 +1071,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				fmt.Fprintln(log, err)
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 			if err = e.beginDeployGuard(r, dir, composePath); err != nil {
 				return err
 			}

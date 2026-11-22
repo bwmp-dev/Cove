@@ -93,7 +93,7 @@ func (e *Engine) OpenTunnel(ctx context.Context, in TunnelRequest) error {
 	if len(e.tunnels) >= 32 {
 		return errors.New("node temporary access limit reached")
 	}
-	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+in.Workload, "--filter", "label=com.docker.compose.service="+in.Service)
+	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project="+e.composeProject(in.Workload), "--filter", "label=com.docker.compose.service="+in.Service)
 	if err != nil || len(strings.Fields(ids)) != 1 {
 		return errors.New("select exactly one running service container")
 	}

@@ -11,6 +11,8 @@ import (
 )
 
 type Probe struct {
+	Adoption            bool         `json:"adoption"`
+	Imports             bool         `json:"imports"`
 	Drift               bool         `json:"drift"`
 	SourceFiles         bool         `json:"source_files"`
 	ComposeBundles      bool         `json:"compose_bundles"`
@@ -50,6 +52,8 @@ func Inspect(ctx context.Context) Probe {
 	defer cancel()
 	p := Probe{Drift: true, SourceFiles: true, ComposeBundles: true, Exec: true, BuiltinVariables: true, GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
 	p.Previews = true
+	p.Imports = true
+	p.Adoption = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Output(); err == nil {

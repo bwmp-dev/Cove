@@ -8,6 +8,8 @@ export interface Capabilities {
   terminal?: boolean;
   exec?: boolean;
   infrastructure?: boolean;
+  imports?: boolean;
+  adoption?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -130,6 +132,8 @@ export interface Workload {
   // True once a deploy or rollback has succeeded, so route changes apply without redeploying.
   deployed: boolean;
   permissions: Permission[];
+  // Set while a node adoption that reserved this resource is still pending; the resource is read-only until it completes.
+  pending_adoption_id?: string;
   project_id: string;
   environment_id?: string;
   routes?: Route[];
@@ -150,7 +154,7 @@ export interface WorkloadInput {
   file_secrets?: FileSecret[];
   hooks?: DeploymentHooks;
   limits?: Record<string, ServiceLimits>;
-  // Accepted on create only; placement changes go through the environment endpoint.
+  // Accepted on create only; placement changes go through the reviewed move endpoint.
   project_id?: string;
   environment_id?: string;
   routes?: Route[];
@@ -167,7 +171,7 @@ export interface WorkloadInput {
 
 export interface Route { domain: string; service: string; port: number }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "adopt";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {

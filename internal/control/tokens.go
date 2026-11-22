@@ -63,9 +63,7 @@ func (s *Server) scopedToken(next http.Handler, w http.ResponseWriter, r *http.R
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), identityKey{}, p))
-	if s.authorize(w, r) {
-		s.authenticated(next, w, r, "API token "+id)
-	}
+	s.serveAuthorized(next, w, r, "API token "+id)
 }
 
 func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {

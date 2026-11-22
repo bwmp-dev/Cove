@@ -296,7 +296,7 @@ func (e *Engine) restoreCopyDatabase(ctx context.Context, r Request, d *Database
 		env = append(env, key+"="+value)
 	}
 	name := "cove-copy-db-" + r.ID
-	args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", path, "run", "--detach", "--no-deps", "--no-TTY", "--name", name, "--label", "dev.cove.drill=" + r.ID, d.Service}
+	args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", path, "run", "--detach", "--no-deps", "--no-TTY", "--name", name, "--label", "dev.cove.drill=" + r.ID, d.Service}
 	if err = e.Run(ctx, dir, args, env, out); err != nil {
 		return err
 	}

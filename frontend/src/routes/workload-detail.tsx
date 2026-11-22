@@ -1,4 +1,4 @@
-import { ResourcePlacement } from "../components/ResourcePlacement";
+import { ResourceMove } from "../components/ResourceMove";
 import { Clone } from "../components/Clone";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useRouterState } from "@tanstack/react-router";
@@ -33,7 +33,7 @@ import {
 import { createContext, use, useEffect, useId, useMemo, useRef, useState } from "react";
 import { errorMessage, isStatus } from "../api/client";
 import { useCancelOperation, useQueueOperation } from "../api/mutations";
-import { projectsQuery, useAssignEnvironment, type Project } from "../api/projects";
+import { projectsQuery, type Project } from "../api/projects";
 import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
 import { ResourceExec } from "../components/ResourceExec";
 import type { Operation, Workload } from "../api/types";
@@ -50,6 +50,7 @@ import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList,
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can } from "../lib/permissions";
+import { useSession } from "../lib/session";
 import { actionLabels, activeOperation, allowedActions, isActive, stateLabels, workloadKind } from "../lib/operations";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
@@ -258,6 +259,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   const placement = findPlacement(projects.data, workload.environment_id, workload.project_id);
   const latest = operations.data?.find((operation) => operation.workload_id === workload.id);
+  const admin = useSession()?.is_admin ?? false;
 
   return (
     <>
@@ -330,6 +332,22 @@ function ResourceHeader({ workload }: { workload: Workload }) {
       />
       <div className="space-y-2 px-4 pt-4 empty:hidden sm:px-6" aria-live="polite">
         {actions.feedback}
+        {workload.pending_adoption_id && (
+          <Notice
+            tone="warn"
+            title="Node adoption pending"
+            action={
+              admin ? (
+                <Link to="/nodes/$nodeId" params={{ nodeId: workload.node_id }} hash={`adoption-${workload.pending_adoption_id}`} className={buttonClass("secondary")}>
+                  Open adoption
+                </Link>
+              ) : undefined
+            }
+          >
+            This resource was reserved by an adoption that has not finished. Its running containers were not restarted, and it stays read-only until the adoption completes.
+            {admin ? " Resume or refresh the adoption on the node page." : " Ask an instance administrator to finish the adoption on the node page."}
+          </Notice>
+        )}
         {workload.preview_source_id && <Notice>This is a temporary preview. Its configuration is managed by <Link to="/resources/$resourceId/previews" params={{ resourceId: workload.preview_source_id }} className="underline">the source resource</Link>. Closing it deletes its preview data.</Notice>}
         {node && node.state !== "ready" && (
           <Notice
@@ -682,37 +700,6 @@ export function ResourceBackups() {
   );
 }
 
-function PlacementForm({ workload }: { workload: Workload }) {
-  const projects = useQuery(projectsQuery);
-  const assign = useAssignEnvironment(workload.id);
-  const online = useOnline();
-  const [selected, setSelected] = useState(`${workload.project_id}:${workload.environment_id ?? ""}`);
-  const current = `${workload.project_id}:${workload.environment_id ?? ""}`;
-
-  return (
-    <form
-      className="space-y-4"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const [project_id, environment_id] = selected.split(":");
-        if (project_id) assign.mutate({ project_id, environment_id: environment_id ?? "" });
-      }}
-    >
-      <ResourcePlacement projects={projects.data ?? []} value={selected} onChange={(value) => { assign.reset(); setSelected(value); }} />
-      {projects.isError && <QueryError what="projects" error={projects.error} onRetry={() => void projects.refetch()} retrying={projects.isFetching} />}
-      {assign.isError && (
-        <Notice tone="error" title="Could not change placement">
-          {errorMessage(assign.error)}
-        </Notice>
-      )}
-      {assign.isSuccess && selected === current && <Notice tone="success" title="Placement saved" />}
-      <Button type="submit" variant="primary" disabled={!online || !selected || selected === current} pending={assign.isPending}>
-        Save placement
-      </Button>
-    </form>
-  );
-}
-
 export function ResourceSettings() {
   const workload = useResource();
   if (!can(workload.permissions, "edit")) {
@@ -725,9 +712,7 @@ export function ResourceSettings() {
   }
   return (
     <>
-      <Section width="form" title="Placement" description="Projects and environments organise resources. Nodes are chosen when a resource is created.">
-        <PlacementForm workload={workload} />
-      </Section>
+      <ResourceMove workload={workload} />
       <Clone kind="resource" id={workload.id} name={workload.name} />
       <Section width="form" title="Danger zone" tone="danger">
         <DeleteResource kind="workload" id={workload.id} />

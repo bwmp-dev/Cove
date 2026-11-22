@@ -68,7 +68,10 @@ func TestManagementAndAutomationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	call("POST", "/api/workloads", workloadInput{Name: "orphan", NodeID: node, Compose: compose, EnvironmentID: resourceID()}, 404)
-	call("PUT", "/api/workloads/"+id+"/environment", map[string]string{"environment_id": env}, 200)
+	move := resourceMoveInput{TeamID: "default", ProjectID: project, EnvironmentID: env}
+	move.Version = value(call("POST", "/api/workloads/"+id+"/move/preview", move, 200), "version")
+	move.Acknowledge = true
+	call("POST", "/api/workloads/"+id+"/move", move, 200)
 	call("DELETE", "/api/projects/"+project, nil, 409)
 	if value(call("GET", "/api/workloads/"+id, nil, 200), "environment_id") != env {
 		t.Fatal("environment assignment lost")
@@ -158,6 +161,14 @@ func TestManagementAndAutomationIntegration(t *testing.T) {
 	}
 	call("DELETE", "/api/workloads/"+id+"/webhook", nil, 200)
 	hook(signature, "delivery-2", 404)
-	call("PUT", "/api/workloads/"+id+"/environment", map[string]string{"project_id": project, "environment_id": ""}, 200)
+	call("PUT", "/api/workloads/"+id+"/environment", map[string]string{"project_id": project, "environment_id": ""}, 409)
+	move.EnvironmentID = ""
+	move.Version = value(call("POST", "/api/workloads/"+id+"/move/preview", move, 200), "version")
+	call("POST", "/api/workloads/"+id+"/move", move, 409)
+	if _, err := db.Exec(ctx, "UPDATE operations SET state='succeeded' WHERE workload_id=$1", id); err != nil {
+		t.Fatal(err)
+	}
+	move.Version = value(call("POST", "/api/workloads/"+id+"/move/preview", move, 200), "version")
+	call("POST", "/api/workloads/"+id+"/move", move, 200)
 	call("DELETE", "/api/projects/"+project, nil, 409)
 }

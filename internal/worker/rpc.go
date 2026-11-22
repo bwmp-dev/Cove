@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Adoption  *AdoptionRequest      `json:"adoption,omitempty"`
 	Exec      *ExecRequest          `json:"exec,omitempty"`
 	Links     *LinkConfig           `json:"links,omitempty"`
 	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
@@ -28,31 +29,78 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
-	Drift         *DriftReport         `json:"drift,omitempty"`
-	SourceFiles   *SourceFiles         `json:"source_files,omitempty"`
-	Exec          *ExecResult          `json:"exec,omitempty"`
-	Links         *LinkStatus          `json:"links,omitempty"`
-	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
-	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
-	IngressResult *IngressConfigResult `json:"ingress_result,omitempty"`
-	RestoreCopy   *RestoreCopy         `json:"restore_copy,omitempty"`
-	Images        map[string]string    `json:"images,omitempty"`
-	Inventory     *PreviewInventory    `json:"inventory,omitempty"`
-	Cleanup       *CleanupPreview      `json:"cleanup,omitempty"`
-	Preflight     *PreflightReport     `json:"preflight,omitempty"`
-	Terminal      *TerminalResponse    `json:"terminal,omitempty"`
-	Releases      []Release            `json:"releases,omitempty"`
-	Backups       []BackupRecord       `json:"backups,omitempty"`
-	Maintenance   *Maintenance         `json:"maintenance,omitempty"`
-	Probe         *Probe               `json:"probe,omitempty"`
-	Operation     *Operation           `json:"operation,omitempty"`
-	Logs          string               `json:"logs,omitempty"`
-	Error         string               `json:"error,omitempty"`
-	Containers    []Container          `json:"containers,omitempty"`
+	Adopted         *AdoptionRequest     `json:"adopted,omitempty"`
+	ComposeProjects []ComposeProject     `json:"compose_projects,omitempty"`
+	Adoption        *AdoptionPlan        `json:"adoption,omitempty"`
+	ImportedCompose *ImportedCompose     `json:"imported_compose,omitempty"`
+	Drift           *DriftReport         `json:"drift,omitempty"`
+	SourceFiles     *SourceFiles         `json:"source_files,omitempty"`
+	Exec            *ExecResult          `json:"exec,omitempty"`
+	Links           *LinkStatus          `json:"links,omitempty"`
+	Ingress         *IngressConfigState  `json:"ingress,omitempty"`
+	IngressFile     *IngressConfigFile   `json:"ingress_file,omitempty"`
+	IngressResult   *IngressConfigResult `json:"ingress_result,omitempty"`
+	RestoreCopy     *RestoreCopy         `json:"restore_copy,omitempty"`
+	Images          map[string]string    `json:"images,omitempty"`
+	Inventory       *PreviewInventory    `json:"inventory,omitempty"`
+	Cleanup         *CleanupPreview      `json:"cleanup,omitempty"`
+	Preflight       *PreflightReport     `json:"preflight,omitempty"`
+	Terminal        *TerminalResponse    `json:"terminal,omitempty"`
+	Releases        []Release            `json:"releases,omitempty"`
+	Backups         []BackupRecord       `json:"backups,omitempty"`
+	Maintenance     *Maintenance         `json:"maintenance,omitempty"`
+	Probe           *Probe               `json:"probe,omitempty"`
+	Operation       *Operation           `json:"operation,omitempty"`
+	Logs            string               `json:"logs,omitempty"`
+	Error           string               `json:"error,omitempty"`
+	Containers      []Container          `json:"containers,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "compose_adoption_status":
+		if !workloadIdentifier.MatchString(r.ID) {
+			return RPCResponse{Error: "invalid resource"}
+		}
+		e.adoptionMu.RLock()
+		entry, ok := e.adoptedProjects[r.ID]
+		e.adoptionMu.RUnlock()
+		if !ok {
+			return RPCResponse{}
+		}
+		return RPCResponse{Adopted: &AdoptionRequest{Workload: r.ID, Project: entry.Project, Fingerprint: entry.Fingerprint}}
+	case "compose_discover":
+		projects, err := e.ScanComposeProjects(ctx)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{ComposeProjects: projects}
+	case "compose_plan":
+		if r.Adoption == nil {
+			return RPCResponse{Error: "project selection required"}
+		}
+		plan, err := e.PlanComposeAdoption(ctx, r.Adoption.Project)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Adoption: plan}
+	case "compose_adopt":
+		if r.Adoption == nil {
+			return RPCResponse{Error: "adoption review required"}
+		}
+		if err := e.AdoptCompose(ctx, *r.Adoption); err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{}
+	case "import_compose":
+		if r.Request == nil {
+			return RPCResponse{Error: "import configuration required"}
+		}
+		result, err := e.PrepareImportedCompose(ctx, *r.Request)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{ImportedCompose: result}
 	case "drift":
 		report, err := e.Drift(ctx, r.ID)
 		if err != nil {
@@ -345,7 +393,7 @@ func RPCTimeout(method string) time.Duration {
 		return 5 * time.Minute
 	case "links_apply":
 		return 4 * time.Minute
-	case "source_files", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
+	case "compose_plan", "compose_adopt", "source_files", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
 		return 3 * time.Minute
 	}
 	return 30 * time.Second

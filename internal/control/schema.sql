@@ -819,3 +819,55 @@ CREATE TABLE IF NOT EXISTS configuration_gitops (
 CREATE INDEX IF NOT EXISTS configuration_gitops_due ON configuration_gitops(next_scan_at) WHERE automatic;
 
 ALTER TABLE operations ADD COLUMN IF NOT EXISTS drift_prepared boolean NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS migration_imports (
+ id text PRIMARY KEY,
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ payload bytea NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '24 hours'
+);
+CREATE INDEX IF NOT EXISTS migration_imports_project ON migration_imports(project_id,expires_at);
+
+CREATE TABLE IF NOT EXISTS compose_adoptions (
+ id text PRIMARY KEY,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ environment_id text REFERENCES environments(id) ON DELETE CASCADE,
+ payload bytea NOT NULL,
+ base_version text NOT NULL,
+ resource_ids jsonb NOT NULL,
+ completed jsonb NOT NULL DEFAULT '[]',
+ status text NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','applying','complete')),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '24 hours'
+);
+CREATE INDEX IF NOT EXISTS compose_adoptions_node ON compose_adoptions(node_id,team_id,created_at);
+CREATE TABLE IF NOT EXISTS compose_adoption_claims (
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ project_name text NOT NULL,
+ adoption_id text NOT NULL REFERENCES compose_adoptions(id) ON DELETE CASCADE,
+ workload_id text NOT NULL UNIQUE REFERENCES workloads(id) ON DELETE CASCADE,
+ PRIMARY KEY(node_id,project_name)
+);
+CREATE OR REPLACE FUNCTION cove_pending_adoption() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE resource text;
+BEGIN
+ IF TG_TABLE_NAME='workloads' THEN
+  IF current_setting('cove.adoption_write',true)='true' THEN RETURN NEW; END IF;
+  resource=NEW.id;
+ ELSE
+  IF NEW.state NOT IN ('queued','running') THEN RETURN NEW; END IF;
+  resource=NEW.workload_id;
+ END IF;
+ IF EXISTS(SELECT 1 FROM compose_adoptions a WHERE a.status='applying' AND a.resource_ids ? resource) THEN
+  RAISE EXCEPTION 'complete pending adoption first' USING ERRCODE='23514',CONSTRAINT='cove_pending_adoption';
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS pending_adoption_workload ON workloads;
+CREATE TRIGGER pending_adoption_workload BEFORE UPDATE OF configuration,node_id,team_id,project_id,environment_id ON workloads FOR EACH ROW EXECUTE FUNCTION cove_pending_adoption();
+DROP TRIGGER IF EXISTS pending_adoption_operation ON operations;
+CREATE TRIGGER pending_adoption_operation BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_pending_adoption();

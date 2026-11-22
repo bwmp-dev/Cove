@@ -512,7 +512,7 @@ func (e *Engine) seedPreviewDatabase(ctx context.Context, r Request, dir string,
 	if err = e.Run(ctx, dir, up, env, out); err != nil {
 		return errors.New("the preview database service did not start")
 	}
-	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+r.Workload, "--filter", "label=com.docker.compose.service="+db.Service)
+	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service="+db.Service)
 	if err != nil || len(strings.Fields(ids)) != 1 {
 		return errors.New("the preview database must run exactly one container")
 	}

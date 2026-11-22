@@ -25,7 +25,7 @@ func (s *Server) resolvedEnvironment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var release, revision string
-	err := s.DB.QueryRow(r.Context(), `SELECT id,COALESCE(result->>'revision','') FROM operations WHERE workload_id=$1 AND state='succeeded' AND action IN ('deploy','rollback') ORDER BY created_at DESC LIMIT 1`, id).Scan(&release, &revision)
+	err := s.DB.QueryRow(r.Context(), `SELECT id,COALESCE(result->>'revision','') FROM operations WHERE workload_id=$1 AND state='succeeded' AND action IN ('deploy','rollback','adopt') ORDER BY created_at DESC LIMIT 1`, id).Scan(&release, &revision)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "release metadata unavailable", 503)
 		return

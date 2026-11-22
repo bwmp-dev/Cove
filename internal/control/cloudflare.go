@@ -209,7 +209,7 @@ func (s *Server) reconcileDNS(ctx context.Context) error {
 		}
 		message := ""
 		if c.Enabled {
-			resources, err := s.DB.Query(ctx, `SELECT w.id,w.node_id,w.configuration FROM workloads w WHERE w.team_id=$1 AND EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','routes','rollback') AND o.state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running'))`, e.team)
+			resources, err := s.DB.Query(ctx, `SELECT w.id,w.node_id,w.configuration FROM workloads w WHERE w.team_id=$1 AND EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','routes','rollback','adopt') AND o.state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running'))`, e.team)
 			if err != nil {
 				return err
 			}

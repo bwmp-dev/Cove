@@ -105,7 +105,7 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 		add("Compose", "error", "Cannot resolve selected Compose files and profiles.")
 		return report
 	}
-	args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath, "config", "--format", "json"}
+	args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath, "config", "--format", "json"}
 	resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	if err = e.Run(ctx, dir, args, env, resolved); err != nil {
 		add("Compose", "error", "Compose validation failed. Check required variables, service definitions, and file paths.")

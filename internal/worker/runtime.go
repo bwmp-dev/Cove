@@ -42,7 +42,7 @@ func (e *Engine) Containers(ctx context.Context, id string) ([]Container, error)
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	output := &limitedBuffer{Limit: 1024 * 1024}
-	if err := e.Run(ctx, e.Root, []string{"docker", "ps", "--all", "--filter", "label=com.docker.compose.project=cove-" + id, "--format", "{{json .}}"}, nil, output); err != nil {
+	if err := e.Run(ctx, e.Root, []string{"docker", "ps", "--all", "--filter", "label=com.docker.compose.project=" + e.composeProject(id), "--format", "{{json .}}"}, nil, output); err != nil {
 		return nil, err
 	}
 	decoder := json.NewDecoder(&output.data)
@@ -91,7 +91,7 @@ func (e *Engine) ContainerLogs(ctx context.Context, id string) (string, error) {
 		environment = append(environment, key+"="+value)
 		log.secrets = append(log.secrets, value)
 	}
-	err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", "cove-" + id, "--file", current.ComposePath, "logs", "--no-color", "--timestamps", "--tail", "200"}, environment, log)
+	err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", e.composeProject(id), "--file", current.ComposePath, "logs", "--no-color", "--timestamps", "--tail", "200"}, environment, log)
 	if flushErr := log.flush(true); err == nil {
 		err = flushErr
 	}

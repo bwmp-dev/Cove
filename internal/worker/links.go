@@ -486,7 +486,7 @@ func (e *Engine) ensureLinkNetwork(ctx context.Context, networks map[string]*lin
 }
 
 func (e *Engine) serviceContainers(ctx context.Context, workload, service string) ([]string, bool, error) {
-	out, err := e.output(ctx, "docker", "ps", "-a", "--no-trunc", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+service, "--filter", "label=com.docker.compose.oneoff=False", "--format", "{{.ID}} {{.State}}")
+	out, err := e.output(ctx, "docker", "ps", "-a", "--no-trunc", "--filter", "label=com.docker.compose.project="+e.composeProject(workload), "--filter", "label=com.docker.compose.service="+service, "--filter", "label=com.docker.compose.oneoff=False", "--format", "{{.ID}} {{.State}}")
 	if err != nil {
 		return nil, false, err
 	}
