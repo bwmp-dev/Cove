@@ -58,7 +58,7 @@ if not re.fullmatch(r"[0-9a-f]{40}", revision) or not re.fullmatch(pattern, vers
 PY
 mkdir -m 0700 "$installation"
 install -d -m 0700 "$installation/deploy" "$installation/scripts"
-for file in compose.yaml deploy/traefik.yaml deploy/traefik-panel.yaml scripts/configure.sh scripts/update-panel.py scripts/install-auto-update.sh; do
+for file in compose.yaml deploy/traefik.yaml deploy/traefik-panel.yaml scripts/configure.sh scripts/update-panel.py scripts/install-auto-update.sh scripts/install-panel-recovery.sh scripts/panel-recovery.py scripts/backup-panel.py; do
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/bwmp-dev/Cove/$revision/$file" -o "$installation/$file"
 done
 sh "$installation/scripts/configure.sh" "$domain"
