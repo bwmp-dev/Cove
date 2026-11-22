@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, GitDeployKey, GitHubSourceConnection, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -13,6 +13,7 @@ export const keys = {
   workload: (id: string) => ["workloads", id] as const,
   workloadRuntime: (id: string) => ["workloads", id, "runtime"] as const,
   workloadLogs: (id: string) => ["workloads", id, "logs"] as const,
+  gitDeployKey: (id: string) => ["workloads", id, "git-deploy-key"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -69,6 +70,18 @@ export const workloadQuery = (id: string) =>
   queryOptions({
     queryKey: keys.workload(id),
     queryFn: ({ signal }) => request<Workload>("GET", `/api/workloads/${encodeURIComponent(id)}`, undefined, signal),
+  });
+
+export const gitDeployKeyQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.gitDeployKey(id),
+    queryFn: ({ signal }) => request<GitDeployKey | null>("GET", `/api/workloads/${encodeURIComponent(id)}/git-deploy-key`, undefined, signal),
+  });
+
+export const githubConnectionQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["github-source", id],
+    queryFn: ({ signal }) => request<GitHubSourceConnection | null>("GET", `/api/workloads/${id}/github`, undefined, signal),
   });
 
 export const operationsQuery = queryOptions({

@@ -28,9 +28,10 @@ type gitProvider interface {
 	CloneToken(context.Context, int64, int64) (string, error)
 	Repositories(context.Context, int64) ([]appRepository, error)
 	BranchHead(context.Context, int64, int64, string) (string, error)
+	TagHead(context.Context, int64, int64, string) (string, error)
 	Branches(context.Context, int64, int64, string) ([]gitBranch, error)
 	VerifyWebhook([]byte, []byte, http.Header) bool
-	PullRequest([]byte) (previewEvent, error)
+	PullRequest(context.Context, []byte) (previewEvent, error)
 	CommitStatus(context.Context, int64, int64, string, gitCommitStatus) error
 }
 
@@ -128,7 +129,7 @@ func (p githubProvider) VerifyWebhook(secret, body []byte, headers http.Header) 
 	return hmac.Equal(decoded, mac.Sum(nil))
 }
 
-func (p githubProvider) PullRequest(body []byte) (previewEvent, error) {
+func (p githubProvider) PullRequest(_ context.Context, body []byte) (previewEvent, error) {
 	var event previewEvent
 	err := json.Unmarshal(body, &event)
 	return event, err

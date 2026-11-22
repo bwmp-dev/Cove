@@ -226,6 +226,12 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			return deny()
 		}
 		return true
+	case strings.HasPrefix(path, "/api/git/"):
+		level := 1
+		if r.Method != "GET" {
+			level = 3
+		}
+		return s.requireAccess(w, r, "team", "", level)
 	case path == "/api/github/repositories":
 		return s.requireAccess(w, r, "team", "", 3)
 	case path == "/api/shared-variables":

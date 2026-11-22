@@ -8,8 +8,10 @@ import { errorMessage } from "../api/client";
 import { useCreateWorkload } from "../api/mutations";
 import { projectsQuery } from "../api/projects";
 import { nodesQuery } from "../api/queries";
-import { WorkloadForm } from "../components/WorkloadForm";
-import { Breadcrumbs, Button, LoadingRows, PageHeader, QueryError } from "../components/ui";
+import { WorkloadForm, type ProviderLink } from "../components/WorkloadForm";
+import type { WorkloadInput } from "../api/types";
+import { Breadcrumbs, Button, LoadingRows, Notice, PageHeader, QueryError } from "../components/ui";
+import { saveProviderSource } from "../api/git-providers";
 import { findPlacement, type Placement } from "../lib/hierarchy";
 import { buttonClass } from "../lib/styles";
 
@@ -49,11 +51,29 @@ function NewResourceCrumbs({ placement }: { placement: Placement | undefined }) 
 export function NewWorkloadPage() {
   const search = route.useSearch();
   const [selection, setSelection] = useState<{ draft?: ResourceDraft } | null>(null);
+  // The resource exists once created, so a failed provider connection is reported instead of resubmitting the form.
+  const [linking, setLinking] = useState(false);
+  const [unlinked, setUnlinked] = useState<{ id: string; message: string } | null>(null);
   const nodes = useQuery(nodesQuery);
   const projects = useQuery(projectsQuery);
   const create = useCreateWorkload();
   const navigate = useNavigate();
   const placement = findPlacement(projects.data, search.environment, search.project);
+
+  async function finish(id: string, input: WorkloadInput, provider?: ProviderLink) {
+    if (provider && input.source) {
+      setLinking(true);
+      try {
+        await saveProviderSource(id, { ...provider, branch: input.source.branch, compose_path: input.source.compose_path, ...(input.source.inline_compose ? { inline_compose: true } : {}) });
+      } catch (error) {
+        setUnlinked({ id, message: errorMessage(error) });
+        return;
+      } finally {
+        setLinking(false);
+      }
+    }
+    void navigate({ to: "/resources/$resourceId", params: { resourceId: id } });
+  }
 
   const breadcrumbs = <NewResourceCrumbs placement={placement} />;
   const cancel = placement?.environment ? (
@@ -81,6 +101,20 @@ export function NewWorkloadPage() {
         <div className="px-4 py-5 sm:px-6">
           <QueryError what={failed === nodes ? "nodes" : "projects"} error={failed.error} onRetry={() => void failed.refetch()} retrying={failed.isFetching} />
         </div>
+      ) : unlinked ? (
+        <div className="max-w-3xl px-4 py-5 sm:px-6">
+          <Notice
+            tone="warn"
+            title="Resource created, but the Git provider was not connected"
+            action={
+              <Link to="/resources/$resourceId/source" params={{ resourceId: unlinked.id }} className={buttonClass("secondary")}>
+                Open Source settings
+              </Link>
+            }
+          >
+            {unlinked.message} Connect the repository again from the resource's Source page.
+          </Notice>
+        </div>
       ) : selection === null ? (
         <TemplateBrowser onUse={(draft) => setSelection({ draft })} onCustom={() => setSelection({})} />
       ) : (
@@ -92,15 +126,11 @@ export function NewWorkloadPage() {
           projects={projects.data ?? []}
           initialEnvironmentId={placement?.environment?.id ?? ""}
           initialProjectId={placement?.project.id ?? ""}
-          pending={create.isPending}
+          pending={create.isPending || linking}
           serverError={create.isError ? errorMessage(create.error) : null}
           submitLabel="Create resource"
           cancel={cancel}
-          onSubmit={(input) =>
-            create.mutate(input, {
-              onSuccess: ({ id }) => void navigate({ to: "/resources/$resourceId", params: { resourceId: id } }),
-            })
-          }
+          onSubmit={(input, provider) => create.mutate(input, { onSuccess: ({ id }) => void finish(id, input, provider) })}
         />
         </>
       )}

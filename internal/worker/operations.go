@@ -697,7 +697,8 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		log.secrets = append(log.secrets, r.Backup.Remote.Password, r.Backup.Remote.SecretKey)
 	}
 	if r.Source != nil {
-		log.secrets = append(log.secrets, r.Source.Token)
+		log.secrets = append(log.secrets, r.Source.Token, r.Source.SSHPrivateKey)
+		log.secrets = append(log.secrets, strings.Split(r.Source.SSHPrivateKey, "\n")...)
 	}
 	if r.Backup != nil {
 		log.secrets = append(log.secrets, r.Backup.Password, r.Backup.AccessKey, r.Backup.SecretKey, r.Backup.SessionToken)

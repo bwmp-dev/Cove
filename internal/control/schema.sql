@@ -689,3 +689,67 @@ CREATE TABLE IF NOT EXISTS github_operation_feedback (
  next_attempt_at timestamptz NOT NULL DEFAULT now(),
  error text NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS git_deploy_keys (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ repository text NOT NULL,
+ host_key text NOT NULL,
+ public_key text NOT NULL,
+ private_key bytea NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS git_connections (
+ id bigserial PRIMARY KEY,
+ team_id text NOT NULL REFERENCES teams(id),
+ configuration bytea NOT NULL
+);
+CREATE TABLE IF NOT EXISTS git_repositories (
+ id bigserial PRIMARY KEY,
+ connection_id bigint NOT NULL REFERENCES git_connections(id) ON DELETE CASCADE,
+ external_id text NOT NULL,
+ full_name text NOT NULL,
+ clone_url text NOT NULL,
+ default_branch text NOT NULL,
+ UNIQUE(connection_id,external_id),
+ UNIQUE(id,connection_id)
+);
+CREATE TABLE IF NOT EXISTS git_sources (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ connection_id bigint NOT NULL REFERENCES git_connections(id),
+ repository_id bigint NOT NULL,
+ automatic boolean NOT NULL DEFAULT false,
+ reporting boolean NOT NULL DEFAULT false,
+ connected_at timestamptz NOT NULL DEFAULT now(),
+ FOREIGN KEY(repository_id,connection_id) REFERENCES git_repositories(id,connection_id)
+);
+CREATE TABLE IF NOT EXISTS git_provider_feedback (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ reported_state text NOT NULL DEFAULT '',
+ attempts integer NOT NULL DEFAULT 0,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ error text NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS git_source_triggers (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ kind text NOT NULL CHECK(kind IN ('branch','tags','releases')),
+ pattern text NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS deploy_hooks (
+ id text PRIMARY KEY,
+ workload_id text UNIQUE NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ token_hash bytea UNIQUE NOT NULL,
+ creator_id text NOT NULL REFERENCES users(id),
+ expires_at timestamptz NOT NULL,
+ window_start timestamptz NOT NULL DEFAULT now(),
+ window_count integer NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS deploy_hook_receipts (
+ hook_id text NOT NULL REFERENCES deploy_hooks(id) ON DELETE CASCADE,
+ delivery text NOT NULL,
+ request_id text NOT NULL,
+ queue_delivery text NOT NULL,
+ cancelled boolean NOT NULL DEFAULT false,
+ PRIMARY KEY(hook_id,delivery)
+);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDotenv, sameRoutes, validateComposePath, validateRepository, validateRoutes, validateWorkload, type WorkloadFormValues } from "./workload-form";
+import { parseDotenv, sameRoutes, validateComposePath, validateHostKey, validateRepository, validateRoutes, validateWorkload, type WorkloadFormValues } from "./workload-form";
 
 const base: WorkloadFormValues = {
   name: "web",
@@ -12,6 +12,7 @@ const base: WorkloadFormValues = {
   branch: "main",
   composePath: "compose.yaml",
   token: "",
+  sshHostKey: "",
   environment: [],
 };
 
@@ -82,6 +83,39 @@ describe("source validation", () => {
     expect(validateRepository("https://user:pass@example.com/a.git")).not.toBeNull();
     expect(validateRepository("http://example.com/a.git")).not.toBeNull();
     expect(validateRepository("https://example.com/a.git")).toBeNull();
+  });
+
+  it("accepts ssh:// repositories for deploy keys", () => {
+    expect(validateRepository("ssh://git@github.com/acme/app.git")).toBeNull();
+    expect(validateRepository("ssh://git@git.example.com:2222/acme/app.git")).toBeNull();
+    expect(validateRepository("ssh://github.com/acme/app.git")).not.toBeNull();
+    expect(validateRepository("ssh://git:secret@github.com/acme/app.git")).not.toBeNull();
+    expect(validateRepository("ssh://git@github.com")).not.toBeNull();
+    expect(validateRepository("SSH://git@github.com/acme/app.git")).not.toBeNull();
+    expect(validateRepository("git@github.com:acme/app.git")).toMatch(/ssh:\/\//);
+  });
+
+  it("accepts exactly one pinned host key", () => {
+    const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+    expect(validateHostKey(key)).toBeNull();
+    expect(validateHostKey(`${key} comment`)).toBeNull();
+    expect(validateHostKey(`github.com ${key}`)).toMatch(/host name/);
+    expect(validateHostKey(`${key}\n${key}`)).not.toBeNull();
+    expect(validateHostKey("ssh-ed25519 not-base64!")).not.toBeNull();
+    expect(validateHostKey("")).not.toBeNull();
+  });
+
+  it("sends the host key instead of a token for SSH sources", () => {
+    const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+    const ssh = { ...base, sourceKind: "git" as const, repository: "ssh://git@github.com/acme/app.git", sshHostKey: ` ${key} ` };
+    const source = validateWorkload(ssh, "edit").input?.source;
+    expect(source).toMatchObject({ repository: ssh.repository, ssh_host_key: key });
+    expect(source).not.toHaveProperty("token");
+    expect(source).not.toHaveProperty("ssh_private_key");
+    expect(validateWorkload({ ...ssh, sshHostKey: "" }, "edit").errors.sshHostKey).toBeDefined();
+    expect(validateWorkload({ ...ssh, token: "secret" }, "edit").errors.token).toBeDefined();
+    const https = validateWorkload({ ...ssh, repository: "https://github.com/acme/app.git" }, "edit").input?.source;
+    expect(https).not.toHaveProperty("ssh_host_key");
   });
 
   it("keeps Compose paths inside the repository", () => {

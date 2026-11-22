@@ -3,14 +3,18 @@ package control
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -24,7 +28,7 @@ func TestGithubDeploymentFeedback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentials, err := f.s.sealPreview(githubAppCredentials{PEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))})
+	credentials, err := f.s.sealPreview(githubAppCredentials{WebhookSecret: "fixture-webhook", PEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +65,9 @@ func TestGithubDeploymentFeedback(t *testing.T) {
 				t.Fatal("unsafe repository token scope")
 			}
 			for key, value := range input.Permissions {
+				if key == "contents" && value == "read" {
+					continue
+				}
 				if value != "write" || (key != "statuses" && key != "deployments" && key != "pull_requests") {
 					t.Fatalf("unsafe feedback permission %s=%s", key, value)
 				}
@@ -69,6 +76,8 @@ func TestGithubDeploymentFeedback(t *testing.T) {
 				code = 403
 			}
 			output = map[string]string{"token": "fixture-write-token"}
+		case strings.HasPrefix(r.URL.Path, "/repositories/99/commits/"):
+			output = map[string]string{"sha": strings.Repeat("a", 40)}
 		case strings.HasPrefix(r.URL.Path, "/repositories/99/statuses/"):
 			var input gitCommitStatus
 			if json.NewDecoder(r.Body).Decode(&input) != nil {
@@ -204,4 +213,44 @@ func TestGithubDeploymentFeedback(t *testing.T) {
 	if apiCalls != before {
 		t.Fatal("reporting continued after disablement")
 	}
+	f.call("root", "default", "PUT", "/api/workloads/"+id+"/git-trigger", gitSourceTrigger{Kind: "releases", Pattern: "v*"}, 200)
+	release := map[string]any{"action": "published", "installation": map[string]int{"id": 41}, "repository": map[string]int{"id": 99}, "release": map[string]any{"tag_name": "v1", "draft": false}}
+	sendRelease := func(delivery string, want int) {
+		t.Helper()
+		raw, _ := json.Marshal(release)
+		mac := hmac.New(sha256.New, []byte("fixture-webhook"))
+		mac.Write(raw)
+		request := httptest.NewRequest("POST", "/hooks/github-app", bytes.NewReader(raw))
+		request.Header.Set("X-GitHub-Event", "release")
+		request.Header.Set("X-GitHub-Delivery", delivery)
+		request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		response := httptest.NewRecorder()
+		f.handler.ServeHTTP(response, request)
+		if response.Code != want {
+			t.Fatalf("release response %d: %s", response.Code, response.Body)
+		}
+	}
+	sendRelease("release-1", 202)
+	sendRelease("release-1", 202)
+	var count int
+	if err = f.s.DB.QueryRow(ctx, `SELECT count(*) FROM webhook_deliveries WHERE workload_id=$1`, id).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("release dedup %d %v", count, err)
+	}
+	if err = f.s.dispatchWebhook(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	var queued []byte
+	if err = f.s.DB.QueryRow(ctx, `SELECT payload FROM operations WHERE workload_id=$1 AND state='queued'`, id).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	var deployment worker.Request
+	if err = f.s.unsealJSON(queued, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	if deployment.Source.Revision != strings.Repeat("a", 40) || deployment.Source.Branch != "v1" {
+		t.Fatal("release not pinned to resolved tag")
+	}
+	release["release"].(map[string]any)["draft"] = true
+	sendRelease("draft-release", 200)
+
 }

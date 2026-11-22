@@ -190,7 +190,7 @@ func (s *Server) previews(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var connected, capable bool
 	var sourceConfig []byte
-	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM github_sources WHERE workload_id=w.id),COALESCE((n.capabilities->>'previews')::boolean,false),w.configuration FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1 FOR UPDATE OF w`, id).Scan(&connected, &capable, &sourceConfig); err != nil {
+	if err = tx.QueryRow(r.Context(), `SELECT (EXISTS(SELECT 1 FROM github_sources WHERE workload_id=w.id) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=w.id)),COALESCE((n.capabilities->>'previews')::boolean,false),w.configuration FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1 FOR UPDATE OF w`, id).Scan(&connected, &capable, &sourceConfig); err != nil {
 		http.Error(w, "resource unavailable", 503)
 		return
 	}
@@ -207,7 +207,7 @@ func (s *Server) previews(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if in.Enabled && (!connected || !capable) {
-		http.Error(w, "connect a GitHub App repository and upgrade and verify the worker before enabling previews", 409)
+		http.Error(w, "connect a managed Git repository and upgrade and verify the worker before enabling previews", 409)
 		return
 	}
 	if in.Environment == nil {
@@ -286,8 +286,15 @@ type previewEvent struct {
 }
 
 func (s *Server) previewWebhook(ctx context.Context, body []byte, delivery string) error {
-	event, parseErr := s.githubProvider().PullRequest(body)
-	if parseErr != nil || !regexp.MustCompile(`^[a-zA-Z0-9-]{1,100}$`).MatchString(delivery) || event.Number < 1 {
+	event, parseErr := s.githubProvider().PullRequest(ctx, body)
+	if parseErr != nil {
+		return errors.New("invalid pull request")
+	}
+	return s.providerPreviewWebhook(ctx, "github", event, delivery)
+}
+
+func (s *Server) providerPreviewWebhook(ctx context.Context, kind string, event previewEvent, delivery string) error {
+	if !regexp.MustCompile(`^[a-zA-Z0-9-]{1,150}$`).MatchString(delivery) || event.Number < 1 {
 		return errors.New("invalid pull request")
 	}
 	if event.Action != "opened" && event.Action != "reopened" && event.Action != "synchronize" && event.Action != "closed" {
@@ -314,7 +321,11 @@ func (s *Server) previewWebhook(ctx context.Context, body []byte, delivery strin
 	if receipt.RowsAffected() == 0 {
 		return tx.Commit(ctx)
 	}
-	rows, err := tx.Query(ctx, `SELECT w.id,w.node_id,w.project_id,w.team_id,w.configuration,p.configuration,g.repository,g.installation_id,g.repository_id FROM github_sources g JOIN workloads w ON w.id=g.workload_id JOIN preview_policies p ON p.workload_id=w.id JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.installation_id=$1 AND g.repository_id=$2 ORDER BY w.id FOR UPDATE OF w`, event.Installation.ID, event.Repository.ID)
+	rows, err := tx.Query(ctx, `SELECT w.id,w.node_id,w.project_id,w.team_id,w.configuration,p.configuration,g.repository,g.installation_id,g.repository_id FROM workloads w JOIN preview_policies p ON p.workload_id=w.id JOIN LATERAL (
+ SELECT g.repository,g.installation_id,g.repository_id FROM github_sources g JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.workload_id=w.id AND $3='github'
+ UNION ALL
+ SELECT r.clone_url,g.connection_id,g.repository_id FROM git_sources g JOIN git_repositories r ON r.id=g.repository_id JOIN git_connections c ON c.id=g.connection_id AND c.team_id=w.team_id WHERE g.workload_id=w.id AND $3<>'github'
+ ) g ON true WHERE g.installation_id=$1 AND g.repository_id=$2 ORDER BY w.id FOR UPDATE OF w`, event.Installation.ID, event.Repository.ID, kind)
 	if err != nil {
 		return err
 	}
@@ -421,8 +432,14 @@ func (s *Server) previewWebhook(ctx context.Context, body []byte, delivery strin
 			if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,'service',$5,$6,$7,4,2048)`, target, item.node, config.Name, encrypted, environment, item.team, item.project); err != nil {
 				return err
 			}
-			if _, err = tx.Exec(ctx, `INSERT INTO github_sources(workload_id,installation_id,repository_id,repository,automatic) VALUES($1,$2,$3,$4,false)`, target, item.installation, item.repo, item.repository); err != nil {
-				return err
+			if kind == "github" {
+				if _, err = tx.Exec(ctx, `INSERT INTO github_sources(workload_id,installation_id,repository_id,repository,automatic) VALUES($1,$2,$3,$4,false)`, target, item.installation, item.repo, item.repository); err != nil {
+					return err
+				}
+			} else {
+				if _, err = tx.Exec(ctx, `INSERT INTO git_sources(workload_id,connection_id,repository_id,automatic,reporting,connected_at) SELECT $1,connection_id,repository_id,false,reporting,connected_at FROM git_sources WHERE workload_id=$2`, target, item.id); err != nil {
+					return err
+				}
 			}
 			if _, err = tx.Exec(ctx, `INSERT INTO previews(source_id,number,workload_id,environment_id,revision,expires_at) VALUES($1,$2,$3,$4,$5,now()+$6*interval '1 hour')`, item.id, event.Number, target, environment, git.Revision, policy.Hours); err != nil {
 				return err

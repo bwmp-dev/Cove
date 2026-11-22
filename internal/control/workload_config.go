@@ -12,6 +12,9 @@ import (
 )
 
 func validateWorkload(in workloadInput) error {
+	if in.Source != nil && in.Source.SSHPrivateKey != "" {
+		return errors.New("SSH private keys are managed through the deploy key endpoint")
+	}
 	if in.Kind == "job" && in.Backup != nil {
 		return errors.New("disable backups before converting a service to a job")
 	}
@@ -56,6 +59,7 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	if configuration.Source != nil {
 		hasToken = configuration.Source.Token != ""
 		configuration.Source.Token = ""
+		configuration.Source.SSHPrivateKey = ""
 	}
 	level, err := s.access(r, "workload", r.PathValue("id"))
 	if err != nil {
@@ -201,6 +205,18 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.Source != nil && in.Source.Token == "" && old.Source != nil && in.Source.Repository == old.Source.Repository {
 			in.Source.Token = old.Source.Token
+		}
+	}
+	if in.Source != nil && strings.HasPrefix(in.Source.Repository, "ssh://") {
+		var repository, host string
+		err := tx.QueryRow(r.Context(), `SELECT repository,host_key FROM git_deploy_keys WHERE workload_id=$1`, r.PathValue("id")).Scan(&repository, &host)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "deploy key unavailable", 503)
+			return
+		}
+		if err == nil && (repository != in.Source.Repository || host != in.Source.SSHHostKey) {
+			http.Error(w, "use Rotate key in SSH deploy key settings to change its repository or host pin", 409)
+			return
 		}
 	}
 	if in.EnvironmentPatch != nil {

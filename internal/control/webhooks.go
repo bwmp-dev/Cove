@@ -25,7 +25,7 @@ func (s *Server) getWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var managed bool
-	if err = s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1)", r.PathValue("id")).Scan(&managed); err != nil {
+	if err = s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1)", r.PathValue("id")).Scan(&managed); err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
@@ -223,7 +223,7 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 	var enabled bool
 	var configuration []byte
-	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic)),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
+	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM deploy_hooks h JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE h.workload_id=$1 AND h.expires_at>now() AND NOT u.disabled AND (u.is_admin OR cove_access(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''))>=2))),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
 		return err
 	}
 	if !enabled {
@@ -247,6 +247,21 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if strings.HasPrefix(delivery, "hook-") {
+		var allowed bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deploy_hook_receipts receipt JOIN deploy_hooks h ON h.id=receipt.hook_id JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE receipt.queue_delivery=$2 AND h.workload_id=$1 AND NOT receipt.cancelled AND h.expires_at>now() AND NOT u.disabled AND (u.is_admin OR cove_access(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''))>=2))`, id, delivery).Scan(&allowed); err != nil {
+			return err
+		}
+		if !allowed {
+			if _, err = tx.Exec(ctx, `UPDATE deploy_hook_receipts SET cancelled=true WHERE queue_delivery=$1`, delivery); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(ctx, `DELETE FROM webhook_deliveries WHERE workload_id=$1 AND delivery=$2 AND operation_id IS NULL`, id, delivery); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 	}
 	var prerequisite string
 	var waiting, abandoned bool

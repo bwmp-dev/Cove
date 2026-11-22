@@ -22,11 +22,13 @@ export interface WorkloadFormValues {
   inlineCompose?: boolean;
   watchPaths?: string;
   token: string;
+  // Pinned public host key, used only for ssh:// repositories.
+  sshHostKey: string;
   // null keeps the saved environment unchanged (edit only).
   environment: EnvRow[] | null;
 }
 
-export type WorkloadFormErrors = Partial<Record<"name" | "nodeId" | "jobService" | "compose" | "repository" | "branch" | "composePath" | "watchPaths" | "token" | "environment" | "form", string>> & {
+export type WorkloadFormErrors = Partial<Record<"name" | "nodeId" | "jobService" | "compose" | "repository" | "branch" | "composePath" | "watchPaths" | "token" | "sshHostKey" | "environment" | "form", string>> & {
   rows?: Record<string, string>;
 };
 
@@ -51,17 +53,47 @@ export function validateEnvironmentKey(key: string): string | null {
   return null;
 }
 
+const sshUser = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$/;
+
+// The server selects deploy-key authentication by this exact lowercase prefix.
+export function isSSHRepository(value: string) {
+  return value.trim().startsWith("ssh://");
+}
+
+// Mirrors the worker's source validation: HTTPS without credentials, or ssh://user@host[:port]/path for deploy keys.
 export function validateRepository(value: string): string | null {
   if (value === "") return "Enter the repository URL.";
+  if (/^[\w.-]+@[^/:]+:(?!\/\/)/.test(value)) return "Use the ssh:// form, as in ssh://git@github.com/acme/app.git.";
   let url: URL;
   try {
     url = new URL(value);
   } catch {
     return "Enter a valid URL.";
   }
-  if (url.protocol !== "https:" || url.host === "") return "Use an HTTPS URL.";
-  if (url.username || url.password) return "Remove credentials from the URL; use the access token field instead.";
   if (url.search || url.hash) return "Remove the query string or fragment.";
+  if (url.protocol === "ssh:") {
+    if (!isSSHRepository(value)) return "Start the URL with lowercase ssh://.";
+    if (url.password) return "Remove the password from the URL; SSH sources use the deploy key.";
+    if (!sshUser.test(url.username)) return "Include the SSH user, as in ssh://git@github.com/acme/app.git.";
+    if (url.host === "") return "Enter the SSH host.";
+    if (url.pathname === "" || url.pathname === "/") return "Include the repository path.";
+    return null;
+  }
+  if (url.protocol !== "https:" || url.host === "") return "Use an HTTPS or ssh:// URL.";
+  if (url.username || url.password) return "Remove credentials from the URL; use the access token field instead.";
+  return null;
+}
+
+const hostKeyType = /^(?:ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-nistp(?:256|384|521)|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/;
+
+// One public key in authorized_keys form ("type base64 [comment]"), the same shape the server accepts as a pin.
+export function validateHostKey(value: string): string | null {
+  if (value === "") return "Paste the Git host's public SSH host key.";
+  if (/[\r\n\0]/.test(value)) return "Paste a single host key on one line.";
+  const [type = "", key = ""] = value.split(/\s+/);
+  if (!hostKeyType.test(type) && hostKeyType.test(key)) return "Remove the host name at the start; paste only the key type and key.";
+  if (!hostKeyType.test(type)) return "Start with the key type, such as ssh-ed25519.";
+  if (!/^[A-Za-z0-9+/]{16,}={0,3}$/.test(key)) return "The key after the type is not valid base64.";
   return null;
 }
 
@@ -131,12 +163,19 @@ export function validateWorkload(values: WorkloadFormValues, mode: "create" | "e
     if (repositoryError) errors.repository = repositoryError;
     if (branchError) errors.branch = branchError;
     if (pathError) errors.composePath = pathError;
-    if (values.token.length > 8192 || /[\r\n\0]/.test(values.token)) errors.token = "Enter a single-line token.";
+    const ssh = isSSHRepository(repository);
+    const sshHostKey = values.sshHostKey.trim();
+    if (ssh) {
+      const hostKeyError = validateHostKey(sshHostKey);
+      if (hostKeyError) errors.sshHostKey = hostKeyError;
+      if (values.token !== "") errors.token = "SSH repositories authenticate with the deploy key. Clear the access token.";
+    } else if (values.token.length > 8192 || /[\r\n\0]/.test(values.token)) errors.token = "Enter a single-line token.";
     const watchPaths = (values.watchPaths ?? "").split(/\r?\n/).map((p) => p.trim()).filter(Boolean);
     if (watchPaths.length > 64 || watchPaths.some((p) => p.length > 256 || p === "!" || p.startsWith("/") || p.startsWith("!/") || (p.includes("\\") || [...p].some((c) => c.charCodeAt(0) < 32)) || p.replace(/^!/, "").split("/").some((part) => part === ".." || part === "."))) errors.watchPaths = "Watch paths must be relative patterns, at most 64 patterns of 256 characters.";
     source = { repository, branch, compose_path: composePath, watch_paths: watchPaths };
     if (values.inlineCompose) source.inline_compose = true;
-    if (values.token !== "") source.token = values.token;
+    if (ssh) source.ssh_host_key = sshHostKey;
+    else if (values.token !== "") source.token = values.token;
   }
 
   let environment: Record<string, string> | undefined;
@@ -196,6 +235,7 @@ export function formValues(workload: Workload | undefined, draft?: ResourceDraft
     inlineCompose: workload?.source?.inline_compose ?? false,
     watchPaths: workload?.source?.watch_paths?.join("\n") ?? "",
     token: "",
+    sshHostKey: workload?.source?.ssh_host_key ?? "",
     environment: workload ? null : Object.entries(draft?.environment ?? {}).map(([key, value]) => createRow(key, value)),
   };
 }

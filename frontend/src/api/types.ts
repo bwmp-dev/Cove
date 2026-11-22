@@ -87,10 +87,24 @@ export interface GitSource {
   branch: string;
   compose_path: string;
   watch_paths?: string[];
+  // The pinned public host key of an ssh:// repository. Its deploy key is managed separately and never sent to the browser.
+  ssh_host_key?: string;
 }
 
 export interface GitSourceInput extends GitSource {
   token?: string;
+}
+
+export interface GitHubSourceConnection {
+  installation_id: number;
+  repository_id: number;
+  automatic: boolean;
+}
+
+export interface GitDeployKey {
+  public_key: string;
+  repository: string;
+  host_key: string;
 }
 
 export type WorkloadKind = "service" | "job";

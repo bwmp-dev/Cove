@@ -5,7 +5,8 @@ import { useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { request, errorMessage } from "../api/client";
 import { GitHubTeamConnection, GitHubUserAuthorization, TeamInstallation } from "./GitHubConnection";
-import type { OperationState, Workload } from "../api/types";
+import { githubConnectionQuery } from "../api/queries";
+import type { GitHubSourceConnection, OperationState, Workload } from "../api/types";
 import { useSession } from "../lib/session";
 import { canManageIntegrations, managesTeam } from "../lib/permissions";
 import { useOnline } from "../lib/hooks";
@@ -19,7 +20,6 @@ import { Button, Field, LoadingRows, Notice, QueryError, Section, SettingRow, Se
 interface Installation { id: number; account: string; team_ids: string[]; can_manage: boolean; shared_with_current_team: boolean }
 export interface AppInfo { configured: boolean; user_auth_configured?: boolean; callback_url?: string; slug?: string; install_url?: string; installations?: Installation[] }
 interface Repository { id: number; full_name: string; clone_url: string; default_branch: string; installation_id: number }
-interface Connection { installation_id: number; repository_id: number; automatic: boolean }
 interface ReportingRecord { operation_id: string; reported_state: OperationState | ""; error: string; next_attempt_at: string }
 interface Reporting { enabled: boolean; reports: ReportingRecord[] }
 
@@ -154,7 +154,7 @@ function GitHubAppRegistration() {
   </div>;
 }
 
-function RepositoryForm({ workload, connection }: { workload: Workload; connection: Connection | null }) {
+function RepositoryForm({ workload, connection }: { workload: Workload; connection: GitHubSourceConnection | null }) {
   const online = useOnline();
   const cache = useQueryClient();
   const repos = useQuery({ queryKey: ["github-repositories"], queryFn: ({ signal }) => request<Repository[]>("GET", "/api/github/repositories", undefined, signal) });
@@ -185,15 +185,15 @@ function RepositoryForm({ workload, connection }: { workload: Workload; connecti
   </div>;
 }
 
-function ReportingHistory({ reports }: { reports: ReportingRecord[] }) {
+export function ReportingHistory({ reports, provider = "GitHub" }: { reports: ReportingRecord[]; provider?: string }) {
   return <div className="space-y-2">
     <h3 className="text-[13px] font-semibold text-fg">Recent reports</h3>
-    {reports.length === 0 ? <p className="text-xs text-fg-muted">No deployments reported yet. Reporting starts with the next deployment after it is enabled.</p> : <ReportingRows reports={reports} />}
+    {reports.length === 0 ? <p className="text-xs text-fg-muted">No deployments reported yet. Reporting starts with the next deployment after it is enabled.</p> : <ReportingRows reports={reports} provider={provider} />}
   </div>;
 }
 
-function ReportingRows({ reports }: { reports: ReportingRecord[] }) {
-  return <ul aria-label="Recent GitHub reports" className="divide-y divide-line rounded-md border border-line">
+function ReportingRows({ reports, provider }: { reports: ReportingRecord[]; provider: string }) {
+  return <ul aria-label={`Recent ${provider} reports`} className="divide-y divide-line rounded-md border border-line">
     {reports.map(report => <li key={report.operation_id} className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1 px-3 py-2.5">
       <div className="min-w-0 space-y-0.5">
         <Link to="/operations/$operationId" params={{ operationId: report.operation_id }} title={report.operation_id} className="rounded text-[13px] text-fg hover:underline">Operation <span className="font-mono">{shortId(report.operation_id)}</span></Link>
@@ -201,7 +201,7 @@ function ReportingRows({ reports }: { reports: ReportingRecord[] }) {
         {report.error && <p className="text-xs text-fg-muted">Next attempt <RelativeTime value={report.next_attempt_at} /></p>}
       </div>
       {report.reported_state
-        ? <span className="flex items-center gap-2"><span className="text-xs text-fg-muted">GitHub shows</span><OperationStateLabel state={report.reported_state} /></span>
+        ? <span className="flex items-center gap-2"><span className="text-xs text-fg-muted">{provider} shows</span><OperationStateLabel state={report.reported_state} /></span>
         : <StatusLabel tone={report.error ? "bad" : "neutral"} label={report.error ? "Not reported" : "Not reported yet"} />}
     </li>)}
   </ul>;
@@ -258,7 +258,7 @@ function GitHubReporting({ workload }: { workload: Workload }) {
 
 export function GitHubSource({ workload }: { workload: Workload }) {
   const session = useSession();
-  const connection = useQuery({ queryKey: ["github-source", workload.id], queryFn: ({ signal }) => request<Connection | null>("GET", `/api/workloads/${workload.id}/github`, undefined, signal) });
+  const connection = useQuery(githubConnectionQuery(workload.id));
   return <>
     <Section width="form" title="GitHub App" description="Build from a private repository without personal access tokens.">
       {connection.isPending ? <p>Loading connection</p> : connection.isError ? <Notice tone="error" title="Could not load GitHub connection">{errorMessage(connection.error)}</Notice> : canManageIntegrations(session) ? <RepositoryForm key={`${connection.data?.repository_id}:${connection.data?.automatic}`} workload={workload} connection={connection.data} /> : <p className="text-sm text-fg-muted">{connection.data ? "Connected through the team's GitHub App." : "Not connected."} Team owners, admins and team-wide editors manage repository connections.</p>}

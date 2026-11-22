@@ -11,6 +11,13 @@ import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
 import { DatabaseAccess } from "../components/DatabaseAccess";
 import { GitHubSource } from "../components/GitHubApp";
+import { GitDeployKey } from "../components/GitDeployKey";
+import { GitProviderSource } from "../components/GitProviderSource";
+import { SourceTrigger } from "../components/SourceTrigger";
+import { DeployHook } from "../components/DeployHook";
+import { projectsQuery } from "../api/projects";
+import { findPlacement } from "../lib/hierarchy";
+import { providerSourceQuery } from "../api/git-providers";
 import { Networks } from "../components/Networks";
 import { PrivateNetwork } from "../components/PrivateNetwork";
 import { ResourceRegistry } from "../components/ResourceRegistry";
@@ -23,7 +30,7 @@ import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
-import { formValues, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { formValues, isSSHRepository, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -240,15 +247,24 @@ function GeneralForm({ workload, nodeName }: { workload: Workload; nodeName: str
 export function ResourceSource() {
   const workload = useResource();
   const editable = can(workload.permissions, "edit");
+  const blocked = useSaveBlocked(workload.id);
+  const provider = useQuery(providerSourceQuery(workload.id));
+  const projects = useQuery(projectsQuery);
+  // PR previews and environment-preview resources are temporary; the server refuses persistent bindings for them.
+  const temporary = Boolean(workload.preview_source_id) || Boolean(findPlacement(projects.data, workload.environment_id, workload.project_id)?.environment?.preview_id);
   return (
     <>
       {editable ? <SourceForm workload={workload} /> : <SourceSummary workload={workload} />}
-      {editable && workload.source && (
+      {editable && !workload.preview_source_id && <GitDeployKey workload={workload} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
+      {editable && workload.source && provider.data === null && (
         <Section width="form" title="Automatic deployments">
           <Webhook workloadId={workload.id} />
         </Section>
       )}
+      <GitProviderSource workload={workload} editable={editable} temporary={temporary} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />
       {editable && <GitHubSource workload={workload} />}
+      {!temporary && <SourceTrigger workload={workload} editable={editable} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
+      {!temporary && <DeployHook workload={workload} editable={editable} />}
     </>
   );
 }
@@ -267,7 +283,9 @@ function SourceSummary({ workload }: { workload: Workload }) {
                   { term: "Branch", value: <span className="font-mono text-xs">{workload.source.branch}</span> },
                   { term: "Compose file", value: <span className="font-mono text-xs">{workload.source.inline_compose ? "Managed in Cove" : workload.source.compose_path}</span> },
                   { term: "Watch paths", value: workload.source.watch_paths?.join(", ") || "All changes" },
-                  { term: "Access token", value: workload.has_source_token ? "Saved" : "None" },
+                  ...(isSSHRepository(workload.source.repository)
+                    ? [{ term: "Host public key", value: <span className="font-mono text-xs break-all">{workload.source.ssh_host_key}</span> }]
+                    : [{ term: "Access token", value: workload.has_source_token ? "Saved" : "None" }]),
                 ]
               : [{ term: "Source", value: "Compose file" }]
           }
@@ -295,15 +313,15 @@ function SourceForm({ workload }: { workload: Workload }) {
   const dirty =
     values.sourceKind !== saved.sourceKind ||
     (git
-      ? values.repository !== saved.repository || values.branch !== saved.branch || (!values.inlineCompose && values.composePath !== saved.composePath) || values.inlineCompose !== saved.inlineCompose || (values.inlineCompose && values.compose !== saved.compose) || values.watchPaths !== saved.watchPaths || values.token !== ""
+      ? values.repository !== saved.repository || values.branch !== saved.branch || (!values.inlineCompose && values.composePath !== saved.composePath) || values.inlineCompose !== saved.inlineCompose || (values.inlineCompose && values.compose !== saved.compose) || values.watchPaths !== saved.watchPaths || values.token !== "" || (isSSHRepository(values.repository) && values.sshHostKey !== saved.sshHostKey)
       : values.compose !== saved.compose);
   const tokenSaved = workload.has_source_token && values.repository.trim() === workload.source?.repository;
   const tokenDiscarded = workload.has_source_token && !tokenSaved && values.token === "";
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const { sourceKind, compose, repository, branch, composePath, inlineCompose, watchPaths, token } = values;
-    setErrors(save({ sourceKind, compose, repository, branch, composePath, inlineCompose, watchPaths, token }, event.currentTarget, () => setValues((current) => ({ ...current, token: "" }))));
+    const { sourceKind, compose, repository, branch, composePath, inlineCompose, watchPaths, token, sshHostKey } = values;
+    setErrors(save({ sourceKind, compose, repository, branch, composePath, inlineCompose, watchPaths, token, sshHostKey }, event.currentTarget, () => setValues((current) => ({ ...current, token: "" }))));
   }
 
   return (

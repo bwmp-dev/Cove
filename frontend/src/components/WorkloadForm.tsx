@@ -6,21 +6,23 @@ import { useId, useState, type FormEvent, type ReactNode } from "react";
 import type { Project } from "../api/projects";
 import type { Node, WorkloadInput } from "../api/types";
 import { formatBytes } from "../lib/format";
-import { byteLength, composeLimit, formValues, routeRows, validateRoutes, validateWorkload, type EnvRow, type SourceKind, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { byteLength, composeLimit, formValues, isSSHRepository, routeRows, validateRoutes, validateWorkload, type EnvRow, type SourceKind, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { ComposeEditor } from "./ComposeEditor";
 import { EnvironmentEditor } from "./EnvironmentEditor";
 import { RouteEditor } from "./RouteEditor";
 import { nodeStates } from "../lib/nodes";
-import { Button, Field, Notice } from "./ui";
+import { Button, Field, Notice, SwitchField } from "./ui";
+import { GitProviderPicker } from "./GitProviderPicker";
+import { automaticDescription, emptySelection, reportingDescription, type ProviderRepository, type ProviderSelection, type ProviderSourceInput } from "../api/git-providers";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 
-interface Choice<T extends string> {
+export interface Choice<T extends string> {
   value: T;
   label: string;
   description: string;
 }
 
-function ChoiceGroup<T extends string>({ legend, name, value, choices, onChange }: { legend: string; name: string; value: T; choices: Choice<T>[]; onChange: (value: T) => void }) {
+export function ChoiceGroup<T extends string>({ legend, name, value, choices, onChange }: { legend: string; name: string; value: T; choices: Choice<T>[]; onChange: (value: T) => void }) {
   return (
     <fieldset>
       <legend className="mb-1.5 text-[13px] font-medium text-fg">{legend}</legend>
@@ -104,10 +106,34 @@ export function TypeFields({ values, errors, set, kindHint }: { values: Workload
   );
 }
 
-export function SourceFields({ values, errors, set, tokenHint, tokenSaved = false }: { values: WorkloadFormValues; errors: WorkloadFormErrors; set: SetValue; tokenHint: string; tokenSaved?: boolean }) {
+// The pin is supplied by the operator; Cove never discovers or trusts a host key on first use.
+export function HostKeyField({ id, value, error, onChange }: { id: string; value: string; error?: string; onChange: (value: string) => void }) {
+  return (
+    <Field id={id} label="Host public key" error={error} hint="One line from the Git host, such as ssh-ed25519 AAAA…. Check it against the fingerprints your Git host publishes. Deployments refuse any other host key.">
+      <textarea
+        id={id}
+        className={`${inputClass} font-mono break-all`}
+        rows={2}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="ssh-ed25519 AAAA…"
+        autoComplete="off"
+        autoCapitalize="none"
+        spellCheck={false}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy(id, error, true)}
+      />
+    </Field>
+  );
+}
+
+// `access` chooses how the repository is reached; `provider` replaces the repository URL, branch and
+// credential fields when a Git provider connection supplies them.
+export function SourceFields({ values, errors, set, tokenHint, tokenSaved = false, access, provider }: { values: WorkloadFormValues; errors: WorkloadFormErrors; set: SetValue; tokenHint: string; tokenSaved?: boolean; access?: ReactNode; provider?: ReactNode }) {
   const id = useId();
   const [revealToken, setRevealToken] = useState(false);
   const composeBytes = byteLength(values.compose);
+  const ssh = !provider && isSSHRepository(values.repository);
   const composeEditor = (
     <Field id={`${id}-compose`} label="Compose file" error={errors.compose} hint={`${formatBytes(composeBytes)} of ${formatBytes(composeLimit())}`}>
       <ComposeEditor
@@ -126,7 +152,8 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
       <ChoiceGroup legend="Compose source" name={`${id}-source`} value={values.sourceKind} choices={sourceChoices} onChange={(value) => set("sourceKind", value)} />
       {values.sourceKind === "compose" ? composeEditor : (
         <>
-          <Field id={`${id}-repo`} label="Repository URL" error={errors.repository} hint="HTTPS only. Do not include credentials in the URL.">
+          {access}
+          {provider ?? <Field id={`${id}-repo`} label="Repository URL" error={errors.repository} hint="HTTPS, or ssh://user@host/path to deploy with an SSH deploy key. Do not include credentials in the URL.">
             <input
               id={`${id}-repo`}
               className={`${inputClass} font-mono`}
@@ -140,13 +167,13 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
               aria-invalid={errors.repository ? true : undefined}
               aria-describedby={describedBy(`${id}-repo`, errors.repository, true)}
             />
-          </Field>
+          </Field>}
           <ChoiceGroup legend="Deployment configuration" name={`${id}-git-compose`} value={values.inlineCompose ? "panel" : "repository"} choices={[
             { value: "repository", label: "File in repository", description: "Use the Compose file committed with your code." },
             { value: "panel", label: "Manage in Cove", description: "Keep Compose here and build from the checked-out repository. Previews require a repository file." },
           ]} onChange={(value) => set("inlineCompose", value === "panel")} />
           <div className="grid gap-5 sm:grid-cols-2">
-            <Field id={`${id}-branch`} label="Branch" error={errors.branch}>
+            {!provider && <Field id={`${id}-branch`} label="Branch" error={errors.branch}>
               <input
                 id={`${id}-branch`}
                 className={`${inputClass} font-mono`}
@@ -158,7 +185,7 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
                 aria-invalid={errors.branch ? true : undefined}
                 aria-describedby={describedBy(`${id}-branch`, errors.branch)}
               />
-            </Field>
+            </Field>}
             {!values.inlineCompose && <Field id={`${id}-path`} label="Compose file path" error={errors.composePath} hint="Relative to the repository root.">
               <input
                 id={`${id}-path`}
@@ -177,7 +204,13 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
           <Field id={`${id}-watch`} label="Watch paths" optional error={errors.watchPaths} hint="One repository-relative pattern per line. Supports *, **, ?, and ! exclusions; last match wins. Empty deploys every push. Unknown changes still deploy. Manual deployments are unaffected. Ordered sequences run together when any member matches.">
             <textarea id={`${id}-watch`} className={`${inputClass} font-mono`} rows={3} aria-invalid={errors.watchPaths ? true : undefined} aria-describedby={describedBy(`${id}-watch`, errors.watchPaths, true)} value={values.watchPaths ?? ""} onChange={(event) => set("watchPaths", event.target.value)} spellCheck={false} />
           </Field>
-          <Field id={`${id}-token`} label="Access token" optional error={errors.token} hint={tokenHint}>
+          {ssh && (
+            <>
+              <HostKeyField id={`${id}-host-key`} value={values.sshHostKey} error={errors.sshHostKey} onChange={(value) => set("sshHostKey", value)} />
+              <p className="text-xs text-fg-muted">Deployments authenticate with a read-only deploy key that Cove generates for this resource. Once the source is saved, create the key under SSH deploy key on the Source page and add its public key to the repository.</p>
+            </>
+          )}
+          {!provider && (!ssh || values.token !== "") && <Field id={`${id}-token`} label="Access token" optional error={errors.token} hint={tokenHint}>
             <div className="flex gap-2">
               <input
                 id={`${id}-token`}
@@ -197,10 +230,39 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
                 {revealToken ? "Hide" : "Show"}
               </Button>
             </div>
-          </Field>
+          </Field>}
         </>
       )}
     </>
+  );
+}
+
+export type ProviderLink = Pick<ProviderSourceInput, "connection_id" | "repository_id" | "automatic" | "reporting">;
+
+const accessChoices: Choice<"url" | "provider">[] = [
+  { value: "url", label: "Repository URL", description: "HTTPS with an optional access token, or SSH with a deploy key." },
+  { value: "provider", label: "Git provider", description: "Choose a repository from a GitLab, Gitea, Forgejo, Codeberg or Bitbucket Cloud connection." },
+];
+
+function ProviderFields({ selection, errors, automatic, reporting, onSelection, onRepository, onAutomatic, onReporting }: {
+  selection: ProviderSelection;
+  errors: WorkloadFormErrors;
+  automatic: boolean;
+  reporting: boolean;
+  onSelection: (selection: ProviderSelection) => void;
+  onRepository: (repository: ProviderRepository | undefined) => void;
+  onAutomatic: (value: boolean) => void;
+  onReporting: (value: boolean) => void;
+}) {
+  const id = useId();
+  const error = errors.repository ?? errors.branch;
+  return (
+    <div className="space-y-4">
+      <GitProviderPicker value={selection} onChange={onSelection} onRepository={onRepository} />
+      {error && <p role="alert" className="text-xs text-bad">{error}</p>}
+      <SwitchField id={`${id}-automatic`} checked={automatic} onChange={(event) => onAutomatic(event.target.checked)} label="Deploy pushes automatically" description={automaticDescription} />
+      <SwitchField id={`${id}-reporting`} checked={reporting} onChange={(event) => onReporting(event.target.checked)} label="Report deployments" description={reportingDescription} />
+    </div>
   );
 }
 
@@ -214,7 +276,8 @@ interface WorkloadFormProps {
   serverError: string | null;
   submitLabel: string;
   cancel: ReactNode;
-  onSubmit: (input: WorkloadInput) => void;
+  // `provider` is connected after the resource is created, because the connection is saved per resource.
+  onSubmit: (input: WorkloadInput, provider?: ProviderLink) => void;
 }
 
 // Creates a resource. Existing resources are edited section by section on the resource pages.
@@ -224,21 +287,37 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
   const [routeErrors, setRouteErrors] = useState<Record<string, string>>({});
   const [resourcePlacement, setResourcePlacement] = useState(initialProjectId ? `${initialProjectId}:${initialEnvironmentId}` : "");
   const [routes, setRoutes] = useState(() => routeRows(draft?.routes));
+  const [access, setAccess] = useState<"url" | "provider">("url");
+  const [selection, setSelection] = useState<ProviderSelection>(emptySelection);
+  const [automatic, setAutomatic] = useState(true);
+  const [reporting, setReporting] = useState(false);
   const id = useId();
 
   const set: SetValue = (key, value) => setValues((current) => ({ ...current, [key]: value }));
+
+  function chooseAccess(next: "url" | "provider") {
+    setAccess(next);
+    setSelection(emptySelection);
+    setValues((current) => ({ ...current, repository: "", branch: next === "url" ? "main" : "", token: "", sshHostKey: "" }));
+  }
 
   const readyNodes = nodes.filter((node) => node.state === "ready");
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = validateWorkload(values, "create");
+    const linked = values.sourceKind === "git" && access === "provider";
+    const result = validateWorkload(linked ? { ...values, token: "", sshHostKey: "" } : values, "create");
+    if (linked && (selection.connectionId === null || selection.repositoryId === null || !selection.branch)) {
+      result.errors.repository = "Select a connection, repository and branch.";
+      delete result.input;
+    }
     const checkedRoutes = values.kind === "job" ? { routes: [], errors: {} } : validateRoutes(routes);
     setErrors(result.errors);
     setRouteErrors(checkedRoutes.errors);
     if (result.input && checkedRoutes.routes && resourcePlacement) {
       const [projectId, environmentId] = resourcePlacement.split(":");
-      onSubmit({ ...result.input, routes: checkedRoutes.routes, project_id: projectId, environment_id: environmentId });
+      const provider = linked && selection.connectionId !== null && selection.repositoryId !== null ? { connection_id: selection.connectionId, repository_id: selection.repositoryId, automatic, reporting } : undefined;
+      onSubmit({ ...result.input, routes: checkedRoutes.routes, project_id: projectId, environment_id: environmentId }, provider);
     } else {
       const form = event.currentTarget;
       requestAnimationFrame(() => form.querySelector<HTMLElement>("[aria-invalid=true]")?.focus());
@@ -302,7 +381,30 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
         </FormSection>
 
         <FormSection title="Source">
-          <SourceFields values={values} errors={errors} set={set} tokenHint="Needed for private repositories. Stored encrypted and never shown again." />
+          <SourceFields
+            values={values}
+            errors={errors}
+            set={set}
+            tokenHint="Needed for private repositories. Stored encrypted and never shown again."
+            access={<ChoiceGroup legend="Repository access" name={`${id}-access`} value={access} choices={accessChoices} onChange={chooseAccess} />}
+            provider={
+              access === "provider" ? (
+                <ProviderFields
+                  selection={selection}
+                  errors={errors}
+                  automatic={automatic}
+                  reporting={reporting}
+                  onSelection={(next) => {
+                    setSelection(next);
+                    set("branch", next.branch);
+                  }}
+                  onRepository={(repository) => set("repository", repository?.clone_url ?? "")}
+                  onAutomatic={setAutomatic}
+                  onReporting={setReporting}
+                />
+              ) : undefined
+            }
+          />
         </FormSection>
 
         {values.kind === "service" && (

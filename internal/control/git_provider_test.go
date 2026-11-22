@@ -44,10 +44,10 @@ func TestGitProviderWebhookVerification(t *testing.T) {
 			}
 		})
 	}
-	if _, err := provider.PullRequest([]byte(`{`)); err == nil {
+	if _, err := provider.PullRequest(context.Background(), []byte(`{`)); err == nil {
 		t.Fatal("accepted malformed pull request")
 	}
-	event, err := provider.PullRequest([]byte(`{"action":"opened","number":7,"installation":{"id":41},"repository":{"id":99}}`))
+	event, err := provider.PullRequest(context.Background(), []byte(`{"action":"opened","number":7,"installation":{"id":41},"repository":{"id":99}}`))
 	if err != nil || event.Action != "opened" || event.Number != 7 || event.Installation.ID != 41 || event.Repository.ID != 99 {
 		t.Fatalf("pull request: %+v, %v", event, err)
 	}

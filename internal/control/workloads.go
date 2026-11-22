@@ -413,6 +413,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.dispatchConnectedGitFeedback(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchGithubFeedback(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -525,7 +528,7 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 			return s.failOperation(ctx, id, "Infrastructure connection unavailable; check the selected registry or storage location.")
 		}
 		if err = s.prepareAppDeployment(ctx, &request); err != nil {
-			return s.failOperation(ctx, id, "GitHub repository access unavailable; check the app installation and reconnect the resource.")
+			return s.failOperation(ctx, id, "Git repository access unavailable; check the provider connection or SSH deploy key and reconnect the resource.")
 		}
 	}
 	method := "submit"
