@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ImageStatus, Operation } from "../api/types";
-import { imageRefreshKey, imageStatus, imageSummary, releaseLink, shortDigest } from "./images";
+import type { ImageStatus, Operation, Workload } from "../api/types";
+import { imageRefreshKey, imageStatus, imageSummary, releaseLink, shortDigest, supportsImageLifecycle } from "./images";
 import { latestByWorkload, latestDeploymentOperation } from "./operations";
 
 const image = (status: ImageStatus["status"], service = "web"): ImageStatus => ({ service, reference: "ghcr.io/acme/web:1", image_id: "sha256:0123456789abcdef0123", status });
@@ -23,6 +23,13 @@ describe("image statuses", () => {
 
   it("shortens digests but keeps the algorithm", () => {
     expect(shortDigest("sha256:0123456789abcdef0123")).toBe("sha256:0123456789ab");
+  });
+
+  it("checks deployed services but not jobs or managed previews", () => {
+    expect(supportsImageLifecycle({ kind: "service", preview_source_id: "", environment_preview_id: "" } as Workload)).toBe(true);
+    expect(supportsImageLifecycle({ kind: "job" } as Workload)).toBe(false);
+    expect(supportsImageLifecycle({ kind: "service", preview_source_id: "w0" } as Workload)).toBe(false);
+    expect(supportsImageLifecycle({ kind: "service", environment_preview_id: "p1" } as Workload)).toBe(false);
   });
 
   it("only links GitHub HTTPS release pages", () => {

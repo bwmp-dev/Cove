@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	Build                  *BuildOptions            `json:"build,omitempty"`
 	PullLatest             bool                     `json:"pull_latest,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
@@ -52,6 +53,7 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
+	Build      *BuildResult   `json:"build,omitempty"`
 	ImageCheck *ImageCheck    `json:"image_check,omitempty"`
 	ID         string         `json:"id"`
 	Workload   string         `json:"workload"`
@@ -169,6 +171,9 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.Build != nil && r.Action != "build" {
+		return errors.New("build options require a build operation")
+	}
 	if r.PullLatest && (r.Action != "deploy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || len(r.ImagePins) > 0) {
 		return errors.New("pull latest requires an unpinned service deployment")
 	}
@@ -230,6 +235,13 @@ func ValidateRequest(r Request) error {
 		}
 		if r.Preview && r.Source != nil && r.Source.InlineCompose {
 			return errors.New("previews require a repository Compose file")
+		}
+	case "build":
+		if r.Build == nil || !repositoryPath.MatchString(r.Build.Repository) || len(r.Build.Repository) > 128 || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("build requires a registry repository path outside managed previews")
+		}
+		if (r.Source == nil || r.Source.InlineCompose) && (len(r.Compose) == 0 || len(r.Compose) > 1024*1024) {
+			return errors.New("compose is required and must not exceed 1 MiB")
 		}
 	case "stop", "start", "restart":
 	case "image_check":
@@ -412,6 +424,16 @@ func (e *Engine) Recover() error {
 			continue
 		}
 		if j.Operation.State == "running" {
+			if j.Request.Action == "build" {
+				cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
+				if err := e.recoverBuild(cleanup, j.Request.Workload); err != nil {
+					fmt.Fprintln(os.Stderr, "Interrupted build cache cleanup is pending:", err)
+				}
+				if err := e.cleanupBuildInputs(j.Request); err != nil {
+					fmt.Fprintln(os.Stderr, "Interrupted build input cleanup is pending:", err)
+				}
+				cancel()
+			}
 			if j.Request.GuardedDeploy != nil && *j.Request.GuardedDeploy {
 				cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				err := e.recoverCandidate(cleanup, filepath.Join(e.Root, "workloads", j.Request.Workload))
@@ -435,6 +457,9 @@ func (e *Engine) Recover() error {
 			j.Operation.State = "interrupted"
 			j.Operation.FinishedAt = &now
 			j.Operation.Error = "Worker restarted during execution; inspect workload before starting another operation."
+			if j.Request.Action == "build" {
+				j.Operation.Error = "Worker restarted during build; inspect registry artifacts before starting a new build."
+			}
 			if j.CancelRequested {
 				j.Operation.State = "cancelled"
 				j.Operation.Error = "Cancellation requested; inspect workload state."
@@ -619,6 +644,7 @@ func (e *Engine) execute(parent context.Context, j journal) {
 		j.Operation.Revision = persisted.Operation.Revision
 		j.Operation.Preview = persisted.Operation.Preview
 		j.Operation.ImageCheck = persisted.Operation.ImageCheck
+		j.Operation.Build = persisted.Operation.Build
 		j.CancelRequested = persisted.CancelRequested
 		committed = persisted.RouteChange != nil && persisted.RouteChange.Committed
 	}
@@ -694,9 +720,17 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		env = append(env, k+"="+v)
 		log.secrets = append(log.secrets, v)
 	}
-	if r.Registry != nil && (r.Action == "deploy" || r.Action == "image_check") {
+	if r.Registry != nil && (r.Action == "deploy" || r.Action == "image_check" || r.Action == "build") {
 		log.secrets = append(log.secrets, r.Registry.Password)
-		config, err := registryConfig(dir, r.Registry)
+		registryDir := dir
+		if r.Action == "build" {
+			registryDir = filepath.Join(e.Root, "build-auth", r.ID)
+			if err := os.MkdirAll(registryDir, 0700); err != nil {
+				return err
+			}
+			defer os.RemoveAll(registryDir)
+		}
+		config, err := registryConfig(registryDir, r.Registry)
 		if err != nil {
 			return err
 		}
@@ -723,6 +757,13 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		err := e.performImageCheck(ctx, r, env, log)
 		if err != nil {
 			fmt.Fprintln(log, "Image check failed:", err)
+		}
+		return err
+	}
+	if r.Action == "build" {
+		err := e.performBuild(ctx, r, dir, env, log)
+		if err != nil {
+			fmt.Fprintln(log, "Build failed:", err)
 		}
 		return err
 	}
@@ -984,7 +1025,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 		}
-		if err = e.buildImages(ctx, dir, args, env, log); err != nil {
+		if err = e.buildImages(ctx, dir, args, env, log, false); err != nil {
 			return err
 		}
 		if r.EnvironmentPreview != nil {

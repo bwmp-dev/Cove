@@ -16,10 +16,10 @@ export function isActive(state: OperationState) {
   return state === "queued" || state === "running";
 }
 
-// Image checks are housekeeping: they run hourly in the background and never change what is deployed,
-// so deployment summaries skip them. Operation lists and details still show them.
+// Image checks and builds never change what is deployed, so deployment summaries skip them.
+// Operation lists, details and active progress still show them.
 export function isHousekeeping(operation: Operation) {
-  return operation.action === "image_check";
+  return operation.action === "image_check" || operation.action === "build";
 }
 
 // The newest operation that changed or acted on the resource, ignoring housekeeping.
@@ -66,6 +66,7 @@ export const actionLabels = {
   restart: "Restart",
   routes: "Update routes",
   image_check: "Check images",
+  build: "Build and publish",
 } as const;
 
 export const stateLabels: Record<OperationState, string> = {

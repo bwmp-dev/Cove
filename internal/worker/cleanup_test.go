@@ -72,7 +72,7 @@ func TestBuildUsesOwnedBuilderAndLabels(t *testing.T) {
 		return nil
 	}
 	for range 2 {
-		if err := e.buildImages(context.Background(), e.Root, []string{"docker", "compose", "-f", "compose.yaml"}, []string{"DOCKER_CONFIG=registry"}, io.Discard); err != nil {
+		if err := e.buildImages(context.Background(), e.Root, []string{"docker", "compose", "-f", "compose.yaml"}, []string{"DOCKER_CONFIG=registry"}, io.Discard, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestCleanupRealDocker(t *testing.T) {
 		}
 	}
 	args := []string{"docker", "compose", "-p", project, "-f", filepath.Join(e.Root, "compose.yaml")}
-	if err := e.buildImages(ctx, e.Root, args, nil, os.Stderr); err != nil {
+	if err := e.buildImages(ctx, e.Root, args, nil, os.Stderr, false); err != nil {
 		t.Fatal(err)
 	}
 	label, err := e.output(ctx, "docker", "image", "inspect", "--format", `{{index .Config.Labels "dev.cove.build-owner"}}`, project+"-app")
@@ -130,7 +130,7 @@ func TestCleanupRealDocker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(e.Root, "payload"), []byte("second build"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.buildImages(ctx, e.Root, args, nil, os.Stderr); err != nil {
+	if err := e.buildImages(ctx, e.Root, args, nil, os.Stderr, false); err != nil {
 		t.Fatal(err)
 	}
 	// Docker's containerd store ages imported images by import time, not SOURCE_DATE_EPOCH.

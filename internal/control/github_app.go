@@ -530,7 +530,7 @@ func (s *Server) githubSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareAppDeployment(ctx context.Context, request *worker.Request) error {
-	if request.Action != "deploy" || request.Source == nil || request.Source.Token != "" {
+	if (request.Action != "deploy" && request.Action != "build") || request.Source == nil || request.Source.Token != "" {
 		return nil
 	}
 	var installation, repo int64

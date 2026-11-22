@@ -159,16 +159,17 @@ func (s *Server) listWorkloads(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Action     string `json:"action"`
-		Release    string `json:"release"`
-		BackupID   string `json:"backup_id"`
-		PullLatest bool   `json:"pull_latest"`
+		Action     string               `json:"action"`
+		Release    string               `json:"release"`
+		BackupID   string               `json:"backup_id"`
+		PullLatest bool                 `json:"pull_latest"`
+		Build      *worker.BuildOptions `json:"build"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
 	switch in.Action {
-	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check":
+	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check", "build":
 	default:
 		http.Error(w, "unsupported action", 400)
 		return
@@ -203,6 +204,27 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
 	request.PullLatest = in.PullLatest
+	request.Build = in.Build
+	if in.Build != nil && in.Action != "build" {
+		http.Error(w, "build options require a build operation", 400)
+		return
+	}
+	if in.Action == "build" {
+		var supported, connected, preview bool
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'build_publish')::boolean,false), EXISTS(SELECT 1 FROM workload_connections c WHERE c.workload_id=w.id AND c.kind='registry'), EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported, &connected, &preview); err != nil {
+			http.Error(w, "build configuration unavailable", 503)
+			return
+		}
+		if preview || in.PullLatest || in.Release != "" || in.BackupID != "" {
+			http.Error(w, "build requires source inputs outside managed previews", 400)
+			return
+		}
+		if !supported || !connected {
+			http.Error(w, "connect a registry and upgrade and verify the worker before building", 409)
+			return
+		}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: "build", Build: in.Build, Compose: config.Compose, Source: config.Source, Environment: config.Environment, FileSecrets: config.FileSecrets, Kind: config.Kind, JobService: config.JobService}
+	}
 	if in.Action == "image_check" {
 		if config.Kind == "job" {
 			http.Error(w, "image checks require a service", 400)

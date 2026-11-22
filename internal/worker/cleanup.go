@@ -39,7 +39,7 @@ func (e *Engine) buildOwner() (string, error) {
 	return owner, writeJSON(path, owner)
 }
 
-func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string, out io.Writer) error {
+func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string, out io.Writer, noCache bool) error {
 	e.buildMu.Lock()
 	defer e.buildMu.Unlock()
 	resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}
@@ -77,7 +77,7 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 	if err != nil {
 		return err
 	}
-	buildEnv := append(append([]string{}, env...), "BUILDX_CONFIG="+filepath.Join(e.Root, "buildx"))
+	buildEnv := append(append([]string{}, env...), "BUILDX_CONFIG="+filepath.Join(e.Root, "buildx"), "BUILDKIT_PROGRESS=plain")
 	marker := filepath.Join(e.Root, "builder-ready.json")
 	if _, err := os.Stat(marker); os.IsNotExist(err) {
 		if err := e.Run(ctx, dir, []string{"docker", "buildx", "create", "--name", "cove-" + owner, "--driver", "docker-container", "--driver-opt", "default-load=true"}, buildEnv, out); err != nil {
@@ -103,7 +103,7 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 	}
 	buildArgs := append(append([]string{}, args...), "--file", override, "build", "--builder", "cove-"+owner)
 	// BuildKit does not include secret contents in its cache key.
-	if secretBuild {
+	if secretBuild || noCache {
 		buildArgs = append(buildArgs, "--no-cache")
 	}
 	return e.Run(ctx, dir, buildArgs, buildEnv, out)

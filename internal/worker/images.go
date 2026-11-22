@@ -56,6 +56,7 @@ func imageRepository(reference string) string {
 	if len(parts) == 1 {
 		return "docker.io/library/" + reference
 	}
+	parts[0] = strings.ToLower(parts[0])
 	if parts[0] == "index.docker.io" {
 		parts[0] = "docker.io"
 	}
@@ -152,7 +153,8 @@ func (e *Engine) checkImage(ctx context.Context, status ImageStatus, env []strin
 		return unknown("The platform image manifest could not be verified.")
 	}
 	status.Status = "update_available"
-	if platform.Config.Digest == status.ImageID {
+	_, platformDigest, _ := strings.Cut(manifestRef, "@")
+	if platform.Config.Digest == status.ImageID || platformDigest == status.ImageID {
 		status.Status = "current"
 	}
 	return status

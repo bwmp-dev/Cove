@@ -10,6 +10,8 @@ export interface Capabilities {
   route_policies?: boolean;
   // Docker Buildx is present, so the worker can check deployed images and pull before redeploying.
   image_lifecycle?: boolean;
+  // Buildx, the Compose builder and pushing the local platform are available, so the worker can build and publish images.
+  build_publish?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -110,6 +112,8 @@ export interface DeploymentHooks { before?: DeploymentHook; after?: DeploymentHo
 
 export interface Workload {
   preview_source_id?: string;
+  // Set (non-empty) when the resource belongs to a managed preview environment.
+  environment_preview_id?: string;
   guarded_deploy?: boolean;
   file_secrets?: FileSecret[];
   hooks?: DeploymentHooks;
@@ -177,7 +181,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "build";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {
@@ -190,6 +194,25 @@ export interface WorkerOperation {
   error?: string;
   revision?: string;
   image_check?: ImageCheck;
+  build?: BuildResult;
+}
+
+export interface BuiltImage {
+  service: string;
+  image_id: string;
+  // An immutable registry reference: registry/path@sha256:...
+  reference: string;
+}
+
+// Present only when a build succeeded and every published image was verified in the registry.
+export interface BuildResult {
+  images: BuiltImage[];
+}
+
+export interface BuildOptions {
+  // A lowercase repository path within the resource's registry, without host, tag or digest.
+  repository: string;
+  no_cache?: boolean;
 }
 
 export type ImageStatusValue = "current" | "update_available" | "pinned" | "unpublished" | "unknown";
@@ -218,6 +241,7 @@ export interface OperationRequest {
   action: Exclude<OperationAction, "routes">;
   // Deploy only: pull the configured tags before building and replacing containers.
   pull_latest?: boolean;
+  build?: BuildOptions;
 }
 
 export interface Operation {

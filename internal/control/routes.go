@@ -17,6 +17,53 @@ import (
 // Held for the rest of a transaction that claims hostnames so concurrent saves cannot claim the same one.
 const routeClaimLock = 1129272902
 
+type routeInput struct {
+	worker.Route
+	Auth *string `json:"auth"`
+}
+
+func retainedRouteAuth(input []routeInput, previous []worker.Route) ([]worker.Route, error) {
+	if input == nil {
+		return nil, nil
+	}
+	routes := make([]worker.Route, len(input))
+	for i, next := range input {
+		routes[i] = next.Route
+		if next.Auth != nil {
+			routes[i].Auth = *next.Auth
+			continue
+		}
+		prefix := ""
+		if next.Policy != nil {
+			prefix = next.Policy.PathPrefix
+		}
+		var matches []worker.Route
+		for _, old := range previous {
+			if old.Domain != next.Domain {
+				continue
+			}
+			oldPrefix := ""
+			if old.Policy != nil {
+				oldPrefix = old.Policy.PathPrefix
+			}
+			if oldPrefix == prefix {
+				matches = []worker.Route{old}
+				break
+			}
+			matches = append(matches, old)
+		}
+		// GET hides password hashes. An omitted credential keeps the same route's protection,
+		// including a changed prefix when the hostname's previous credentials agree.
+		for j, old := range matches {
+			if j > 0 && old.Auth != routes[i].Auth {
+				return nil, errors.New("set authentication explicitly when changing a path on a hostname with different route credentials")
+			}
+			routes[i].Auth = old.Auth
+		}
+	}
+	return routes, nil
+}
+
 // routeConflict returns a hostname from routes that the dashboard or another resource already uses,
 // including hostnames waiting in another resource's queued route update. Callers must hold a transaction.
 func (s *Server) routeConflict(ctx context.Context, tx pgx.Tx, workload string, routes []worker.Route) (string, error) {
@@ -129,7 +176,7 @@ func deployAttempted(ctx context.Context, tx pgx.Tx, workload string) (bool, err
 // saves the routes once the worker reports success, so a failed update leaves the saved routes unchanged.
 func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Routes []worker.Route `json:"routes"`
+		Routes []routeInput `json:"routes"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -166,15 +213,20 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "only services can have routes", 400)
 		return
 	}
-	if config.Private != nil && len(in.Routes) > 0 {
-		http.Error(w, "disable private networking and deploy before adding public domains", 409)
-		return
-	}
-	if err = worker.ValidateRoutes(in.Routes, "service"); err != nil {
+	routes, err := retainedRouteAuth(in.Routes, config.Routes)
+	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if worker.HasRoutePolicies(in.Routes) {
+	if config.Private != nil && len(routes) > 0 {
+		http.Error(w, "disable private networking and deploy before adding public domains", 409)
+		return
+	}
+	if err = worker.ValidateRoutes(routes, "service"); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if worker.HasRoutePolicies(routes) {
 		var supported bool
 		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((capabilities->>'route_policies')::boolean,false) FROM nodes WHERE id=(SELECT node_id FROM workloads WHERE id=$1)`, id).Scan(&supported); err != nil {
 			http.Error(w, "worker capabilities unavailable", 503)
@@ -185,7 +237,7 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if worker.RoutesEqual(config.Routes, in.Routes) {
+	if worker.RoutesEqual(config.Routes, routes) {
 		respond(w, 200, map[string]string{"state": "unchanged"})
 		return
 	}
@@ -198,7 +250,7 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "wait for the active operation before changing routes", 409)
 		return
 	}
-	if !s.checkRouteClaims(w, r.Context(), tx, id, in.Routes) {
+	if !s.checkRouteClaims(w, r.Context(), tx, id, routes) {
 		return
 	}
 	attempted, err := deployAttempted(r.Context(), tx, id)
@@ -207,7 +259,7 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !attempted {
-		config.Routes = in.Routes
+		config.Routes = routes
 		if data, err = json.Marshal(config); err == nil {
 			encrypted, err = seal(s.Key, data)
 		}
@@ -229,7 +281,7 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upgrade and verify this resource's worker before changing routes on a resource that has been deployed", 409)
 		return
 	}
-	request := worker.Request{ID: resourceID(), Workload: id, Action: "routes", Kind: config.Kind, Routes: in.Routes}
+	request := worker.Request{ID: resourceID(), Workload: id, Action: "routes", Kind: config.Kind, Routes: routes}
 	if err = worker.ValidateRequest(request); err != nil {
 		http.Error(w, err.Error(), 400)
 		return

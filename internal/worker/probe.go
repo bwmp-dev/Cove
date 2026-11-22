@@ -34,6 +34,7 @@ type Probe struct {
 	LiveRoutes          bool         `json:"live_routes"`
 	RoutePolicies       bool         `json:"route_policies"`
 	ImageLifecycle      bool         `json:"image_lifecycle"`
+	BuildPublish        bool         `json:"build_publish"`
 	Protocol            int          `json:"protocol"`
 	OS                  string       `json:"os"`
 	Arch                string       `json:"arch"`
@@ -51,6 +52,11 @@ func Inspect(ctx context.Context) Probe {
 	p.GuardedHooks = true
 	p.RoutePolicies = true
 	if _, err := exec.CommandContext(ctx, "docker", "buildx", "version").Output(); err == nil {
+		if help, err := exec.CommandContext(ctx, "docker", "compose", "build", "--help").Output(); err == nil {
+			if push, err := exec.CommandContext(ctx, "docker", "push", "--help").Output(); err == nil {
+				p.BuildPublish = strings.Contains(string(help), "--builder") && strings.Contains(string(push), "--platform")
+			}
+		}
 		if help, err := exec.CommandContext(ctx, "docker", "compose", "pull", "--help").Output(); err == nil {
 			p.ImageLifecycle = strings.Contains(string(help), "--policy") && strings.Contains(string(help), "--ignore-buildable")
 		}

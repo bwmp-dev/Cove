@@ -120,6 +120,12 @@ export const workloadLogsQuery = (id: string) =>
     retry: false,
   });
 
+export const workloadRegistryQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["resource-registry", id] as const,
+    queryFn: ({ signal }) => request<{ registry_id: string }>("GET", `/api/workloads/${id}/registry`, undefined, signal),
+  });
+
 // Cached results only; the API never contacts a registry on read. The key includes the newest finished
 // check, deploy or rollback so a completed check or a new deployment refreshes the result.
 export const workloadImagesQuery = (id: string, refresh: string | null) =>

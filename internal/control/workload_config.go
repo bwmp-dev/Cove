@@ -86,10 +86,14 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]any{"environment_preview_id": environmentPreview, "preview_source_id": previewSource, "guarded_deploy": configuration.GuardedDeploy, "file_secrets": configuration.FileSecrets, "hooks": configuration.Hooks, "limits": configuration.Limits, "deployed": deployed, "permissions": permissions(level), "id": r.PathValue("id"), "name": configuration.Name, "node_id": configuration.NodeID, "compose": configuration.Compose, "environment_keys": keys, "source": configuration.Source, "has_source_token": hasToken, "kind": configuration.Kind, "job_service": configuration.JobService, "routes": configuration.Routes, "environment_id": environmentID, "project_id": projectID, "manually_stopped": stopped})
 }
 func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
-	var in workloadInput
-	if !decode(w, r, &in) {
+	var input struct {
+		workloadInput
+		Routes []routeInput `json:"routes"`
+	}
+	if !decode(w, r, &input) {
 		return
 	}
+	in := input.workloadInput
 	if in.Backup != nil {
 		http.Error(w, "use the backup policy endpoint to change backups", 400)
 		return
@@ -161,6 +165,11 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		var old workloadInput
 		if json.Unmarshal(data, &old) != nil {
 			http.Error(w, "configuration unavailable", 500)
+			return
+		}
+		in.Routes, err = retainedRouteAuth(input.Routes, old.Routes)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
 			return
 		}
 		if in.Backup == nil {

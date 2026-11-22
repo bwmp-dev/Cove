@@ -354,6 +354,15 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if r.Action == "build" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'build_publish')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before building images")
+		}
+	}
 	if r.PullLatest || r.Action == "image_check" {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
@@ -494,14 +503,14 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	if err := s.DB.QueryRow(ctx, "SELECT team_id FROM workloads WHERE id=$1", r.Workload).Scan(&team); err != nil {
 		return err
 	}
-	if r.Action == "deploy" && !r.Preview {
+	if (r.Action == "deploy" || r.Action == "build") && !r.Preview {
 		resolved, err := s.resolveSharedVariables(ctx, r.Workload, r.Environment)
 		if err != nil {
 			return err
 		}
 		r.Environment = resolved
 	}
-	if (r.Action == "deploy" || r.Action == "image_check") && r.Registry == nil {
+	if (r.Action == "deploy" || r.Action == "image_check" || r.Action == "build") && r.Registry == nil {
 		var id string
 		err := s.DB.QueryRow(ctx, `SELECT connection_id FROM workload_connections WHERE workload_id=$1 AND kind='registry'`, r.Workload).Scan(&id)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -514,6 +523,9 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			}
 			r.Registry = c.Registry
 		}
+	}
+	if r.Action == "build" && r.Registry == nil {
+		return errors.New("connect a registry before building images")
 	}
 	if r.Backup != nil && r.Backup.StorageID != "" {
 		c, err := s.readConnection(ctx, r.Backup.StorageID, team, "storage")

@@ -34,6 +34,11 @@ func TestImageDigestCheckAndPlatformComparison(t *testing.T) {
 	if got = e.checkImage(context.Background(), status, nil); got.Status != "update_available" {
 		t.Fatal(got)
 	}
+	current = latest
+	status.ImageID = current
+	if got = e.checkImage(context.Background(), status, nil); got.Status != "current" {
+		t.Fatal("containerd manifest identity was not recognized", got)
+	}
 	e.Run = func(context.Context, string, []string, []string, io.Writer) error {
 		return errors.New("private-registry-token")
 	}

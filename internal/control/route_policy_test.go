@@ -5,6 +5,7 @@ import (
 	"cove/internal/worker"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,70 @@ func TestRoutePolicyPersistenceAndCapability(t *testing.T) {
 	f.sql(`UPDATE nodes SET capabilities='{}' WHERE id='policy-node'`)
 	if err := f.s.prepareInfrastructure(context.Background(), &req); err == nil {
 		t.Fatal("old worker accepted route policies")
+	}
+}
+
+func TestRoutePolicyRetainsHiddenAuthentication(t *testing.T) {
+	f := newAccountFixture(t)
+	f.sql(`INSERT INTO nodes(id,name,address,port,public_key,private_key,state,capabilities) VALUES('auth-node','Node','localhost',22,'',$1,'ready','{"route_policies":true}')`, []byte{})
+	f.sql("INSERT INTO projects(id,name,team_id) VALUES('auth-project','Project','default')")
+	auth := "user:$2y$10$" + strings.Repeat("a", 53)
+	config := workloadInput{Name: "Protected", NodeID: "auth-node", ProjectID: "auth-project", Kind: "service", Compose: "services:\n  app:\n    image: busybox:1.37\n", Routes: []worker.Route{{Domain: "protected.example.com", Service: "app", Port: 80, Auth: auth}}}
+	id := jsonString(t, f.call("root", "default", "POST", "/api/workloads", config, 201), "id")
+	response := f.call("root", "default", "GET", "/api/workloads/"+id, nil, 200)
+	if strings.Contains(response.Body.String(), auth) {
+		t.Fatal("route password hash exposed")
+	}
+	var visible workloadInput
+	if err := json.Unmarshal(response.Body.Bytes(), &visible); err != nil {
+		t.Fatal(err)
+	}
+	visible.Routes[0].Policy = &worker.RoutePolicy{PathPrefix: "/api", SecurityHeaders: true}
+	f.call("root", "default", "PUT", "/api/workloads/"+id+"/routes", map[string]any{"routes": visible.Routes}, 200)
+	var encrypted []byte
+	if err := f.s.DB.QueryRow(context.Background(), "SELECT configuration FROM workloads WHERE id=$1", id).Scan(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	data, err := unseal(f.s.Key, encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved workloadInput
+	if err = json.Unmarshal(data, &saved); err != nil || saved.Routes[0].Auth != auth {
+		t.Fatal("route edit dropped hidden authentication", saved.Routes, err)
+	}
+	visible.Name = "Protected renamed"
+	visible.ProjectID, visible.EnvironmentID = "", ""
+	f.call("root", "default", "PUT", "/api/workloads/"+id, visible, 200)
+	if err = f.s.DB.QueryRow(context.Background(), "SELECT configuration FROM workloads WHERE id=$1", id).Scan(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	data, err = unseal(f.s.Key, encrypted)
+	if err != nil || json.Unmarshal(data, &saved) != nil || saved.Routes[0].Auth != auth {
+		t.Fatal("configuration save dropped hidden authentication", err)
+	}
+	route := map[string]any{"domain": "protected.example.com", "service": "app", "port": 80, "policy": visible.Routes[0].Policy, "auth": ""}
+	f.call("root", "default", "PUT", "/api/workloads/"+id+"/routes", map[string]any{"routes": []any{route}}, 200)
+	if err = f.s.DB.QueryRow(context.Background(), "SELECT configuration FROM workloads WHERE id=$1", id).Scan(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	data, err = unseal(f.s.Key, encrypted)
+	saved = workloadInput{}
+	if err != nil || json.Unmarshal(data, &saved) != nil || saved.Routes[0].Auth != "" {
+		t.Fatal("explicit authentication removal was not applied", err)
+	}
+}
+
+func TestRouteAuthenticationRejectsAmbiguousPathChange(t *testing.T) {
+	previous := []worker.Route{{Domain: "app.example.com", Auth: "first", Policy: &worker.RoutePolicy{PathPrefix: "/one"}}, {Domain: "app.example.com", Auth: "second", Policy: &worker.RoutePolicy{PathPrefix: "/two"}}}
+	input := []routeInput{{Route: worker.Route{Domain: "app.example.com", Policy: &worker.RoutePolicy{PathPrefix: "/three"}}}}
+	if _, err := retainedRouteAuth(input, previous); err == nil {
+		t.Fatal("ambiguous credentials discarded")
+	}
+	input[0].Policy.PathPrefix = "/two"
+	got, err := retainedRouteAuth(input, previous)
+	if err != nil || got[0].Auth != "second" {
+		t.Fatal(got, err)
 	}
 }
 

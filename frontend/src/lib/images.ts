@@ -1,5 +1,6 @@
 import type { ImageStatus, ImageStatusValue, Operation, Workload } from "../api/types";
 import type { Tone } from "./nodes";
+import { isManagedPreview } from "./previews";
 
 export const imageStatuses: Record<ImageStatusValue, { tone: Tone; label: string; description: string }> = {
   current: { tone: "ok", label: "Current", description: "The running image matches the registry digest for its tag." },
@@ -44,7 +45,7 @@ export function releaseLink(url: string | undefined) {
 
 // Checks run on deployed services only; jobs and managed previews are not checked.
 export function supportsImageLifecycle(workload: Workload) {
-  return workload.kind !== "job" && !workload.preview_source_id;
+  return workload.kind !== "job" && !isManagedPreview(workload);
 }
 
 // The newest finished operation that can change the cached image result.
