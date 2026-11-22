@@ -1002,7 +1002,7 @@ func (e *Engine) prepareLinks(ctx context.Context, r Request, dir string, args, 
 		return "", false, errors.New("could not resolve Compose for private connections")
 	}
 	var config map[string]any
-	if err = json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err = unmarshalCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", false, errors.New("invalid resolved Compose configuration")
 	}
 	if err = addLinkNetworks(config, attachments); err != nil {

@@ -81,6 +81,11 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 			return report
 		}
 	}
+	composePath, err = normalizeComposeFile(composePath)
+	if err != nil {
+		add("Compose", "error", "Cannot normalize Compose configuration.")
+		return report
+	}
 	if len(r.BuiltinDefaults) > 0 {
 		_, overridden := r.Environment[CoveCommitSHA]
 		r.Environment, _ = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)

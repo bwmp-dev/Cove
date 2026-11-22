@@ -50,7 +50,7 @@ func (e *Engine) testDeploymentCandidate(ctx context.Context, r Request, dir str
 		return "", err
 	}
 	var config map[string]any
-	if err := json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err := unmarshalCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", err
 	}
 	name, err := guardedService(config)

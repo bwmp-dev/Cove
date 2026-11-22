@@ -226,7 +226,7 @@ func (e *Engine) preparePromotion(ctx context.Context, r Request, dir string, ar
 		return "", err
 	}
 	var config map[string]any
-	if err := json.Unmarshal(output.data.Bytes(), &config); err != nil {
+	if err := unmarshalCompose(output.data.Bytes(), &config); err != nil {
 		return "", err
 	}
 	if r.EnvironmentPreview != nil {

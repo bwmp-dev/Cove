@@ -912,6 +912,19 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 	}
 	args := []string{"docker", "compose", "--project-name", "cove-" + strings.ToLower(r.Workload), "--file", composePath}
 	if r.Action == "deploy" {
+		if r.Preview {
+			composePath, err = e.preparePreview(r, dir, composePath)
+			if err != nil {
+				fmt.Fprintln(log, err)
+				return err
+			}
+			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+		}
+		composePath, err = normalizeComposeFile(composePath)
+		if err != nil {
+			return err
+		}
+		args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
 		if len(r.BuiltinDefaults) > 0 {
 			prepared, err := e.prepareBuiltinEnvironment(ctx, r, dir, args, env)
 			if err != nil {
@@ -919,14 +932,6 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 			composePath = prepared
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
-		}
-		if r.Preview {
-			composePath, err = e.preparePreview(r, dir, composePath)
-			if err != nil {
-				fmt.Fprintln(log, err)
-				return err
-			}
 			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
 		}
 		if r.Source != nil {

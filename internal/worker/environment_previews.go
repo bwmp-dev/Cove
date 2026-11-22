@@ -458,7 +458,7 @@ func (e *Engine) preparePreviewStorage(ctx context.Context, r Request, dir strin
 		return "", errors.New("could not resolve Compose for preview isolation")
 	}
 	var config map[string]any
-	if err := json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err := unmarshalCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", errors.New("invalid resolved Compose configuration")
 	}
 	volumes, err := isolatePreviewCompose(config, r.EnvironmentPreview, r.Workload, filepath.Join(dir, "releases"))

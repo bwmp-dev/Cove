@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,11 @@ import (
 	"strings"
 	"time"
 )
+
+func unmarshalCompose(data []byte, target any) error {
+	// Compose config escapes dollars in both JSON keys and values for a second Compose read.
+	return json.Unmarshal(bytes.ReplaceAll(data, []byte("$$"), []byte("$")), target)
+}
 
 // Escape resolved literal dollars before Compose reads the snapshot a second time.
 func literalCompose(value any) any {
@@ -160,7 +166,7 @@ func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args
 		return deployedState{}, err
 	}
 	var config map[string]any
-	if err := json.Unmarshal(output.data.Bytes(), &config); err != nil {
+	if err := unmarshalCompose(output.data.Bytes(), &config); err != nil {
 		return deployedState{}, err
 	}
 	services, ok := config["services"].(map[string]any)
@@ -204,6 +210,7 @@ func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args
 		service["image"] = image
 		service["pull_policy"] = "never"
 		delete(service, "build")
+		delete(service, "profiles")
 	}
 	snapshots := filepath.Join(dir, "release-states")
 	if err := os.MkdirAll(snapshots, 0700); err != nil {

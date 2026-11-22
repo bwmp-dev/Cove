@@ -76,7 +76,7 @@ func (e *Engine) prepareNetworks(ctx context.Context, r Request, dir string, arg
 		return "", errors.New("could not resolve Compose for shared networks")
 	}
 	var config map[string]any
-	if err := json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err := unmarshalCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", errors.New("invalid resolved Compose configuration")
 	}
 	if err := addSharedNetworks(config, r.Networks); err != nil {
