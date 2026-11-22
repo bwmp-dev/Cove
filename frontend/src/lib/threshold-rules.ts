@@ -10,7 +10,7 @@ export const defaultThresholdMetric: ThresholdMetricOption = { value: "cpu", lab
 export const thresholdMetrics: ThresholdMetricOption[] = [
   defaultThresholdMetric,
   { value: "memory", label: "Memory used", description: "Memory in use: total memory minus the memory available to new processes.", scope: "node", unit: "percent" },
-  { value: "disk", label: "Data disk used", description: "Only the filesystem that holds /var/lib/cove, not every mounted disk.", scope: "node", unit: "percent" },
+  { value: "disk", label: "Disk used", description: "Used space on the filesystem that holds /var/lib/cove, on the fullest mount, or on one mount you choose.", scope: "node", unit: "percent" },
   { value: "certificate", label: "Certificate expiry", description: "Days until the certificate served for one of the service's configured domains expires.", scope: "resource", unit: "days" },
   { value: "restarts", label: "Container restarts", description: "Automatic restarts by Docker's restart policy in the last ten minutes.", scope: "resource", unit: "events" },
   { value: "oom", label: "Out-of-memory kills", description: "Out-of-memory events in the last ten minutes, or at least one container currently stopped by one.", scope: "resource", unit: "events" },
@@ -35,6 +35,26 @@ export function metricScope(metric: string): ThresholdScope {
   return thresholdMetric(metric)?.scope ?? "node";
 }
 
+export type MountScope = "data" | "any" | "path";
+
+export const mountScopes: { value: MountScope; label: string; hint: string }[] = [
+  { value: "data", label: "Cove data filesystem", hint: "Only the filesystem that holds /var/lib/cove." },
+  { value: "any", label: "Fullest mount", hint: "The highest utilisation across every mount the worker measures. Unreadable or clipped mounts never count as recovery." },
+  { value: "path", label: "One mount", hint: "A single mount point reported by the worker. While it is missing or unreadable the alert neither triggers nor clears." },
+];
+
+export function mountScope(path: string): MountScope {
+  return path === "" ? "data" : path === "*" ? "any" : "path";
+}
+
+export function diskTargetLabel(path: string) {
+  if (path === "") return "Data disk used";
+  if (path === "*") return "Fullest mount used";
+  return `Disk used on ${path}`;
+}
+
+export const maxMountPathBytes = 4096;
+
 export const confirmationChoices = [60, 120, 300, 600, 900, 1800, 3600];
 export const repeatChoices = [300, 900, 1800, 3600, 7200, 21600, 43200, 86400, 604800];
 export const maxRuleChannels = 32;
@@ -58,9 +78,9 @@ export function formatDays(value: number) {
   return `${Number.isInteger(value) ? value : value.toFixed(1)} ${value === 1 ? "day" : "days"}`;
 }
 
-export function thresholdCondition(rule: Pick<ThresholdRuleInput, "metric" | "threshold" | "domain" | "confirmation_seconds">) {
+export function thresholdCondition(rule: Pick<ThresholdRuleInput, "metric" | "threshold" | "domain" | "confirmation_seconds"> & { mount_path?: string }) {
   const lasting = `for ${formatDuration(rule.confirmation_seconds)}`;
-  const label = metricLabel(rule.metric);
+  const label = rule.metric === "disk" ? diskTargetLabel(rule.mount_path ?? "") : metricLabel(rule.metric);
   switch (thresholdMetric(rule.metric)?.unit) {
     case "days":
       return `${label} for ${rule.domain} at or below ${formatDays(rule.threshold)} ${lasting}`;
@@ -71,7 +91,7 @@ export function thresholdCondition(rule: Pick<ThresholdRuleInput, "metric" | "th
   }
 }
 
-export type ThresholdFieldName = "name" | "node_id" | "workload_id" | "domain" | "metric" | "threshold" | "confirmation_seconds" | "repeat_seconds" | "channel_ids";
+export type ThresholdFieldName = "name" | "node_id" | "workload_id" | "domain" | "mount_path" | "metric" | "threshold" | "confirmation_seconds" | "repeat_seconds" | "channel_ids";
 export interface ThresholdFormError {
   field: ThresholdFieldName;
   message: string;
@@ -93,9 +113,18 @@ export function thresholdRuleFromForm(data: FormData): ThresholdRuleInput | Thre
   let nodeID = "";
   let workloadID = "";
   let domain = "";
+  let mountPath = "";
   if (metric.scope === "node") {
     nodeID = text("node_id");
     if (nodeID === "") return { field: "node_id", message: "Select a node." };
+    if (metric.value === "disk") {
+      const scope = text("mount_scope");
+      if (scope === "any") mountPath = "*";
+      if (scope === "path") {
+        mountPath = text("mount_path");
+        if (!mountPath.startsWith("/") || new TextEncoder().encode(mountPath).length > maxMountPathBytes) return { field: "mount_path", message: "Select a mount." };
+      }
+    }
   } else {
     workloadID = text("workload_id");
     if (workloadID === "") return { field: "workload_id", message: "Select a service." };
@@ -114,7 +143,7 @@ export function thresholdRuleFromForm(data: FormData): ThresholdRuleInput | Thre
   const channels = [...new Set(data.getAll("channel_ids").filter((value): value is string => typeof value === "string" && value !== ""))];
   if (channels.length === 0) return { field: "channel_ids", message: "Select at least one channel." };
   if (channels.length > maxRuleChannels) return { field: "channel_ids", message: `Select at most ${maxRuleChannels} channels.` };
-  return { name, node_id: nodeID, workload_id: workloadID, domain, metric: metric.value, threshold, confirmation_seconds: confirmation, repeat_seconds: repeat, channel_ids: channels };
+  return { name, node_id: nodeID, workload_id: workloadID, domain, mount_path: mountPath, metric: metric.value, threshold, confirmation_seconds: confirmation, repeat_seconds: repeat, channel_ids: channels };
 }
 
 // A rule only restricts which channels may receive its events; each channel's own switches and

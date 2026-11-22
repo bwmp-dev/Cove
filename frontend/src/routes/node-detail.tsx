@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
 import { CleanupPreview } from "../components/CleanupPreview";
+import { NodeCleanup } from "../components/NodeCleanup";
+import { NodeMounts } from "../components/NodeMounts";
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { KeyRound, Network, Pencil, RefreshCw, Server } from "lucide-react";
 import { useState } from "react";
@@ -247,7 +249,7 @@ function NodeDetail({ node }: { node: Node }) {
         <Section title="Resources on this node" flush>
           <NodeResources nodeId={node.id} />
         </Section>
-        {admin && <CleanupPreview nodeId={node.id} />}
+        {admin && (node.capabilities?.scheduled_cleanup ? <NodeCleanup node={node} /> : <CleanupPreview nodeId={node.id} />)}
         {admin && (
           <Section title="Danger zone" tone="danger">
             <DeleteResource kind="node" id={node.id} />
@@ -255,6 +257,7 @@ function NodeDetail({ node }: { node: Node }) {
         )}
         </div>
       </SectionGrid>
+      {admin && <NodeMounts node={node} />}
       {admin && (
         <Section title="Usage history" description="Host usage recorded by Cove from this node's worker." flush>
           <NodeMetricHistory nodeId={node.id} />
@@ -293,7 +296,7 @@ function NodeUsage({ node }: { node: Node }) {
   const metrics = node.capabilities?.metrics;
   const fresh = metrics && node.state === "ready" && now - new Date(metrics.sampled_at).getTime() < 180_000;
   const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
-  return <Section title="Node usage" description="Host usage at the last probe. Disk covers the filesystem containing /var/lib/cove; separately mounted Docker or application disks are not included.">
+  return <Section title="Node usage" description="Host usage at the last probe. Disk covers the filesystem containing /var/lib/cove; other mounts are listed under Mounted filesystems.">
     <div className="space-y-4">
       {fresh ? <>
         <MeterGroup label="Node usage" columns={3}>

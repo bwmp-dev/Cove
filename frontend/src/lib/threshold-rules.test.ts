@@ -12,7 +12,7 @@ const replaceIn = (entries: [string, string][], key: string, value: string) => f
 
 describe("thresholdRuleFromForm", () => {
   it("builds the API body with numbers and distinct channels", () => {
-    expect(thresholdRuleFromForm(form(valid))).toEqual({ name: "Hot CPU", node_id: "node-1", workload_id: "", domain: "", metric: "cpu", threshold: 92.5, confirmation_seconds: 300, repeat_seconds: 3600, channel_ids: ["a", "b"] });
+    expect(thresholdRuleFromForm(form(valid))).toEqual({ name: "Hot CPU", node_id: "node-1", workload_id: "", domain: "", mount_path: "", metric: "cpu", threshold: 92.5, confirmation_seconds: 300, repeat_seconds: 3600, channel_ids: ["a", "b"] });
   });
 
   it("rejects values outside the API limits", () => {
@@ -33,7 +33,7 @@ describe("thresholdRuleFromForm", () => {
   const certificate: [string, string][] = [["name", "Cert"], ["metric", "certificate"], ["workload_id", "w1"], ["domain", "app.example.test"], ["threshold", "14"], ["confirmation_seconds", "300"], ["repeat_seconds", "86400"], ["channel_ids", "a"]];
 
   it("targets a service and configured domain for certificate rules, leaving the node to the API", () => {
-    expect(thresholdRuleFromForm(form([...certificate, ["node_id", "ignored"]]))).toEqual({ name: "Cert", node_id: "", workload_id: "w1", domain: "app.example.test", metric: "certificate", threshold: 14, confirmation_seconds: 300, repeat_seconds: 86400, channel_ids: ["a"] });
+    expect(thresholdRuleFromForm(form([...certificate, ["node_id", "ignored"]]))).toEqual({ name: "Cert", node_id: "", workload_id: "w1", domain: "app.example.test", mount_path: "", metric: "certificate", threshold: 14, confirmation_seconds: 300, repeat_seconds: 86400, channel_ids: ["a"] });
     expect(thresholdRuleFromForm(replaceIn(certificate, "workload_id", ""))).toEqual({ field: "workload_id", message: "Select a service." });
     expect(thresholdRuleFromForm(replaceIn(certificate, "domain", ""))).toEqual({ field: "domain", message: "Select a domain." });
     expect(thresholdRuleFromForm(replaceIn(certificate, "threshold", "3650"))).toMatchObject({ threshold: 3650 });
@@ -79,4 +79,17 @@ describe("thresholdDeliveryProblem", () => {
 
 it("formats durations in the largest whole unit", () => {
   expect([60, 300, 3600, 7200, 86400, 604800, 90].map(formatDuration)).toEqual(["1 minute", "5 minutes", "1 hour", "2 hours", "1 day", "7 days", "90 seconds"]);
+});
+
+it("maps disk filesystem scopes to the mount path contract", () => {
+  const disk = valid.filter(([name]) => name !== "metric").concat([["metric", "disk"]]);
+  expect(thresholdRuleFromForm(form(disk))).toMatchObject({ metric: "disk", mount_path: "" });
+  expect(thresholdRuleFromForm(form([...disk, ["mount_scope", "any"]]))).toMatchObject({ mount_path: "*" });
+  expect(thresholdRuleFromForm(form([...disk, ["mount_scope", "path"], ["mount_path", "/srv/data"]]))).toMatchObject({ mount_path: "/srv/data" });
+  expect(thresholdRuleFromForm(form([...disk, ["mount_scope", "path"], ["mount_path", ""]]))).toEqual({ field: "mount_path", message: "Select a mount." });
+  const cpu = form([...valid, ["mount_scope", "any"]]);
+  expect(thresholdRuleFromForm(cpu)).toMatchObject({ metric: "cpu", mount_path: "" });
+  expect(thresholdCondition({ metric: "disk", threshold: 85, domain: "", mount_path: "*", confirmation_seconds: 300 })).toBe("Fullest mount used at or above 85% for 5 minutes");
+  expect(thresholdCondition({ metric: "disk", threshold: 85, domain: "", mount_path: "/srv", confirmation_seconds: 300 })).toBe("Disk used on /srv at or above 85% for 5 minutes");
+  expect(thresholdCondition({ metric: "disk", threshold: 85, domain: "", mount_path: "", confirmation_seconds: 300 })).toBe("Data disk used at or above 85% for 5 minutes");
 });

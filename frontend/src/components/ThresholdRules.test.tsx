@@ -16,7 +16,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-const nodes = [{ id: "n1", name: "edge-1", capabilities: { alert_observations: true } }, { id: "n2", name: "other-team-node" }, { id: "n3", name: "old-worker", capabilities: {} }];
+const nodes = [{ id: "n1", name: "edge-1", capabilities: { alert_observations: true, mount_metrics: true } }, { id: "n2", name: "other-team-node" }, { id: "n3", name: "old-worker", capabilities: {} }];
 const workloads = [
   { id: "w1", name: "api", kind: "service", node_id: "n1", project: "Shop", environment: "production" },
   { id: "w2", name: "nightly", kind: "job", node_id: "n1", project: "Shop", environment: "production" },
@@ -37,6 +37,7 @@ function renderRules(rules: unknown[]) {
     if (path === "/api/nodes") return Promise.resolve(nodes);
     if (path === "/api/teams/one/nodes") return Promise.resolve(["n1", "n3"]);
     if (path === "/api/workloads") return Promise.resolve(workloads);
+    if (path === "/api/notifications/mounts?node_id=n1") return Promise.resolve({ limited: true, sampled_at: "2026-11-22T12:00:00Z", mounts: [{ path: "/proc", filesystem: "proc", total: 0, available: 0, known: false }, { path: "/srv/data", filesystem: "ext4", total: 100, available: 10, known: true }, { path: "/mnt/nfs", filesystem: "nfs", total: 0, available: 0, known: true, error: "stale file handle" }] });
     if (path === "/api/workloads/w1") return Promise.resolve({ id: "w1", routes: [{ domain: "b.example.test", service: "web", port: 80 }, { domain: "a.example.test", service: "web", port: 80 }, { domain: "a.example.test", service: "admin", port: 81 }] });
     return Promise.reject(new Error(`unexpected ${path}`));
   });
@@ -56,8 +57,8 @@ it("creates a rule on a team node with the selected channels", async () => {
   expect(screen.queryByRole("option", { name: "other-team-node" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("option", { name: "edge-1" }));
   fireEvent.click(screen.getByRole("combobox", { name: "Metric" }));
-  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["CPU usage", "Memory used", "Data disk used", "Certificate expiry", "Container restarts", "Out-of-memory kills", "Container crashes"]);
-  fireEvent.click(screen.getByRole("option", { name: "Data disk used" }));
+  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["CPU usage", "Memory used", "Disk used", "Certificate expiry", "Container restarts", "Out-of-memory kills", "Container crashes"]);
+  fireEvent.click(screen.getByRole("option", { name: "Disk used" }));
   expect(screen.getByText(/Only the filesystem that holds \/var\/lib\/cove/)).toBeInTheDocument();
   expect(screen.getByText("This channel does not select threshold events.")).toBeInTheDocument();
   expect(screen.getByText(/Resource owner emails skip node events/)).toBeInTheDocument();
@@ -70,7 +71,7 @@ it("creates a rule on a team node with the selected channels", async () => {
   fireEvent.click(screen.getByRole("checkbox", { name: /Ops chat/ }));
   fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "Create rule" })).not.toBeInTheDocument());
-  expect(request).toHaveBeenCalledWith("POST", "/api/notifications/rules", { name: "Disk filling", node_id: "n1", workload_id: "", domain: "", metric: "disk", threshold: 85, confirmation_seconds: 600, repeat_seconds: 3600, channel_ids: ["c1"] });
+  expect(request).toHaveBeenCalledWith("POST", "/api/notifications/rules", { name: "Disk filling", node_id: "n1", workload_id: "", domain: "", mount_path: "", metric: "disk", threshold: 85, confirmation_seconds: 600, repeat_seconds: 3600, channel_ids: ["c1"] });
 });
 
 it("shows API errors when creating a rule", async () => {
@@ -83,6 +84,30 @@ it("shows API errors when creating a rule", async () => {
   vi.mocked(request).mockImplementationOnce(() => Promise.reject(new Error("a team may have at most 100 threshold rules")));
   fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
   expect(await screen.findByText("a team may have at most 100 threshold rules")).toBeInTheDocument();
+});
+
+it("scopes disk rules to one reported mount on workers that measure mounts", async () => {
+  renderRules([{ ...rule, id: "r5", name: "Any mount", metric: "disk", threshold: 85, mount_path: "*" }]);
+  expect(await screen.findByText(/Fullest mount used at or above 85% for 5 minutes on edge-1/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "New rule" }));
+  choose("Metric", "Disk used");
+  choose("Node", "old-worker");
+  fireEvent.click(screen.getByRole("combobox", { name: "Filesystem" }));
+  expect(screen.getByRole("option", { name: "One mount" })).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(screen.getByRole("option", { name: "Cove data filesystem" }));
+  expect(screen.getByText(/old-worker does not report mounts/)).toBeInTheDocument();
+  choose("Node", "edge-1");
+  choose("Filesystem", "One mount");
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Mount" })).toBeEnabled());
+  expect(screen.getByText(/clipped at the worker's limit/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("combobox", { name: "Mount" }));
+  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Select a mount", "/mnt/nfs (unreadable)", "/srv/data"]);
+  fireEvent.click(screen.getByRole("option", { name: "/srv/data" }));
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Data volume" } });
+  fireEvent.change(screen.getByLabelText("Threshold (%)"), { target: { value: "90" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: /Ops chat/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/notifications/rules", expect.objectContaining({ metric: "disk", node_id: "n1", mount_path: "/srv/data", threshold: 90 })));
 });
 
 it("lists rules and warns that deleting does not close external incidents", async () => {
@@ -127,7 +152,7 @@ it("creates a certificate rule for a configured domain of a team service", async
   expect(await screen.findByText("Enter a number of days above 0 and at most 3650.")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Threshold (days)"), { target: { value: "14" } });
   fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
-  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/notifications/rules", { name: "Cert expiring", node_id: "", workload_id: "w1", domain: "b.example.test", metric: "certificate", threshold: 14, confirmation_seconds: 300, repeat_seconds: 3600, channel_ids: ["c3"] }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/notifications/rules", { name: "Cert expiring", node_id: "", workload_id: "w1", domain: "b.example.test", mount_path: "", metric: "certificate", threshold: 14, confirmation_seconds: 300, repeat_seconds: 3600, channel_ids: ["c3"] }));
 });
 
 it("requires a service and blocks rules on workers without observation support", async () => {

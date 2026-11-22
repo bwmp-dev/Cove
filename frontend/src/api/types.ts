@@ -1,6 +1,9 @@
 export type NodeState = "pending" | "enrolled" | "unreachable" | "ssh_verified" | "ready";
 
-export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number; network_rx?: number; network_tx?: number }
+// A filesystem mounted in the worker's namespace. Pseudo filesystems report known=false without an error;
+// an error means the mount could not be read. Neither has a capacity reading.
+export interface MountMetric { path: string; filesystem: string; total: number; available: number; known: boolean; error?: string }
+export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number; network_rx?: number; network_tx?: number; cpus?: number; mounts?: MountMetric[] | null; mounts_limited?: boolean }
 export interface Capabilities {
   metrics?: NodeMetrics;
   shared_host?: { coolify_detected: boolean; cleanup_verified: boolean };
@@ -11,6 +14,9 @@ export interface Capabilities {
   backblaze_b2?: boolean;
   file_browser?: boolean;
   alert_observations?: boolean;
+  scheduled_cleanup?: boolean;
+  journal_retention?: boolean;
+  mount_metrics?: boolean;
   protocol: number;
   os: string;
   arch: string;

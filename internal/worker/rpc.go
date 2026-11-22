@@ -15,20 +15,25 @@ import (
 )
 
 type RPCRequest struct {
-	Files     *FileRequest          `json:"files,omitempty"`
-	Telemetry *TelemetryRequest     `json:"telemetry,omitempty"`
-	Links     *LinkConfig           `json:"links,omitempty"`
-	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
-	Tunnel    *TunnelRequest        `json:"tunnel,omitempty"`
-	Promotion *PromotionExport      `json:"promotion,omitempty"`
-	Registry  *Registry             `json:"registry,omitempty"`
-	Storage   *StorageLocation      `json:"storage,omitempty"`
-	Terminal  *TerminalRequest      `json:"terminal,omitempty"`
-	Method    string                `json:"method"`
-	Request   *Request              `json:"request,omitempty"`
-	ID        string                `json:"id,omitempty"`
+	CleanupControl *CleanupControl       `json:"cleanup_control,omitempty"`
+	JournalPrune   *JournalPruneRequest  `json:"journal_prune,omitempty"`
+	Files          *FileRequest          `json:"files,omitempty"`
+	Telemetry      *TelemetryRequest     `json:"telemetry,omitempty"`
+	Links          *LinkConfig           `json:"links,omitempty"`
+	Ingress        *IngressConfigRequest `json:"ingress,omitempty"`
+	Tunnel         *TunnelRequest        `json:"tunnel,omitempty"`
+	Promotion      *PromotionExport      `json:"promotion,omitempty"`
+	Registry       *Registry             `json:"registry,omitempty"`
+	Storage        *StorageLocation      `json:"storage,omitempty"`
+	Terminal       *TerminalRequest      `json:"terminal,omitempty"`
+	Method         string                `json:"method"`
+	Request        *Request              `json:"request,omitempty"`
+	ID             string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	CleanupState  *CleanupState         `json:"cleanup_state,omitempty"`
+	CleanupPlan   *CleanupPlan          `json:"cleanup_plan,omitempty"`
+	JournalPrune  *JournalPruneResult   `json:"journal_prune,omitempty"`
 	Observations  *WorkloadObservations `json:"observations,omitempty"`
 	Files         *FileResponse         `json:"files,omitempty"`
 	Telemetry     *Telemetry            `json:"telemetry,omitempty"`
@@ -54,6 +59,25 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "cleanup_control":
+		if r.CleanupControl == nil {
+			return RPCResponse{Error: "cleanup request required"}
+		}
+		state, plan, err := e.CleanupPolicy(ctx, *r.CleanupControl)
+		if err != nil {
+			return RPCResponse{CleanupState: state, CleanupPlan: plan, Error: err.Error()}
+		}
+		return RPCResponse{CleanupState: state, CleanupPlan: plan}
+	case "prune_journals":
+		if r.JournalPrune == nil {
+			return RPCResponse{Error: "journal request required"}
+		}
+		result, err := e.PruneJournals(ctx, *r.JournalPrune)
+		if err != nil {
+			return RPCResponse{JournalPrune: result, Error: "journal pruning unavailable; worker busy or metadata unsafe"}
+		}
+		return RPCResponse{JournalPrune: result}
+
 	case "observations":
 		result, err := e.ObserveWorkload(ctx, r.ID)
 		if err != nil {

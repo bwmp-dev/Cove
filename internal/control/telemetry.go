@@ -79,7 +79,10 @@ func (s *Server) collectTelemetry(ctx context.Context) error {
 	if err = pruneTelemetry(ctx, tx, c); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	return s.pruneOperationHistory(ctx, c.OperationDays, c.OperationRows)
 }
 
 func (s *Server) metricHistory(w http.ResponseWriter, r *http.Request) {

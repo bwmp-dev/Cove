@@ -11,14 +11,17 @@ import (
 )
 
 type NodeMetrics struct {
-	NetworkRX       *uint64   `json:"network_rx,omitempty"`
-	NetworkTX       *uint64   `json:"network_tx,omitempty"`
-	SampledAt       time.Time `json:"sampled_at"`
-	CPUPercent      float64   `json:"cpu_percent"`
-	MemoryTotal     uint64    `json:"memory_total"`
-	MemoryAvailable uint64    `json:"memory_available"`
-	DiskTotal       uint64    `json:"disk_total"`
-	DiskAvailable   uint64    `json:"disk_available"`
+	Mounts          []MountMetric `json:"mounts"`
+	MountsLimited   bool          `json:"mounts_limited"`
+	CPUs            int           `json:"cpus"`
+	NetworkRX       *uint64       `json:"network_rx,omitempty"`
+	NetworkTX       *uint64       `json:"network_tx,omitempty"`
+	SampledAt       time.Time     `json:"sampled_at"`
+	CPUPercent      float64       `json:"cpu_percent"`
+	MemoryTotal     uint64        `json:"memory_total"`
+	MemoryAvailable uint64        `json:"memory_available"`
+	DiskTotal       uint64        `json:"disk_total"`
+	DiskAvailable   uint64        `json:"disk_available"`
 }
 
 type SharedHost struct {

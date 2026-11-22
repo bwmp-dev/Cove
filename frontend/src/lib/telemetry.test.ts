@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { MetricHistory, RetentionSettings } from "../api/telemetry";
-import type { Container, NodeMetrics } from "../api/types";
-import { containerColour, counterRates, logContainers, logSearchTooLong, nodeCharts, parseRetention, retentionChanges, retentionDraft, segments, workloadCharts } from "./telemetry";
+import type { MetricHistory, NodeHistorySample, RetentionSettings } from "../api/telemetry";
+import type { Container, MountMetric, NodeMetrics } from "../api/types";
+import { containerColour, counterRates, logContainers, logSearchTooLong, mountHistories, nodeCharts, parseRetention, retentionChanges, retentionDraft, segments, workloadCharts } from "./telemetry";
 
 const minute = 60_000;
 const at = (minutes: number) => new Date(Date.UTC(2026, 10, 22, 12, minutes)).toISOString();
@@ -47,7 +47,7 @@ describe("counterRates", () => {
 describe("nodeCharts", () => {
   it("orders newest-first points, keeps missing fields unknown and reports network support", () => {
     const sample = (minutes: number, extra: Partial<NodeMetrics>): NodeMetrics => ({ sampled_at: at(minutes), cpu_percent: 10, memory_total: 1000, memory_available: 400, disk_total: 5000, disk_available: 1000, ...extra });
-    const history: MetricHistory<NodeMetrics> = {
+    const history: MetricHistory<NodeHistorySample> = {
       tier: "minute",
       limited: false,
       deploy_markers: [],
@@ -55,6 +55,8 @@ describe("nodeCharts", () => {
         { series: "", sampled_at: at(2), sample: sample(2, { network_rx: 600, network_tx: 1200 }) },
         { series: "", sampled_at: at(1), sample: sample(1, { cpu_percent: undefined, network_rx: 0, network_tx: 0 }) },
         { series: "", sampled_at: at(0), sample: sample(0, { memory_available: undefined }) },
+        // Mount series share the history response but must not become base samples.
+        { series: "mount:abc", sampled_at: at(1), sample: { path: "/data", filesystem: "ext4", total: 100, available: 40, known: true } },
       ],
     };
     const charts = nodeCharts(history);
@@ -68,6 +70,30 @@ describe("nodeCharts", () => {
     ]);
     expect(charts.memoryTotal).toBe(1000);
     expect(charts.hasNetwork).toBe(true);
+  });
+});
+
+describe("mountHistories", () => {
+  it("groups mount series by path and keeps samples without capacity unknown", () => {
+    const mount = (extra: Partial<MountMetric>): MountMetric => ({ path: "/data", filesystem: "ext4", total: 1000, available: 400, known: true, ...extra });
+    const history: MetricHistory<NodeHistorySample> = {
+      tier: "minute",
+      limited: false,
+      deploy_markers: [],
+      points: [
+        { series: "mount:b", sampled_at: at(2), sample: mount({ path: "/var", total: 0, available: 0 }) },
+        { series: "mount:a", sampled_at: at(2), sample: mount({ available: 100 }) },
+        { series: "mount:a", sampled_at: at(1), sample: mount({ total: 0, available: 0 }) },
+        { series: "mount:a", sampled_at: at(0), sample: mount({}) },
+        { series: "", sampled_at: at(0), sample: { sampled_at: at(0), cpu_percent: 1, memory_total: 1, memory_available: 1, disk_total: 1, disk_available: 1 } },
+      ],
+    };
+    const mounts = mountHistories(history);
+    expect(mounts.map((item) => item.path)).toEqual(["/data", "/var"]);
+    expect(mounts[0]?.used.points.map((point) => point.v)).toEqual([600, undefined, 900]);
+    expect(mounts[0]?.total).toBe(1000);
+    expect(mounts[1]?.total).toBeUndefined();
+    expect(mounts[1]?.used.points.map((point) => point.v)).toEqual([undefined]);
   });
 });
 
@@ -118,6 +144,8 @@ describe("retention", () => {
     raw_days: 1,
     hour_days: 30,
     day_days: 365,
+    operation_rows: 100000,
+    operation_days: 90,
   };
 
   it("sends only changed limits and keeps untouched byte limits exact", () => {

@@ -1,11 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { errorMessage, isStatus } from "../api/client";
-import { retentionQuery, storageUsageQuery, useUpdateRetention, type RetentionSettings, type StorageCategory } from "../api/telemetry";
+import { operationRetentionQuery, retentionQuery, storageUsageQuery, useRunOperationRetention, useUpdateRetention, type OperationRetentionStatus, type RetentionSettings, type StorageCategory } from "../api/telemetry";
 import { useOnline } from "../lib/hooks";
 import { inputClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { formatBinaryBytes, isByteLimit, parseRetention, retentionChanges, retentionDraft, retentionKeys, retentionLimits, retentionValueLabel, type RetentionDraft, type RetentionErrors } from "../lib/telemetry";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { RelativeTime } from "./RelativeTime";
+import { StatusLabel } from "./status";
 import { SaveBar, UnsavedChangesGuard } from "./SaveBar";
 import { Button, Field, LoadingRows, Meter, MeterGroup, Notice, QueryError, Section, SettingRows, Subsection } from "./ui";
 
@@ -22,12 +24,19 @@ const labels: Record<RetentionKey, { label: string; hint: string }> = {
   log_days: { label: "Keep lines for", hint: "Days." },
   audit_rows: { label: "Stored entries", hint: "Entries across all teams." },
   audit_days: { label: "Keep entries for", hint: "Days." },
+  operation_rows: { label: "Eligible records", hint: "Finished operation records across all teams." },
+  operation_days: { label: "Keep records for", hint: "Days." },
 };
 
 const groups: { title: string; description: string; keys: RetentionKey[] }[] = [
   { title: "Metric history", description: "Node and container samples behind the usage charts.", keys: ["metric_rows", "metric_bytes", "raw_days", "hour_days", "day_days"] },
   { title: "Log history", description: "Stored container log lines.", keys: ["log_rows", "log_bytes", "log_days"] },
   { title: "Audit log", description: "Security and change events.", keys: ["audit_rows", "audit_days"] },
+  {
+    title: "Operation history",
+    description: "Finished operation records and their worker journals. Records that recovery, releases, backups or unfinished work still refer to are kept, so stored history can exceed these limits.",
+    keys: ["operation_rows", "operation_days"],
+  },
 ];
 
 const groupNames = Object.fromEntries(groups.flatMap((group) => group.keys.map((key) => [key, group.title]))) as Record<RetentionKey, string>;
@@ -73,7 +82,7 @@ function RetentionForm({ saved }: { saved: RetentionSettings }) {
       <UnsavedChangesGuard dirty={dirty && !update.isPending} />
       <Section
         title="Telemetry retention"
-        description="Limits for stored metrics, log history and the audit log across every team. Cove removes the oldest data first when a limit is reached."
+        description="Limits for stored metrics, log history, the audit log and operation history across every team. Cove removes the oldest eligible data first when a limit is reached."
         width="form"
         flush
         footer={
@@ -86,7 +95,7 @@ function RetentionForm({ saved }: { saved: RetentionSettings }) {
               setErrors({});
               update.reset();
             }}
-            status={update.isSuccess ? "Saved. Data beyond the new limits was removed." : undefined}
+            status={update.isSuccess ? "Saved. Telemetry beyond the new limits was removed; operation history is pruned by the next node passes." : undefined}
           />
         }
       >
@@ -136,7 +145,7 @@ function RetentionForm({ saved }: { saved: RetentionSettings }) {
             </li>
           ))}
         </ul>
-        <p className="mt-3">Operation records and worker journals are not affected.</p>
+        <p className="mt-3">Eligible operation records and their worker journals beyond the operation limits are also permanently deleted, in bounded passes over the next minutes. Records that recovery, releases, backups or unfinished work refer to are kept.</p>
       </ConfirmDialog>
     </form>
   );
@@ -195,7 +204,7 @@ export function StorageUsage() {
       { key: "metrics", label: "Metric samples", category: data.metrics, limit: limits ? `${rows(limits.metric_rows)} rows, ${formatBinaryBytes(limits.metric_bytes)}` : undefined },
       { key: "logs", label: "Log lines", category: data.logs, limit: limits ? `${rows(limits.log_rows)} rows, ${formatBinaryBytes(limits.log_bytes)}, ${limits.log_days} days` : undefined },
       { key: "audit", label: "Audit entries", category: data.audit, limit: limits ? `${rows(limits.audit_rows)} rows, ${limits.audit_days} days` : undefined },
-      { key: "operations", label: "Operations and worker journals", category: data.operations, limit: "Not pruned" },
+      { key: "operations", label: "Operations and worker journals", category: data.operations, limit: limits ? `${rows(limits.operation_rows)} eligible rows, ${limits.operation_days} days` : undefined },
     ];
     body = (
       <>
@@ -254,8 +263,107 @@ export function StorageUsage() {
       <div className="space-y-1.5 border-t border-line px-4 py-3 text-xs text-fg-muted">
         <p>Metric and log sizes are Cove's accounted payload plus a per-row allowance, not database file size. Space freed by pruning is reused by PostgreSQL; database files and indexes do not shrink until it is reclaimed.</p>
         <p>Audit and operation sizes are PostgreSQL table and index size. The audit log can briefly exceed its row limit between pruning passes, which run about once a minute.</p>
-        <p>Operation records and worker journals are never pruned by these settings, because recovery, releases and backups refer to them.</p>
+        <p>Operation records and worker journals are pruned in bounded batches: each ready node is checked at most every five minutes, and offline, busy or older workers are skipped until a later pass. Limits apply to eligible history only: records that recovery, releases, backups or unfinished work refer to are kept, so operations can exceed their limits.</p>
       </div>
+    </Section>
+  );
+}
+
+function PassState({ status }: { status: OperationRetentionStatus }) {
+  if (!status.checked_at) return <StatusLabel tone="neutral" label="Not checked yet" />;
+  if (status.error) return <StatusLabel tone="warn" label="Deferred" />;
+  return <StatusLabel tone="ok" label="Checked" />;
+}
+
+export function OperationRetentionPasses() {
+  const statuses = useQuery(operationRetentionQuery);
+  const run = useRunOperationRetention();
+  const online = useOnline();
+  const [confirming, setConfirming] = useState(false);
+
+  let body;
+  if (statuses.isPending) {
+    body = <LoadingRows label="Loading operation retention status" rows={3} />;
+  } else if (statuses.isError) {
+    body = (
+      <div className="p-3">
+        {isStatus(statuses.error, 503) ? (
+          <Notice tone="warn" title="Retention status unavailable" action={<Button variant="ghost" size="sm" onClick={() => void statuses.refetch()} pending={statuses.isFetching}>Retry</Button>}>
+            {errorMessage(statuses.error)}
+          </Notice>
+        ) : (
+          <QueryError what="operation retention status" error={statuses.error} onRetry={() => void statuses.refetch()} retrying={statuses.isFetching} />
+        )}
+      </div>
+    );
+  } else if (statuses.data.length === 0) {
+    body = <p className="px-4 py-6 text-[13px] text-fg-muted">No nodes are registered, so there is no operation history to prune.</p>;
+  } else {
+    body = (
+      <table className="w-full text-left">
+        <caption className="sr-only">Last operation retention pass by node</caption>
+        <thead>
+          <tr className={tableHeadClass}>
+            <th scope="col" className="py-2 pr-4 pl-4 font-medium">Node</th>
+            <th scope="col" className="hidden py-2 pr-4 font-medium sm:table-cell">Last pass</th>
+            <th scope="col" className="py-2 pr-4 text-right font-medium">Pruned</th>
+            <th scope="col" className="py-2 pr-4 text-right font-medium">Kept</th>
+          </tr>
+        </thead>
+        <tbody>
+          {statuses.data.map((status) => (
+            <tr key={status.node_id} className={tableRowClass}>
+              <td className="py-2.5 pr-4 pl-4 align-top text-[13px] text-fg">
+                <span className="break-words">{status.name}</span>
+                <span className="mt-1 block text-xs"><PassState status={status} /></span>
+                <span className="mt-0.5 block text-xs text-fg-muted sm:hidden">{status.checked_at ? <RelativeTime value={status.checked_at} /> : "Never"}</span>
+                {status.error && <span className="mt-0.5 block text-xs break-words text-warn">{status.error}</span>}
+              </td>
+              <td className="hidden py-2.5 pr-4 align-top text-xs text-fg-muted sm:table-cell">{status.checked_at ? <RelativeTime value={status.checked_at} /> : "Never"}</td>
+              <td className="py-2.5 pr-4 text-right align-top text-[13px] text-fg-muted tabular-nums">{rows(status.pruned)}</td>
+              <td className="py-2.5 pr-4 text-right align-top text-[13px] text-fg-muted tabular-nums">{rows(status.protected)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  return (
+    <Section
+      title="Operation retention"
+      description="The last bounded pass on each node. Pruned and kept are counts from that pass only, not totals; kept counts journals the worker protected for recovery and is not a census of every protected record."
+      actions={
+        <Button onClick={() => { run.reset(); setConfirming(true); }} disabled={!online || statuses.isPending} pending={run.isPending}>
+          Run retention pass
+        </Button>
+      }
+      flush
+    >
+      {(run.isError || run.isSuccess) && (
+        <div className="border-b border-line p-4" aria-live="polite">
+          {run.isError ? (
+            <Notice tone="error" title="Retention pass did not finish">
+              {errorMessage(run.error)} Some nodes may already have been pruned; the status below was read again. Check it before running another pass.
+            </Notice>
+          ) : (
+            <Notice tone="success" title="Retention pass finished">Up to eight nodes were checked. Nodes that were offline, busy or running an older worker are deferred to a later pass.</Notice>
+          )}
+        </div>
+      )}
+      {body}
+      <ConfirmDialog
+        open={confirming}
+        title="Run an operation retention pass now?"
+        confirmLabel="Run pass and delete"
+        danger
+        pending={run.isPending}
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => run.mutate(undefined, { onSettled: () => setConfirming(false) })}
+      >
+        <p>Up to eight ready nodes are checked now. Eligible finished operation records and their worker journals beyond the configured limits are permanently deleted.</p>
+        <p className="mt-3">Records that recovery, releases, backups or unfinished work refer to are kept. Offline, busy and older workers are skipped until a later pass.</p>
+      </ConfirmDialog>
     </Section>
   );
 }

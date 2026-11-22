@@ -1,5 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { request } from "./client";
+import type { MountMetric } from "./types";
 
 export type ConnectionKind = "registries" | "storage-locations" | "notifications";
 export interface Registry { server: string; username: string; password?: string }
@@ -15,6 +16,9 @@ export type NodeThresholdMetric = "cpu" | "memory" | "disk";
 export type ResourceThresholdMetric = "certificate" | "restarts" | "oom" | "crashes";
 export type ThresholdMetric = NodeThresholdMetric | ResourceThresholdMetric;
 // Resource rules leave node_id blank on create; the API derives it from the resource. Node rules send empty workload_id and domain.
-export interface ThresholdRuleInput { name: string; node_id: string; workload_id: string; domain: string; metric: ThresholdMetric; threshold: number; confirmation_seconds: number; repeat_seconds: number; channel_ids: string[] }
+// mount_path applies to disk rules only: empty is the Cove data filesystem, "*" the fullest mount, an absolute path one mount.
+export interface ThresholdRuleInput { name: string; node_id: string; workload_id: string; domain: string; mount_path: string; metric: ThresholdMetric; threshold: number; confirmation_seconds: number; repeat_seconds: number; channel_ids: string[] }
 export interface ThresholdRule extends ThresholdRuleInput { id: string }
+export interface NotificationMounts { mounts: MountMetric[]; limited: boolean; sampled_at: string }
+export const notificationMountsQuery = (nodeId: string) => queryOptions({ queryKey: ["notification-mounts", nodeId], queryFn: ({ signal }) => request<NotificationMounts>("GET", `/api/notifications/mounts?node_id=${encodeURIComponent(nodeId)}`, undefined, signal), staleTime: 60_000 });
 export const thresholdRulesQuery = queryOptions({ queryKey: ["threshold-rules"], queryFn: ({ signal }) => request<ThresholdRule[]>("GET", "/api/notifications/rules", undefined, signal) });

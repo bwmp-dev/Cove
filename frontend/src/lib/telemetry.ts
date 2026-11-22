@@ -1,5 +1,5 @@
-import type { MetricHistory, MetricRange, MetricTier, RetentionSettings } from "../api/telemetry";
-import type { Container, NodeMetrics } from "../api/types";
+import type { MetricHistory, MetricPoint, MetricRange, MetricTier, NodeHistorySample, RetentionSettings } from "../api/telemetry";
+import type { Container, MountMetric, NodeMetrics } from "../api/types";
 
 export const rangeOptions: { value: MetricRange; label: string }[] = [
   { value: "hour", label: "Last hour" },
@@ -133,8 +133,18 @@ function used(total: unknown, available: unknown) {
   return all !== undefined && free !== undefined ? all - free : undefined;
 }
 
-export function nodeCharts(history: MetricHistory<NodeMetrics>): NodeCharts {
+export function isBaseNodePoint(point: MetricPoint<NodeHistorySample>): point is MetricPoint<NodeMetrics> {
+  return point.series === "";
+}
+
+export function isMountPoint(point: MetricPoint<NodeHistorySample>): point is MetricPoint<MountMetric> {
+  return point.series.startsWith("mount:");
+}
+
+// Only the base host series feeds these charts; mount series carry a different payload.
+export function nodeCharts(history: MetricHistory<NodeHistorySample>): NodeCharts {
   const samples = history.points
+    .filter(isBaseNodePoint)
     .map((point) => ({ t: time(point.sampled_at), sample: point.sample }))
     .filter((point): point is { t: number; sample: NodeMetrics } => point.t !== undefined)
     .sort((a, b) => a.t - b.t);
@@ -162,6 +172,49 @@ export function nodeCharts(history: MetricHistory<NodeMetrics>): NodeCharts {
     diskTotal: latest.map(({ sample }) => reading(sample.disk_total)).find((value) => value !== undefined),
     hasNetwork: samples.some(({ sample }) => reading(sample.network_rx) !== undefined || reading(sample.network_tx) !== undefined),
   };
+}
+
+export interface MountHistory {
+  key: string;
+  path: string;
+  filesystem: string;
+  total: number | undefined;
+  used: ChartSeries;
+}
+
+// One line per mount series, labelled with the path from its latest sample. Samples without a capacity
+// reading stay unknown rather than zero.
+export function mountHistories(history: MetricHistory<NodeHistorySample>): MountHistory[] {
+  const groups = new Map<string, { t: number; sample: MountMetric }[]>();
+  for (const point of history.points) {
+    if (!isMountPoint(point)) continue;
+    const t = time(point.sampled_at);
+    if (t === undefined) continue;
+    groups.set(point.series, [...(groups.get(point.series) ?? []), { t, sample: point.sample }]);
+  }
+  const result: MountHistory[] = [];
+  for (const [key, group] of groups) {
+    const samples = group.sort((a, b) => a.t - b.t);
+    const latest = samples[samples.length - 1]!.sample;
+    const capacity = (sample: MountMetric) => (sample.known && reading(sample.total) !== undefined && sample.total > 0 && sample.available <= sample.total ? sample : undefined);
+    const lastKnown = [...samples].reverse().map(({ sample }) => capacity(sample)).find((sample) => sample !== undefined);
+    result.push({
+      key,
+      path: latest.path,
+      filesystem: latest.filesystem,
+      total: lastKnown?.total,
+      used: {
+        key,
+        label: latest.path,
+        colour: seriesColour(0),
+        points: samples.map(({ t, sample }) => {
+          const measured = capacity(sample);
+          return { t, v: measured ? measured.total - measured.available : undefined };
+        }),
+      },
+    });
+  }
+  return result.sort((a, b) => a.path.localeCompare(b.path) || a.key.localeCompare(b.key));
 }
 
 export type WorkloadMetric = "cpu" | "memory" | "networkRx" | "networkTx" | "blockRead" | "blockWritten";
@@ -252,6 +305,8 @@ export const retentionLimits: Record<RetentionKey, { min: number; max: number }>
   raw_days: { min: 1, max: 7 },
   hour_days: { min: 1, max: 90 },
   day_days: { min: 1, max: 3650 },
+  operation_rows: { min: 1000, max: 1_000_000 },
+  operation_days: { min: 1, max: 3650 },
 };
 
 export const retentionKeys = Object.keys(retentionLimits) as RetentionKey[];

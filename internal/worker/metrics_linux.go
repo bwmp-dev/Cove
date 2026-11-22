@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -82,6 +83,8 @@ func inspectMetrics(ctx context.Context, root string) *NodeMetrics {
 		sample.NetworkRX = &rx
 		sample.NetworkTX = &tx
 	}
+	sample.Mounts, sample.MountsLimited = inspectMounts()
+	sample.CPUs = runtime.NumCPU()
 	return sample
 }
 

@@ -7,7 +7,7 @@ import { nodeMetricsQuery, workloadMetricsQuery, type DeployMarker, type MetricH
 import { formatAbsolute } from "../lib/format";
 import { actionLabels } from "../lib/operations";
 import { listLinkClass } from "../lib/styles";
-import { formatBinaryBytes, formatPercent, formatRate, hasReadings, isMetricRange, maxGap, nodeCharts, rangeOptions, rangeWindows, tierLabels, workloadCharts } from "../lib/telemetry";
+import { formatBinaryBytes, formatPercent, formatRate, hasReadings, isMetricRange, maxGap, mountHistories, nodeCharts, rangeOptions, rangeWindows, tierLabels, workloadCharts, type MountHistory } from "../lib/telemetry";
 import { MetricChart } from "./MetricChart";
 import { OperationStateLabel } from "./status";
 import { Select } from "./Select";
@@ -104,6 +104,43 @@ function tierNote(history: MetricHistory<unknown>) {
   return `Each point is the last sample recorded in its ${tierLabels[history.tier]}, not an average or peak. Gaps mean no sample was recorded.`;
 }
 
+function MountHistoryChart({ id, mounts, common }: { id: string; mounts: MountHistory[]; common: { start: number; end: number; gap: number; formatTime: (time: number) => string } }) {
+  const [selected, setSelected] = useState("");
+  if (mounts.length === 0) {
+    return (
+      <div className="min-w-0">
+        <h3 className="text-[13px] font-semibold text-fg">Mount used</h3>
+        <p className="mt-0.5 text-xs text-fg-muted">No mount samples in this range. Workers record per-mount history once they report mounted filesystems; earlier history is not backfilled.</p>
+      </div>
+    );
+  }
+  const mount = mounts.find((item) => item.key === selected) ?? mounts[0]!;
+  return (
+    <div className="min-w-0 space-y-2">
+      <div className="w-full sm:w-72">
+        <label htmlFor={id} className="text-xs text-fg-muted">
+          Mount
+        </label>
+        <Select id={id} aria-label="Mount" value={mount.key} onChange={(event) => setSelected(event.target.value)}>
+          {mounts.map((item) => (
+            <option key={item.key} value={item.key}>
+              {item.path}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <MetricChart
+        title={`Used on ${mount.path}`}
+        description={`${mount.filesystem || "Unknown filesystem"}${mount.total === undefined ? "" : `, ${formatBinaryBytes(mount.total)}`}. Only samples that reported capacity are drawn.`}
+        series={[mount.used]}
+        format={formatBinaryBytes}
+        ceiling={mount.total}
+        {...common}
+      />
+    </div>
+  );
+}
+
 export function NodeMetricHistory({ nodeId }: { nodeId: string }) {
   const [range, setRange] = useState<MetricRange>("hour");
   const query = useQuery(nodeMetricsQuery(nodeId, range));
@@ -130,7 +167,7 @@ export function NodeMetricHistory({ nodeId }: { nodeId: string }) {
                 />
                 <MetricChart
                   title="Cove data disk used"
-                  description={`Only the filesystem holding Cove data${charts.diskTotal === undefined ? "" : ` (${formatBinaryBytes(charts.diskTotal)})`}. Other mounts are not measured.`}
+                  description={`Only the filesystem holding Cove data${charts.diskTotal === undefined ? "" : ` (${formatBinaryBytes(charts.diskTotal)})`}. Choose another mount below.`}
                   series={charts.disk}
                   format={formatBinaryBytes}
                   ceiling={charts.diskTotal}
@@ -144,6 +181,7 @@ export function NodeMetricHistory({ nodeId }: { nodeId: string }) {
                   emptyText={charts.hasNetwork ? "Not enough consecutive samples to compute a rate." : "This worker does not report network counters."}
                   {...common}
                 />
+                <MountHistoryChart id={`node-${nodeId}-mount-history`} mounts={mountHistories(history)} common={common} />
               </div>
             </>
           );

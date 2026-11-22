@@ -15,6 +15,7 @@ import (
 )
 
 type thresholdRule struct {
+	MountPath    string   `json:"mount_path"`
 	WorkloadID   string   `json:"workload_id"`
 	Domain       string   `json:"domain"`
 	ID           string   `json:"id"`
@@ -30,7 +31,7 @@ type thresholdRule struct {
 func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 	ctx, team := r.Context(), actor(r).Team
 	if r.Method == http.MethodGet {
-		rows, err := s.DB.Query(ctx, `SELECT id,name,node_id,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids,COALESCE(workload_id,''),domain FROM threshold_rules WHERE team_id=$1 ORDER BY name,id`, team)
+		rows, err := s.DB.Query(ctx, `SELECT id,name,node_id,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids,COALESCE(workload_id,''),domain,mount_path FROM threshold_rules WHERE team_id=$1 ORDER BY name,id`, team)
 		if err != nil {
 			http.Error(w, "rules unavailable", 503)
 			return
@@ -39,7 +40,7 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		out := []thresholdRule{}
 		for rows.Next() {
 			var rule thresholdRule
-			if err = rows.Scan(&rule.ID, &rule.Name, &rule.NodeID, &rule.Metric, &rule.Threshold, &rule.Confirmation, &rule.Repeat, &rule.Channels, &rule.WorkloadID, &rule.Domain); err != nil {
+			if err = rows.Scan(&rule.ID, &rule.Name, &rule.NodeID, &rule.Metric, &rule.Threshold, &rule.Confirmation, &rule.Repeat, &rule.Channels, &rule.WorkloadID, &rule.Domain, &rule.MountPath); err != nil {
 				http.Error(w, "rules unavailable", 503)
 				return
 			}
@@ -155,6 +156,17 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	seen := map[string]bool{}
+	if rule.MountPath != "" {
+		var supported bool
+		if err = tx.QueryRow(ctx, `SELECT COALESCE((capabilities->>'mount_metrics')::boolean,false) FROM nodes WHERE id=$1`, rule.NodeID).Scan(&supported); err != nil {
+			http.Error(w, "node unavailable", 503)
+			return
+		}
+		if !supported {
+			http.Error(w, "upgrade and verify the worker for mount thresholds", 409)
+			return
+		}
+	}
 	for _, id := range rule.Channels {
 		if seen[id] {
 			http.Error(w, "select distinct channels", 400)
@@ -172,7 +184,7 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rule.ID = resourceID()
-	_, err = tx.Exec(ctx, `INSERT INTO threshold_rules(id,team_id,node_id,name,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids,workload_id,domain) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11)`, rule.ID, team, rule.NodeID, rule.Name, rule.Metric, rule.Threshold, rule.Confirmation, rule.Repeat, rule.Channels, rule.WorkloadID, rule.Domain)
+	_, err = tx.Exec(ctx, `INSERT INTO threshold_rules(id,team_id,node_id,name,metric,threshold,confirmation_seconds,repeat_seconds,channel_ids,workload_id,domain,mount_path) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''),$11,$12)`, rule.ID, team, rule.NodeID, rule.Name, rule.Metric, rule.Threshold, rule.Confirmation, rule.Repeat, rule.Channels, rule.WorkloadID, rule.Domain, rule.MountPath)
 	if err == nil {
 		err = tx.Commit(ctx)
 	}
@@ -187,18 +199,18 @@ func (s *Server) evaluateThresholdSample(ctx context.Context, node string, sampl
 	if sample.SampledAt.IsZero() || time.Since(sample.SampledAt) > 2*time.Minute || sample.SampledAt.After(time.Now().Add(time.Minute)) {
 		return nil
 	}
-	rows, err := s.DB.Query(ctx, `SELECT r.id,r.team_id,r.name,r.metric,r.threshold FROM threshold_rules r JOIN team_nodes t ON t.team_id=r.team_id AND t.node_id=r.node_id WHERE r.node_id=$1 AND r.workload_id IS NULL`, node)
+	rows, err := s.DB.Query(ctx, `SELECT r.id,r.team_id,r.name,r.metric,r.threshold,r.mount_path FROM threshold_rules r JOIN team_nodes t ON t.team_id=r.team_id AND t.node_id=r.node_id WHERE r.node_id=$1 AND r.workload_id IS NULL`, node)
 	if err != nil {
 		return err
 	}
 	type evaluation struct {
-		id, team, name, metric string
-		threshold              float64
+		id, team, name, metric, mount string
+		threshold                     float64
 	}
 	var rules []evaluation
 	for rows.Next() {
 		var rule evaluation
-		if err = rows.Scan(&rule.id, &rule.team, &rule.name, &rule.metric, &rule.threshold); err != nil {
+		if err = rows.Scan(&rule.id, &rule.team, &rule.name, &rule.metric, &rule.threshold, &rule.mount); err != nil {
 			break
 		}
 		rules = append(rules, rule)
@@ -219,15 +231,17 @@ func (s *Server) evaluateThresholdSample(ctx context.Context, node string, sampl
 			}
 			value = 100 * (1 - float64(sample.MemoryAvailable)/float64(sample.MemoryTotal))
 		case "disk":
-			if sample.DiskTotal == 0 || sample.DiskAvailable > sample.DiskTotal {
+			var known bool
+			value, known = diskThresholdValue(sample, rule.mount, rule.threshold)
+			if !known {
 				continue
 			}
-			value = 100 * (1 - float64(sample.DiskAvailable)/float64(sample.DiskTotal))
+
 		}
 		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
 			continue
 		}
-		if err = s.recordHealthRouted(ctx, rule.team, "threshold_"+rule.id, node, fmt.Sprintf("%s: %s usage %.1f%% (threshold %.1f%%)", rule.name, rule.metric, value, rule.threshold), value >= rule.threshold, rule.id); err != nil {
+		if err = s.recordHealthRouted(ctx, rule.team, "threshold_"+rule.id, node, fmt.Sprintf("%s: %s usage %.1f%% (threshold %.1f%%)", rule.name, rule.metric+" "+rule.mount, value, rule.threshold), value >= rule.threshold, rule.id); err != nil {
 			return err
 		}
 	}

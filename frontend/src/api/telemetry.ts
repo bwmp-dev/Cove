@@ -1,6 +1,6 @@
 import { keepPreviousData, queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { request, requestText } from "./client";
-import type { Container, NodeMetrics, OperationState } from "./types";
+import type { Container, MountMetric, NodeMetrics, OperationState } from "./types";
 
 export type MetricRange = "hour" | "day" | "week" | "month" | "year";
 export type MetricTier = "minute" | "hour" | "day";
@@ -25,6 +25,9 @@ export interface MetricHistory<TSample> {
   points: MetricPoint<TSample>[];
   deploy_markers: DeployMarker[];
 }
+
+// Node history mixes the base host series ("") with one series per measured mount ("mount:<hash>").
+export type NodeHistorySample = NodeMetrics | MountMetric;
 
 export interface LogEntry {
   id: string;
@@ -65,6 +68,8 @@ export interface RetentionSettings {
   raw_days: number;
   hour_days: number;
   day_days: number;
+  operation_rows: number;
+  operation_days: number;
 }
 
 export interface StorageCategory {
@@ -80,12 +85,23 @@ export interface StorageUsage {
   operations: StorageCategory;
 }
 
+// Values describe each node's last bounded pass only; they are not cumulative or instance-wide totals.
+export interface OperationRetentionStatus {
+  node_id: string;
+  name: string;
+  checked_at: string | null;
+  error: string;
+  pruned: number;
+  protected: number;
+}
+
 export const telemetryKeys = {
   workloadMetrics: (id: string, range: MetricRange) => ["workloads", id, "metrics", range] as const,
   nodeMetrics: (id: string, range: MetricRange) => ["nodes", id, "metrics", range] as const,
   logHistory: (id: string, filter: LogFilter, cursor: LogCursor | null) => ["workloads", id, "log-history", filter, cursor] as const,
   retention: ["settings", "retention"] as const,
   storageUsage: ["settings", "storage-usage"] as const,
+  operationRetention: ["settings", "operation-retention"] as const,
 };
 
 // Collection runs about once a minute, so refreshing faster only repeats the same buckets.
@@ -102,7 +118,7 @@ export const workloadMetricsQuery = (id: string, range: MetricRange) =>
 export const nodeMetricsQuery = (id: string, range: MetricRange) =>
   queryOptions({
     queryKey: telemetryKeys.nodeMetrics(id, range),
-    queryFn: ({ signal }) => request<MetricHistory<NodeMetrics>>("GET", `/api/nodes/${encodeURIComponent(id)}/metrics?range=${range}`, undefined, signal),
+    queryFn: ({ signal }) => request<MetricHistory<NodeHistorySample>>("GET", `/api/nodes/${encodeURIComponent(id)}/metrics?range=${range}`, undefined, signal),
     refetchInterval: metricRefresh,
     placeholderData: keepPreviousData,
   });
@@ -151,6 +167,23 @@ export function useUpdateRetention() {
     // Omitted fields keep their saved value, so only the changed limits are sent.
     mutationFn: (changes: Partial<RetentionSettings>) => request<RetentionSettings>("PUT", "/api/settings/retention", changes),
     onSuccess: (saved) => client.setQueryData(telemetryKeys.retention, saved),
+    onSettled: () => client.invalidateQueries({ queryKey: telemetryKeys.storageUsage }),
+  });
+}
+
+export const operationRetentionQuery = queryOptions({
+  queryKey: telemetryKeys.operationRetention,
+  queryFn: ({ signal }) => request<OperationRetentionStatus[]>("GET", "/api/settings/operation-retention", undefined, signal),
+  refetchInterval: 60_000,
+});
+
+export function useRunOperationRetention() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => request<OperationRetentionStatus[]>("POST", "/api/settings/operation-retention/run", {}),
+    onSuccess: (statuses) => client.setQueryData(telemetryKeys.operationRetention, statuses),
+    // A failed pass may still have pruned some nodes, so its status is read again.
+    onError: () => client.invalidateQueries({ queryKey: telemetryKeys.operationRetention }),
     onSettled: () => client.invalidateQueries({ queryKey: telemetryKeys.storageUsage }),
   });
 }

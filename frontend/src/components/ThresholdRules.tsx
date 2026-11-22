@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
-import { errorMessage, request } from "../api/client";
-import { connectionsQuery, thresholdRulesQuery, type Connection, type ThresholdMetric, type ThresholdRule, type ThresholdRuleInput } from "../api/connections";
+import { errorMessage, isStatus, request } from "../api/client";
+import { connectionsQuery, notificationMountsQuery, thresholdRulesQuery, type Connection, type ThresholdMetric, type ThresholdRule, type ThresholdRuleInput } from "../api/connections";
 import { nodesQuery, workloadQuery, workloadsQuery } from "../api/queries";
 import { teamNodesQuery } from "../api/teams";
 import type { Node, WorkloadSummary } from "../api/types";
@@ -11,14 +11,15 @@ import { currentTeam, managesTeam } from "../lib/permissions";
 import { useSession } from "../lib/session";
 import { providerLabel } from "../lib/notifications";
 import { choiceClass, describedBy, inputClass } from "../lib/styles";
-import { confirmationChoices, defaultThresholdMetric, formatDuration, isThresholdError, maxRuleChannels, metricScope, repeatChoices, thresholdCondition, thresholdDeliveryProblem, thresholdMetric, thresholdMetrics, thresholdRuleFromForm, thresholdUnits, type ThresholdFieldName, type ThresholdFormError, type ThresholdScope } from "../lib/threshold-rules";
+import { confirmationChoices, defaultThresholdMetric, formatDuration, isThresholdError, maxRuleChannels, metricScope, mountScopes, repeatChoices, thresholdCondition, thresholdDeliveryProblem, thresholdMetric, thresholdMetrics, thresholdRuleFromForm, thresholdUnits, type MountScope, type ThresholdFieldName, type ThresholdFormError, type ThresholdScope } from "../lib/threshold-rules";
+import { formatAbsolute } from "../lib/format";
 import { Checkbox } from "./Checkbox";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Select } from "./Select";
 import { Button, Field, LoadingRows, Notice, QueryError, Section } from "./ui";
 
 const maxRules = 100;
-const description = "Alert when a node's CPU, memory or data disk usage stays at or above a percentage, when a service's certificate nears expiry, or when its containers keep restarting, run out of memory or crash. Rules are checked about once a minute against fresh samples; samples older than two minutes and values that cannot be read neither trigger nor clear an alert. Rules cannot be edited: delete one and create a new rule to change it.";
+const description = "Alert when a node's CPU, memory, data disk or mount usage stays at or above a percentage, when a service's certificate nears expiry, or when its containers keep restarting, run out of memory or crash. Rules are checked about once a minute against fresh samples; samples older than two minutes and values that cannot be read neither trigger nor clear an alert. Rules cannot be edited: delete one and create a new rule to change it.";
 
 function placement(workload: WorkloadSummary) {
   return `${workload.project ?? "Unknown project"} / ${workload.environment ?? "Project resources"}`;
@@ -49,6 +50,86 @@ function DomainField({ workloadID, value, onChange, error, fieldID }: { workload
         </Select>
       )}
     </Field>
+  );
+}
+
+function isMountScope(value: string): value is MountScope {
+  return mountScopes.some((scope) => scope.value === value);
+}
+
+function MountScopeField({ node, value, onChange, fieldID }: { node: Node | undefined; value: MountScope; onChange: (value: MountScope) => void; fieldID: string }) {
+  const supported = node?.capabilities?.mount_metrics === true;
+  const selected = mountScopes.find((scope) => scope.value === value) ?? mountScopes[0]!;
+  let hint = selected.hint;
+  if (node === undefined) hint = `${hint} Select a node to watch other mounts.`;
+  else if (!supported) hint = `${hint} ${node.name} does not report mounts; upgrade and verify its worker to watch other mounts.`;
+  return (
+    <Field id={fieldID} label="Filesystem" hint={hint}>
+      <Select id={fieldID} name="mount_scope" value={value} onChange={(event) => isMountScope(event.target.value) && onChange(event.target.value)} aria-describedby={`${fieldID}-hint`}>
+        {mountScopes.map((scope) => (
+          <option key={scope.value} value={scope.value} disabled={scope.value !== "data" && !supported}>
+            {scope.label}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+}
+
+function MountPathField({ nodeID, value, onChange, error, fieldID }: { nodeID: string; value: string; onChange: (value: string) => void; error?: string; fieldID: string }) {
+  const mounts = useQuery({ ...notificationMountsQuery(nodeID), enabled: nodeID !== "" });
+  if (mounts.isError) {
+    return (
+      <Field id={fieldID} label="Mount" error={error}>
+        {isStatus(mounts.error, 409) || isStatus(mounts.error, 404) ? (
+          <Notice tone="warn" title="Mounts unavailable">{errorMessage(mounts.error)}</Notice>
+        ) : (
+          <QueryError what="the node's mounts" error={mounts.error} onRetry={() => void mounts.refetch()} retrying={mounts.isFetching} />
+        )}
+      </Field>
+    );
+  }
+  const choices = (mounts.data?.mounts ?? []).filter((mount) => mount.known || mount.error).sort((a, b) => a.path.localeCompare(b.path));
+  let hint = "Mount points the worker reported in its last sample.";
+  if (mounts.isPending) hint = "Loading the node's mounts…";
+  else if (choices.length === 0) hint = "The worker reported no measurable mounts.";
+  else if (mounts.data) hint = `Mount points the worker reported at ${formatAbsolute(mounts.data.sampled_at)}.${mounts.data.limited ? " The list was clipped at the worker's limit, so some mounts are missing." : ""}`;
+  return (
+    <Field id={fieldID} label="Mount" hint={hint} error={error}>
+      <Select id={fieldID} name="mount_path" value={value} onChange={(event) => onChange(event.target.value)} disabled={choices.length === 0} required aria-invalid={error ? true : undefined} aria-describedby={describedBy(fieldID, error, true)}>
+        <option value="" disabled>Select a mount</option>
+        {choices.map((mount) => (
+          <option key={mount.path} value={mount.path}>
+            {mount.error ? `${mount.path} (unreadable)` : mount.path}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+}
+
+// Remounted per node (keyed by node id), so a scope the new node cannot measure never carries over.
+function DiskScopeFields({ node, error, fieldID }: { node: Node | undefined; error?: string; fieldID: string }) {
+  const [target, setTarget] = useState<MountScope>("data");
+  const [path, setPath] = useState("");
+  return (
+    <>
+      <MountScopeField
+        node={node}
+        value={target}
+        onChange={(value) => {
+          setTarget(value);
+          setPath("");
+        }}
+        fieldID={`${fieldID}-scope`}
+      />
+      {target === "path" && node && <MountPathField nodeID={node.id} value={path} onChange={setPath} error={error} fieldID={fieldID} />}
+      {target !== "data" && (
+        <p className="text-xs text-fg-muted sm:col-span-2">
+          Mounts are read in the worker's namespace; in container installs that may not include every host disk. Unknown, unreadable or clipped mount readings never count as recovery.
+        </p>
+      )}
+    </>
   );
 }
 
@@ -101,6 +182,7 @@ function ThresholdRuleForm({ nodes, services, channels, close }: { nodes: Node[]
   const [metric, setMetric] = useState<ThresholdMetric>("cpu");
   const [workloadID, setWorkloadID] = useState("");
   const [domain, setDomain] = useState("");
+  const [nodeID, setNodeID] = useState("");
   const [error, setError] = useState<ThresholdFormError>();
   const create = useMutation({
     mutationFn: (rule: ThresholdRuleInput) => request<{ id: string }>("POST", "/api/notifications/rules", rule),
@@ -151,7 +233,7 @@ function ThresholdRuleForm({ nodes, services, channels, close }: { nodes: Node[]
           </Field>
           {scope === "node" ? (
             <Field id={fieldID("node_id")} label="Node" error={message("node_id")}>
-              <Select id={fieldID("node_id")} name="node_id" defaultValue="" required aria-invalid={message("node_id") ? true : undefined} aria-describedby={message("node_id") ? `${fieldID("node_id")}-error` : undefined}>
+              <Select id={fieldID("node_id")} name="node_id" value={nodeID} onChange={(event) => setNodeID(event.target.value)} required aria-invalid={message("node_id") ? true : undefined} aria-describedby={message("node_id") ? `${fieldID("node_id")}-error` : undefined}>
                 <option value="" disabled>Select a node</option>
                 {nodes.map((node) => <option key={node.id} value={node.id}>{node.name}</option>)}
               </Select>
@@ -168,6 +250,7 @@ function ThresholdRuleForm({ nodes, services, channels, close }: { nodes: Node[]
               fieldID={fieldID("workload_id")}
             />
           )}
+          {metric === "disk" && <DiskScopeFields key={nodeID} node={nodes.find((item) => item.id === nodeID)} error={message("mount_path")} fieldID={fieldID("mount_path")} />}
           {selected.unit === "days" && <DomainField workloadID={workloadID} value={domain} onChange={setDomain} error={message("domain")} fieldID={fieldID("domain")} />}
           <Field id={fieldID("threshold")} label={unit.label} hint={unit.hint} error={message("threshold")}>
             <input key={selected.unit} id={fieldID("threshold")} name="threshold" type="number" inputMode={selected.unit === "events" ? "numeric" : "decimal"} min={unit.min} max={unit.max} step={unit.step} className={inputClass} required aria-invalid={message("threshold") ? true : undefined} aria-describedby={describedBy(fieldID("threshold"), message("threshold"), true)} />

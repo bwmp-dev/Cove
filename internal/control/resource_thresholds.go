@@ -4,13 +4,18 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"path"
 	"strings"
 	"time"
+	"unicode"
 
 	"cove/internal/worker"
 )
 
 func validThresholdRule(r thresholdRule) bool {
+	if r.MountPath != "" && (r.Metric != "disk" || len(r.MountPath) > 4096 || r.MountPath != "*" && (!strings.HasPrefix(r.MountPath, "/") || path.Clean(r.MountPath) != r.MountPath || strings.IndexFunc(r.MountPath, unicode.IsControl) >= 0)) {
+		return false
+	}
 	if r.Name == "" || len(r.Name) > 120 || math.IsNaN(r.Threshold) || math.IsInf(r.Threshold, 0) || r.Threshold <= 0 || r.Confirmation < 60 || r.Confirmation > 3600 || r.Repeat < 300 || r.Repeat > 604800 || len(r.Channels) < 1 || len(r.Channels) > 32 {
 		return false
 	}

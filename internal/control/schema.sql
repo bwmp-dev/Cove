@@ -729,3 +729,12 @@ ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_metric_check CHECK(me
 ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_threshold_check;
 ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_threshold_check CHECK(threshold>0 AND threshold<=100000);
 CREATE INDEX IF NOT EXISTS threshold_rules_workload ON threshold_rules(workload_id) WHERE workload_id IS NOT NULL;
+
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS mount_path text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS operation_retention_runs (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ checked_at timestamptz NOT NULL,
+ error text NOT NULL DEFAULT '',
+ pruned integer NOT NULL DEFAULT 0,
+ protected integer NOT NULL DEFAULT 0
+);

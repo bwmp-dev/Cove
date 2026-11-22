@@ -15,21 +15,27 @@ import (
 )
 
 type telemetryRetention struct {
-	MetricRows  int   `json:"metric_rows"`
-	MetricBytes int64 `json:"metric_bytes"`
-	LogRows     int   `json:"log_rows"`
-	LogBytes    int64 `json:"log_bytes"`
-	LogDays     int   `json:"log_days"`
-	AuditRows   int   `json:"audit_rows"`
-	AuditDays   int   `json:"audit_days"`
-	RawDays     int   `json:"raw_days"`
-	HourDays    int   `json:"hour_days"`
-	DayDays     int   `json:"day_days"`
+	OperationRows int   `json:"operation_rows"`
+	OperationDays int   `json:"operation_days"`
+	MetricRows    int   `json:"metric_rows"`
+	MetricBytes   int64 `json:"metric_bytes"`
+	LogRows       int   `json:"log_rows"`
+	LogBytes      int64 `json:"log_bytes"`
+	LogDays       int   `json:"log_days"`
+	AuditRows     int   `json:"audit_rows"`
+	AuditDays     int   `json:"audit_days"`
+	RawDays       int   `json:"raw_days"`
+	HourDays      int   `json:"hour_days"`
+	DayDays       int   `json:"day_days"`
 }
 
 func telemetryConfig(ctx context.Context, tx pgx.Tx) (telemetryRetention, error) {
-	var config telemetryRetention
-	err := tx.QueryRow(ctx, `SELECT configuration FROM telemetry_settings WHERE id=1 FOR UPDATE`).Scan(&config)
+	config := telemetryRetention{OperationRows: 100000, OperationDays: 90}
+	var raw []byte
+	err := tx.QueryRow(ctx, `SELECT configuration FROM telemetry_settings WHERE id=1 FOR UPDATE`).Scan(&raw)
+	if err == nil {
+		err = json.Unmarshal(raw, &config)
+	}
 	return config, err
 }
 
@@ -84,9 +90,24 @@ func (s *Server) storeNodeMetric(ctx context.Context, node string, sample *worke
 	if err != nil {
 		return err
 	}
-	if err = saveMetric(ctx, tx, node, "", "", sample.SampledAt, sample); err != nil {
+	if len(sample.Mounts) > 2048 {
+		return fmt.Errorf("mount metric response exceeds limits")
+	}
+	copySample := *sample
+	copySample.Mounts = nil
+	if err = saveMetric(ctx, tx, node, "", "", sample.SampledAt, &copySample); err != nil {
 		return err
 	}
+	for _, mount := range sample.Mounts {
+		if len(mount.Path) > 4096 || !mount.Known {
+			continue
+		}
+		sum := sha256.Sum256([]byte(mount.Path))
+		if err = saveMetric(ctx, tx, node, "", "mount:"+hex.EncodeToString(sum[:16]), sample.SampledAt, mount); err != nil {
+			return err
+		}
+	}
+
 	if err = pruneTelemetry(ctx, tx, c); err != nil {
 		return err
 	}
@@ -161,7 +182,7 @@ func (s *Server) telemetryRetention(w http.ResponseWriter, r *http.Request) {
 		if !decode(w, r, &c) {
 			return
 		}
-		if c.MetricRows < 1000 || c.MetricRows > 1000000 || c.LogRows < 1000 || c.LogRows > 1000000 || c.MetricBytes < 1048576 || c.MetricBytes > 10737418240 || c.LogBytes < 1048576 || c.LogBytes > 10737418240 || c.AuditRows < 1000 || c.AuditRows > 1000000 || c.LogDays < 1 || c.LogDays > 365 || c.AuditDays < 1 || c.AuditDays > 3650 || c.RawDays < 1 || c.RawDays > 7 || c.HourDays < c.RawDays || c.HourDays > 90 || c.DayDays < c.HourDays || c.DayDays > 3650 {
+		if c.OperationRows < 1000 || c.OperationRows > 1000000 || c.OperationDays < 1 || c.OperationDays > 3650 || c.MetricRows < 1000 || c.MetricRows > 1000000 || c.LogRows < 1000 || c.LogRows > 1000000 || c.MetricBytes < 1048576 || c.MetricBytes > 10737418240 || c.LogBytes < 1048576 || c.LogBytes > 10737418240 || c.AuditRows < 1000 || c.AuditRows > 1000000 || c.LogDays < 1 || c.LogDays > 365 || c.AuditDays < 1 || c.AuditDays > 3650 || c.RawDays < 1 || c.RawDays > 7 || c.HourDays < c.RawDays || c.HourDays > 90 || c.DayDays < c.HourDays || c.DayDays > 3650 {
 			http.Error(w, "invalid retention limits", 400)
 			return
 		}
