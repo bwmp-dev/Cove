@@ -162,7 +162,7 @@ func (s *Server) githubAppSetup(w http.ResponseWriter, r *http.Request) {
 	if in.Organization != "" {
 		action = "https://github.com/organizations/" + in.Organization + "/settings/apps/new"
 	}
-	manifest := map[string]any{"name": in.Name, "description": in.Description, "url": s.PublicURL, "public": true, "redirect_url": s.PublicURL + "/api/github/app/callback", "setup_url": s.PublicURL + "/integrations", "hook_attributes": map[string]any{"url": s.PublicURL + "/hooks/github-app", "active": true}, "default_permissions": map[string]string{"contents": "read", "pull_requests": "read", "members": "read"}, "default_events": []string{"push", "pull_request"}}
+	manifest := map[string]any{"name": in.Name, "description": in.Description, "url": s.PublicURL, "public": true, "redirect_url": s.PublicURL + "/api/github/app/callback", "setup_url": s.PublicURL + "/integrations", "hook_attributes": map[string]any{"url": s.PublicURL + "/hooks/github-app", "active": true}, "default_permissions": map[string]string{"contents": "read", "pull_requests": "write", "statuses": "write", "deployments": "write", "members": "read"}, "default_events": []string{"push", "pull_request"}}
 	manifest["callback_urls"] = []string{s.PublicURL + "/api/github/app/connect/callback"}
 	b, err := json.Marshal(manifest)
 	if err != nil {
@@ -536,6 +536,20 @@ func (s *Server) prepareAppDeployment(ctx context.Context, request *worker.Reque
 	token, err := s.githubProvider().CloneToken(ctx, installation, repo)
 	if err != nil {
 		return err
+	}
+	var reporting bool
+	if err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM github_reporting r LEFT JOIN previews p ON p.workload_id=$1 WHERE r.workload_id=COALESCE(p.source_id,$1) AND r.enabled)`, request.Workload).Scan(&reporting); err != nil {
+		return err
+	}
+	if reporting && request.Source.Revision == "" {
+		revision, err := s.githubProvider().BranchHead(ctx, installation, repo, request.Source.Branch)
+		if err != nil {
+			return err
+		}
+		if revision == "" {
+			return errors.New("GitHub branch is unavailable")
+		}
+		request.Source.Revision = revision
 	}
 	request.Source.Token = token
 	raw, err := json.Marshal(request)

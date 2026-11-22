@@ -674,3 +674,18 @@ LANGUAGE sql STABLE AS $$
   g->>'scope'='team' OR (g->>'scope'='project' AND g->>'scope_id'=project) OR
   (g->>'scope'='environment' AND g->>'scope_id'=s.scope))
 $$;
+
+CREATE TABLE IF NOT EXISTS github_reporting (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ enabled boolean NOT NULL DEFAULT false,
+ enabled_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS github_operation_feedback (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ revision text NOT NULL,
+ reported_state text NOT NULL DEFAULT '',
+ deployment_id bigint NOT NULL DEFAULT 0,
+ attempts integer NOT NULL DEFAULT 0,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ error text NOT NULL DEFAULT ''
+);

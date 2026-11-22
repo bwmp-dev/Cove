@@ -130,6 +130,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/github/app/sync", s.admin(http.HandlerFunc(s.syncGithubInstallations)))
 	mux.Handle("PUT /api/github/app/installations/{installation}", s.admin(http.HandlerFunc(s.assignGithubInstallation)))
 	mux.Handle("GET /api/github/repositories", s.admin(http.HandlerFunc(s.githubRepositories)))
+	mux.Handle("GET /api/workloads/{id}/github/reporting", s.admin(http.HandlerFunc(s.githubReporting)))
+	mux.Handle("PUT /api/workloads/{id}/github/reporting", s.admin(http.HandlerFunc(s.githubReporting)))
 	mux.Handle("GET /api/workloads/{id}/github", s.admin(http.HandlerFunc(s.githubSource)))
 	for _, method := range []string{"GET", "PUT", "POST", "DELETE"} {
 		mux.Handle(method+" /api/workloads/{id}/previews", s.admin(http.HandlerFunc(s.previews)))

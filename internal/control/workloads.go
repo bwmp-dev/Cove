@@ -413,6 +413,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.dispatchGithubFeedback(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchNotifications(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
