@@ -21,7 +21,11 @@ func databaseHelperName(r Request) string {
 }
 
 func (e *Engine) cleanupDatabaseVerifier(ctx context.Context, r Request) error {
-	ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "name=^/"+databaseHelperName(r)+"$", "--filter", "label=dev.cove.database-verify="+r.ID)
+	owner, err := e.backupHelperOwner(false)
+	if err != nil || owner == "" {
+		return err
+	}
+	ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "name=^/"+databaseHelperName(r)+"$", "--filter", "label=dev.cove.database-verify="+r.ID, "--filter", "label=dev.cove.backup-owner="+owner)
 	if err != nil {
 		return err
 	}
@@ -47,19 +51,24 @@ func (e *Engine) verifyExtendedDatabase(ctx context.Context, r Request, source, 
 	if err != nil || !imageDigest.MatchString(image) {
 		return nil, errors.New("database image identity unavailable")
 	}
+	owner, err := e.backupHelperOwner(true)
+	if err != nil {
+		return nil, err
+	}
 	name := databaseHelperName(r)
-	cleanup = func() error {
+	remove := func() error {
 		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		defer cancel()
 		return e.cleanupDatabaseVerifier(c, r)
 	}
+	cleanup = remove
 	created := false
 	defer func() {
 		if result != nil && created {
-			result = errors.Join(result, cleanup())
+			result = errors.Join(result, remove())
 		}
 	}()
-	args := []string{"docker", "create", "--name", name, "--label", "dev.cove.database-verify=" + r.ID, "--network", "none", "--restart", "no", "--memory", "2g", "--cpus", "2", "--pids-limit", "512", image}
+	args := []string{"docker", "create", "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=2", "--name", name, "--label", "dev.cove.database-verify=" + r.ID, "--label", "dev.cove.backup-owner=" + owner, "--network", "none", "--restart", "no", "--memory", "2g", "--cpus", "2", "--pids-limit", "512", image}
 	engine := r.Backup.Database.Engine
 	if engine == "mongodb" {
 		args = append(args, "mongod", "--bind_ip", "127.0.0.1")
@@ -91,6 +100,10 @@ func (e *Engine) verifyExtendedDatabase(ctx context.Context, r Request, source, 
 		if e.Run(ctx, e.Root, command, nil, io.Discard) == nil {
 			ready = true
 			break
+		}
+		state, inspectErr := e.output(ctx, "docker", "inspect", "--format", "{{.State.Status}}", name)
+		if inspectErr != nil || state == "exited" || state == "dead" {
+			return nil, errors.New("isolated database rejected the dump or exceeded its resource limit")
 		}
 		select {
 		case <-ctx.Done():

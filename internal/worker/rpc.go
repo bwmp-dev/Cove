@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Stream         *StreamRequest        `json:"stream,omitempty"`
 	TrafficControl *ProxyTrafficControl  `json:"traffic_control,omitempty"`
 	CleanupControl *CleanupControl       `json:"cleanup_control,omitempty"`
 	JournalPrune   *JournalPruneRequest  `json:"journal_prune,omitempty"`
@@ -337,6 +338,12 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 		return err
 	}
 	defer unlock()
+	recovery, cancelRecovery := context.WithTimeout(ctx, time.Minute)
+	err = e.recoverBackupTransfersOnStartup(recovery)
+	cancelRecovery()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
 		return err
 	}
@@ -368,11 +375,13 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 			http.NotFound(w, r)
 			return
 		}
-		var request RPCRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&request) != nil {
+		request, input, err := decodeRPCFrame(r.Body)
+		if err != nil {
 			http.Error(w, "invalid request", 400)
+			return
+		}
+		if request.Method == "stream" {
+			e.serveStream(w, r, request.Stream, input)
 			return
 		}
 		if timeout := RPCTimeout(request.Method); timeout > 30*time.Second {
@@ -403,6 +412,8 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
 	switch method {
+	case "stream":
+		return 30 * time.Minute
 	case "ingress_config_change":
 		return 5 * time.Minute
 	case "links_apply", "traffic_control":
@@ -414,23 +425,25 @@ func RPCTimeout(method string) time.Duration {
 }
 
 func Proxy(ctx context.Context, socket string, in io.Reader, out io.Writer) error {
-	data, err := io.ReadAll(io.LimitReader(in, 2*1024*1024+1))
+	rpc, stream, err := decodeRPCFrame(in)
 	if err != nil {
 		return err
 	}
-	if len(data) > 2*1024*1024 {
-		return errors.New("request too large")
+	data, err := json.Marshal(rpc)
+	if err != nil {
+		return err
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
 	defer transport.CloseIdleConnections()
-	var rpc RPCRequest
-	if err = json.Unmarshal(data, &rpc); err != nil {
-		return err
-	}
+
 	client := &http.Client{Transport: transport, Timeout: RPCTimeout(rpc.Method)}
-	request, err := http.NewRequestWithContext(ctx, "POST", "http://worker/rpc", bytes.NewReader(data))
+	var body io.Reader = bytes.NewReader(data)
+	if rpc.Method == "stream" {
+		body = io.MultiReader(bytes.NewReader(append(data, '\n')), stream)
+	}
+	request, err := http.NewRequestWithContext(ctx, "POST", "http://worker/rpc", body)
 	if err != nil {
 		return err
 	}
@@ -442,6 +455,13 @@ func Proxy(ctx context.Context, socket string, in io.Reader, out io.Writer) erro
 	if response.StatusCode != 200 {
 		return errors.New("worker rejected request")
 	}
-	_, err = io.Copy(out, io.LimitReader(response.Body, 2*1024*1024))
+	limit := int64(2 << 20)
+	if rpc.Method == "stream" {
+		limit = MaxTransferBytes + (64 << 10)
+	}
+	n, err := io.Copy(out, io.LimitReader(response.Body, limit+1))
+	if err == nil && n > limit {
+		err = errors.New("worker response exceeds limit")
+	}
 	return err
 }

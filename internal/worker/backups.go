@@ -225,10 +225,17 @@ func (e *Engine) restic(ctx context.Context, r Request, mounts []backupMount, wr
 }
 
 func (e *Engine) resticInput(ctx context.Context, r Request, mounts []backupMount, writable bool, input io.Reader, out io.Writer, command ...string) error {
+	owner, ownerErr := e.backupHelperOwner(e.Root != "")
+	if ownerErr != nil {
+		return ownerErr
+	}
 	b := r.Backup
 	repository := b.Repository
 	env := []string{"RESTIC_PASSWORD=" + b.Password, "AWS_ACCESS_KEY_ID=" + b.AccessKey, "AWS_SECRET_ACCESS_KEY=" + b.SecretKey, "AWS_SESSION_TOKEN=" + b.SessionToken}
-	args := []string{"docker", "run", "--rm", "--name", "cove-backup-" + r.ID, "--label", "dev.cove.operation=" + r.ID, "--network", "host", "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/data", "-e", "RESTIC_PASSWORD", "-e", "RESTIC_REPOSITORY", "-e", "AWS_ACCESS_KEY_ID", "-e", "AWS_SECRET_ACCESS_KEY", "-e", "AWS_SESSION_TOKEN"}
+	args := []string{"docker", "run", "--rm", "--log-driver", "none", "--name", "cove-backup-" + r.ID, "--label", "dev.cove.operation=" + r.ID, "--network", "host", "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/data", "-e", "RESTIC_PASSWORD", "-e", "RESTIC_REPOSITORY", "-e", "AWS_ACCESS_KEY_ID", "-e", "AWS_SECRET_ACCESS_KEY", "-e", "AWS_SESSION_TOKEN"}
+	if owner != "" {
+		args = append(args, "--label", "dev.cove.backup-owner="+owner)
+	}
 	if b.CACertificate != "" {
 		path := filepath.Join(e.Root, "workloads", r.Workload, "backup-ca.pem")
 		if err := os.WriteFile(path, []byte(b.CACertificate), 0600); err != nil {
@@ -302,20 +309,11 @@ func (e *Engine) resticInput(ctx context.Context, r Request, mounts []backupMoun
 	if ctx.Err() != nil || (input != nil && err != nil) {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		if input == nil {
-			if removeErr := e.Run(cleanup, e.Root, []string{"docker", "rm", "-f", "cove-backup-" + r.ID}, nil, io.Discard); removeErr != nil {
-				return errors.Join(err, removeErr)
-			}
-		} else {
-			owned, inspectErr := e.output(cleanup, "docker", "ps", "-aq", "--filter", "name=^/cove-backup-"+r.ID+"$", "--filter", "label=dev.cove.operation="+r.ID)
-			if inspectErr != nil {
-				return errors.Join(err, inspectErr)
-			}
-			if ids := strings.Fields(owned); len(ids) > 0 {
-				if removeErr := e.Run(cleanup, e.Root, append([]string{"docker", "rm", "-f"}, ids...), nil, io.Discard); removeErr != nil {
-					return errors.Join(err, removeErr)
-				}
-			}
+		if owner != "" {
+			return errors.Join(err, e.removeBackupHelper(cleanup, owner, "cove-backup-"+r.ID, r.ID))
+		}
+		if removeErr := e.Run(cleanup, e.Root, []string{"docker", "rm", "-f", "cove-backup-" + r.ID}, nil, io.Discard); removeErr != nil {
+			return errors.Join(err, removeErr)
 		}
 	}
 	return err
@@ -526,6 +524,10 @@ func (e *Engine) performBackup(ctx context.Context, r Request, out io.Writer) (r
 func (e *Engine) pruneBackups(ctx context.Context, r Request, out io.Writer) error {
 	e.backupMu.Lock()
 	defer e.backupMu.Unlock()
+	return e.pruneBackupsLocked(ctx, r, out)
+}
+
+func (e *Engine) pruneBackupsLocked(ctx context.Context, r Request, out io.Writer) error {
 	records, err := e.Backups(r.Workload)
 	if err != nil {
 		return err

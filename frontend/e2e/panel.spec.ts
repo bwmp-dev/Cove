@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
-import { expect, test, type Page, type TestInfo, type Locator } from "@playwright/test";
+import { createHash, randomBytes } from "node:crypto";
+import { expect, test, type Download, type Page, type TestInfo, type Locator } from "@playwright/test";
 import { spawn, execFileSync } from "node:child_process";
 
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
@@ -1260,6 +1261,135 @@ test("environment graph creates, applies and revokes a private connection on the
     await page.screenshot({ path: testInfo.outputPath(`connections-matrix-${width}.png`), fullPage: true });
   }
   await page.unroute("**/api/projects/*/connections*");
+});
+
+test("Redis backups download as a verified RDB, import back through the panel and restore", async ({ page }, testInfo) => {
+  test.setTimeout(600_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Backup transfer project");
+  const url = await createResource(page, "transfer-redis");
+  const id = new URL(url).pathname.split("/")[2];
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // CodeMirror input is unreliable for exact YAML, so the Compose file is saved through the API.
+  const yaml = "services:\n  cache:\n    image: redis:7.4-alpine\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, redis-cli, ping]\n      interval: 1s\nvolumes:\n  data: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await page.reload();
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+  const redis = (args: string[], input?: string) => execFileSync("docker", ["exec", "-i", containers(url).split("|")[0] ?? "", "redis-cli", ...args], { encoding: "utf8", input }).trim();
+  const payload = randomBytes(24 * 1024).toString("hex");
+  expect(redis(["-x", "SET", "payload"], payload)).toBe("OK");
+  expect(redis(["SET", "marker", "original"])).toBe("OK");
+
+  const finished = async (action: string, after: Set<string>) => {
+    let operation: { id: string; action: string; state: string } | undefined;
+    await expect.poll(async () => {
+      const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+      operation = operations.find(item => item.action === action && !after.has(item.id));
+      return operation && !["queued", "running"].includes(operation.state);
+    }, { timeout: 240_000 }).toBe(true);
+    expect(operation?.state, await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()).toBe("succeeded");
+  };
+  const seen = async () => new Set(((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as { id: string }[]).map(item => item.id));
+  const backupIds = async () => ((await (await page.request.get(`/api/workloads/${id}/backups`)).json()) as { backups: { id: string }[] }).backups.map(item => item.id);
+
+  // Administrators see the instance-wide transfer limit; saving sends an exact byte count.
+  await page.goto("/admin");
+  const transfers = page.locator("form").filter({ has: page.getByRole("heading", { name: "Backup transfers", exact: true }) });
+  const limit = transfers.getByLabel("Largest backup (MiB)", { exact: true });
+  await expect(limit).toHaveValue("1024");
+  await limit.fill("2048");
+  await transfers.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.getByText("Saved. New transfers use this limit.", { exact: true })).toBeVisible();
+  expect(await (await page.request.get("/api/settings/transfer-limits")).json()).toMatchObject({ backup_bytes: 2048 * 1024 * 1024 });
+  await page.getByRole("heading", { name: "Backup transfers", exact: true }).scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "backup-transfer-settings");
+
+  await page.goto(url);
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await chooseOption(page.getByLabel("Backup method"), "redis");
+  await page.getByLabel("Database Compose service", { exact: true }).fill("cache");
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-redis-transfer-password");
+  await page.getByLabel("Interval in hours", { exact: true }).fill("0");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Import dump", exact: true })).toBeVisible();
+  let before = await seen();
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await finished("backup", before);
+  const [original] = await backupIds();
+  await expect(page.getByRole("button", { name: "Download", exact: true })).toBeEnabled({ timeout: 60_000 });
+
+  // The download is a plain link: the browser streams it to disk from a new tab.
+  await page.getByRole("button", { name: "Download", exact: true }).click();
+  const warning = page.getByRole("dialog", { name: "Download unencrypted backup?" });
+  await expect(warning.getByText(/Redis complete instance dump/)).toBeVisible();
+  await expect(warning.getByText(`cove-backup-${original}.rdb`, { exact: true })).toBeVisible();
+  await capture(page, testInfo, "backup-download-warning");
+  // Chromium may attribute a download that opened in a new tab to either the tab or its opener.
+  const downloaded = new Promise<Download>((resolve, reject) => {
+    page.once("download", resolve);
+    page.context().once("page", (popup) => popup.once("download", resolve));
+    setTimeout(() => reject(new Error("No download started")), 60_000);
+  });
+  await warning.getByRole("link", { name: "Download", exact: true }).click();
+  const download = await downloaded;
+  expect(download.suggestedFilename()).toBe(`cove-backup-${original}.rdb`);
+  const directory = mkdtempSync(join(tmpdir(), "cove-transfer-"));
+  try {
+    const file = join(directory, download.suggestedFilename());
+    await download.saveAs(file);
+    const bytes = readFileSync(file);
+    expect(bytes.length).toBeGreaterThan(32 * 1024);
+    expect(bytes.subarray(0, 5).toString()).toBe("REDIS");
+    const direct = await page.request.get(`/api/workloads/${id}/backups/${original}/download`);
+    expect(direct.headers()["cache-control"]).toBe("no-store");
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(direct.headers()["x-cove-sha256"]);
+
+    expect(redis(["SET", "marker", "changed"])).toBe("OK");
+    expect(redis(["DEL", "payload"])).toBe("1");
+
+    // An invalid dump publishes nothing and leaves the running database alone.
+    await page.getByRole("button", { name: "Import dump", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Import database dump" });
+    await expect(dialog.getByText("Accepted file: Redis RDB snapshot", { exact: true })).toBeVisible();
+    const input = dialog.getByLabel("Dump file", { exact: true });
+    await expect(input).toBeEnabled();
+    await input.setInputFiles({ name: "not-a-dump.rdb", mimeType: "application/octet-stream", buffer: Buffer.from("this is not an RDB snapshot\n".repeat(64)) });
+    await dialog.getByRole("button", { name: "Import and verify", exact: true }).click();
+    await expect(dialog.getByText("Import failed", { exact: true })).toBeVisible({ timeout: 240_000 });
+    await capture(page, testInfo, "backup-import-failed");
+    expect(await backupIds()).toEqual([original]);
+    expect(redis(["GET", "marker"])).toBe("changed");
+
+    await input.setInputFiles(file);
+    await dialog.getByRole("button", { name: "Import and verify", exact: true }).click();
+    await expect(dialog.getByText("Uploading and verifying", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Verified backup stored", { exact: true })).toBeVisible({ timeout: 240_000 });
+    await expect(dialog.getByText(createHash("sha256").update(bytes).digest("hex"), { exact: true })).toBeVisible();
+    expect(redis(["GET", "marker"])).toBe("changed");
+    await expect(dialog.getByRole("button", { name: "Restore this backup…", exact: true })).toBeVisible({ timeout: 60_000 });
+    await capture(page, testInfo, "backup-import-verified");
+    const ids = await backupIds();
+    expect(ids).toHaveLength(2);
+    const imported = ids.find(item => item !== original);
+
+    await dialog.getByRole("button", { name: "Restore this backup…", exact: true }).click();
+    const confirm = page.getByRole("dialog", { name: "Restore Redis complete instance?" });
+    await expect(confirm.getByText(/saves a safety backup/)).toBeVisible();
+    before = await seen();
+    const restoreRequest = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith(`/api/workloads/${id}/operations`));
+    await confirm.getByRole("button", { name: "Restore data", exact: true }).click();
+    expect((await restoreRequest).postDataJSON()).toEqual({ action: "restore", backup_id: imported });
+    await finished("restore", before);
+    await expect.poll(() => redis(["GET", "marker"]), { timeout: 60_000 }).toBe("original");
+    expect(redis(["GET", "payload"])).toBe(payload);
+    await page.reload();
+    await capture(page, testInfo, "backup-transfer-list");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("administrators browse, edit, download and delete container files on the real worker", async ({ page }, testInfo) => {

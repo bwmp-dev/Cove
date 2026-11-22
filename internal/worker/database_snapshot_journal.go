@@ -25,7 +25,7 @@ func (e *Engine) settleDatabaseSnapshot(ctx context.Context, r Request) error {
 		return err
 	}
 	var pending databaseSnapshotJournal
-	if len(data) > 16384 || json.Unmarshal(data, &pending) != nil || !identifier.MatchString(pending.Operation) {
+	if len(data) > 32768 || json.Unmarshal(data, &pending) != nil || !identifier.MatchString(pending.Operation) {
 		return errors.New("invalid database snapshot recovery record")
 	}
 	if !pending.Complete {

@@ -789,3 +789,6 @@ CREATE TABLE IF NOT EXISTS route_traffic (
 );
 CREATE INDEX IF NOT EXISTS route_traffic_recent ON route_traffic(timestamp DESC,id DESC);
 CREATE INDEX IF NOT EXISTS route_traffic_resource ON route_traffic(workload_id,timestamp DESC);
+
+-- Backup transfer bounds.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS backup_transfer_bytes bigint NOT NULL DEFAULT 1073741824 CHECK (backup_transfer_bytes BETWEEN 1048576 AND 68719476736);

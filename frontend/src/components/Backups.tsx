@@ -1,23 +1,24 @@
 import { Select } from "./Select";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { errorMessage, request } from "../api/client";
 import { connectionsQuery } from "../api/connections";
 import { keys } from "../api/queries";
 import { useOnline } from "../lib/hooks";
-import { backupScopeLabel, calendarRetention, calendarTiers, databaseEngine, databaseEngines, INSTANCE_SCOPE_NAME, KEEP_LAST_MAX, retentionSummary, usesCalendarRetention, type CalendarRetention } from "../lib/backups";
-import { inputClass } from "../lib/styles";
+import { backupDownloadUrl } from "../api/backup-transfers";
+import { backupScopeLabel, calendarRetention, downloadFileName, matchesPolicy, calendarTiers, databaseEngine, databaseEngines, INSTANCE_SCOPE_NAME, KEEP_LAST_MAX, retentionSummary, usesCalendarRetention, type CalendarRetention, type DatabaseBackup } from "../lib/backups";
+import { buttonClass, inputClass } from "../lib/styles";
+import { BackupImport } from "./BackupImport";
 import { ConfirmDialog, Dialog } from "./ConfirmDialog";
 import { RelativeTime } from "./RelativeTime";
 import { Button, Field, Notice, QueryError } from "./ui";
 
-interface DatabaseBackup { engine: string; service: string; name: string }
 interface Policy { drill_interval_hours?: number; database?: DatabaseBackup; storage_id?: string; repository: string; keep_last: number; keep_daily?: number; keep_weekly?: number; keep_monthly?: number; interval_hours: number; ca_certificate?: string }
 interface Snapshot { verified_at?: string; verification?: string; id: string; created_at: string; repository: string; database?: DatabaseBackup }
 
 // Each flag is unknown when the worker's capabilities cannot be read; the API still refuses unsupported policies.
-export interface WorkerSupport { retention: boolean | undefined; instanceEngines: boolean | undefined; nodeName?: string }
+export interface WorkerSupport { retention: boolean | undefined; instanceEngines: boolean | undefined; transfers?: boolean | undefined; nodeName?: string }
 
 function EngineNotice({ engine }: { engine: string }) {
   if (engine === "mongodb") return <Notice title="MongoDB requirements">
@@ -50,6 +51,17 @@ function restoreWarning(engine: string | undefined) {
 function restoreCopyScope(database: DatabaseBackup) {
   const engine = databaseEngine(database.engine);
   return engine?.scope === "instance" ? `The complete ${engine.name} instance snapshot is restored into the database service.` : "Only this database's dump is restored.";
+}
+
+function DownloadDialog({ workloadId, snapshot, onClose }: { workloadId: string; snapshot: Snapshot; onClose: () => void }) {
+  return <Dialog open title="Download unencrypted backup?" onClose={onClose} footer={<>
+    <Button variant="ghost" onClick={onClose}>Cancel</Button>
+    <a href={backupDownloadUrl(workloadId, snapshot.id)} target="_blank" rel="noopener" className={buttonClass("primary")} onClick={onClose}>Download</a>
+  </>}>
+    <p>{snapshot.database ? <>The file is the {backupScopeLabel(snapshot.database)} dump (<span className="font-mono">{snapshot.database.service}</span>) from this backup.</> : "The file contains the persistent volume data from this snapshot. It does not include the release, Compose configuration or environment variables."}</p>
+    <p className="mt-2">Cove decrypts it for the download, so anyone with the file can read the data. Store it somewhere private.</p>
+    <p className="mt-2">Your browser saves <span className="font-mono break-all">{downloadFileName(snapshot.id, snapshot.database)}</span> and shows its progress. Cove checks the size and SHA-256 checksum while sending and stops a download that fails, so an incomplete file shows as failed in the browser. If the download cannot start, the new tab explains why.</p>
+  </Dialog>;
 }
 
 function PolicyForm({ workloadId, initial, support, onClose }: { workloadId: string; initial: Policy | null; support: WorkerSupport; onClose: () => void }) {
@@ -122,8 +134,41 @@ function PolicyForm({ workloadId, initial, support, onClose }: { workloadId: str
   </form>;
 }
 
+function SnapshotRow({ snapshot, actions }: { snapshot: Snapshot; actions: ReactNode }) {
+  return <li className="flex flex-wrap items-center justify-between gap-3 py-3"><div><RelativeTime value={snapshot.created_at} /><p className="text-xs text-fg-muted break-all">{snapshot.id}</p>{snapshot.database && <p className="text-xs text-fg-muted">{backupScopeLabel(snapshot.database)}</p>}{snapshot.verified_at && <p className="text-xs text-fg-muted">{snapshot.verification === "database" ? "Database restore verified" : "File restore verified"} <RelativeTime value={snapshot.verified_at} /></p>}</div>{actions}</li>;
+}
+
+interface SnapshotActionsProps { disabled: boolean; restoreDisabled: boolean; downloadDisabled: boolean; onDownload: () => void; onCopy: () => void; onDrill: () => void; onRestore: () => void }
+
+function SnapshotActions({ disabled, restoreDisabled, downloadDisabled, onDownload, onCopy, onDrill, onRestore }: SnapshotActionsProps) {
+  return <div className="flex flex-wrap gap-2">
+    <Button size="sm" disabled={disabled || downloadDisabled} onClick={onDownload}>Download</Button>
+    <Button size="sm" disabled={disabled || restoreDisabled} onClick={onCopy}>Restore as new resource</Button>
+    <Button size="sm" disabled={disabled || restoreDisabled} onClick={onDrill}>Verify restore</Button>
+    <Button size="sm" disabled={disabled || restoreDisabled} onClick={onRestore}>Restore</Button>
+  </div>;
+}
+
+function PolicySummary({ saved, canEdit, transfersBlocked, nodeName, interrupted }: { saved: Policy | null; canEdit: boolean; transfersBlocked: boolean; nodeName?: string; interrupted: boolean }) {
+  return <>
+    {saved && canEdit && transfersBlocked && <Notice tone="warn" title="Downloads and imports need an upgraded worker">Upgrade and verify {nodeName ?? "this resource's worker"} to download backups or import database dumps. Backups and restores still work.</Notice>}
+    {interrupted && <Notice tone="warn" title="Import cancelled in this browser">If the file had already been received, the worker may still finish and store the verified backup. Check the backup list before trying again.</Notice>}
+    {!saved && !canEdit && <p className="text-sm text-fg-muted">No backup policy is configured. Editor access is needed to configure one.</p>}
+    {saved && <p className="text-xs text-fg-muted break-words">{saved.database ? `${backupScopeLabel(saved.database)} (${saved.database.service})` : "Volume snapshot"} · {saved.repository} · {retentionSummary(saved)} · {saved.interval_hours ? `Every ${saved.interval_hours} hours` : "Manual only"}</p>}
+  </>;
+}
+
+function SnapshotList({ snapshots, row }: { snapshots: UseQueryResult<{ backups: Snapshot[] }>; row: (snapshot: Snapshot) => ReactNode }) {
+  if (snapshots.isError) return <QueryError what="backups" error={snapshots.error} onRetry={() => void snapshots.refetch()} />;
+  if (!snapshots.data?.backups.length) return <p className="text-sm text-fg-muted">No backups yet.</p>;
+  return <ul className="divide-y divide-line">{snapshots.data.backups.map(row)}</ul>;
+}
+
 export function Backups({ workloadId, busy, canOperate, canEdit, support }: { workloadId: string; busy: boolean; canOperate: boolean; canEdit: boolean; support: WorkerSupport }) {
  const [copy, setCopy] = useState<Snapshot | null>(null);
+  const [download, setDownload] = useState<Snapshot | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [interrupted, setInterrupted] = useState(false);
   const [editing, setEditing] = useState(false);
   const [restore, setRestore] = useState<Snapshot | null>(null);
   const online = useOnline();
@@ -135,13 +180,16 @@ export function Backups({ workloadId, busy, canOperate, canEdit, support }: { wo
   if (!policy.data) return <p className="text-sm text-fg-muted">Loading backup policy…</p>;
   if (editing) return <PolicyForm workloadId={workloadId} initial={policy.data.backup} support={support} onClose={() => setEditing(false)} />;
   const saved = policy.data.backup;
+  const transfersBlocked = support.transfers === false;
+  const findSnapshot = (id: string) => snapshots.data?.backups.find((item) => item.id === id);
   return <div className="space-y-4">
-    <div className="flex flex-wrap items-center gap-3 empty:hidden">{canEdit && <Button disabled={!online || busy} onClick={() => setEditing(true)}>{saved ? "Edit policy" : "Configure backups"}</Button>}{saved && canOperate && <Button disabled={!online || busy} pending={action.isPending} onClick={() => action.mutate({ action: "backup" })}>Back up now</Button>}</div>
-    {!saved && !canEdit && <p className="text-sm text-fg-muted">No backup policy is configured. Editor access is needed to configure one.</p>}
-    {saved && <p className="text-xs text-fg-muted break-words">{saved.database ? `${backupScopeLabel(saved.database)} (${saved.database.service})` : "Volume snapshot"} · {saved.repository} · {retentionSummary(saved)} · {saved.interval_hours ? `Every ${saved.interval_hours} hours` : "Manual only"}</p>}
+    <div className="flex flex-wrap items-center gap-3 empty:hidden">{canEdit && <Button disabled={!online || busy} onClick={() => setEditing(true)}>{saved ? "Edit policy" : "Configure backups"}</Button>}{saved && canOperate && <Button disabled={!online || busy} pending={action.isPending} onClick={() => action.mutate({ action: "backup" })}>Back up now</Button>}{saved?.database && canEdit && <Button disabled={!online || busy || transfersBlocked} onClick={() => { setInterrupted(false); setImporting(true); }}>Import dump</Button>}</div>
+    <PolicySummary saved={saved} canEdit={canEdit} transfersBlocked={transfersBlocked} nodeName={support.nodeName} interrupted={interrupted} />
     {action.isError && <Notice tone="error">{errorMessage(action.error)}</Notice>}
     {copy && <RestoreCopyForm workloadId={workloadId} snapshot={copy} onClose={() => setCopy(null)} />}
-    {snapshots.isError ? <QueryError what="backups" error={snapshots.error} onRetry={() => void snapshots.refetch()} /> : snapshots.data?.backups.length ? <ul className="divide-y divide-line">{snapshots.data.backups.map((snapshot) => <li key={snapshot.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><RelativeTime value={snapshot.created_at} /><p className="text-xs text-fg-muted break-all">{snapshot.id}</p>{snapshot.database && <p className="text-xs text-fg-muted">{backupScopeLabel(snapshot.database)}</p>}{snapshot.verified_at && <p className="text-xs text-fg-muted">{snapshot.verification === "database" ? "Database restore verified" : "File restore verified"} <RelativeTime value={snapshot.verified_at} /></p>}</div>{canEdit && <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!online || busy || action.isPending || saved?.repository !== snapshot.repository} onClick={() => setCopy(snapshot)}>Restore as new resource</Button><Button size="sm" disabled={!online || busy || action.isPending || saved?.repository !== snapshot.repository} onClick={() => action.mutate({ action: "drill", backup_id: snapshot.id })}>Verify restore</Button><Button size="sm" disabled={!online || busy || action.isPending || saved?.repository !== snapshot.repository} onClick={() => setRestore(snapshot)}>Restore</Button></div>}</li>)}</ul> : <p className="text-sm text-fg-muted">No backups yet.</p>}
+    <SnapshotList snapshots={snapshots} row={(snapshot) => <SnapshotRow key={snapshot.id} snapshot={snapshot} actions={canEdit && <SnapshotActions disabled={!online || busy} restoreDisabled={action.isPending || saved?.repository !== snapshot.repository} downloadDisabled={transfersBlocked || !matchesPolicy(saved, snapshot)} onDownload={() => setDownload(snapshot)} onCopy={() => setCopy(snapshot)} onDrill={() => action.mutate({ action: "drill", backup_id: snapshot.id })} onRestore={() => setRestore(snapshot)} />} />} />
+    {download && <DownloadDialog workloadId={workloadId} snapshot={download} onClose={() => setDownload(null)} />}
+    {importing && saved?.database && <BackupImport workloadId={workloadId} database={saved.database} importedRow={findSnapshot} canRestore={canEdit && !busy && !action.isPending} onRestore={(id) => { const row = findSnapshot(id); setImporting(false); if (row) setRestore(row); }} onClose={(wasInterrupted) => { setImporting(false); setInterrupted(wasInterrupted); }} />}
     <ConfirmDialog open={restore !== null} title={restore?.database ? `Restore ${backupScopeLabel(restore.database)}?` : "Restore persistent data?"} confirmLabel="Restore data" danger onCancel={() => setRestore(null)} onConfirm={() => { if (restore) action.mutate({ action: "restore", backup_id: restore.id }); }}>
       {restoreWarning(restore?.database?.engine)}
     </ConfirmDialog>

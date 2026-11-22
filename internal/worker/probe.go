@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	BackupTransfers     bool         `json:"backup_transfers"`
 	StreamedBackups     bool         `json:"extended_logical_backups"`
 	TrafficLogs         bool         `json:"traffic_logs"`
 	CapacityAdvice      bool         `json:"capacity_advice"`
@@ -60,6 +61,7 @@ func Inspect(ctx context.Context) Probe {
 	p.Telemetry = true
 	p.BackupRetention = true
 	p.StreamedBackups = true
+	p.BackupTransfers = true
 	p.BackblazeB2 = true
 	p.FileBrowser = true
 	p.CapacityAdvice = true

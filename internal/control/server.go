@@ -43,7 +43,8 @@ type Server struct {
 	SendMail              func(context.Context, string, string, string) error
 	dummyPasswordHash     []byte
 	// workerRPC replaces node transports in tests that simulate several workers.
-	workerRPC func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
+	workerRPC    func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
+	workerStream func(context.Context, string, worker.RPCRequest, io.Reader, func(worker.StreamResponse, io.Reader) error) error
 }
 
 func (s *Server) Init(ctx context.Context) error {
@@ -211,6 +212,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/workloads/{id}/runtime", s.admin(http.HandlerFunc(s.workloadRuntime)))
 	mux.Handle("GET /api/workloads/{id}/logs", s.admin(http.HandlerFunc(s.workloadLogs)))
 	mux.Handle("GET /api/workloads/{id}/backups", s.admin(http.HandlerFunc(s.workloadBackups)))
+	mux.HandleFunc("GET /api/workloads/{id}/backups/{backup}/download", s.nativeBackupDownload)
+	mux.Handle("POST /api/workloads/{id}/backups/import", s.admin(http.HandlerFunc(s.importBackupDump)))
+	mux.Handle("POST /api/workloads/{id}/backups/import-s3", s.admin(http.HandlerFunc(s.importBackupDump)))
+	mux.Handle("GET /api/settings/transfer-limits", s.admin(http.HandlerFunc(s.transferLimits)))
+	mux.Handle("GET /api/workloads/{id}/backups/transfer-limits", s.admin(http.HandlerFunc(s.transferLimits)))
+	mux.Handle("PUT /api/settings/transfer-limits", s.admin(http.HandlerFunc(s.transferLimits)))
 	mux.Handle("GET /api/workloads/{id}/releases", s.admin(http.HandlerFunc(s.workloadReleases)))
 	mux.Handle("GET /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.getBackupPolicy)))
 	mux.Handle("PUT /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.setBackupPolicy)))

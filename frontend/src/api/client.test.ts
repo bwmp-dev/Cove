@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rememberTeam } from "../lib/team";
-import { ApiError, request } from "./client";
+import { backupDownloadUrl } from "./backup-transfers";
+import { ApiError, request, uploadFile } from "./client";
 
 function respond(status: number, body: string, type: string, headers: Record<string, string> = {}) {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(body, { status, headers: { "content-type": type, ...headers } }))));
@@ -57,5 +58,37 @@ describe("request", () => {
     const error = (await request("GET", "/api/nodes").catch((caught: unknown) => caught)) as ApiError;
     expect(error).toBeInstanceOf(ApiError);
     expect(error.isNetwork).toBe(true);
+  });
+});
+
+describe("uploadFile", () => {
+  it("sends the file itself as the body with its size and the team, not JSON", async () => {
+    respond(201, '{"backup_id":"b1","size":5,"sha256":"aa","verified":true}', "application/json");
+    rememberTeam("team-b");
+    const file = new File(["hello"], "dump.rdb");
+    await expect(uploadFile("/api/workloads/w1/backups/import", file)).resolves.toMatchObject({ backup_id: "b1" });
+    const [path, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(path).toBe("/api/workloads/w1/backups/import");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(file);
+    expect(init.credentials).toBe("same-origin");
+    expect(headers.get("content-type")).toBe("application/octet-stream");
+    expect(headers.get("x-cove-size")).toBe("5");
+    expect(headers.get("x-cove-team")).toBe("team-b");
+    expect(headers.get("authorization")).toBeNull();
+  });
+
+  it("reports the server's refusal like other requests", async () => {
+    respond(413, "dump exceeds the configured backup transfer limit", "text/plain");
+    await expect(uploadFile("/x", new Blob(["a"]))).rejects.toMatchObject({ status: 413, message: "Dump exceeds the configured backup transfer limit" });
+  });
+});
+
+describe("backupDownloadUrl", () => {
+  it("is a same-origin path that adds only the selected team as context", () => {
+    expect(backupDownloadUrl("w1", "b 1")).toBe("/api/workloads/w1/backups/b%201/download");
+    rememberTeam("team-b");
+    expect(backupDownloadUrl("w1", "b1")).toBe("/api/workloads/w1/backups/b1/download?team_id=team-b");
   });
 });

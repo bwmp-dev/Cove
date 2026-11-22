@@ -58,22 +58,27 @@ function parseRetryAfter(response: Response): number | null {
 
 async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
   const headers: Record<string, string> = { Accept: accept };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+  return dispatch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
+}
+
+async function dispatch(path: string, init: { method: string; headers: Record<string, string>; body?: BodyInit; signal?: AbortSignal }): Promise<Response> {
+  const headers = { ...init.headers };
   const team = selectedTeam();
   if (team) {
     headers["X-Cove-Team"] = team;
   }
-  if (body !== undefined) {
-    headers["Content-Type"] = "application/json";
-  }
   let response: Response;
   try {
     response = await fetch(path, {
-      method,
+      method: init.method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: init.body,
       credentials: "same-origin",
       cache: "no-store",
-      signal,
+      signal: init.signal,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -87,13 +92,22 @@ async function send(method: string, path: string, accept: string, body?: unknown
   return response;
 }
 
-export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const response = await send(method, path, "application/json", body, signal);
+async function readJson<T>(response: Response): Promise<T> {
   try {
     return (await response.json()) as T;
   } catch {
     throw new ApiError(response.status, "The server returned an unreadable response.");
   }
+}
+
+export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  return readJson<T>(await send(method, path, "application/json", body, signal));
+}
+
+// Sends a file as the raw request body. The browser streams a File from disk, so it is never read into memory here.
+export async function uploadFile<T>(path: string, file: Blob, signal?: AbortSignal): Promise<T> {
+  const headers = { Accept: "application/json", "Content-Type": "application/octet-stream", "X-Cove-Size": String(file.size) };
+  return readJson<T>(await dispatch(path, { method: "POST", headers, body: file, signal }));
 }
 
 // Plain-text GET for exports, sent with the same session and team headers as JSON requests.

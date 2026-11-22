@@ -1,3 +1,4 @@
+import { BackupTransferLimit } from "../components/BackupTransferLimit";
 import { InstanceIntegrations } from "../components/InstanceIntegrations";
 import { MetricsExport } from "../components/MetricsExport";
 import { OperationRetentionPasses, StorageUsage, TelemetryRetention } from "../components/TelemetryRetention";
@@ -205,12 +206,13 @@ export function AdminPage() {
   }
   return (
     <>
-      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, update and data retention settings for this Cove instance." />
+      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, update, backup transfer and data retention settings for this Cove instance." />
       <Section title="Sign-in" width="form">
         <SignInSettings />
       </Section>
       <InstanceIntegrations />
       <Section title="Updates" width="form"><UpdateChannel /></Section>
+      <BackupTransferLimit />
       <TelemetryRetention />
       <MetricsExport />
       <StorageUsage />

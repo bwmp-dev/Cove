@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { backupScopeLabel, calendarRetention, retentionSummary, usesCalendarRetention } from "./backups";
+import { backupScopeLabel, bytesToMiBText, calendarRetention, downloadFileName, matchesPolicy, MiB, objectKeyError, parseTransferLimit, retentionSummary, usesCalendarRetention } from "./backups";
 
 it("treats omitted calendar tiers as disabled", () => {
   expect(calendarRetention({ keep_weekly: 4 })).toEqual({ keep_daily: 0, keep_weekly: 4, keep_monthly: 0 });
@@ -17,4 +17,50 @@ it("labels instance engines by instance and others by database", () => {
   expect(backupScopeLabel({ engine: "valkey", name: "all" })).toBe("Valkey complete instance");
   expect(backupScopeLabel({ engine: "mongodb", name: "all" })).toBe("MongoDB complete instance");
   expect(backupScopeLabel({ engine: "mariadb", name: "all" })).toBe("MariaDB database all");
+});
+
+it("matches a snapshot only to a policy with the same repository and exact database scope", () => {
+  const db = { engine: "redis", service: "cache", name: "all" };
+  expect(matchesPolicy({ repository: "local" }, { repository: "local" })).toBe(true);
+  expect(matchesPolicy({ repository: "local", database: db }, { repository: "local", database: { ...db } })).toBe(true);
+  expect(matchesPolicy({ repository: "local", database: db }, { repository: "local", database: { ...db, service: "redis" } })).toBe(false);
+  expect(matchesPolicy({ repository: "local", database: db }, { repository: "local" })).toBe(false);
+  expect(matchesPolicy({ repository: "s3:https://a/b" }, { repository: "local" })).toBe(false);
+  expect(matchesPolicy(null, { repository: "local" })).toBe(false);
+});
+
+it("names downloads by what the backup contains", () => {
+  expect(downloadFileName("b1", undefined)).toBe("cove-backup-b1.tar");
+  expect(downloadFileName("b1", { engine: "postgresql", service: "db", name: "app" })).toBe("cove-backup-b1.dump");
+  expect(downloadFileName("b1", { engine: "mongodb", service: "db", name: "all" })).toBe("cove-backup-b1.dump");
+  expect(downloadFileName("b1", { engine: "valkey", service: "db", name: "all" })).toBe("cove-backup-b1.rdb");
+});
+
+it("accepts only relative object keys that stay inside the storage path", () => {
+  expect(objectKeyError("dumps/2026/app.dump")).toBeUndefined();
+  expect(objectKeyError("")).toBeDefined();
+  expect(objectKeyError("/dumps/app.dump")).toBeDefined();
+  expect(objectKeyError("dumps/../secret")).toBeDefined();
+  expect(objectKeyError("./app.dump")).toBeDefined();
+  expect(objectKeyError("dumps//app.dump")).toBeDefined();
+  expect(objectKeyError("dumps/")).toBeDefined();
+  expect(objectKeyError("dumps\\app.dump")).toBeDefined();
+  expect(objectKeyError("c:app.dump")).toBeDefined();
+  expect(objectKeyError("dumps/app\u0007.dump")).toBeDefined();
+  expect(objectKeyError("\u00e9".repeat(512))).toBeUndefined();
+  expect(objectKeyError("\u00e9".repeat(513))).toBeDefined();
+});
+
+it("converts edited transfer limits to exact bytes and keeps an untouched saved value", () => {
+  const min = MiB;
+  const max = 64 * 1024 * MiB;
+  expect(parseTransferLimit("2048", 1024 * MiB, min, max)).toEqual({ bytes: 2048 * MiB });
+  expect(parseTransferLimit("65536", 1024 * MiB, min, max)).toEqual({ bytes: max });
+  const odd = 1536 * MiB + 7;
+  expect(bytesToMiBText(odd)).toBe("1536.00");
+  expect(parseTransferLimit(bytesToMiBText(odd), odd, min, max)).toEqual({ bytes: odd });
+  expect(parseTransferLimit("0", 1024 * MiB, min, max)).toHaveProperty("error");
+  expect(parseTransferLimit("65537", 1024 * MiB, min, max)).toHaveProperty("error");
+  expect(parseTransferLimit("1.5", 1024 * MiB, min, max)).toHaveProperty("error");
+  expect(parseTransferLimit("", 1024 * MiB, min, max)).toHaveProperty("error");
 });
