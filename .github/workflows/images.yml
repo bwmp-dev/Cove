@@ -1,0 +1,98 @@
+name: Publish dashboard and workers
+on:
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      revision:
+        required: true
+        type: string
+      publish:
+        required: true
+        type: boolean
+permissions:
+  contents: read
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        target: [panel, worker]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.revision }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image names
+        id: names
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          image="ghcr.io/${REPOSITORY,,}"
+          if [ "$TARGET" = worker ]; then image="$image-worker"; fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ inputs.publish }}
+          tags: ${{ steps.names.outputs.image }}:${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.revision }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          build-args: |
+            BUILD_VERSION=${{ inputs.version }}
+            BUILD_REVISION=${{ inputs.revision }}
+            BUILD_CHANNEL=${{ inputs.channel }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+  promote:
+    needs: images
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote complete builds to the selected channel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ inputs.revision }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          if [ "$CHANNEL" = beta ]; then
+            head=$(gh api "repos/$REPOSITORY/commits/main" --jq .sha)
+            [ "$head" = "$REVISION" ] || { echo 'A newer main commit exists; keeping this build under its immutable tag.'; exit 0; }
+          else
+            latest=$(gh api "repos/$REPOSITORY/releases/latest" --jq .tag_name)
+            [ "$latest" = "$VERSION" ] || { echo 'A newer release exists; keeping this build under its version tag.'; exit 0; }
+          fi
+          for suffix in '' '-worker'; do
+            image="ghcr.io/${REPOSITORY,,}$suffix"
+            docker buildx imagetools create --tag "$image:$CHANNEL" "$image:$VERSION"
+          done

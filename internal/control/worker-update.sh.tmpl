@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+[ "$(id -u)" = 0 ] || { echo 'Run as root.' >&2; exit 1; }
+exec 9>/run/cove-worker-update.lock
+flock -n 9 || exit 0
+case "$(uname -m)" in
+ x86_64) arch=amd64 ;;
+ aarch64) arch=arm64 ;;
+ *) echo 'Unsupported CPU architecture.' >&2; exit 1 ;;
+esac
+scratch=$(mktemp -d)
+drained=false
+replaced=false
+completed=false
+rpc() { printf '{"method":"%s"}\n' "$1" | /usr/local/bin/cove-worker rpc; }
+ready() {
+ attempts=0
+ while [ "$attempts" -lt 30 ]; do
+  if rpc probe > "$scratch/probe.json" && jq -e '.probe.ready == true' "$scratch/probe.json" >/dev/null; then return 0; fi
+  attempts=$((attempts + 1)); sleep 1
+ done
+ return 1
+}
+cleanup() {
+ status=$?
+ trap - EXIT HUP INT TERM
+ if [ "$replaced" = true ] && [ "$completed" = false ]; then
+  systemctl stop cove-worker || true
+  install -m 755 "$scratch/previous" /usr/local/bin/cove-worker.restore
+  mv -f /usr/local/bin/cove-worker.restore /usr/local/bin/cove-worker
+  systemctl start cove-worker && ready || { echo 'Worker rollback failed; inspect journalctl -u cove-worker.' >&2; status=1; }
+ fi
+ if [ "$drained" = true ]; then
+  if ! rpc resume > "$scratch/resume.json" || ! jq -e '.maintenance.draining == false' "$scratch/resume.json" >/dev/null; then
+   echo 'Could not resume worker; inspect journalctl -u cove-worker-update.' >&2; status=1
+  fi
+ fi
+ rm -rf "$scratch"
+ exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
+curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=https' '{{.URL}}/releases/worker/'"$arch" -o "$scratch/release.json"
+checksum=$(jq -er '.sha256 | select(test("^[a-f0-9]{64}$"))' "$scratch/release.json")
+installed=$(sha256sum /usr/local/bin/cove-worker)
+[ "${installed%% *}" != "$checksum" ] || exit 0
+systemctl is-active --quiet cove-worker || { echo 'Worker is stopped; refusing an automatic update.' >&2; exit 1; }
+# Preserve maintenance requested by an operator or another workflow.
+[ ! -e /var/lib/cove/draining.json ] || { echo 'Worker already in maintenance; deferring update.'; exit 0; }
+curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=https' '{{.URL}}/releases/worker/'"$arch/$checksum" -o "$scratch/worker"
+printf '%s  %s\n' "$checksum" "$scratch/worker" | sha256sum -c -
+cp /usr/local/bin/cove-worker "$scratch/previous"
+drained=true
+attempts=0
+while :; do
+ rpc drain > "$scratch/drain.json"
+ jq -e '.maintenance.draining == true and (.maintenance.active | type == "number")' "$scratch/drain.json" >/dev/null
+ [ "$(jq -r '.maintenance.active' "$scratch/drain.json")" = 0 ] && break
+ attempts=$((attempts + 1))
+ [ "$attempts" -lt 360 ] || { echo 'Worker busy; update deferred.' >&2; exit 1; }
+ sleep 5
+done
+systemctl stop cove-worker
+replaced=true
+install -m 755 "$scratch/worker" /usr/local/bin/cove-worker.new
+mv -f /usr/local/bin/cove-worker.new /usr/local/bin/cove-worker
+systemctl start cove-worker
+ready || { echo 'Replacement worker failed readiness; restoring previous binary.' >&2; exit 1; }
+completed=true
+echo 'Worker updated to the panel release.'

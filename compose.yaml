@@ -1,0 +1,82 @@
+services:
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: cove
+      POSTGRES_USER: cove
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/configure.sh first}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U cove -d cove]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+  cove:
+    image: ghcr.io/bwmp-dev/cove:${COVE_VERSION:-release}
+    build: .
+    environment:
+      DATABASE_URL: postgres://cove:${POSTGRES_PASSWORD}@database:5432/cove?sslmode=disable
+      COVE_ENCRYPTION_KEY: ${COVE_ENCRYPTION_KEY:?Run scripts/configure.sh first}
+      COVE_ADMIN_TOKEN: ${COVE_ADMIN_TOKEN:?Run scripts/configure.sh first}
+      COVE_ADMIN_PASSWORD: ${COVE_ADMIN_PASSWORD:?Run scripts/configure.sh first}
+      COVE_PUBLIC_URL: https://${COVE_DOMAIN:?Set COVE_DOMAIN}
+      COVE_GITHUB_CLIENT_ID: ${COVE_GITHUB_CLIENT_ID:-}
+      COVE_GITHUB_CLIENT_SECRET: ${COVE_GITHUB_CLIENT_SECRET:-}
+      COVE_SMTP_HOST: ${COVE_SMTP_HOST:-}
+      COVE_SMTP_PORT: ${COVE_SMTP_PORT:-}
+      COVE_SMTP_USERNAME: ${COVE_SMTP_USERNAME:-}
+      COVE_SMTP_PASSWORD: ${COVE_SMTP_PASSWORD:-}
+      COVE_SMTP_FROM: ${COVE_SMTP_FROM:-}
+    depends_on:
+      database:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - default
+      - ingress
+  proxy:
+    image: traefik:v3.7.19
+    container_name: cove-ingress
+    labels:
+      cove.managed: ingress
+      cove.panel.domain: ${COVE_DOMAIN:?Set COVE_DOMAIN}
+    entrypoint: [sh, -ec]
+    command:
+      - |
+        mkdir -p /data/dynamic
+        cp /etc/traefik/panel.yaml /data/dynamic/panel.yaml
+        exec traefik --configFile=/etc/traefik/traefik.yaml
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ingress
+    environment:
+      COVE_DOMAIN: ${COVE_DOMAIN:?Set COVE_DOMAIN}
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./deploy/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - ./deploy/traefik-panel.yaml:/etc/traefik/panel.yaml:ro
+      - certificates:/data
+    depends_on:
+      - cove
+    restart: unless-stopped
+volumes:
+  database:
+  certificates:
+    name: cove-ingress
+    labels:
+      cove.managed: ingress
+networks:
+  ingress:
+    name: cove-ingress
+    labels:
+      cove.managed: ingress

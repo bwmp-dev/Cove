@@ -1,0 +1,13 @@
+http:
+  routers:
+    cove-panel:
+      rule: 'Host(`{{ env "COVE_DOMAIN" }}`)'
+      entryPoints: [websecure]
+      service: cove-panel
+      tls:
+        certResolver: cove
+  services:
+    cove-panel:
+      loadBalancer:
+        servers:
+          - url: http://cove:8080

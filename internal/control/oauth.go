@@ -1,0 +1,278 @@
+package control
+
+import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
+)
+
+func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
+	if s.GithubClientID == "" || s.GithubClientSecret == "" {
+		http.Error(w, "GitHub sign-in is not configured", 409)
+		return
+	}
+	var in struct {
+		Invitation string `json:"invitation_token"`
+		Link       bool   `json:"link"`
+		Password   string `json:"current_password"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
+		http.Error(w, "authentication unavailable", 503)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var link, invite *string
+	var linkVersion *int64
+	if in.Link {
+		p, err := s.sessionIdentity(r)
+		if err != nil {
+			http.Error(w, "sign in before linking GitHub", 401)
+			return
+		}
+		var hash []byte
+		var version int64
+		err = tx.QueryRow(r.Context(), "SELECT password_hash,auth_version FROM users WHERE id=$1 AND NOT disabled FOR SHARE", p.ID).Scan(&hash, &version)
+		if err != nil || len(in.Password) > 72 || bcrypt.CompareHashAndPassword(hash, []byte(in.Password)) != nil {
+			http.Error(w, "current password is incorrect", 400)
+			return
+		}
+		link = &p.ID
+		linkVersion = &version
+	}
+	if in.Invitation != "" {
+		var id string
+		err := s.DB.QueryRow(r.Context(), "SELECT id FROM invitations WHERE token_hash=$1 AND consumed_at IS NULL AND expires_at>now()", tokenHash(in.Invitation)).Scan(&id)
+		if err != nil {
+			http.Error(w, "invalid or expired invitation", 400)
+			return
+		}
+		invite = &id
+	}
+	state, browser, verifier := randomToken(), randomToken(), randomToken()
+	encrypted, err := seal(s.Key, []byte(verifier))
+	if err != nil {
+		http.Error(w, "authentication unavailable", 503)
+		return
+	}
+	_, err = tx.Exec(r.Context(), "INSERT INTO oauth_states(token_hash,browser_hash,verifier,link_user_id,invitation_id,link_version,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '10 minutes')", tokenHash(state), tokenHash(browser), encrypted, link, invite, linkVersion)
+	if err == nil {
+		err = tx.Commit(r.Context())
+	}
+	if err != nil {
+		http.Error(w, "authentication unavailable", 503)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "__Host-cove-oauth", Value: browser, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+	challenge := sha256.Sum256([]byte(verifier))
+	q := url.Values{"client_id": {s.GithubClientID}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "scope": {"read:user user:email"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
+	respond(w, 200, map[string]string{"url": "https://github.com/login/oauth/authorize?" + q.Encode()})
+}
+func (s *Server) githubRequest(r *http.Request, method, endpoint, token string, form url.Values, out any) error {
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req, err := http.NewRequestWithContext(r.Context(), method, endpoint, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Cove")
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	}
+	client := http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if s.OAuthClient != nil {
+		client.Transport = s.OAuthClient.Transport
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return errors.New("provider request rejected")
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 1024*1024+1))
+	if err != nil || len(b) > 1024*1024 {
+		return errors.New("invalid provider response")
+	}
+	return json.Unmarshal(b, out)
+}
+func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
+	fail := func(code string) { http.Redirect(w, r, "/login?error="+code, http.StatusSeeOther) }
+	cookie, err := r.Cookie("__Host-cove-oauth")
+	if err != nil || s.GithubClientID == "" || s.GithubClientSecret == "" {
+		fail("oauth_failed")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "__Host-cove-oauth", Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	var browser, encrypted []byte
+	var link, invite *string
+	var linkVersion *int64
+	err = s.DB.QueryRow(r.Context(), "DELETE FROM oauth_states WHERE token_hash=$1 AND expires_at>now() RETURNING browser_hash,verifier,link_user_id,invitation_id,link_version", tokenHash(r.URL.Query().Get("state"))).Scan(&browser, &encrypted, &link, &invite, &linkVersion)
+	if err != nil || subtle.ConstantTimeCompare(browser, tokenHash(cookie.Value)) != 1 {
+		fail("oauth_failed")
+		return
+	}
+	verifier, err := unseal(s.Key, encrypted)
+	if err != nil || r.URL.Query().Get("code") == "" {
+		fail("oauth_failed")
+		return
+	}
+	var access struct {
+		Token string `json:"access_token"`
+		Type  string `json:"token_type"`
+	}
+	err = s.githubRequest(r, "POST", "https://github.com/login/oauth/access_token", "", url.Values{"client_id": {s.GithubClientID}, "client_secret": {s.GithubClientSecret}, "code": {r.URL.Query().Get("code")}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "code_verifier": {string(verifier)}}, &access)
+	if err != nil || access.Token == "" || !strings.EqualFold(access.Type, "bearer") {
+		fail("oauth_failed")
+		return
+	}
+	var gh struct {
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+	}
+	if s.githubRequest(r, "GET", "https://api.github.com/user", access.Token, nil, &gh) != nil || gh.ID <= 0 {
+		fail("oauth_failed")
+		return
+	}
+	var emails []struct {
+		Email    string `json:"email"`
+		Primary  bool   `json:"primary"`
+		Verified bool   `json:"verified"`
+	}
+	if s.githubRequest(r, "GET", "https://api.github.com/user/emails", access.Token, nil, &emails) != nil {
+		fail("oauth_failed")
+		return
+	}
+	verified := map[string]bool{}
+	email := ""
+	for _, e := range emails {
+		normalized, valid := normalizeEmail(e.Email)
+		if e.Verified && valid {
+			verified[normalized] = true
+			if email == "" || e.Primary {
+				email = normalized
+			}
+		}
+	}
+	if email == "" {
+		fail("oauth_failed")
+		return
+	}
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
+		fail("oauth_failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var team, inviteEmail, role string
+	var grants json.RawMessage
+	if invite != nil {
+		err = tx.QueryRow(r.Context(), `SELECT i.team_id,i.email,i.role,i.grants FROM invitations i JOIN users creator ON creator.id=i.created_by WHERE i.id=$1 AND i.consumed_at IS NULL AND i.expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin'))) FOR UPDATE OF i`, invite).Scan(&team, &inviteEmail, &role, &grants)
+		if err != nil || !verified[inviteEmail] {
+			fail("oauth_failed")
+			return
+		}
+		email = inviteEmail
+	}
+	var user string
+	githubID := strconv.FormatInt(gh.ID, 10)
+	err = tx.QueryRow(r.Context(), "SELECT id FROM users WHERE github_id=$1 AND NOT disabled FOR UPDATE", githubID).Scan(&user)
+	if link != nil {
+		if err == nil && user != *link {
+			fail("account_exists")
+			return
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			fail("oauth_failed")
+			return
+		}
+		var localEmail string
+		var currentGitHub *string
+		var currentVersion int64
+		err = tx.QueryRow(r.Context(), "SELECT COALESCE(email,''),github_id,auth_version FROM users WHERE id=$1 AND NOT disabled FOR UPDATE", link).Scan(&localEmail, &currentGitHub, &currentVersion)
+		if err != nil || linkVersion == nil || currentVersion != *linkVersion || !verified[localEmail] || (currentGitHub != nil && *currentGitHub != githubID) {
+			fail("oauth_failed")
+			return
+		}
+		user = *link
+		_, err = tx.Exec(r.Context(), "UPDATE users SET github_id=$1 WHERE id=$2", githubID, user)
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM users WHERE email=$1 OR github_id=$2)", email, githubID).Scan(&exists)
+		if err != nil {
+			fail("oauth_failed")
+			return
+		}
+		if exists {
+			fail("account_exists")
+			return
+		}
+		var enabled bool
+		err = tx.QueryRow(r.Context(), "SELECT registration_enabled FROM control_settings WHERE id=1 FOR SHARE").Scan(&enabled)
+		if err != nil {
+			fail("oauth_failed")
+			return
+		}
+		if !enabled && invite == nil {
+			fail("registration_closed")
+			return
+		}
+		user = resourceID()
+		name := gh.Login
+		if name == "" || len(name) > 120 {
+			name = "GitHub user"
+		}
+		_, err = tx.Exec(r.Context(), "INSERT INTO users(id,email,name,email_verified,github_id) VALUES($1,$2,$3,true,$4)", user, email, name, githubID)
+	}
+	if err != nil {
+		fail("oauth_failed")
+		return
+	}
+	if invite != nil {
+		var localEmail string
+		if tx.QueryRow(r.Context(), "SELECT email FROM users WHERE id=$1", user).Scan(&localEmail) != nil || localEmail != inviteEmail {
+			fail("oauth_failed")
+			return
+		}
+		_, err = tx.Exec(r.Context(), "INSERT INTO team_members(team_id,user_id,role,grants) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", team, user, role, grants)
+		if err == nil {
+			_, err = tx.Exec(r.Context(), "UPDATE invitations SET consumed_at=now() WHERE id=$1", invite)
+		}
+	}
+	token := randomToken()
+	expiry := time.Now().Add(12 * time.Hour)
+	if err == nil {
+		_, err = tx.Exec(r.Context(), "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)", tokenHash(token), user, expiry)
+	}
+	if err == nil {
+		err = tx.Commit(r.Context())
+	}
+	if err != nil {
+		fail("oauth_failed")
+		return
+	}
+	setSession(w, token, expiry)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}

@@ -1,0 +1,78 @@
+name: Build and test
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: cove-ci-only
+          POSTGRES_DB: cove_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval=5s --health-timeout=5s --health-retries=12
+    env:
+      COVE_TEST_DATABASE_URL: postgres://postgres:cove-ci-only@localhost:5432/cove_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm install -g pnpm@11.20.0
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
+        working-directory: frontend
+      - run: python3 scripts/test-update-panel.py
+      - run: python3 scripts/test-worker-update.py
+      - run: sh -n scripts/install-auto-update.sh
+      - run: go test -race ./... -timeout 10m
+      - run: go vet ./...
+  release-please:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+  beta-images:
+    needs: test
+    uses: ./.github/workflows/images.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      channel: beta
+      version: beta-${{ github.sha }}
+      revision: ${{ github.sha }}
+      publish: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+  release-images:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/images.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      channel: release
+      version: ${{ needs.release-please.outputs.tag_name }}
+      revision: ${{ needs.release-please.outputs.sha }}
+      publish: true

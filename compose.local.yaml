@@ -1,0 +1,21 @@
+services:
+  cove:
+    environment:
+      COVE_LOCAL_SOCKET: /run/cove/worker.sock
+    group_add:
+      - "0"
+    volumes:
+      - /run/cove:/run/cove:ro
+  worker:
+    image: ghcr.io/bwmp-dev/cove-worker:${COVE_VERSION:-release}
+    build:
+      context: .
+      target: worker
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/cove:/var/lib/cove
+      - /run/cove:/run/cove
+    restart: unless-stopped

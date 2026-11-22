@@ -1,0 +1,228 @@
+package worker
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Escape resolved literal dollars before Compose reads the snapshot a second time.
+func literalCompose(value any) any {
+	switch value := value.(type) {
+	case string:
+		return strings.ReplaceAll(value, "$", "$$")
+	case []any:
+		for i, v := range value {
+			value[i] = literalCompose(v)
+		}
+		return value
+	case map[string]any:
+		for k, v := range value {
+			value[k] = literalCompose(v)
+		}
+		return value
+	default:
+		return value
+	}
+}
+
+type Release struct {
+	ID      string    `json:"id"`
+	Created time.Time `json:"created_at"`
+}
+
+func (e *Engine) Releases(workload string) ([]Release, error) {
+	if !workloadIdentifier.MatchString(workload) {
+		return nil, errors.New("invalid workload")
+	}
+	dir := filepath.Join(e.Root, "workloads", workload, "release-states")
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return []Release{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	items := []Release{}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), ".compose.json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if !identifier.MatchString(id) {
+			return nil, errors.New("invalid saved release")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, Release{ID: id, Created: info.ModTime()})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Created.After(items[j].Created) })
+	return items, nil
+}
+
+func (e *Engine) pruneReleases(ctx context.Context, workload string, out io.Writer) error {
+	releases, err := e.Releases(workload)
+	if err != nil || len(releases) <= 10 {
+		return err
+	}
+	dir := filepath.Join(e.Root, "workloads", workload)
+	keep := map[string]bool{}
+	for _, release := range releases[:10] {
+		keep[release.ID] = true
+	}
+	protect := func(state deployedState) {
+		keep[strings.TrimSuffix(filepath.Base(state.ComposePath), ".compose.json")] = true
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "current.json"))
+	if err != nil {
+		return err
+	}
+	var current deployedState
+	if err = json.Unmarshal(data, &current); err != nil {
+		return err
+	}
+	protect(current)
+	backups, err := e.Backups(workload)
+	if err != nil {
+		return err
+	}
+	for _, backup := range backups {
+		data, err = os.ReadFile(filepath.Join(dir, "backups", backup.ID+".json"))
+		if err != nil {
+			return err
+		}
+		var manifest backupManifest
+		if err = json.Unmarshal(data, &manifest); err != nil {
+			return err
+		}
+		protect(manifest.State)
+	}
+	// Rollback records may point at an older release's immutable Compose file.
+	for _, release := range releases {
+		if !keep[release.ID] {
+			continue
+		}
+		data, err = os.ReadFile(filepath.Join(dir, "release-states", release.ID+".json"))
+		if err != nil {
+			return err
+		}
+		var state deployedState
+		if err = json.Unmarshal(data, &state); err != nil {
+			return err
+		}
+		protect(state)
+	}
+	for _, release := range releases {
+		if keep[release.ID] {
+			continue
+		}
+		prefix := "cove-release/" + workload + ":" + strings.ToLower(release.ID) + "-"
+		tags, err := e.output(ctx, "docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference="+prefix+"*")
+		if err != nil {
+			return err
+		}
+		for _, tag := range strings.Fields(tags) {
+			if !strings.HasPrefix(tag, prefix) {
+				return errors.New("unexpected retained image tag")
+			}
+			if err = e.Run(ctx, e.Root, []string{"docker", "image", "rm", tag}, nil, out); err != nil {
+				return err
+			}
+		}
+		for _, path := range []string{filepath.Join(dir, "release-states", release.ID+".json"), filepath.Join(dir, "release-states", release.ID+".compose.json"), filepath.Join(dir, release.ID+".yaml")} {
+			if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		if err = os.RemoveAll(filepath.Join(dir, "releases", release.ID)); err != nil {
+			return err
+		}
+		if err = os.RemoveAll(filepath.Join(e.Root, "file-secrets", workload, release.ID)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args, env []string) (deployedState, error) {
+	output := &limitedBuffer{Limit: 2 * 1024 * 1024}
+	if err := e.Run(ctx, dir, append(append([]string{}, args...), "config", "--format", "json"), env, output); err != nil {
+		return deployedState{}, err
+	}
+	var config map[string]any
+	if err := json.Unmarshal(output.data.Bytes(), &config); err != nil {
+		return deployedState{}, err
+	}
+	services, ok := config["services"].(map[string]any)
+	if !ok || len(services) == 0 {
+		return deployedState{}, errors.New("release has no services")
+	}
+	for name, raw := range services {
+		service, ok := raw.(map[string]any)
+		if !ok || !serviceIdentifier.MatchString(name) {
+			return deployedState{}, errors.New("invalid release service")
+		}
+		// A preview's disabled background services have no container to snapshot.
+		if scale, ok := service["scale"].(float64); ok && scale == 0 && r.EnvironmentPreview != nil {
+			continue
+		}
+		ids := &limitedBuffer{Limit: 65536}
+		if err := e.Run(ctx, dir, []string{"docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-" + r.Workload, "--filter", "label=com.docker.compose.service=" + name, "--filter", "label=com.docker.compose.oneoff=False"}, nil, ids); err != nil {
+			return deployedState{}, err
+		}
+		containers := strings.Fields(ids.data.String())
+		if len(containers) == 0 {
+			return deployedState{}, errors.New("cannot snapshot a service without a created container")
+		}
+		image := ""
+		for _, container := range containers {
+			inspected := &limitedBuffer{Limit: 1024}
+			if err := e.Run(ctx, dir, []string{"docker", "inspect", "--format", "{{.Image}}", container}, nil, inspected); err != nil {
+				return deployedState{}, err
+			}
+			digest := strings.TrimSpace(inspected.data.String())
+			if !strings.HasPrefix(digest, "sha256:") || len(digest) != 71 || (image != "" && image != digest) {
+				return deployedState{}, errors.New("service images are not consistent")
+			}
+			image = digest
+		}
+		serviceHash := sha256.Sum256([]byte(name))
+		retained := "cove-release/" + r.Workload + ":" + r.ID + "-" + hex.EncodeToString(serviceHash[:8])
+		if err := e.Run(ctx, dir, []string{"docker", "image", "tag", image, strings.ToLower(retained)}, nil, &limitedBuffer{Limit: 1024}); err != nil {
+			return deployedState{}, err
+		}
+		service["image"] = image
+		service["pull_policy"] = "never"
+		delete(service, "build")
+	}
+	snapshots := filepath.Join(dir, "release-states")
+	if err := os.MkdirAll(snapshots, 0700); err != nil {
+		return deployedState{}, err
+	}
+	path := filepath.Join(snapshots, r.ID+".compose.json")
+	if err := writeJSON(path, literalCompose(config)); err != nil {
+		return deployedState{}, err
+	}
+	state := deployedState{ComposePath: path, Environment: r.Environment}
+	e.mu.Lock()
+	j, err := e.read(r.ID)
+	e.mu.Unlock()
+	if err != nil {
+		return deployedState{}, err
+	}
+	state.Revision = j.Operation.Revision
+	if err = writeJSON(filepath.Join(snapshots, r.ID+".json"), state); err != nil {
+		return deployedState{}, err
+	}
+	return state, nil
+}

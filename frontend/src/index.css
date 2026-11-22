@@ -1,0 +1,96 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  /* Neutral scale. Each step has one role; pick the role rather than a neighbouring step or an opacity modifier. */
+  /* 1 App background: the shell and sidebar. */
+  --color-canvas: #08080a;
+  /* 2 Subtle background: the page panel and form fields. */
+  --color-panel: #101013;
+  /* 3 Component background at rest: section bodies, graph nodes. */
+  --color-surface: #16161a;
+  /* 4 Component hover: hovered rows, raised controls and the selected navigation item. */
+  --color-raised: #1e1e23;
+  /* 5 Component active: hovered raised controls, pressed toggles. */
+  --color-hover: #24242a;
+  /* 6 Subtle border: dividers and table hairlines. */
+  --color-line: #26262c;
+  /* 7 Border: control and section edges, group separators. */
+  --color-line-strong: #36363e;
+  /* 8 Strong border: form fields, which need a 3:1 boundary against panel and surface. */
+  --color-line-input: #64656d;
+  /* 9 Solid: neutral status dots. Also the lowest step for readable text, at least 4.5:1 on every background up to raised. */
+  --color-fg-subtle: #85868e;
+  /* Disabled controls are exempt from contrast minimums and must read as inactive. */
+  --color-fg-disabled: #5c5d65;
+  /* 11 Low-contrast text: descriptions and metadata. */
+  --color-fg-muted: #9a9ba3;
+  /* 12 High-contrast text. */
+  --color-fg: #ececee;
+
+  /* Semantic colours: solid (dots, icons, text at 4.5:1 on surface), tint (selected or notice background)
+     and line (the border around a tint). Tints and lines are mixed over the panel so they stay opaque. */
+  --color-ok: #4cc38a;
+  --color-ok-tint: #151e1d;
+  --color-ok-line: #234939;
+  --color-warn: #e5a54b;
+  --color-warn-tint: #211c17;
+  --color-warn-line: #544025;
+  --color-bad: #ef6461;
+  --color-bad-tint: #221719;
+  --color-bad-line: #572b2c;
+  --color-info: #6aa6f8;
+  --color-info-tint: #171c25;
+  --color-info-line: #2d405c;
+
+  /* Widest page content column (max-w-page). Wider panels only add empty space between labels and values. */
+  --container-page: 80rem;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-canvas text-fg font-sans text-sm antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    background: var(--color-info-line);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-info);
+    outline-offset: 2px;
+  }
+  dialog::backdrop {
+    background: rgb(0 0 0 / 0.6);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+    }
+  }
+}
+
+@layer components {
+  /* Page content sits in one centred column; elements marked page-bleed (page headers) span the panel so their divider reaches both edges. */
+  .page-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, var(--container-page)) minmax(0, 1fr);
+    align-content: start;
+  }
+  .page-grid > * {
+    grid-column: 2;
+    min-width: 0;
+  }
+  .page-grid > .page-bleed {
+    grid-column: 1 / -1;
+  }
+}

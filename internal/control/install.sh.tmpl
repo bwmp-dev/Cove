@@ -1,0 +1,150 @@
+#!/bin/sh
+set -eu
+[ "$(id -u)" = 0 ] || { echo 'Run this installer as root.' >&2; exit 1; }
+[ "$(uname -s)" = Linux ] || { echo 'Linux is required.' >&2; exit 1; }
+command -v systemctl >/dev/null || { echo 'systemd is required.' >&2; exit 1; }
+command -v flock >/dev/null || { echo 'Install util-linux (flock) before retrying.' >&2; exit 1; }
+exec 9>/run/cove-worker-update.lock
+flock -n 9 || { echo 'A worker update is already running; retry later.' >&2; exit 1; }
+case "$(uname -m)" in
+ x86_64) arch=amd64; checksum='{{.AMD64}}' ;;
+ aarch64) arch=arm64; checksum='{{.ARM64}}' ;;
+ *) echo 'Unsupported CPU architecture.' >&2; exit 1 ;;
+esac
+if id cove >/dev/null 2>&1 && [ ! -f /etc/cove/managed-user ]; then
+ echo 'An existing unmanaged cove account exists; refusing to modify it.' >&2; exit 1
+fi
+if [ -f /etc/cove/node-id ] && [ "$(cat /etc/cove/node-id)" != '{{.ID}}' ]; then
+ echo 'This machine belongs to another node enrollment.' >&2; exit 1
+fi
+echo 'Preparing Cove worker: Docker/Compose, dedicated SSH account, and worker executable.'
+if ! command -v jq >/dev/null || ! command -v git >/dev/null || ! command -v sshd >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+ command -v apt-get >/dev/null || { echo 'Install Docker Compose v2, Docker Buildx, OpenSSH, curl, and jq before retrying on this distribution.' >&2; exit 1; }
+ apt-get update
+ apt-get install -y --no-upgrade ca-certificates curl jq openssh-server git
+ if ! command -v docker >/dev/null; then apt-get install -y docker.io; fi
+ if ! docker compose version >/dev/null 2>&1; then
+  if apt-cache show docker-compose-v2 >/dev/null 2>&1; then apt-get install -y docker-compose-v2
+  elif apt-cache show docker-compose-plugin >/dev/null 2>&1; then apt-get install -y docker-compose-plugin
+  else echo 'Install Docker Compose v2 for this distribution and rerun.' >&2; exit 1; fi
+ fi
+ # Git sources build with a dedicated Buildx builder; distribution Docker packages ship it separately.
+ if ! docker buildx version >/dev/null 2>&1; then
+  if apt-cache show docker-buildx >/dev/null 2>&1; then apt-get install -y --no-upgrade docker-buildx
+  elif apt-cache show docker-buildx-plugin >/dev/null 2>&1; then apt-get install -y --no-upgrade docker-buildx-plugin
+  else echo 'Install Docker Buildx for this distribution and rerun.' >&2; exit 1; fi
+ fi
+fi
+install -d -m 700 /etc/cove
+if ! id cove >/dev/null 2>&1; then useradd --system --create-home --home-dir /var/lib/cove --shell /bin/sh cove; fi
+install -d -m 700 -o cove -g cove /var/lib/cove
+touch /etc/cove/managed-user
+printf '%s\n' '{{.ID}}' > /etc/cove/node-id
+getent group docker >/dev/null || groupadd --system docker
+usermod -aG docker cove
+systemctl start docker
+ssh-keygen -A
+if ! systemctl is-active --quiet ssh && ! systemctl is-active --quiet sshd; then systemctl start ssh; fi
+scratch=$(mktemp -d)
+drained=false
+replaced=false
+completed=false
+cleanup() {
+ status=$?
+ trap - EXIT HUP INT TERM
+ if [ "$completed" = false ] && [ "$replaced" = true ]; then
+  systemctl stop cove-worker || true
+  if [ -f "$scratch/previous-worker" ]; then
+   install -m 755 "$scratch/previous-worker" /usr/local/bin/cove-worker.restore
+   mv -f /usr/local/bin/cove-worker.restore /usr/local/bin/cove-worker
+   if [ -f "$scratch/previous-service" ]; then
+    cp "$scratch/previous-service" /etc/systemd/system/cove-worker.service
+   fi
+   systemctl daemon-reload
+   systemctl start cove-worker || echo 'Previous worker could not restart; inspect journalctl -u cove-worker.' >&2
+  fi
+ fi
+ if [ "$drained" = true ] && systemctl is-active --quiet cove-worker; then
+  resumed=false
+  attempts=0
+  while [ "$attempts" -lt 30 ]; do
+   if printf '%s\n' '{"method":"resume"}' | /usr/local/bin/cove-worker rpc > "$scratch/resume.json" 2>/dev/null && jq -e '.maintenance.draining == false' "$scratch/resume.json" >/dev/null; then resumed=true; break; fi
+   attempts=$((attempts + 1))
+   sleep 1
+  done
+  if [ "$resumed" = false ]; then echo 'Could not resume worker; inspect its logs and send the resume RPC after recovery.' >&2; status=1; fi
+ fi
+ rm -rf "$scratch"
+ exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
+curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=https' -H 'Authorization: Bearer {{.Token}}' '{{.URL}}/bootstrap/worker/'"$arch" -o "$scratch/worker"
+printf '%s  %s\n' "$checksum" "$scratch/worker" | sha256sum -c -
+if [ -f /usr/local/bin/cove-worker ]; then cp /usr/local/bin/cove-worker "$scratch/previous-worker"; fi
+if [ -f /etc/systemd/system/cove-worker.service ]; then cp /etc/systemd/system/cove-worker.service "$scratch/previous-service"; fi
+if systemctl is-active --quiet cove-worker; then
+ echo 'Waiting for active operations before replacing the worker.'
+ drained=true
+ attempts=0
+ while :; do
+  printf '%s\n' '{"method":"drain"}' | /usr/local/bin/cove-worker rpc > "$scratch/drain.json"
+  jq -e '.maintenance.draining == true and (.maintenance.active | type == "number")' "$scratch/drain.json" >/dev/null || {
+   echo 'Installed worker does not support safe draining. Finish its operations and stop cove-worker before retrying.' >&2; exit 1;
+  }
+  [ "$(jq -r '.maintenance.active' "$scratch/drain.json")" = 0 ] && break
+  attempts=$((attempts + 1))
+  [ "$attempts" -lt 360 ] || { echo 'Worker is still busy; upgrade cancelled.' >&2; exit 1; }
+  sleep 5
+ done
+ replaced=true
+ systemctl stop cove-worker
+fi
+replaced=true
+install -m 755 "$scratch/worker" /usr/local/bin/cove-worker.new
+mv -f /usr/local/bin/cove-worker.new /usr/local/bin/cove-worker
+install -d -m 700 -o cove -g cove /var/lib/cove/.ssh
+printf '%s\n' 'restrict,command="/usr/local/bin/cove-worker rpc" {{.PublicKey}}' > "$scratch/authorized_keys"
+install -m 600 -o cove -g cove "$scratch/authorized_keys" /var/lib/cove/.ssh/authorized_keys
+cat > /etc/systemd/system/cove-worker.service <<'SERVICE'
+[Unit]
+Description=Cove worker
+After=docker.service network.target
+Requires=docker.service
+[Service]
+User=cove
+Group=cove
+SupplementaryGroups=docker
+RuntimeDirectory=cove
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/local/bin/cove-worker daemon
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+KillMode=control-group
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cove /run/cove
+ProtectHome=true
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+SERVICE
+systemctl daemon-reload
+systemctl enable --now cove-worker
+systemctl is-active --quiet cove-worker || { echo 'Worker service failed to start.' >&2; exit 1; }
+attempts=0
+while :; do
+ if printf '%s\n' '{"method":"probe"}' | /usr/local/bin/cove-worker rpc > "$scratch/probe.json" 2>/dev/null && jq -e '.probe.ready == true' "$scratch/probe.json" >/dev/null; then break; fi
+ attempts=$((attempts + 1))
+ [ "$attempts" -lt 30 ] || { echo 'Replacement worker failed readiness; restoring previous executable.' >&2; exit 1; }
+ sleep 1
+done
+completed=true
+{{template "worker-update-install.sh.tmpl" .}}
+host_key=$(cat /etc/ssh/ssh_host_ed25519_key.pub)
+jq -n --arg host_key "$host_key" '{host_key:$host_key}' > "$scratch/register.json"
+curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=https' -H 'Authorization: Bearer {{.Token}}' -H 'Content-Type: application/json' --data-binary @"$scratch/register.json" '{{.URL}}/bootstrap/register'
+echo '\nEnrollment verification returned above. If unreachable, correct SSH reachability and verify again from Cove.'
