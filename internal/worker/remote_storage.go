@@ -50,6 +50,12 @@ func ValidateStorage(s *StorageLocation) error {
 	if s.Path == "" || strings.Contains(s.Path, "..") || strings.ContainsAny(s.Path, "\\:") {
 		return errors.New("a storage path without parent traversal is required")
 	}
+	if s.Protocol == "b2" {
+		if s.Endpoint != "" || s.AccessKey == "" || s.SecretKey == "" || strings.HasPrefix(s.Path, "/") || s.CACertificate != "" {
+			return errors.New("Backblaze B2 requires an application key ID, application key and bucket/path; endpoint and private CA must be empty")
+		}
+		return nil
+	}
 	u, err := url.Parse(s.Endpoint)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("invalid storage endpoint")
@@ -81,7 +87,7 @@ func ValidateStorage(s *StorageLocation) error {
 			return errors.New("FTPS requires credentials and explicit or implicit TLS")
 		}
 	default:
-		return errors.New("storage protocol must be s3, sftp, ftps, or webdav")
+		return errors.New("storage protocol must be s3, b2, sftp, ftps, or webdav")
 	}
 	return nil
 }
@@ -118,6 +124,8 @@ func storageEnvironment(s *StorageLocation) ([]string, error) {
 		env = append(env, "RCLONE_CA_CERT=/storage-ca.pem")
 	}
 	switch s.Protocol {
+	case "b2":
+		env = append(env, "RCLONE_CONFIG_COVE_ACCOUNT="+s.AccessKey, "RCLONE_CONFIG_COVE_KEY="+s.SecretKey)
 	case "s3":
 		env = append(env, "RCLONE_CONFIG_COVE_PROVIDER=Other", "RCLONE_CONFIG_COVE_NO_CHECK_BUCKET=true", "RCLONE_CONFIG_COVE_ENDPOINT="+s.Endpoint, "RCLONE_CONFIG_COVE_ACCESS_KEY_ID="+s.AccessKey, "RCLONE_CONFIG_COVE_SECRET_ACCESS_KEY="+s.SecretKey, "RCLONE_CONFIG_COVE_REGION="+s.Region)
 	case "webdav":

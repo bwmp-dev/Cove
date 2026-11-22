@@ -17,6 +17,9 @@ import (
 )
 
 type BackupConfig struct {
+	KeepDaily          int              `json:"keep_daily,omitempty"`
+	KeepWeekly         int              `json:"keep_weekly,omitempty"`
+	KeepMonthly        int              `json:"keep_monthly,omitempty"`
 	DrillIntervalHours int              `json:"drill_interval_hours,omitempty"`
 	Database           *DatabaseBackup  `json:"database,omitempty"`
 	StorageID          string           `json:"storage_id,omitempty"`
@@ -78,6 +81,9 @@ func ValidateBackup(b *BackupConfig) error {
 	}
 	if b.KeepLast < 1 || b.KeepLast > 1000 || b.IntervalHours < 0 || b.IntervalHours > 8760 {
 		return errors.New("backup retention must be 1-1000 and interval 0-8760 hours")
+	}
+	if b.KeepDaily < 0 || b.KeepDaily > 366 || b.KeepWeekly < 0 || b.KeepWeekly > 520 || b.KeepMonthly < 0 || b.KeepMonthly > 120 {
+		return errors.New("daily retention must be 0-366, weekly 0-520 and monthly 0-120")
 	}
 	if len(b.Password) < 16 || len(b.Password) > 4096 {
 		return errors.New("backup encryption password must contain 16-4096 bytes")
@@ -483,25 +489,26 @@ func (e *Engine) pruneBackups(ctx context.Context, r Request, out io.Writer) err
 	if err != nil {
 		return err
 	}
-	kept := 0
+	retained := retainedBackups(records, r.Backup)
+	pruned := false
 	for _, record := range records {
 		if record.Repository != r.Backup.Repository {
 			continue
 		}
-		kept++
-		if kept <= r.Backup.KeepLast {
+		if retained[record.ID] {
 			continue
 		}
 		if err = e.restic(ctx, r, nil, false, out, "forget", record.Snapshot); err != nil {
 			return err
 		}
+		pruned = true
 		for _, suffix := range []string{".json", ".source.json"} {
 			if err = os.Remove(filepath.Join(e.Root, "workloads", r.Workload, "backups", record.ID+suffix)); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}
 	}
-	if kept > r.Backup.KeepLast {
+	if pruned {
 		return e.restic(ctx, r, nil, false, out, "prune")
 	}
 	return nil

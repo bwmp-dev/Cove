@@ -331,7 +331,7 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var allowed bool
-	err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM nodes n JOIN team_nodes t ON t.node_id=n.id WHERE n.id=$1 AND t.team_id=$2 AND n.state='ready' AND COALESCE((n.capabilities->>'infrastructure')::boolean,false))`, in.Node, actor(r).Team).Scan(&allowed)
+	err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM nodes n JOIN team_nodes t ON t.node_id=n.id WHERE n.id=$1 AND t.team_id=$2 AND n.state='ready' AND COALESCE((n.capabilities->>'infrastructure')::boolean,false) AND (NOT $3::boolean OR COALESCE((n.capabilities->>'backblaze_b2')::boolean,false)))`, in.Node, actor(r).Team, kind == "storage" && c.Storage.Protocol == "b2").Scan(&allowed)
 	if err != nil || !allowed {
 		http.Error(w, "select a ready team node with an upgraded worker", 409)
 		return
@@ -404,6 +404,18 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if r.Action == "stop" || r.Action == "start" || r.Action == "restart" {
+		r.Backup = nil
+	}
+	if r.Action == "backup" && r.Backup != nil && (r.Backup.KeepDaily > 0 || r.Backup.KeepWeekly > 0 || r.Backup.KeepMonthly > 0) {
+		var capable bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'backup_retention')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {
+			return err
+		}
+		if !capable {
+			return errors.New("upgrade and verify the worker before applying daily, weekly or monthly retention")
+		}
+	}
 	if r.Action == "deploy" && r.Hooks != nil && (len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil) {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'guarded_hooks')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {

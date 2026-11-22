@@ -666,12 +666,14 @@ export function ResourceBackups() {
   const workload = useResource();
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
     <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts. Containers stop briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} />
+      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} retention={{ supported: node ? Boolean(node.capabilities?.backup_retention) : undefined, nodeName: node?.name }} />
     </Section>
   );
 }

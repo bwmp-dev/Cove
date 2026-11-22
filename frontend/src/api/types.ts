@@ -7,6 +7,8 @@ export interface Capabilities {
   resource_limits?: boolean;
   terminal?: boolean;
   infrastructure?: boolean;
+  backup_retention?: boolean;
+  backblaze_b2?: boolean;
   protocol: number;
   os: string;
   arch: string;

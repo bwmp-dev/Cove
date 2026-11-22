@@ -6,21 +6,27 @@ import { errorMessage, request } from "../api/client";
 import { connectionsQuery } from "../api/connections";
 import { keys } from "../api/queries";
 import { useOnline } from "../lib/hooks";
+import { calendarRetention, calendarTiers, KEEP_LAST_MAX, retentionSummary, usesCalendarRetention, type CalendarRetention } from "../lib/backups";
 import { inputClass } from "../lib/styles";
 import { ConfirmDialog, Dialog } from "./ConfirmDialog";
 import { RelativeTime } from "./RelativeTime";
 import { Button, Field, Notice, QueryError } from "./ui";
 
 interface DatabaseBackup { engine: string; service: string; name: string }
-interface Policy { drill_interval_hours?: number; database?: DatabaseBackup; storage_id?: string; repository: string; keep_last: number; interval_hours: number; ca_certificate?: string }
+interface Policy { drill_interval_hours?: number; database?: DatabaseBackup; storage_id?: string; repository: string; keep_last: number; keep_daily?: number; keep_weekly?: number; keep_monthly?: number; interval_hours: number; ca_certificate?: string }
 interface Snapshot { verified_at?: string; verification?: string; id: string; created_at: string; repository: string; database?: DatabaseBackup }
 
-function PolicyForm({ workloadId, initial, onClose }: { workloadId: string; initial: Policy | null; onClose: () => void }) {
+// Unknown when the worker's capabilities cannot be read; the API still refuses unsupported rules.
+export interface RetentionSupport { supported: boolean | undefined; nodeName?: string }
+
+function PolicyForm({ workloadId, initial, retention, onClose }: { workloadId: string; initial: Policy | null; retention: RetentionSupport; onClose: () => void }) {
   const client = useQueryClient();
   const online = useOnline();
   const locations = useQuery(connectionsQuery("storage-locations"));
   const [storage, setStorage] = useState(initial?.storage_id ?? "");
   const [engine, setEngine] = useState(initial?.database?.engine ?? "");
+  const [retentionError, setRetentionError] = useState<string>();
+  const savedCalendar = calendarRetention(initial);
   const save = useMutation({
     gcTime: 0,
     mutationFn: (backup: (Policy & { password: string; access_key: string; secret_key: string }) | null) => request("PUT", `/api/workloads/${workloadId}/backup-policy`, { backup }),
@@ -30,7 +36,15 @@ function PolicyForm({ workloadId, initial, onClose }: { workloadId: string; init
     event.preventDefault();
     const values = new FormData(event.currentTarget);
     const text = (name: string) => { const value = values.get(name); return typeof value === "string" ? value : ""; };
-    save.mutate({ database: engine ? { engine, service: text("db-service"), name: text("db-name") } : undefined, storage_id: storage, repository: text("repository").trim(), password: text("password"), access_key: text("access"), secret_key: text("secret"), keep_last: Number(text("keep")), interval_hours: Number(text("interval")), drill_interval_hours: Number(text("drill-interval")), ca_certificate: text("ca") });
+    const calendar: CalendarRetention = { keep_daily: Number(text("keep-daily")), keep_weekly: Number(text("keep-weekly")), keep_monthly: Number(text("keep-monthly")) };
+    if (retention.supported === false && usesCalendarRetention(calendar)) {
+      setRetentionError(`Set these to 0, or upgrade and verify ${retention.nodeName ?? "this resource's worker"} first.`);
+      const control = event.currentTarget.elements.namedItem(calendar.keep_daily > 0 ? "keep-daily" : calendar.keep_weekly > 0 ? "keep-weekly" : "keep-monthly");
+      if (control instanceof HTMLElement) control.focus();
+      return;
+    }
+    setRetentionError(undefined);
+    save.mutate({ database: engine ? { engine, service: text("db-service"), name: text("db-name") } : undefined, storage_id: storage, repository: text("repository").trim(), password: text("password"), access_key: text("access"), secret_key: text("secret"), keep_last: Number(text("keep")), ...calendar, interval_hours: Number(text("interval")), drill_interval_hours: Number(text("drill-interval")), ca_certificate: text("ca") });
   }
   return <form className="space-y-4" onSubmit={submit}>
     <Field id="backup-mode" label="Backup method"><Select id="backup-mode" className={inputClass} value={engine} onChange={event => setEngine(event.target.value)}><option value="">Consistent volume snapshot (stops containers)</option><option value="postgresql">PostgreSQL logical dump (online)</option><option value="mariadb">MariaDB logical dump (online, InnoDB only)</option></Select></Field>
@@ -43,16 +57,26 @@ function PolicyForm({ workloadId, initial, onClose }: { workloadId: string; init
     {!storage && <><Field id="backup-access" label="S3 access key" optional><input className={inputClass} id="backup-access" name="access" type="password" autoComplete="off" /></Field>
     <Field id="backup-secret" label="S3 secret key" optional hint="Leave credentials blank to keep saved values for the same repository."><input className={inputClass} id="backup-secret" name="secret" type="password" autoComplete="off" /></Field>
     <Field id="backup-ca" label="Private CA certificate" optional hint="PEM certificate for a private S3 endpoint. Public providers use the system trust store."><textarea className={inputClass} id="backup-ca" name="ca" defaultValue={initial?.ca_certificate ?? ""} rows={3} /></Field></>}
-    <div className="grid gap-4 sm:grid-cols-2">
-      <Field id="backup-keep" label="Snapshots to retain"><input className={inputClass} id="backup-keep" name="keep" type="number" min={1} max={1000} defaultValue={initial?.keep_last ?? 7} required /></Field>
-      <Field id="backup-interval" label="Interval in hours" hint="0 means manual backups only."><input className={inputClass} id="backup-interval" name="interval" type="number" min={0} max={8760} defaultValue={initial?.interval_hours ?? 24} required /></Field>
-    </div>
+    <Field id="backup-interval" label="Interval in hours" hint="0 means manual backups only."><input className={inputClass} id="backup-interval" name="interval" type="number" min={0} max={8760} defaultValue={initial?.interval_hours ?? 24} required aria-describedby="backup-interval-hint" /></Field>
+    <fieldset className="min-w-0 space-y-3" aria-describedby="backup-retention-help">
+      <legend className="text-[13px] font-semibold">Retention</legend>
+      <p id="backup-retention-help" className="text-xs text-fg-muted">Cove keeps every snapshot matched by any rule: the latest snapshots, plus the newest snapshot from each of the most recent days, ISO weeks and calendar months (UTC) that have backups. Periods without backups do not use a slot. Set a period to 0 to turn it off. Older snapshots in this repository are pruned only after a successful backup.</p>
+      {retention.supported === false && <Notice tone="warn" title="Daily, weekly and monthly retention needs an upgraded worker">Upgrade and verify {retention.nodeName ?? "this resource's worker"} to keep snapshots by day, week or month. Latest-snapshot retention works on every worker.</Notice>}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field id="backup-keep" label="Latest snapshots" hint={`Always kept, 1 to ${KEEP_LAST_MAX}.`}><input className={inputClass} id="backup-keep" name="keep" type="number" min={1} max={KEEP_LAST_MAX} step={1} defaultValue={initial?.keep_last ?? 7} required aria-describedby="backup-keep-hint" /></Field>
+        {calendarTiers.map((tier) => {
+          const id = `backup-${tier.key.replace("_", "-")}`;
+          return <Field key={tier.key} id={id} label={tier.label} hint={`Last 0 to ${tier.max} ${tier.unit} with backups.`}><input className={inputClass} id={id} name={tier.key.replace("_", "-")} type="number" min={0} max={tier.max} step={1} defaultValue={savedCalendar[tier.key]} required aria-invalid={retentionError ? true : undefined} aria-describedby={retentionError ? `${id}-hint backup-retention-error` : `${id}-hint`} /></Field>;
+        })}
+      </div>
+      {retentionError && <p id="backup-retention-error" className="text-xs text-bad">{retentionError}</p>}
+    </fieldset>
     {save.isError && <Notice tone="error">{errorMessage(save.error)}</Notice>}
     <div className="flex flex-wrap gap-2"><Button type="submit" variant="primary" pending={save.isPending} disabled={!online}>Save policy</Button><Button onClick={onClose} disabled={save.isPending}>Cancel</Button>{initial && <Button disabled={!online || save.isPending} onClick={() => save.mutate(null)}>Disable backups</Button>}</div>
   </form>;
 }
 
-export function Backups({ workloadId, busy, canOperate, canEdit }: { workloadId: string; busy: boolean; canOperate: boolean; canEdit: boolean }) {
+export function Backups({ workloadId, busy, canOperate, canEdit, retention }: { workloadId: string; busy: boolean; canOperate: boolean; canEdit: boolean; retention: RetentionSupport }) {
  const [copy, setCopy] = useState<Snapshot | null>(null);
   const [editing, setEditing] = useState(false);
   const [restore, setRestore] = useState<Snapshot | null>(null);
@@ -63,12 +87,12 @@ export function Backups({ workloadId, busy, canOperate, canEdit }: { workloadId:
   const action = useMutation({ mutationFn: (input: { action: "backup" | "restore" | "drill"; backup_id?: string }) => request("POST", `/api/workloads/${workloadId}/operations`, input), onSuccess: async () => { setRestore(null); await client.invalidateQueries({ queryKey: keys.operations }); } });
   if (policy.isError) return <QueryError what="backup policy" error={policy.error} onRetry={() => void policy.refetch()} />;
   if (!policy.data) return <p className="text-sm text-fg-muted">Loading backup policy…</p>;
-  if (editing) return <PolicyForm workloadId={workloadId} initial={policy.data.backup} onClose={() => setEditing(false)} />;
+  if (editing) return <PolicyForm workloadId={workloadId} initial={policy.data.backup} retention={retention} onClose={() => setEditing(false)} />;
   const saved = policy.data.backup;
   return <div className="space-y-4">
     <div className="flex flex-wrap items-center gap-3 empty:hidden">{canEdit && <Button disabled={!online || busy} onClick={() => setEditing(true)}>{saved ? "Edit policy" : "Configure backups"}</Button>}{saved && canOperate && <Button disabled={!online || busy} pending={action.isPending} onClick={() => action.mutate({ action: "backup" })}>Back up now</Button>}</div>
     {!saved && !canEdit && <p className="text-sm text-fg-muted">No backup policy is configured. Editor access is needed to configure one.</p>}
-    {saved && <p className="text-xs text-fg-muted">{saved.repository} · Keep {saved.keep_last} snapshots · {saved.interval_hours ? `Every ${saved.interval_hours} hours` : "Manual only"}</p>}
+    {saved && <p className="text-xs text-fg-muted">{saved.repository} · {retentionSummary(saved)} · {saved.interval_hours ? `Every ${saved.interval_hours} hours` : "Manual only"}</p>}
     {action.isError && <Notice tone="error">{errorMessage(action.error)}</Notice>}
     {copy && <RestoreCopyForm workloadId={workloadId} snapshot={copy} onClose={() => setCopy(null)} />}
     {snapshots.isError ? <QueryError what="backups" error={snapshots.error} onRetry={() => void snapshots.refetch()} /> : snapshots.data?.backups.length ? <ul className="divide-y divide-line">{snapshots.data.backups.map((snapshot) => <li key={snapshot.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><RelativeTime value={snapshot.created_at} /><p className="text-xs text-fg-muted break-all">{snapshot.id}</p>{snapshot.verified_at && <p className="text-xs text-fg-muted">{snapshot.verification === "database" ? "Database restore verified" : "File restore verified"} <RelativeTime value={snapshot.verified_at} /></p>}</div>{canEdit && <div className="flex flex-wrap gap-2"><Button size="sm" disabled={!online || busy || action.isPending || saved?.repository !== snapshot.repository} onClick={() => setCopy(snapshot)}>Restore as new resource</Button><Button size="sm" disabled={!online || busy || action.isPending || saved?.repository !== snapshot.repository} onClick={() => action.mutate({ action: "drill", backup_id: snapshot.id })}>Verify restore</Button><Button size="sm" disabled={!online || busy || action.isPending || saved?.repository !== snapshot.repository} onClick={() => setRestore(snapshot)}>Restore</Button></div>}</li>)}</ul> : <p className="text-sm text-fg-muted">No backups yet.</p>}
