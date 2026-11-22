@@ -86,6 +86,14 @@ function proxyRouters() {
   return execFileSync("docker", ["exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers"], { encoding: "utf8" });
 }
 
+// Deploying from the resource header asks for confirmation with an optional reason.
+async function deployFromHeader(page: Page) {
+  await page.locator("main header").getByRole("button", { name: "Deploy", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: /^Deploy .+\?$/ });
+  await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(dialog).toBeHidden();
+}
+
 async function createResource(page: Page, name: string) {
   await page.getByRole("link", { name: "New resource", exact: true }).first().click();
   await page.getByRole("button", { name: "Custom Compose or Git" }).click();
@@ -264,7 +272,7 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await expect(networks.getByText("Connections saved", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Overview", exact: true }).click();
 
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText("running", { exact: true }).first()).toBeVisible();
   await capture(page, testInfo, "resource");
@@ -771,7 +779,7 @@ test("shared variables stay hidden and resolve in a real deployment", async ({ p
   const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string; compose: string };
   const saved = await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: config.name, node_id: config.node_id, compose: config.compose + "    environment:\n      CHECK: ${CHECK}\n", kind: "service", environment: { CHECK: "{{environment.CHECK}}" } } });
   expect(saved.status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   const ids = execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${id}`], { encoding: "utf8" }).trim().split(/\s+/);
   expect(ids.length).toBe(1);
@@ -792,7 +800,7 @@ test("restore drills verify copied volume data without restarting the resource",
   const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
   const yaml = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo original > /data/marker; sleep 3600']\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\nvolumes:\n  data: {}\n";
   expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
   await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
   await page.getByRole("button", { name: "Configure backups", exact: true }).click();
@@ -851,7 +859,7 @@ test("resource bindings, hooks and promotion keep target configuration", async (
   const source = await (await page.request.get(`/api/workloads/${sourceID}`)).json() as { name: string; node_id: string; compose: string; project_id: string };
   const headers = { Origin: new URL(sourceURL).origin };
   expect((await page.request.put(`/api/workloads/${sourceID}`, { headers, data: { name: source.name, node_id: source.node_id, kind: "service", compose: source.compose, environment: { MODE: "source-fixture" } } })).status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   const sourceContainer = containers(sourceURL).split("|")[0] ?? "";
   const sourceImage = execFileSync("docker", ["inspect", "--format", "{{.Image}}", sourceContainer], { encoding: "utf8" }).trim();
@@ -973,7 +981,7 @@ test("temporary SSH access reaches one service and revocation closes it", async 
 `;
   expect((await page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
   await page.reload();
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   // This fixture's worker is containerized; attach it to emulate the real host's bridge reachability.
   execFileSync("docker", ["network", "connect", `cove-${id}_default`, process.env.COVE_BROWSER_WORKER ?? ""]);
@@ -1025,7 +1033,7 @@ test("guarded deployment rejects an unhealthy candidate without replacing the ap
   await createProject(page, "Guarded project");
   const url = await createResource(page, "guarded-app");
   const id = new URL(url).pathname.split("/")[2];
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60000 });
   const original = containers(url);
   await page.goto(`${url}/deployment-safety`);

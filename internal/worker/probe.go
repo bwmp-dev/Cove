@@ -14,6 +14,8 @@ import (
 )
 
 type Probe struct {
+	OutboundProxy       bool         `json:"outbound_proxy"`
+	ReleaseDiff         bool         `json:"release_diff"`
 	BinarySHA256        string       `json:"binary_sha256"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
 	GuardedHooks        bool         `json:"guarded_hooks"`
@@ -53,6 +55,8 @@ func Inspect(ctx context.Context) Probe {
 			p.BinarySHA256 = fmt.Sprintf("%x", sha256.Sum256(data))
 		}
 	}
+	p.OutboundProxy = true
+	p.ReleaseDiff = true
 	p.Previews = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true

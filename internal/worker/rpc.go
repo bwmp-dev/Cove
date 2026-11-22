@@ -16,19 +16,21 @@ import (
 )
 
 type RPCRequest struct {
-	Proxy     *outbound.Config      `json:"outbound_proxy,omitempty"`
-	Links     *LinkConfig           `json:"links,omitempty"`
-	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
-	Tunnel    *TunnelRequest        `json:"tunnel,omitempty"`
-	Promotion *PromotionExport      `json:"promotion,omitempty"`
-	Registry  *Registry             `json:"registry,omitempty"`
-	Storage   *StorageLocation      `json:"storage,omitempty"`
-	Terminal  *TerminalRequest      `json:"terminal,omitempty"`
-	Method    string                `json:"method"`
-	Request   *Request              `json:"request,omitempty"`
-	ID        string                `json:"id,omitempty"`
+	Diff      *ReleaseComparisonRequest `json:"release_comparison,omitempty"`
+	Proxy     *outbound.Config          `json:"outbound_proxy,omitempty"`
+	Links     *LinkConfig               `json:"links,omitempty"`
+	Ingress   *IngressConfigRequest     `json:"ingress,omitempty"`
+	Tunnel    *TunnelRequest            `json:"tunnel,omitempty"`
+	Promotion *PromotionExport          `json:"promotion,omitempty"`
+	Registry  *Registry                 `json:"registry,omitempty"`
+	Storage   *StorageLocation          `json:"storage,omitempty"`
+	Terminal  *TerminalRequest          `json:"terminal,omitempty"`
+	Method    string                    `json:"method"`
+	Request   *Request                  `json:"request,omitempty"`
+	ID        string                    `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Comparison    *ReleaseComparison   `json:"release_comparison,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
 	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
 	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
@@ -59,6 +61,15 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 	}
 	switch r.Method {
+	case "release_comparison":
+		if r.Diff == nil {
+			return RPCResponse{Error: "release comparison required"}
+		}
+		comparison, err := e.CompareReleases(ctx, *r.Diff, r.Proxy)
+		if err != nil {
+			return RPCResponse{Error: "retained release comparison unavailable: " + err.Error()}
+		}
+		return RPCResponse{Comparison: comparison}
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()
 		if err != nil {
@@ -321,6 +332,9 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // RPCTimeout bounds one worker call. Custom proxy configuration changes include validation in a
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
+	if method == "release_comparison" {
+		return 40 * time.Second
+	}
 	switch method {
 	case "ingress_config_change":
 		return 5 * time.Minute

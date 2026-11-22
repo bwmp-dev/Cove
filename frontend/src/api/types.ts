@@ -169,16 +169,30 @@ export interface WorkerOperation {
   revision?: string;
 }
 
+// Written by the control plane instead of a worker report: a policy, approval or quota hold (hold_reason, with
+// error repeated for older clients) or a failure recorded before any worker accepted the operation.
+export interface ControlPlaneResult {
+  error: string;
+  hold_reason?: string;
+}
+
 export interface Operation {
   approval_required?: boolean;
   approved_at?: string | null;
   can_approve?: boolean;
   cancel_requested?: boolean;
+  // Optional free text given when a deploy, rollback, promotion or sequence was queued.
+  reason?: string;
+  // Present on the detail endpoint only.
+  emergency_override_by?: string | null;
+  emergency_override_reason?: string;
+  emergency_override_at?: string | null;
+  can_override?: boolean;
   id: string;
   workload_id: string;
   action: OperationAction;
   state: OperationState;
-  result: WorkerOperation | null;
+  result: WorkerOperation | ControlPlaneResult | null;
   created_at: string;
 }
 

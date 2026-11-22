@@ -3,6 +3,7 @@ package control
 import (
 	"cove/internal/worker"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -39,6 +40,10 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: "preflight", Request: &request})
+	if errors.Is(err, errOutboundWorkerUnsupported) {
+		http.Error(w, err.Error(), 409)
+		return
+	}
 	if err != nil || response.Preflight == nil {
 		http.Error(w, "preflight unavailable; check worker connectivity", 502)
 		return

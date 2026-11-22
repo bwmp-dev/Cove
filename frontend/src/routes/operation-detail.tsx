@@ -1,22 +1,25 @@
 import { Activity } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { useCancelOperation, useRollback } from "../api/mutations";
-import { errorMessage, request } from "../api/client";
-import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useCancelOperation, useEmergencyOverride, useRollback } from "../api/mutations";
+import { errorMessage, isStatus, request } from "../api/client";
+import type { Operation } from "../api/types";
+import { ReasonField } from "../components/ReasonField";
+import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { useOnline } from "../lib/hooks";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { operationQuery, workloadsQuery } from "../api/queries";
 import { projectsQuery } from "../api/projects";
 import { LogViewer } from "../components/LogViewer";
+import { OperationResultNotice } from "../components/OperationResultNotice";
 import { OperationStateLabel } from "../components/status";
-import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
+import { Breadcrumbs, Button, DefinitionList, EmptyState, Field, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { shortId } from "../lib/format";
 import { formatAbsolute, formatDuration } from "../lib/format";
-import { actionLabels, durationMs, isActive } from "../lib/operations";
+import { actionLabels, durationMs, isActive, overrideEligible, reasonError, workerResult } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
-import { linkClass } from "../lib/styles";
+import { inputClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/operations/$operationId");
 
@@ -24,6 +27,7 @@ function RollbackRelease({ workloadId, release }: { workloadId: string; release:
   const retained = useQuery({ queryKey: ["releases", workloadId], queryFn: ({ signal }) => request<{ releases: { id: string }[] }>("GET", `/api/workloads/${workloadId}/releases`, undefined, signal) });
   const rollback = useRollback(workloadId);
   const [confirm, setConfirm] = useState(false);
+  const [reason, setReason] = useState("");
   const online = useOnline();
   const navigate = useNavigate();
   return <>
@@ -31,12 +35,48 @@ function RollbackRelease({ workloadId, release }: { workloadId: string; release:
     {retained.isError && <Notice tone="error">Could not verify whether this release is retained.</Notice>}
     {retained.data && !retained.data.releases.some((item) => item.id === release) && <p className="text-xs text-fg-muted">This release is no longer retained on the worker.</p>}
     {rollback.isError && <Notice tone="error" title="Could not queue rollback">{errorMessage(rollback.error)}</Notice>}
-    <ConfirmDialog open={confirm} title="Roll back to this release?" confirmLabel="Roll back" danger onCancel={() => setConfirm(false)} onConfirm={() => {
-      setConfirm(false);
-      rollback.mutate(release, { onSuccess: ({ id }) => void navigate({ to: "/operations/$operationId", params: { operationId: id } }) });
+    <ConfirmDialog open={confirm} title="Roll back to this release?" confirmLabel="Roll back" danger pending={rollback.isPending} onCancel={() => setConfirm(false)} onConfirm={() => {
+      if (reasonError(reason)) return;
+      rollback.mutate({ release, reason }, { onSettled: () => setConfirm(false), onSuccess: ({ id }) => void navigate({ to: "/operations/$operationId", params: { operationId: id } }) });
     }}>
-      This restores the saved Compose configuration and local images. It does not restore database contents or volumes, undo migrations, or edit your saved resource configuration. The worker must still have this release and its images.
+      <p>This restores the saved Compose configuration and local images. It does not restore database contents or volumes, undo migrations, or edit your saved resource configuration. The worker must still have this release and its images.</p>
+      <div className="mt-4"><ReasonField id="rollback-reason" value={reason} onChange={setReason} /></div>
     </ConfirmDialog>
+  </>;
+}
+
+// Team owners and admins can let one queued deploy or rollback skip the schedule and approval gates. Quotas,
+// dependencies, locks, permissions and cancellation still apply.
+function EmergencyOverride({ operation }: { operation: Operation }) {
+  const override = useEmergencyOverride(operation.id);
+  const online = useOnline();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [attempted, setAttempted] = useState(false);
+  const error = reasonError(reason, true);
+  const shown = attempted ? error : reason ? reasonError(reason) : undefined;
+  const close = () => { setOpen(false); setAttempted(false); };
+  const ineligible = isStatus(override.error, 409);
+  return <>
+    <Button variant="danger" disabled={!online || override.isPending} onClick={() => { override.reset(); setOpen(true); }}>Emergency override</Button>
+    <Dialog open={open} title="Override the deployment schedule?" onClose={close}>
+      <form className="mt-3 space-y-4" noValidate onSubmit={(event) => {
+        event.preventDefault();
+        setAttempted(true);
+        if (error) return;
+        override.mutate(reason, { onSuccess: close });
+      }}>
+        <p>This lets this {(actionLabels[operation.action] ?? operation.action).toLowerCase()} start without waiting for deployment windows, freezes or approval. Quotas, dependencies, locks and cancellation still apply. Your account, the time and the reason are recorded in the audit log.</p>
+        <Field id="override-reason" label="Emergency reason" hint="Required. Visible to anyone who can read this operation; do not include secrets." error={shown}>
+          <textarea id="override-reason" className={inputClass} rows={3} value={reason} required aria-invalid={shown ? true : undefined} aria-describedby={shown ? "override-reason-error" : "override-reason-hint"} onChange={(event) => setReason(event.target.value)} />
+        </Field>
+        {override.isError && <Notice tone="error" title="Could not override">{ineligible ? "This operation is no longer eligible: it may have started, been cancelled or already been overridden." : errorMessage(override.error)}</Notice>}
+        <div className="flex justify-end gap-2 border-t border-line pt-3">
+          <Button variant="ghost" onClick={close} disabled={override.isPending}>Cancel</Button>
+          <Button type="submit" variant="danger" pending={override.isPending}>Override and allow start</Button>
+        </div>
+      </form>
+    </Dialog>
   </>;
 }
 
@@ -87,7 +127,7 @@ export function OperationPage() {
 
   const workload = workloads.data?.find((item) => item.id === operation.workload_id);
   const placement = workload ? findPlacement(projects.data, workload.environment_id, workload.project_id) : undefined;
-  const result = operation.result;
+  const worker = workerResult(operation);
   const duration = durationMs(operation);
   const active = isActive(operation.state);
 
@@ -131,7 +171,25 @@ export function OperationPage() {
         }
       />
 
-      {operation.approval_required && !operation.approved_at && operation.state === "queued" && <div className="px-4 pt-4 sm:px-6"><Notice title="Approval required"><p>A team administrator must approve this deployment before it can start.</p>{operation.can_approve && <Button disabled={!online || operation.cancel_requested} pending={approve.isPending} onClick={() => approve.mutate()}>Approve deployment</Button>}{approve.isError && <p>{errorMessage(approve.error)}</p>}</Notice></div>}
+      {operation.approval_required && !operation.approved_at && !operation.emergency_override_at && operation.state === "queued" && <div className="px-4 pt-4 sm:px-6"><Notice title="Approval required"><p>A team administrator must approve this deployment before it can start.</p>{operation.can_approve && <Button disabled={!online || operation.cancel_requested} pending={approve.isPending} onClick={() => approve.mutate()}>Approve deployment</Button>}{approve.isError && <p>{errorMessage(approve.error)}</p>}</Notice></div>}
+      {operation.emergency_override_at && (
+        <div className="px-4 pt-4 sm:px-6">
+          <Notice tone="warn" title="Emergency override recorded">
+            <p>
+              Deployment windows, freezes and approval were skipped for this operation on {formatAbsolute(operation.emergency_override_at)}
+              {operation.emergency_override_by ? <> by account <span className="font-mono text-xs break-all">{operation.emergency_override_by}</span></> : null}.
+            </p>
+            {operation.emergency_override_reason && <p className="mt-1 whitespace-pre-wrap break-words text-fg">{operation.emergency_override_reason}</p>}
+          </Notice>
+        </div>
+      )}
+      {overrideEligible(operation) && (
+        <div className="px-4 pt-4 sm:px-6">
+          <Notice title="Emergency override" action={<EmergencyOverride operation={operation} />}>
+            If an outage requires this deployment now, a team owner or admin can let this operation skip deployment windows, freezes and approval.
+          </Notice>
+        </div>
+      )}
       {operations.isRefetchError && (
         <div className="px-4 pt-4 sm:px-6">
           <QueryError what="the latest status" error={operations.error} onRetry={() => void operations.refetch()} retrying={operations.isFetching} />
@@ -144,11 +202,7 @@ export function OperationPage() {
           {cancel.isError && <Notice tone="error" title="Could not request cancellation">{errorMessage(cancel.error)}</Notice>}
           {active && operation.cancel_requested && <Notice tone="warn" title="Waiting for the worker">The request is saved and will be delivered when the worker is reachable.</Notice>}
           <p className="text-[13px] text-fg-muted">{stateDescriptions[operation.state]}</p>
-          {result?.error && (
-            <Notice tone="error" title="Worker error">
-              <span className="font-mono text-xs break-words">{result.error}</span>
-            </Notice>
-          )}
+          <OperationResultNotice operation={operation} />
           <DefinitionList
             items={[
               {
@@ -174,11 +228,12 @@ export function OperationPage() {
                   ]
                 : []),
               { term: "Action", value: actionLabels[operation.action] ?? operation.action },
+              ...(operation.reason ? [{ term: "Reason", value: <span className="whitespace-pre-wrap break-words">{operation.reason}</span> }] : []),
               { term: "Queued", value: formatAbsolute(operation.created_at) },
-              ...(result?.finished_at ? [{ term: "Finished", value: formatAbsolute(result.finished_at) }] : []),
+              ...(worker?.finished_at ? [{ term: "Finished", value: formatAbsolute(worker.finished_at) }] : []),
               ...(duration !== null ? [{ term: "Duration", value: formatDuration(duration) }] : []),
-              ...(result?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{result.revision}</span> }] : []),
-              ...(!result ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),
+              ...(worker?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{worker.revision}</span> }] : []),
+              ...(!worker ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),
             ]}
           />
         </div>

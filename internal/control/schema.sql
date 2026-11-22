@@ -827,3 +827,39 @@ CREATE TABLE IF NOT EXISTS workload_security_observations (
 );
 
 ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_update_channel text NOT NULL DEFAULT '';
+
+ALTER TABLE deployment_policies DROP CONSTRAINT IF EXISTS deployment_policies_check;
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='deployment_policies'::regclass AND conname='deployment_policy_scope') THEN
+  ALTER TABLE deployment_policies ADD CONSTRAINT deployment_policy_scope CHECK(project_id IS NULL OR environment_id IS NULL);
+ END IF;
+END $$;
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS timezone text NOT NULL DEFAULT 'UTC';
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS recurring_windows jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS freezes jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS outside_window text NOT NULL DEFAULT 'block';
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT '';
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS emergency_override_by text;
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS emergency_override_reason text NOT NULL DEFAULT '';
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS emergency_override_at timestamptz;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}';
+CREATE OR REPLACE FUNCTION cove_deployment_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF NEW.action IN ('deploy','rollback') THEN
+  SELECT EXISTS(SELECT 1 FROM workloads w JOIN deployment_policies p ON p.team_id=w.team_id AND ((p.project_id IS NULL AND p.environment_id IS NULL) OR p.project_id=w.project_id OR p.environment_id=w.environment_id) WHERE w.id=NEW.workload_id AND p.approval) INTO NEW.approval_required;
+ END IF;
+ RETURN NEW;
+END $$;
+
+CREATE TABLE IF NOT EXISTS panel_channel_observations (
+ channel text PRIMARY KEY CHECK(channel IN ('beta','release')),
+ version text NOT NULL, revision text NOT NULL, schema_hash text NOT NULL,
+ revision_time timestamptz NOT NULL, checked_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS confirmed_panel_version text NOT NULL DEFAULT '';
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS confirmed_panel_revision text NOT NULL DEFAULT '';
+
+ALTER TABLE panel_channel_observations ADD COLUMN IF NOT EXISTS source_root text NOT NULL DEFAULT '';
+ALTER TABLE panel_channel_observations ADD COLUMN IF NOT EXISTS source_generation bigint NOT NULL DEFAULT 0;
+
+ALTER TABLE workload_security_observations ADD COLUMN IF NOT EXISTS attempted_at timestamptz;
+ALTER TABLE workload_security_observations ALTER COLUMN observed_at DROP NOT NULL;

@@ -95,6 +95,11 @@ func (s *Server) Init(ctx context.Context) error {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /api/workloads/{id}/release-diff", s.admin(http.HandlerFunc(s.releaseDiff)))
+	for _, method := range []string{"GET", "PUT"} {
+		mux.Handle(method+" /api/teams/{id}/deployment-policy", s.admin(http.HandlerFunc(s.deploymentPolicy)))
+	}
+	mux.Handle("POST /api/operations/{id}/emergency-override", s.admin(http.HandlerFunc(s.emergencyOverride)))
 	mux.Handle("POST /api/settings/update-status", s.admin(http.HandlerFunc(s.reportUpdateStatus)))
 	mux.Handle("GET /api/settings/outbound-proxy/environment", s.admin(http.HandlerFunc(s.hostProxyEnvironment)))
 	for _, method := range []string{"GET", "PUT"} {

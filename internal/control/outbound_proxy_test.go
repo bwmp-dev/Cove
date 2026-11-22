@@ -4,11 +4,55 @@ import (
 	"context"
 	"cove/internal/buildinfo"
 	"cove/internal/outbound"
+	"cove/internal/worker"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+func TestPanelProxyReusesConnectionsAndAppliesChangedSettings(t *testing.T) {
+	var connections atomic.Int32
+	first := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "first") }))
+	first.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	first.Start()
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "second") }))
+	defer second.Close()
+	s := &Server{outboundState: &outboundProxyState{}}
+	config := outbound.Config{HTTP: first.URL}
+	s.outboundState.value.Store(&config)
+	client := &http.Client{Transport: s.OutboundTransport(http.DefaultTransport.(*http.Transport))}
+	defer client.CloseIdleConnections()
+	read := func() string {
+		response, err := client.Get("http://upstream.example/test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	if read() != "first" || read() != "first" || connections.Load() != 1 {
+		t.Fatal("configured proxy connection was not reused")
+	}
+	changed := outbound.Config{HTTP: second.URL}
+	s.outboundState.value.Store(&changed)
+	if read() != "second" {
+		t.Fatal("changed settings did not replace the proxy")
+	}
+}
 
 func TestProxyDoesNotBypassWebhookDestinationValidation(t *testing.T) {
 	called := false
@@ -23,6 +67,25 @@ func TestProxyDoesNotBypassWebhookDestinationValidation(t *testing.T) {
 	}
 	if called {
 		t.Fatal("private destination reached proxy")
+	}
+}
+
+func TestFailedFleetScansDoNotStarveOtherResourcesIntegration(t *testing.T) {
+	f := newAccountFixture(t)
+	f.sql("INSERT INTO nodes(id,name,address,port,public_key,private_key,state) VALUES('scan-node','Node','localhost',22,'',$1,'ready')", []byte{})
+	f.sql("INSERT INTO projects(id,name,team_id) VALUES('scan-project','Project','default')")
+	f.sql(`INSERT INTO workloads(id,node_id,name,configuration,team_id,project_id) SELECT 'scan-'||i,'scan-node','App',$1,'default','scan-project' FROM generate_series(1,17) i`, []byte{})
+	f.s.workerRPC = func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error) {
+		return worker.RPCResponse{}, errors.New("offline fixture")
+	}
+	for _, want := range []int{8, 16, 17} {
+		if err := f.s.refreshPortExposure(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		var attempted, observed int
+		if err := f.s.DB.QueryRow(context.Background(), "SELECT count(*),count(observed_at) FROM workload_security_observations").Scan(&attempted, &observed); err != nil || attempted != want || observed != 0 {
+			t.Fatal(attempted, observed, err)
+		}
 	}
 }
 
@@ -70,4 +133,31 @@ func TestOutboundProxySealedAndScopedIntegration(t *testing.T) {
 		t.Fatal("partial update lost credentials", err)
 	}
 	f.call("root", "", "PUT", "/api/settings/outbound-proxy", map[string]string{"https_proxy": "socks5://proxy.example"}, 400)
+}
+
+func TestOldWorkerProxyNegotiationIntegration(t *testing.T) {
+	f := newAccountFixture(t)
+	f.sql("INSERT INTO nodes(id,name,address,port,public_key,private_key,state) VALUES('old-proxy-node','Old worker','localhost',22,'',$1,'ready')", []byte{})
+	config := outbound.Config{}
+	f.s.outboundState.value.Store(&config)
+	f.s.outboundState.saved.Store(false)
+	request := worker.RPCRequest{Method: "preflight", Request: &worker.Request{}}
+	_, err := f.s.nodeRPC(context.Background(), "old-proxy-node", request)
+	if err == nil || err.Error() != "node is not enrolled" {
+		t.Fatal("default settings must not require new-worker capabilities", err)
+	}
+	f.s.outboundState.saved.Store(true)
+	_, err = f.s.nodeRPC(context.Background(), "old-proxy-node", request)
+	if !errors.Is(err, errOutboundWorkerUnsupported) {
+		t.Fatal("saved instance settings require an upgraded worker", err)
+	}
+	_, err = f.s.nodeRPC(context.Background(), "old-proxy-node", worker.RPCRequest{Method: "probe"})
+	if err == nil || err.Error() != "node is not enrolled" {
+		t.Fatal("capability discovery must remain available", err)
+	}
+	f.sql(`UPDATE nodes SET capabilities='{"outbound_proxy":true}' WHERE id='old-proxy-node'`)
+	_, err = f.s.nodeRPC(context.Background(), "old-proxy-node", request)
+	if err == nil || err.Error() != "node is not enrolled" {
+		t.Fatal("supported workers must accept instance settings", err)
+	}
 }

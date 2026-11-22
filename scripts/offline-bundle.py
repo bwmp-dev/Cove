@@ -18,7 +18,7 @@ ASSETS = ('compose.yaml', 'compose.local.yaml', 'deploy/traefik.yaml', 'deploy/t
 def run(args, **kwargs):
     result = subprocess.run([str(arg) for arg in args], stderr=subprocess.PIPE, **kwargs)
     if result.returncode:
-        raise RuntimeError('Offline bundle command failed: ' + str(args[0]))
+        raise subprocess.CalledProcessError(result.returncode, [str(arg) for arg in args], output=result.stdout, stderr=result.stderr)
     return result
 
 
@@ -143,8 +143,25 @@ def install(root, manifest, installation, domain, certificate, private_key, bind
     (installation / 'compose.offline.json').write_text(json.dumps(override))
     with (installation / '.env').open('a') as stream:
         stream.write('\nCOMPOSE_FILE=compose.yaml:' + ('compose.local.yaml:' if local_worker else '') + 'compose.offline.json\nCOVE_VERSION=' + manifest['version'] + '\n')
-    run(['docker', 'compose', '--project-directory', installation, 'up', '-d', '--pull', 'never', '--no-build', '--wait', '--wait-timeout', '180'])
+    run(['docker', 'compose', '--project-directory', installation, 'up', '-d', '--pull', 'never', '--no-build', '--wait', '--wait-timeout', '180'], cwd=installation)
     print('Offline panel installed. Configure private DNS and trust the supplied TLS issuer before first-user setup. No Internet update timer was enabled.')
+
+
+def apply_update(root, manifest, installation, confirm_downgrade=False):
+    previous_directory = Path.cwd()
+    try:
+        updater(root).update(installation, manifest['version'], manifest['images'], confirm_downgrade)
+    finally:
+        os.chdir(previous_directory)
+    override_path = installation / 'compose.offline.json'
+    if override_path.exists():
+        override = json.loads(override_path.read_text())
+        for service in ('cove', 'worker'):
+            if service in override['services']:
+                override['services'][service]['image'] = manifest['images'][service]
+        temporary = override_path.with_suffix('.next')
+        temporary.write_text(json.dumps(override))
+        os.replace(temporary, override_path)
 
 
 def main():
@@ -159,6 +176,7 @@ def main():
     parser.add_argument('--domain')
     parser.add_argument('--tls-certificate', type=Path)
     parser.add_argument('--tls-key', type=Path)
+    parser.add_argument('--confirm-downgrade', action='store_true')
     parser.add_argument('--local-worker', action='store_true')
     parser.add_argument('--bind-address', default='127.0.0.1')
     args = parser.parse_args()
@@ -193,17 +211,10 @@ def main():
             install(root, manifest, args.installation.resolve(), args.domain, args.tls_certificate.resolve(strict=True), args.tls_key.resolve(strict=True), args.bind_address, args.local_worker)
         else:
             installation = args.installation.resolve(strict=True)
-            updater(root).update(installation, manifest['version'], manifest['images'])
-            override_path = installation / 'compose.offline.json'
-            if override_path.exists():
-                override = json.loads(override_path.read_text())
-                for service in ('cove', 'worker'):
-                    if service in override['services']:
-                        override['services'][service]['image'] = manifest['images'][service]
-                temporary = override_path.with_suffix('.next')
-                temporary.write_text(json.dumps(override))
-                os.replace(temporary, override_path)
-    except (OSError, ValueError, KeyError, RuntimeError):
+            apply_update(root, manifest, installation, args.confirm_downgrade)
+    except (RuntimeError, ValueError) as error:
+        sys.exit('Offline operation failed: ' + str(error))
+    except (OSError, KeyError, subprocess.CalledProcessError):
         sys.exit('Offline operation failed. No verification bypass is available; inspect the bundle, trust fingerprint and host prerequisites.')
 
 

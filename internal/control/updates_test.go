@@ -1,6 +1,7 @@
 package control
 
 import (
+	"cove/internal/buildinfo"
 	"crypto/sha256"
 	"fmt"
 	"net/http/httptest"
@@ -65,6 +66,7 @@ func TestUpdateChannelAuthorizationAndPersistence(t *testing.T) {
 	f.call(user, "", "GET", "/api/updates", nil, 403)
 	f.call(user, "", "PUT", "/api/updates", map[string]string{"channel": "beta"}, 403)
 	f.call("root", "", "PUT", "/api/updates", map[string]string{"channel": "unknown"}, 400)
+	f.sql("INSERT INTO panel_channel_observations(channel,version,revision,schema_hash,revision_time) VALUES('beta',$1,$2,$3,now()),('release',$1,$2,$3,now())", buildinfo.Version, strings.Repeat("a", 40), schemaFingerprint())
 	for _, channel := range []string{"beta", "release"} {
 		f.call("root", "", "PUT", "/api/updates", map[string]string{"channel": channel}, 200)
 		if got := jsonString(t, f.call("root", "", "GET", "/api/updates", nil, 200), "channel"); got != channel {

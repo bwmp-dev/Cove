@@ -11,12 +11,15 @@ ARG TARGETARCH
 ARG BUILD_VERSION=development
 ARG BUILD_REVISION=unknown
 ARG BUILD_CHANNEL=development
+ARG BUILD_SOURCE_GENERATION=
+ARG BUILD_SOURCE_ROOT=
+ARG BUILD_REVISION_TIME=
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags "-X cove/internal/buildinfo.Version=${BUILD_VERSION} -X cove/internal/buildinfo.Revision=${BUILD_REVISION} -X cove/internal/buildinfo.Channel=${BUILD_CHANNEL}" -o /out/cove ./cmd/cove \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags "-X cove/internal/buildinfo.Version=${BUILD_VERSION} -X cove/internal/buildinfo.Revision=${BUILD_REVISION} -X cove/internal/buildinfo.Channel=${BUILD_CHANNEL} -X cove/internal/buildinfo.RevisionTime=${BUILD_REVISION_TIME} -X cove/internal/buildinfo.SourceGeneration=${BUILD_SOURCE_GENERATION} -X cove/internal/buildinfo.SourceRoot=${BUILD_SOURCE_ROOT}" -o /out/cove ./cmd/cove \
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /out/cove-worker-linux-amd64 ./cmd/cove-worker \
  && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /out/cove-worker-linux-arm64 ./cmd/cove-worker
 

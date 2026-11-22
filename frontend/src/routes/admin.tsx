@@ -10,7 +10,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { errorMessage } from "../api/client";
 import { settingsQuery, usersQuery, useResetLink, useUpdateSettings, useUpdateUser, type User } from "../api/teams";
-import { updatesQuery, useUpdateChannel } from "../api/updates";
+import { updatesQuery, useUpdateChannel, type UpdateChannelName, type UpdateTarget } from "../api/updates";
+import type { Tone } from "../lib/nodes";
 import { Select } from "../components/Select";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
@@ -25,29 +26,123 @@ function Configured({ enabled }: { enabled: boolean }) {
   return <StatusLabel tone={enabled ? "ok" : "neutral"} label={enabled ? "Configured" : "Not configured"} />;
 }
 
+const channelLabels: Record<UpdateChannelName, string> = {
+  release: "Release — published stable versions",
+  beta: "Beta — every successful main build",
+};
+
+function shortRevision(revision: string) {
+  return revision ? revision.slice(0, 12) : "unknown";
+}
+
+function targetStatus(target: UpdateTarget | undefined, current: boolean): { tone: Tone; label: string } {
+  if (current) return { tone: "ok", label: "Selected" };
+  if (!target?.available) return { tone: "neutral", label: "Not observed" };
+  if (!target.allowed) return { tone: "bad", label: "Blocked" };
+  if (target.downgrade) return { tone: "warn", label: "Downgrade" };
+  return { tone: "ok", label: "Available" };
+}
+
+// A channel can be chosen when it is already selected (an idempotent save) or when the host updater's latest
+// observation of it is fresh and comparable with this build. Blocked targets are never sent to the API.
+function selectable(target: UpdateTarget | undefined, current: boolean) {
+  return current || Boolean(target?.available && target.allowed);
+}
+
+function ChannelTarget({ name, target, current }: { name: UpdateChannelName; target: UpdateTarget | undefined; current: boolean }) {
+  const status = targetStatus(target, current);
+  return (
+    <li className="space-y-1 py-2.5 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <p className="text-[13px] font-medium text-fg">{name === "release" ? "Release" : "Beta"}</p>
+        <StatusLabel tone={status.tone} label={status.label} />
+      </div>
+      {target?.version ? (
+        <p className="text-xs text-fg-muted">
+          <span className="font-mono break-all text-fg">{target.version}</span>
+          <span> · revision </span>
+          <span className="font-mono break-all" title={target.revision}>{shortRevision(target.revision)}</span>
+          {target.checked_at && <> · checked <RelativeTime value={target.checked_at} /></>}
+        </p>
+      ) : (
+        <p className="text-xs text-fg-muted">The host updater has not reported this channel.</p>
+      )}
+      {target?.message && <p className="text-xs break-words text-fg-muted">{target.message}</p>}
+    </li>
+  );
+}
+
 function UpdateChannel() {
   const settings = useQuery(updatesQuery);
   const update = useUpdateChannel();
   const online = useOnline();
+  const [downgrade, setDowngrade] = useState<UpdateChannelName | null>(null);
   if (settings.isPending) return <LoadingRows label="Loading update settings" rows={2} />;
   if (settings.isError) return <QueryError what="update settings" error={settings.error} onRetry={() => void settings.refetch()} retrying={settings.isFetching} />;
+  const data = settings.data;
+  const targets = data.targets ?? {};
+  const pendingTarget = downgrade ? targets[downgrade] : undefined;
+
+  function choose(channel: UpdateChannelName) {
+    if (channel === data.channel) {
+      update.mutate({ channel });
+      return;
+    }
+    const target = targets[channel];
+    if (!target || !selectable(target, false)) return;
+    if (target.downgrade) {
+      update.reset();
+      setDowngrade(channel);
+      return;
+    }
+    update.mutate({ channel, target_revision: target.revision });
+  }
+
   return <div className="space-y-4">
     <SettingRows>
-      <SettingRow label="Installed version" description={`Build channel: ${settings.data.build_channel}`}>
-        <span className="font-mono text-xs break-all">{settings.data.version}</span>
+      <SettingRow label="Installed version" description={<>Build channel: {data.build_channel} · revision <span className="font-mono" title={data.revision}>{shortRevision(data.revision)}</span></>}>
+        <span className="font-mono text-xs break-all">{data.version}</span>
       </SettingRow>
-      <Field id="update-channel" label="Update channel" layout="row" hint="The host updater checks hourly. Workers follow the panel. Switching to release may install an older version. The host updater must be installed first.">
-        <Select id="update-channel" value={settings.data.channel} aria-describedby="update-channel-hint" disabled={!online || update.isPending} onChange={(event) => {
+      <Field id="update-channel" label="Update channel" layout="row" hint="The host updater checks both channels hourly and reports what each would install; the browser never contacts the release registry. Workers follow the panel. A channel whose database schema is incompatible with this build is blocked and cannot be confirmed. The host updater must be installed first.">
+        <Select id="update-channel" value={data.channel} aria-describedby="update-channel-hint" disabled={!online || update.isPending} onChange={(event) => {
           const channel = event.target.value;
-          if (channel === "beta" || channel === "release") update.mutate(channel);
+          if (channel === "beta" || channel === "release") choose(channel);
         }}>
-          <option value="release">Release — published stable versions</option>
-          <option value="beta">Beta — every successful main build</option>
+          {(["release", "beta"] as const).map((channel) => (
+            <option key={channel} value={channel} disabled={!selectable(targets[channel], channel === data.channel)}>{channelLabels[channel]}</option>
+          ))}
         </Select>
       </Field>
+      <SettingRow label="Channel targets" description="What each channel would install, from the host updater's latest observation. Observations older than two hours cannot be used.">
+        <ul aria-label="Channel targets" className="w-full divide-y divide-line">
+          {(["release", "beta"] as const).map((channel) => <ChannelTarget key={channel} name={channel} target={targets[channel]} current={channel === data.channel} />)}
+        </ul>
+      </SettingRow>
     </SettingRows>
+    {data.confirmed_downgrade_version && (
+      <Notice tone="warn" title="Downgrade confirmed">
+        The host updater may install <span className="font-mono">{data.confirmed_downgrade_version}</span> (revision <span className="font-mono break-all">{shortRevision(data.confirmed_downgrade_revision ?? "")}</span>).
+      </Notice>
+    )}
     {update.isError && <Notice tone="error" title="Could not change update channel">{errorMessage(update.error)}</Notice>}
     {update.isSuccess && <Notice tone="success" title="Update channel saved">The next host update check will use this channel.</Notice>}
+    <ConfirmDialog
+      open={downgrade !== null && pendingTarget !== undefined}
+      title="Downgrade the panel?"
+      confirmLabel={`Switch to ${downgrade === "beta" ? "beta" : "release"}`}
+      danger
+      pending={update.isPending}
+      onCancel={() => setDowngrade(null)}
+      onConfirm={() => {
+        if (!downgrade || !pendingTarget) return;
+        update.mutate({ channel: downgrade, confirm_downgrade: true, target_revision: pendingTarget.revision }, { onSettled: () => setDowngrade(null) });
+      }}
+    >
+      <p>
+        The installed version is <span className="font-mono text-fg">{data.version}</span>. The {downgrade} channel would install the older <span className="font-mono text-fg">{pendingTarget?.version}</span> (revision <span className="font-mono break-all text-fg">{shortRevision(pendingTarget?.revision ?? "")}</span>).
+      </p>
+      <p className="mt-2">This confirmation applies only to that revision. If the channel reports a different revision, you will be asked again. Its database schema matches this build, but application data changed since then is not reversed. Take a backup first.</p>
+    </ConfirmDialog>
   </div>;
 }
 

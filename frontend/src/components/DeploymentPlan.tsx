@@ -9,6 +9,8 @@ import { can } from "../lib/permissions";
 import { inputClass } from "../lib/styles";
 import { Dialog } from "./ConfirmDialog";
 import { Button, Notice, SwitchField } from "./ui";
+import { ReasonField } from "./ReasonField";
+import { reasonError, withReason } from "../lib/operations";
 
 export function DeploymentPlan({ projectId, resources }: { projectId: string; resources: WorkloadSummary[] }) {
   const client = useQueryClient();
@@ -18,15 +20,16 @@ export function DeploymentPlan({ projectId, resources }: { projectId: string; re
   const [automatic, setAutomatic] = useState(false);
   const save = useMutation({ mutationFn: (value?: { workload_ids: string[]; automatic: boolean }) => request("PUT", `/api/projects/${projectId}/deployment-sequence`, value ?? { workload_ids: steps, automatic }), onSuccess: async () => { await client.invalidateQueries({ queryKey: ["deployment-sequence", projectId] }); } });
   const [steps, setSteps] = useState<string[]>(["", ""]);
+  const [reason, setReason] = useState("");
   const deploy = useMutation({
-    mutationFn: () => request<{ operation_ids: string[] }>("POST", `/api/projects/${projectId}/deployments`, { workload_ids: steps }),
+    mutationFn: () => request<{ operation_ids: string[] }>("POST", `/api/projects/${projectId}/deployments`, withReason({ workload_ids: steps }, reason)),
     onSuccess: async () => { await client.invalidateQueries({ queryKey: ["operations"] }); },
   });
   const available = resources.filter(resource => can(resource.permissions, "operate"));
   if (available.length < 2 && !saved.data?.workload_ids.length) return null;
   return <>
     {saved.isError && <Notice tone="error">{errorMessage(saved.error)}</Notice>}
-    <Button disabled={!saved.isSuccess} onClick={() => { deploy.reset(); save.reset(); setSteps(saved.data?.workload_ids.length ? saved.data.workload_ids : ["", ""]); setAutomatic(saved.data?.automatic ?? false); setOpen(true); }}>Deploy in order</Button>
+    <Button disabled={!saved.isSuccess} onClick={() => { deploy.reset(); save.reset(); setSteps(saved.data?.workload_ids.length ? saved.data.workload_ids : ["", ""]); setAutomatic(saved.data?.automatic ?? false); setReason(""); setOpen(true); }}>Deploy in order</Button>
     <Dialog open={open} title="Deploy resources in order" onClose={() => { if (!deploy.isPending) setOpen(false); }}>
       <div className="mt-4 space-y-4">
         <p>Each step waits for the previous deployment to succeed. Put migration jobs before the services that need them. Failure or cancellation skips later steps.</p>
@@ -39,8 +42,9 @@ export function DeploymentPlan({ projectId, resources }: { projectId: string; re
         {save.isError && <Notice tone="error">{errorMessage(save.error)}</Notice>}
         {save.isSuccess && <Notice>Sequence saved.</Notice>}
         <Notice>This explicitly deploys the selected resources, including stopped ones. Database migrations are not automatically reversed if a later step fails.</Notice>
+        {!deploy.isSuccess && <ReasonField id="deploy-sequence-reason" value={reason} onChange={setReason} disabled={deploy.isPending} hint="Applied to every deployment this run queues and recorded in the audit log. Not saved with the sequence; do not include secrets." />}
         {deploy.isError && <Notice tone="error">{errorMessage(deploy.error)}</Notice>}
-        {deploy.isSuccess ? <div><p>Deployment plan queued.</p><Link to="/operations" onClick={() => setOpen(false)} className="underline">View operations</Link></div> : <Button variant="primary" disabled={!online || deploy.isPending || steps.some(step => !step)} onClick={() => deploy.mutate()}>{deploy.isPending ? "Queueing…" : "Deploy selected resources"}</Button>}
+        {deploy.isSuccess ? <div><p>Deployment plan queued.</p><Link to="/operations" onClick={() => setOpen(false)} className="underline">View operations</Link></div> : <Button variant="primary" disabled={!online || deploy.isPending || steps.some(step => !step) || Boolean(reasonError(reason))} onClick={() => deploy.mutate()}>{deploy.isPending ? "Queueing…" : "Deploy selected resources"}</Button>}
       </div>
     </Dialog>
   </>;

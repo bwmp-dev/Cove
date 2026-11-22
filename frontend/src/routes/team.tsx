@@ -3,6 +3,7 @@ import { Checkbox } from "../components/Checkbox";
 import { Select } from "../components/Select";
 import { SharedVariables } from "../components/SharedVariables";
 import { TeamQuota } from "../components/TeamQuota";
+import { DeploymentPolicy } from "../components/DeploymentPolicy";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useId, useState, type FormEvent } from "react";
@@ -491,6 +492,7 @@ export function TeamPage() {
         </Section>
         {manager && <TeamSecondFactor team={team} canChange={owner} />}
         {manager && <TeamQuota teamId={team.id} admin={Boolean(session?.is_admin)} />}
+        {manager && <DeploymentPolicy scope="team" id={team.id} />}
         <Section title="Create another team">
           <CreateTeam />
         </Section>

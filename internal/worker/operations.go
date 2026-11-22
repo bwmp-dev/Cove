@@ -96,6 +96,7 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	comparisonMu sync.Mutex
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -144,7 +145,7 @@ func NewEngine(root string) (*Engine, error) {
 	if err := os.MkdirAll(filepath.Join(root, "workloads"), 0700); err != nil {
 		return nil, err
 	}
-	e := &Engine{Root: root, Run: RunCommand, active: map[string]bool{}, cancels: map[string]context.CancelFunc{}, recovering: map[string]routeRecovery{}, fatal: make(chan error, 1), linkKick: make(chan struct{}, 1)}
+	e := &Engine{Root: root, Run: configuredRunner(root), active: map[string]bool{}, cancels: map[string]context.CancelFunc{}, recovering: map[string]routeRecovery{}, fatal: make(chan error, 1), linkKick: make(chan struct{}, 1)}
 	if _, err := os.Stat(filepath.Join(root, "draining.json")); err == nil {
 		e.draining = true
 	} else if !os.IsNotExist(err) {

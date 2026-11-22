@@ -32,6 +32,57 @@ def verify_image(image):
     return matches[0]
 
 
+def image_labels(image):
+    return json.loads(run(["docker", "inspect", "--format", "{{json .Config.Labels}}", image],
+                          capture_output=True, text=True).stdout) or {}
+
+
+def is_downgrade(current, target):
+    def stable(value):
+        if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", value):
+            return tuple(map(int, value[1:].split(".")))
+        return None
+    before = current.get("org.opencontainers.image.version", "")
+    after = target.get("org.opencontainers.image.version", "")
+    if before and before == after:
+        return False
+    a, b = stable(before), stable(after)
+    if a is not None and b is not None:
+        return b < a
+    if current.get("org.opencontainers.image.revision") and current.get("org.opencontainers.image.revision") == target.get("org.opencontainers.image.revision"):
+        return False
+    try:
+        old_generation = int(current["io.cove.source-generation"])
+        new_generation = int(target["io.cove.source-generation"])
+    except (KeyError, ValueError):
+        raise RuntimeError("Cannot establish update order; use a backed-up metadata-aware forward upgrade first") from None
+    if old_generation < 1 or new_generation < 1 or old_generation == new_generation or not current.get("io.cove.source-root") or current.get("io.cove.source-root") != target.get("io.cove.source-root"):
+        raise RuntimeError("Source histories are incomparable; automatic channel replacement is refused")
+    return new_generation < old_generation
+
+
+
+def enforce_update_order(current, target, version, confirmed):
+    if target.get("org.opencontainers.image.version") != version:
+        raise RuntimeError("Target image version does not match the requested release")
+    if is_downgrade(current, target):
+        old_schema = current.get("io.cove.schema-sha256", "")
+        if not re.fullmatch(r"[a-f0-9]{64}", old_schema) or target.get("io.cove.schema-sha256") != old_schema:
+            raise RuntimeError("Unsafe schema downgrade blocked; restore a compatible backup explicitly")
+        if not confirmed:
+            raise RuntimeError("Downgrade requires explicit confirmation")
+
+
+def report_channel(installation, channel, version):
+    labels = image_labels("ghcr.io/bwmp-dev/cove:" + channel)
+    host_request(installation, "/api/settings/update-status", {
+        "channel": channel, "version": version,
+        "revision": labels.get("org.opencontainers.image.revision", ""),
+        "schema_hash": labels.get("io.cove.schema-sha256", ""),
+        "revision_time": labels.get("io.cove.revision-time", ""),
+        "source_root": labels.get("io.cove.source-root", ""), "source_generation": int(labels.get("io.cove.source-generation", "0"))})
+
+
 def latest_release(channel="release"):
     if channel not in ("beta", "release"):
         raise ValueError("Choose beta or release.")
@@ -111,7 +162,7 @@ def drain(compose):
     raise RuntimeError("Worker is still busy; update cancelled.")
 
 
-def update(installation, version, offline_images=None):
+def update(installation, version, offline_images=None, confirm_downgrade=False):
     import fcntl
 
     images = release_images(version)
@@ -130,6 +181,7 @@ def update(installation, version, offline_images=None):
         environment = Path(".env")
         original_env = environment.read_text()
         previous = {}
+        schema_changed = False
         for service in services:
             container = run([*compose, "ps", "-q", service], capture_output=True, text=True).stdout.strip()
             if not container:
@@ -148,6 +200,11 @@ def update(installation, version, offline_images=None):
                 ["docker", "image", "inspect", "--format", "{{.Id}}", images[service]],
                 capture_output=True, text=True).stdout.strip()
             config["services"][service].pop("build", None)
+            if service == "cove":
+                current_labels = image_labels(previous[service]["image"])
+                target_labels = image_labels(config["services"][service]["image"])
+                enforce_update_order(current_labels, target_labels, version, confirm_downgrade)
+                schema_changed = current_labels.get("io.cove.schema-sha256") != target_labels.get("io.cove.schema-sha256")
         if all(previous[service]["image"] == config["services"][service]["image"] for service in services):
             print(f"Already running {version}; no update needed.")
             return
@@ -193,7 +250,10 @@ def update(installation, version, offline_images=None):
             temporary_env.write_text("\n".join([*lines, f"COVE_VERSION={version}", ""]))
             os.replace(temporary_env, environment)
         except BaseException:
-            if replaced:
+            if replaced and schema_changed:
+                print("Schema fingerprint changed; automatic binary rollback was refused. The panel is stopped. Restore the saved database/configuration explicitly before starting an older image.", file=sys.stderr)
+                run([*new, "stop", "cove"])
+            elif replaced:
                 run([*old, "up", "-d", "--no-deps", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", *services])
             raise
         finally:
@@ -208,6 +268,7 @@ def update(installation, version, offline_images=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update the Cove panel and local container worker from published images.")
     parser.add_argument("version", nargs="?", help="vX.Y.Z or sha-<full commit>")
+    parser.add_argument("--confirm-downgrade", action="store_true", help="Explicitly permit a downgrade only when schema fingerprints match")
     parser.add_argument("--latest", action="store_true", help="Follow the channel selected in dashboard settings")
     parser.add_argument("--channel", choices=["beta", "release"], help="Override the saved channel for this check")
     parser.add_argument("--installation", type=Path, default=Path(__file__).resolve().parents[1])
@@ -223,8 +284,20 @@ if __name__ == "__main__":
         load_outbound_proxy(installation)
         channel = args.channel or selected_channel(installation) if args.latest else None
         version = latest_release(channel) if args.latest else args.version
+        confirmed = args.confirm_downgrade
         if args.latest:
-            host_request(installation, "/api/settings/update-status", {"version": version, "channel": channel})
-        update(installation, version)
-    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
+            report_channel(installation, channel, version)
+            other = "beta" if channel == "release" else "release"
+            try:
+                other_version = latest_release(other)
+                report_channel(installation, other, other_version)
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
+                print("Other channel could not be verified; its switching observation was not refreshed.", file=sys.stderr)
+            settings = host_request(installation, "/api/updates")
+            target_revision = image_labels("ghcr.io/bwmp-dev/cove:" + channel).get("org.opencontainers.image.revision")
+            confirmed = confirmed or (settings.get("confirmed_downgrade_version") == version and settings.get("confirmed_downgrade_revision") == target_revision)
+        update(installation, version, confirm_downgrade=confirmed)
+    except RuntimeError as error:
+        sys.exit("Update failed: " + str(error) + ". Inspect the saved recovery files before retrying.")
+    except (OSError, ValueError, subprocess.CalledProcessError):
         sys.exit("Update failed. Inspect .cove-updates recovery files and service logs; credentials were not printed.")

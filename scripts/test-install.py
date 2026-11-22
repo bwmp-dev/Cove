@@ -52,7 +52,10 @@ elif name == "docker":
     if args[0] == "info" and not (root / "docker-running").exists():
         sys.exit(1)
     if args[:2] == ["image", "inspect"]:
-        print("ghcr.io/bwmp-dev/cove@sha256:" + "a" * 64 if "RepoDigests" in args[3] else "a" * 40 if "revision" in args[3] else "beta-" + "a" * 40)
+        if "{{json .Config.Labels}}" in args:
+            print(json.dumps({"org.opencontainers.image.version": "beta-" + "a" * 40, "org.opencontainers.image.revision": "a" * 40, "io.cove.schema-sha256": "b" * 64, "io.cove.revision-time": "2026-11-22T12:00:00Z", "io.cove.source-root": "c" * 40, "io.cove.source-generation": "123"}))
+        else:
+            print("ghcr.io/bwmp-dev/cove@sha256:" + "a" * 64 if "RepoDigests" in args[3] else "a" * 40 if "revision" in args[3] else "beta-" + "a" * 40)
 elif name == "python3":
     class Response:
         status = 200
@@ -62,9 +65,13 @@ elif name == "python3":
         if isinstance(request, urllib.request.Request):
             env = dict(line.split("=", 1) for line in (root / "installation/.env").read_text().splitlines())
             assert request.get_header("Authorization") == "Bearer " + env["COVE_ADMIN_TOKEN"]
-            assert request.method == "PUT"
-            assert json.loads(request.data) == {"channel": "beta"}
-            (root / "channel-set").touch()
+            if request.full_url.endswith("/api/settings/update-status"):
+                assert request.method == "POST"
+                assert json.loads(request.data)["channel"] == "beta"
+            else:
+                assert request.method == "PUT"
+                assert json.loads(request.data) == {"channel": "beta"}
+                (root / "channel-set").touch()
         else:
             assert request == "https://cove.example.com/healthz"
         return Response()

@@ -57,15 +57,7 @@ func (e *Engine) checkout(ctx context.Context, r Request, root string, out io.Wr
 	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
 		return "", "", err
 	}
-	environment := []string{"GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
-	if r.OutboundProxy != nil {
-		environment = append(environment, r.OutboundProxy.Env()...)
-	}
-	args := []string{"git"}
-	if r.Source.Token != "" {
-		environment = append(environment, "COVE_GIT_TOKEN="+r.Source.Token)
-		args = append(args, "-c", `credential.helper=!f() { printf 'username=x-access-token\npassword=%s\n' "$COVE_GIT_TOKEN"; }; f`)
-	}
+	environment, args := gitAccess(r)
 	clone := append(append([]string{}, args...), "clone", "--depth", "1", "--single-branch", "--branch", r.Source.Branch, "--", r.Source.Repository, directory)
 	if err := e.Run(ctx, root, clone, environment, out); err != nil {
 		return "", "", err
@@ -145,4 +137,17 @@ func prepareCheckoutPermissions(directory string) error {
 		}
 		return os.Chmod(path, mode)
 	})
+}
+
+func gitAccess(r Request) ([]string, []string) {
+	environment := []string{"GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	if r.OutboundProxy != nil {
+		environment = append(environment, r.OutboundProxy.Env()...)
+	}
+	args := []string{"git"}
+	if r.Source.Token != "" {
+		environment = append(environment, "COVE_GIT_TOKEN="+r.Source.Token)
+		args = append(args, "-c", `credential.helper=!f() { printf 'username=x-access-token\npassword=%s\n' "$COVE_GIT_TOKEN"; }; f`)
+	}
+	return environment, args
 }

@@ -359,7 +359,9 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		if err != nil {
 			return err
 		}
-		r.OutboundProxy = &c
+		if s.propagateOutbound(c) {
+			r.OutboundProxy = &c
+		}
 	}
 	if r.Action == "deploy" && r.Hooks != nil && (len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil) {
 		var supported bool

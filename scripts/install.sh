@@ -72,8 +72,8 @@ unset COVE_DOMAIN POSTGRES_PASSWORD COVE_ENCRYPTION_KEY COVE_ADMIN_TOKEN COVE_VE
 docker compose pull
 docker compose up -d --no-build --wait --wait-timeout 180
 echo 'Waiting for public HTTPS. DNS must point to this host and ports 80/443 must be reachable...'
-python3 - "$installation/.env" "$channel" <<'PY'
-import json, pathlib, sys, time, urllib.error, urllib.request
+python3 - "$installation/.env" "$channel" "$image" <<'PY'
+import json, pathlib, subprocess, sys, time, urllib.error, urllib.request
 env = dict(line.split("=", 1) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if "=" in line)
 origin = "https://" + env["COVE_DOMAIN"]
 deadline = time.monotonic() + 180
@@ -87,6 +87,12 @@ while True:
     if time.monotonic() >= deadline:
         sys.exit("HTTPS is not ready. Services and credentials were preserved; check DNS and docker compose logs, then install the update timer with scripts/install-auto-update.sh.")
     time.sleep(3)
+labels = json.loads(subprocess.check_output(["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", sys.argv[3]], text=True))
+observation = {"channel": sys.argv[2], "version": labels["org.opencontainers.image.version"], "revision": labels["org.opencontainers.image.revision"], "schema_hash": labels["io.cove.schema-sha256"], "revision_time": labels["io.cove.revision-time"], "source_root": labels["io.cove.source-root"], "source_generation": int(labels["io.cove.source-generation"])}
+report = urllib.request.Request(origin + "/api/settings/update-status", method="POST", data=json.dumps(observation).encode(), headers={"Authorization": "Bearer " + env["COVE_ADMIN_TOKEN"], "Content-Type": "application/json"})
+with urllib.request.urlopen(report, timeout=15) as response:
+    if response.status != 200:
+        sys.exit("Could not record the signed installation metadata.")
 request = urllib.request.Request(origin + "/api/updates", method="PUT", data=json.dumps({"channel": sys.argv[2]}).encode(), headers={"Authorization": "Bearer " + env["COVE_ADMIN_TOKEN"], "Content-Type": "application/json"})
 with urllib.request.urlopen(request, timeout=15) as response:
     if response.status != 200:

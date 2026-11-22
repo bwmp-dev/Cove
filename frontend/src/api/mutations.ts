@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { rememberTeam } from "../lib/team";
 import { keys } from "./queries";
+import { withReason } from "../lib/operations";
 import type { Enrollment, NodeInput, OperationAction, QueuedOperation, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
 
 // Mutations carrying credentials (passwords, setup commands, secrets) use gcTime 0 so
@@ -106,8 +107,9 @@ export function useUpdateRoutes(workloadId: string) {
 export function useQueueOperation(workloadId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (action: Exclude<OperationAction, "routes">) =>
-      request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, { action }),
+    // The API accepts a reason for deploy and rollback only.
+    mutationFn: ({ action, reason = "" }: { action: Exclude<OperationAction, "routes">; reason?: string }) =>
+      request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, action === "deploy" ? withReason({ action }, reason) : { action }),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
   });
 }
@@ -123,7 +125,7 @@ export function useCancelOperation(operationId: string) {
 export function useRollback(workloadId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (release: string) => request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, { action: "rollback", release }),
+    mutationFn: ({ release, reason = "" }: { release: string; reason?: string }) => request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, withReason({ action: "rollback", release }, reason)),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
   });
 }
@@ -136,6 +138,14 @@ export interface PortBindingRewrite {
 }
 
 // Previews with confirm false; saving needs confirm true and the revision the preview returned.
+export function useEmergencyOverride(operationId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (reason: string) => request<unknown>("POST", `/api/operations/${encodeURIComponent(operationId)}/emergency-override`, { reason: reason.trim() }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
+  });
+}
+
 export function usePortBindings(workloadId: string) {
   const client = useQueryClient();
   return useMutation({

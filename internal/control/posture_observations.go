@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
 
 func (s *Server) observePorts(ctx context.Context, id string, containers []worker.Container) error {
@@ -22,12 +24,12 @@ func (s *Server) observePorts(ctx context.Context, id string, containers []worke
 			exposed = true
 		}
 	}
-	_, err := s.DB.Exec(ctx, `INSERT INTO workload_security_observations(workload_id,exposed) VALUES($1,$2) ON CONFLICT(workload_id) DO UPDATE SET exposed=$2,observed_at=now()`, id, exposed)
+	_, err := s.DB.Exec(ctx, `INSERT INTO workload_security_observations(workload_id,exposed,attempted_at) VALUES($1,$2,now()) ON CONFLICT(workload_id) DO UPDATE SET exposed=$2,observed_at=now(),attempted_at=now()`, id, exposed)
 	return err
 }
 
 func (s *Server) refreshPortExposure(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `SELECT w.id,w.node_id FROM workloads w LEFT JOIN workload_security_observations o ON o.workload_id=w.id WHERE o.observed_at IS NULL OR o.observed_at<now()-interval '5 minutes' ORDER BY o.observed_at NULLS FIRST LIMIT 8`)
+	rows, err := s.DB.Query(ctx, `SELECT w.id,w.node_id FROM workloads w LEFT JOIN workload_security_observations o ON o.workload_id=w.id WHERE COALESCE(o.attempted_at,o.observed_at) IS NULL OR COALESCE(o.attempted_at,o.observed_at)<now()-interval '5 minutes' ORDER BY COALESCE(o.attempted_at,o.observed_at) NULLS FIRST LIMIT 8`)
 	if err != nil {
 		return err
 	}
@@ -46,15 +48,36 @@ func (s *Server) refreshPortExposure(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	scanCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	jobs := make(chan item, len(items))
 	for _, i := range items {
-		response, e := s.nodeRPC(ctx, i.node, worker.RPCRequest{Method: "containers", ID: i.id})
-		if e != nil {
-			continue
-		}
-		if e = s.observePorts(ctx, i.id, response.Containers); e != nil {
-			return e
-		}
+		jobs <- i
 	}
+	close(jobs)
+	failures := make(chan error, len(items))
+	var group sync.WaitGroup
+	for workerIndex := 0; workerIndex < 4; workerIndex++ {
+		group.Go(func() {
+			for i := range jobs {
+				response, e := s.nodeRPC(scanCtx, i.node, worker.RPCRequest{Method: "containers", ID: i.id})
+				if e != nil {
+					_, e = s.DB.Exec(ctx, `INSERT INTO workload_security_observations(workload_id,exposed,observed_at,attempted_at) VALUES($1,false,NULL,now()) ON CONFLICT(workload_id) DO UPDATE SET attempted_at=now()`, i.id)
+				} else {
+					e = s.observePorts(ctx, i.id, response.Containers)
+				}
+				if e != nil {
+					failures <- e
+				}
+			}
+		})
+	}
+	group.Wait()
+	close(failures)
+	for e := range failures {
+		return e
+	}
+
 	return nil
 }
 
@@ -64,8 +87,13 @@ func (s *Server) reportUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Version string `json:"version"`
-		Channel string `json:"channel"`
+		Version      string    `json:"version"`
+		Channel      string    `json:"channel"`
+		Revision     string    `json:"revision"`
+		Schema       string    `json:"schema_hash"`
+		RevisionTime time.Time `json:"revision_time"`
+		Root         string    `json:"source_root"`
+		Generation   int64     `json:"source_generation"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -82,10 +110,36 @@ func (s *Server) reportUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "verified release version required", 400)
 		return
 	}
-	if _, err := s.DB.Exec(r.Context(), "UPDATE control_settings SET latest_panel_version=$1,panel_update_checked_at=now(),panel_update_channel=$2 WHERE id=1", in.Version, in.Channel); err != nil {
+	if in.Root != "" || in.Generation != 0 {
+		if !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(in.Root) || in.Generation < 1 {
+			http.Error(w, "valid signed source lineage required", 400)
+			return
+		}
+	}
+	if in.Schema != "" || in.Revision != "" || !in.RevisionTime.IsZero() {
+		if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(in.Schema) || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(in.Revision) || in.RevisionTime.IsZero() {
+			http.Error(w, "complete verified image metadata required", 400)
+			return
+		}
+	}
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
 		http.Error(w, "update observation unavailable", 503)
 		return
 	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(r.Context(), "UPDATE control_settings SET latest_panel_version=$1,panel_update_checked_at=now(),panel_update_channel=$2 WHERE id=1", in.Version, in.Channel)
+	if err == nil && in.Schema != "" {
+		_, err = tx.Exec(r.Context(), `INSERT INTO panel_channel_observations(channel,version,revision,schema_hash,revision_time,source_root,source_generation) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(channel) DO UPDATE SET version=$2,revision=$3,schema_hash=$4,revision_time=$5,source_root=$6,source_generation=$7,checked_at=now()`, in.Channel, in.Version, in.Revision, in.Schema, in.RevisionTime, in.Root, in.Generation)
+	}
+	if err == nil {
+		err = tx.Commit(r.Context())
+	}
+	if err != nil {
+		http.Error(w, "update observation unavailable", 503)
+		return
+	}
+
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
