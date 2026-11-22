@@ -66,7 +66,10 @@ test("environment previews: recipe from a real deployment, preview states and co
   // A credential-like variable must be decided before previews can copy it.
   expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: resource.compose, environment: { API_TOKEN: "production-token-fixture", LOG_LEVEL: "info" } } })).status()).toBe(200);
   const deploy = (await (await page.request.post(`/api/workloads/${id}/operations`, { headers: { Origin: origin }, data: { action: "deploy" } })).json()) as { id: string };
-  await expect.poll(async () => ((await (await page.request.get(`/api/operations/${deploy.id}`)).json()) as { state: string }).state, { timeout: 180_000 }).toBe("succeeded");
+  const deployState = async () => ((await (await page.request.get(`/api/operations/${deploy.id}`)).json()) as { state: string }).state;
+  await expect.poll(deployState, { timeout: 180_000 }).toMatch(/^(succeeded|failed|cancelled|interrupted)$/);
+  const finalState = await deployState();
+  if (finalState !== "succeeded") throw new Error(`Initial deploy ${deploy.id} ended ${finalState}:\n${await (await page.request.get(`/api/operations/${deploy.id}/logs`)).text()}`);
 
   // The recipe plan is read from the deployed release on the worker.
   await page.goto(`/projects/${projectId}/previews`);

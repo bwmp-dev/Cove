@@ -140,7 +140,7 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 			return err
 		}
 		if config.Kind == "job" && !j.stopped {
-			request := worker.Request{ID: resourceID(), Workload: j.id, Action: "deploy", Kind: config.Kind, JobService: config.JobService, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+			request := worker.Request{ID: resourceID(), Workload: j.id, Action: "deploy", Kind: config.Kind, JobService: config.JobService, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 			if err = worker.ValidateRequest(request); err != nil {
 				return err
 			}

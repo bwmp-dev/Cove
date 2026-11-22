@@ -12,6 +12,8 @@ export interface Capabilities {
   image_lifecycle?: boolean;
   // Buildx, the Compose builder and pushing the local platform are available, so the worker can build and publish images.
   build_publish?: boolean;
+  // The worker supports rolling, blue/green and canary replacements with promote and abort.
+  rollouts?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -110,7 +112,35 @@ export interface DeploymentAssertions {
 }
 export interface DeploymentHooks { before?: DeploymentHook; after?: DeploymentHook; before_steps?: DeploymentHook[]; assertions?: DeploymentAssertions }
 
+export type RolloutStrategy = "disabled" | "rolling" | "blue_green" | "canary";
+
+export interface HTTPHealthCheck { port: number; path: string }
+
+export interface RolloutOptions {
+  strategy: RolloutStrategy;
+  replicas?: Record<string, number>;
+  http_checks?: Record<string, HTTPHealthCheck>;
+  parallel_volumes: boolean;
+  drain_seconds: number;
+  timeout_seconds: number;
+  canary_percent: number;
+}
+
+export type RolloutPhase = "preparing" | "replacing" | "waiting" | "promoting" | "aborting" | "draining" | "completed" | "aborted";
+
+export interface RolloutStatus {
+  operation: string;
+  // The candidate deploy's operation ID.
+  release?: string;
+  strategy: Exclude<RolloutStrategy, "disabled"> | "guarded";
+  phase: RolloutPhase;
+  reason?: string;
+  candidate_percent: number;
+  replicas?: Record<string, number>;
+}
+
 export interface Workload {
+  rollout?: RolloutOptions | null;
   preview_source_id?: string;
   // Set (non-empty) when the resource belongs to a managed preview environment.
   environment_preview_id?: string;
@@ -138,6 +168,8 @@ export interface Workload {
 }
 
 export interface WorkloadInput {
+  // Omitted on update to keep the saved options; send strategy "disabled" to turn rollouts off.
+  rollout?: RolloutOptions;
   guarded_deploy?: boolean;
   file_secrets?: FileSecret[];
   hooks?: DeploymentHooks;
@@ -181,7 +213,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "build";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "build" | "rollout_promote" | "rollout_abort";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {
@@ -195,6 +227,7 @@ export interface WorkerOperation {
   revision?: string;
   image_check?: ImageCheck;
   build?: BuildResult;
+  rollout?: RolloutStatus;
 }
 
 export interface BuiltImage {
@@ -289,6 +322,8 @@ export interface Container {
 
 export interface WorkloadRuntime {
   containers: Container[];
+  // Null when no replacement is pending or staged. This, not operation history, is the current rollout state.
+  rollout?: RolloutStatus | null;
 }
 
 export interface FileSecret { name: string; variable: string; services: string[]; build_services: string[] }

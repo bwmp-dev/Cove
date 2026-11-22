@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 && !(len(os.Args) == 3 && os.Args[1] == "tunnel") {
+	if len(os.Args) != 2 && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck")) {
 		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
@@ -18,6 +18,8 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "healthcheck":
+		err = worker.HTTPHealth(ctx, os.Args[2])
 	case "tunnel":
 		err = worker.TunnelProxy(ctx, "/run/cove/worker.sock", os.Args[2], os.Stdin, os.Stdout)
 	case "ingress-prepare":

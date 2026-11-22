@@ -20,7 +20,7 @@ func validateWorkload(in workloadInput) error {
 	if strings.TrimSpace(in.Name) == "" || len(in.Name) > 120 {
 		return errors.New("a name of at most 120 characters is required")
 	}
-	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy})
+	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy, Rollout: in.Rollout})
 }
 func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	var encrypted []byte
@@ -83,7 +83,7 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	for i := range configuration.Routes {
 		configuration.Routes[i].Auth = ""
 	}
-	respond(w, 200, map[string]any{"environment_preview_id": environmentPreview, "preview_source_id": previewSource, "guarded_deploy": configuration.GuardedDeploy, "file_secrets": configuration.FileSecrets, "hooks": configuration.Hooks, "limits": configuration.Limits, "deployed": deployed, "permissions": permissions(level), "id": r.PathValue("id"), "name": configuration.Name, "node_id": configuration.NodeID, "compose": configuration.Compose, "environment_keys": keys, "source": configuration.Source, "has_source_token": hasToken, "kind": configuration.Kind, "job_service": configuration.JobService, "routes": configuration.Routes, "environment_id": environmentID, "project_id": projectID, "manually_stopped": stopped})
+	respond(w, 200, map[string]any{"environment_preview_id": environmentPreview, "preview_source_id": previewSource, "guarded_deploy": configuration.GuardedDeploy, "rollout": configuration.Rollout, "file_secrets": configuration.FileSecrets, "hooks": configuration.Hooks, "limits": configuration.Limits, "deployed": deployed, "permissions": permissions(level), "id": r.PathValue("id"), "name": configuration.Name, "node_id": configuration.NodeID, "compose": configuration.Compose, "environment_keys": keys, "source": configuration.Source, "has_source_token": hasToken, "kind": configuration.Kind, "job_service": configuration.JobService, "routes": configuration.Routes, "environment_id": environmentID, "project_id": projectID, "manually_stopped": stopped})
 }
 func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -188,6 +188,9 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		if in.GuardedDeploy == nil {
 			in.GuardedDeploy = old.GuardedDeploy
 		}
+		if in.Rollout == nil {
+			in.Rollout = old.Rollout
+		}
 		if in.Environment == nil {
 			in.Environment = old.Environment
 		}
@@ -230,6 +233,10 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Kind == "" {
 		in.Kind = "service"
+	}
+	if in.Rollout != nil {
+		value := in.Rollout.Normalized()
+		in.Rollout = &value
 	}
 	data, err := json.Marshal(in)
 	if err != nil {

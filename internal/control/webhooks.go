@@ -169,7 +169,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	config.Source.Revision = event.After
-	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Source: config.Source, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Source: config.Source, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	if err = worker.ValidateRequest(request); err != nil {
 		http.Error(w, "invalid deployment configuration", 400)
 		return

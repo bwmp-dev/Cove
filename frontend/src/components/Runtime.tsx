@@ -12,8 +12,8 @@ import { tableHeadClass, tableRowClass } from "../lib/styles";
 
 const toneClass: Record<Tone, string> = { ok: "bg-ok", warn: "bg-warn", bad: "bg-bad", neutral: "bg-fg-subtle" };
 
-function ContainerRow({ container, kind }: { container: Container; kind: "service" | "job" }) {
-  const { tone, label } = containerStatus(container, kind);
+function ContainerRow({ container, kind, manuallyStopped }: { container: Container; kind: "service" | "job"; manuallyStopped: boolean }) {
+  const { tone, label } = containerStatus(container, kind, { manuallyStopped });
   return (
     <tr className={tableRowClass}>
       <td className="py-2.5 pr-4 pl-4">
@@ -49,7 +49,7 @@ function ContainerRow({ container, kind }: { container: Container; kind: "servic
   );
 }
 
-export function RuntimeContainers({ workloadId, kind, operationActive }: { workloadId: string; kind: "service" | "job"; operationActive: boolean }) {
+export function RuntimeContainers({ workloadId, kind, operationActive, manuallyStopped }: { workloadId: string; kind: "service" | "job"; operationActive: boolean; manuallyStopped: boolean }) {
   const runtime = useQuery(workloadRuntimeQuery(workloadId, operationActive));
   const now = useNow(5_000);
 
@@ -117,7 +117,7 @@ export function RuntimeContainers({ workloadId, kind, operationActive }: { workl
           </thead>
           <tbody>
             {containers.map((container) => (
-              <ContainerRow key={container.id} container={container} kind={kind} />
+              <ContainerRow key={container.id} container={container} kind={kind} manuallyStopped={manuallyStopped} />
             ))}
           </tbody>
         </table>

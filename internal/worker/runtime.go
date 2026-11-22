@@ -31,7 +31,7 @@ func (e *Engine) inspectContainerStates(ctx context.Context, containers []Contai
 	if len(containers) == 0 {
 		return nil
 	}
-	args := []string{"docker", "inspect", "--format", `{"id":{{json .Id}},"state":{{json .State}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}`}
+	args := []string{"docker", "inspect", "--format", `{"id":{{json .Id}},"state":{{json .State}},"service":{{json (or (index .Config.Labels "dev.cove.service") (index .Config.Labels "com.docker.compose.service"))}}}`}
 	for _, container := range containers {
 		args = append(args, container.ID)
 	}

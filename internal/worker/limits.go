@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -76,7 +75,7 @@ func (e *Engine) prepareLimits(ctx context.Context, r Request, dir string, args,
 		return "", err
 	}
 	var config map[string]any
-	if err := json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err := decodeResolvedCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", err
 	}
 	if err := applyLimits(config, r.Limits); err != nil {

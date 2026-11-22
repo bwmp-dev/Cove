@@ -67,6 +67,8 @@ export const actionLabels = {
   routes: "Update routes",
   image_check: "Check images",
   build: "Build and publish",
+  rollout_promote: "Promote rollout",
+  rollout_abort: "Abort rollout",
 } as const;
 
 export const stateLabels: Record<OperationState, string> = {

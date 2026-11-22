@@ -27,6 +27,7 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Rollout       *RolloutStatus       `json:"rollout,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
 	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
 	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
@@ -202,7 +203,11 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 				containers[i].MetricsUnavailable = true
 			}
 		}
-		return RPCResponse{Containers: containers}
+		rollout, err := e.rolloutStatus(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect deployment traffic state"}
+		}
+		return RPCResponse{Containers: containers, Rollout: rollout}
 	case "container_logs":
 		logs, err := e.ContainerLogs(ctx, r.ID)
 		if err != nil {

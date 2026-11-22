@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -47,7 +46,7 @@ func (e *Engine) prepareFileSecrets(ctx context.Context, r Request, dir string, 
 		return "", err
 	}
 	var config map[string]any
-	if err := json.Unmarshal(output.data.Bytes(), &config); err != nil {
+	if err := decodeResolvedCompose(output.data.Bytes(), &config); err != nil {
 		return "", err
 	}
 	if err := validateFileSecretTargets(config, r); err != nil {

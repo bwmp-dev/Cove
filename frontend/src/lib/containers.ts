@@ -20,7 +20,11 @@ function legacyExitCode(status: string): number | undefined {
   return code === undefined ? undefined : Number(code);
 }
 
-export function containerStatus(container: Container, kind: "service" | "job"): ContainerStatus {
+export interface ContainerStatusContext {
+  manuallyStopped?: boolean;
+}
+
+export function containerStatus(container: Container, kind: "service" | "job", { manuallyStopped = false }: ContainerStatusContext = {}): ContainerStatus {
   const status = container.status.toLowerCase();
   switch (container.state) {
     case "running":
@@ -37,12 +41,13 @@ export function containerStatus(container: Container, kind: "service" | "job"): 
     case "restarting":
       return { tone: "warn", label: "Restarting" };
     case "dead":
-      return { tone: "bad", label: "Dead" };
+      return manuallyStopped ? { tone: "neutral", label: "Stopped" } : { tone: "bad", label: "Dead" };
     case "exited": {
       const code = container.exit_code ?? legacyExitCode(status);
-      if (code === 0) {
-        return kind === "job" || container.expected_completed ? { tone: "ok", label: "Completed" } : { tone: "neutral", label: "Exited (0)" };
-      }
+      if (code === 0 && (kind === "job" || container.expected_completed)) return { tone: "ok", label: "Completed" };
+      // Docker reports a stop past the grace period as exit 137 (SIGKILL), which is the operator's intent, not a crash.
+      if (manuallyStopped) return { tone: "neutral", label: "Stopped" };
+      if (code === 0) return { tone: "neutral", label: "Exited (0)" };
       return { tone: "bad", label: code === undefined ? "Exited" : `Failed (exit ${code})` };
     }
     default:

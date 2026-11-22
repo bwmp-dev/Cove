@@ -28,6 +28,32 @@ describe("containerStatus with typed worker fields", () => {
   });
 });
 
+describe("containerStatus for intentionally stopped resources", () => {
+  const stopped = { manuallyStopped: true };
+
+  it("labels containers killed by an operator stop as stopped instead of failed", () => {
+    expect(containerStatus(container("exited", "Exited (137) 5 seconds ago", { exit_code: 137 }), "service", stopped)).toEqual({ tone: "neutral", label: "Stopped" });
+    expect(containerStatus(container("exited", "Exited (143) 5 seconds ago"), "service", stopped)).toEqual({ tone: "neutral", label: "Stopped" });
+    expect(containerStatus(container("exited", "Exited (0) 5 seconds ago", { exit_code: 0 }), "service", stopped)).toEqual({ tone: "neutral", label: "Stopped" });
+    expect(containerStatus(container("dead", "Dead", { exit_code: 137 }), "service", stopped)).toEqual({ tone: "neutral", label: "Stopped" });
+  });
+
+  it("keeps successful one-shot completions as completed", () => {
+    expect(containerStatus(container("exited", "Exited (0) 2 minutes ago", { exit_code: 0 }), "job", stopped)).toEqual({ tone: "ok", label: "Completed" });
+    expect(containerStatus(container("exited", "Exited (0) 2 minutes ago", { exit_code: 0, service: "migrate", expected_completed: true }), "service", stopped)).toEqual({ tone: "ok", label: "Completed" });
+  });
+
+  it("reports containers that are still running or stopping by their actual state", () => {
+    expect(containerStatus(container("running", "Up 3 minutes (healthy)", { health: "healthy" }), "service", stopped)).toEqual({ tone: "ok", label: "Healthy" });
+    expect(containerStatus(container("running", "Up 3 minutes (unhealthy)", { health: "unhealthy" }), "service", stopped)).toEqual({ tone: "bad", label: "Unhealthy" });
+    expect(containerStatus(container("restarting", "Restarting (1) 5 seconds ago"), "service", stopped)).toEqual({ tone: "warn", label: "Restarting" });
+  });
+
+  it("still reports unexpected exits as failures when no manual stop is recorded", () => {
+    expect(containerStatus(container("exited", "Exited (137) 1 minute ago", { exit_code: 137 }), "service", { manuallyStopped: false })).toEqual({ tone: "bad", label: "Failed (exit 137)" });
+  });
+});
+
 describe("containerStatus with older workers", () => {
   it("falls back to the raw Docker status", () => {
     expect(containerStatus(container("exited", "Exited (0) 2 minutes ago"), "job").tone).toBe("ok");

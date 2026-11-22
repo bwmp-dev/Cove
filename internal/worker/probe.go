@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	Rollouts            bool         `json:"rollouts"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
 	GuardedHooks        bool         `json:"guarded_hooks"`
 	Previews            bool         `json:"previews"`
@@ -51,6 +52,7 @@ func Inspect(ctx context.Context) Probe {
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	p.RoutePolicies = true
+	p.Rollouts = true
 	if _, err := exec.CommandContext(ctx, "docker", "buildx", "version").Output(); err == nil {
 		if help, err := exec.CommandContext(ctx, "docker", "compose", "build", "--help").Output(); err == nil {
 			if push, err := exec.CommandContext(ctx, "docker", "push", "--help").Output(); err == nil {

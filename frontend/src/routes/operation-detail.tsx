@@ -16,18 +16,24 @@ import { formatAbsolute, formatDuration } from "../lib/format";
 import { actionLabels, durationMs, isActive } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
+import { resultSummary } from "../lib/rollouts";
 import { linkClass } from "../lib/styles";
+import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
+import type { WorkloadSummary } from "../api/types";
 
 const route = getRouteApi("/app/operations/$operationId");
 
-function RollbackRelease({ workloadId, release }: { workloadId: string; release: string }) {
+function RollbackRelease({ workload, release }: { workload: WorkloadSummary; release: string }) {
+  const workloadId = workload.id;
+  const pendingRollout = usePendingRollout(workload);
   const retained = useQuery({ queryKey: ["releases", workloadId], queryFn: ({ signal }) => request<{ releases: { id: string }[] }>("GET", `/api/workloads/${workloadId}/releases`, undefined, signal) });
   const rollback = useRollback(workloadId);
   const [confirm, setConfirm] = useState(false);
   const online = useOnline();
   const navigate = useNavigate();
   return <>
-    <Button disabled={!online || rollback.isPending || retained.isError || !retained.data?.releases.some((item) => item.id === release)} onClick={() => setConfirm(true)}>Roll back to this release</Button>
+    <Button disabled={!online || rollback.isPending || Boolean(pendingRollout) || retained.isError || !retained.data?.releases.some((item) => item.id === release)} onClick={() => setConfirm(true)}>Roll back to this release</Button>
+    {pendingRollout && <PendingRolloutMessage workloadId={workloadId} action="roll back" />}
     {retained.isError && <Notice tone="error">Could not verify whether this release is retained.</Notice>}
     {retained.data && !retained.data.releases.some((item) => item.id === release) && <p className="text-xs text-fg-muted">This release is no longer retained on the worker.</p>}
     {rollback.isError && <Notice tone="error" title="Could not queue rollback">{errorMessage(rollback.error)}</Notice>}
@@ -140,7 +146,7 @@ export function OperationPage() {
 
       <Section title="Summary">
         <div className="space-y-4">
-          {workload?.kind === "service" && can(workload.permissions, "operate") && operation.state === "succeeded" && (operation.action === "deploy" || operation.action === "rollback") && <RollbackRelease workloadId={workload.id} release={operation.id} />}
+          {workload?.kind === "service" && can(workload.permissions, "operate") && operation.state === "succeeded" && (operation.action === "deploy" || operation.action === "rollback") && <RollbackRelease workload={workload} release={operation.id} />}
           {cancel.isError && <Notice tone="error" title="Could not request cancellation">{errorMessage(cancel.error)}</Notice>}
           {active && operation.cancel_requested && <Notice tone="warn" title="Waiting for the worker">The request is saved and will be delivered when the worker is reachable.</Notice>}
           <p className="text-[13px] text-fg-muted">{stateDescriptions[operation.state]}</p>
@@ -177,6 +183,28 @@ export function OperationPage() {
               { term: "Queued", value: formatAbsolute(operation.created_at) },
               ...(result?.finished_at ? [{ term: "Finished", value: formatAbsolute(result.finished_at) }] : []),
               ...(duration !== null ? [{ term: "Duration", value: formatDuration(duration) }] : []),
+              ...(result?.rollout
+                ? [
+                    {
+                      term: "Rollout",
+                      value: (
+                        <div className="space-y-1">
+                          <p>{resultSummary(result.rollout)}</p>
+                          {result.rollout.reason && <p className="text-xs text-fg-muted">{result.rollout.reason}</p>}
+                          {result.rollout.phase === "waiting" && workload && (
+                            <p className="text-xs text-fg-muted">
+                              The resource{" "}
+                              <Link to="/resources/$resourceId" params={{ resourceId: workload.id }} className={linkClass}>
+                                Overview
+                              </Link>{" "}
+                              shows whether it is still waiting.
+                            </p>
+                          )}
+                        </div>
+                      ),
+                    },
+                  ]
+                : []),
               ...(result?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{result.revision}</span> }] : []),
               ...(!result ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),
             ]}

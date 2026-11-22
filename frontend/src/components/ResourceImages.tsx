@@ -13,6 +13,7 @@ import { can } from "../lib/permissions";
 import { buttonClass, linkClass } from "../lib/styles";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RelativeTime } from "./RelativeTime";
+import { PendingRolloutMessage, usePendingRollout } from "./StagedRollout";
 import { StatusLabel } from "./status";
 import { Button, LoadingRows, Notice, QueryError, Section } from "./ui";
 
@@ -123,6 +124,7 @@ export function ResourceImages({ workload }: { workload: Workload }) {
   const ready = node?.state === "ready";
   const supported = Boolean(node?.capabilities?.image_lifecycle);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const pendingRollout = usePendingRollout(workload, Boolean(active));
   const blocked = !online || !ready || !supported || Boolean(active) || queue.isPending || operations.isPending;
   const reason = !online
     ? "You are offline. Image actions are available when the connection returns."
@@ -150,7 +152,7 @@ export function ResourceImages({ workload }: { workload: Workload }) {
             </Button>
             <Button
               size="sm"
-              disabled={blocked}
+              disabled={blocked || Boolean(pendingRollout)}
               pending={queue.isPending && queue.variables.action === "deploy"}
               aria-describedby={statusId}
               onClick={() => setConfirmPull(true)}
@@ -174,6 +176,7 @@ export function ResourceImages({ workload }: { workload: Workload }) {
           </Notice>
         )}
         {canOperate && reason && <p className="text-xs text-fg-muted">{reason}</p>}
+        {canOperate && !active && pendingRollout && <PendingRolloutMessage workloadId={workload.id} action="pull images and redeploy" />}
         {canOperate && active && (
           <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
             <span>

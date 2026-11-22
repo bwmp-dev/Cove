@@ -174,7 +174,7 @@ func (e *Engine) performImageCheck(ctx context.Context, r Request, env []string,
 	seen := map[string]bool{}
 	for _, container := range containers {
 		var deployed struct{ Reference, Image, Service string }
-		if err = e.imageJSON(ctx, env, &deployed, "docker", "inspect", "--format", `{"reference":{{json .Config.Image}},"image":{{json .Image}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}`, container.ID); err != nil {
+		if err = e.imageJSON(ctx, env, &deployed, "docker", "inspect", "--format", `{"reference":{{json (or (index .Config.Labels "dev.cove.image-reference") .Config.Image)}},"image":{{json .Image}},"service":{{json (or (index .Config.Labels "dev.cove.service") (index .Config.Labels "com.docker.compose.service"))}}}`, container.ID); err != nil {
 			return err
 		}
 		key := deployed.Service + "/" + deployed.Image + "/" + deployed.Reference

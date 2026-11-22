@@ -102,10 +102,13 @@ type ingressMiddleware struct {
 }
 
 type ingressService struct {
-	LoadBalancer struct {
-		Servers []map[string]string `json:"servers"`
-		Sticky  map[string]any      `json:"sticky,omitempty"`
-	} `json:"loadBalancer"`
+	LoadBalancer *ingressLoadBalancer `json:"loadBalancer,omitempty"`
+	Weighted     *ingressWeighted     `json:"weighted,omitempty"`
+}
+
+type ingressLoadBalancer struct {
+	Servers []map[string]string `json:"servers"`
+	Sticky  map[string]any      `json:"sticky,omitempty"`
 }
 
 type dynamicIngress struct {
@@ -143,7 +146,7 @@ func (c *dynamicIngress) addNamed(domain, upstream, auth, name string) {
 		router.Middlewares = []string{name + "-auth"}
 	}
 	c.HTTP.Routers[name] = router
-	service := ingressService{}
+	service := ingressService{LoadBalancer: &ingressLoadBalancer{}}
 	service.LoadBalancer.Servers = []map[string]string{{"url": upstream}}
 	c.HTTP.Services[name] = service
 }
@@ -267,15 +270,18 @@ func (e *Engine) loadIngress() (map[string][]Route, error) {
 }
 
 func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out io.Writer) error {
-	config, err := ingressConfig(routes)
+	if _, err := ingressConfig(routes); err != nil {
+		return err
+	}
+	if err := e.ensureIngress(ctx, out); err != nil {
+		return err
+	}
+	config, err := e.ingressTraffic(ctx, routes, out)
 	if err != nil {
 		return err
 	}
 	config, err = e.migrationIngressConfig(config)
 	if err != nil {
-		return err
-	}
-	if err = e.ensureIngress(ctx, out); err != nil {
 		return err
 	}
 	panel, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "cove.panel.domain"}}`, "cove-ingress")
@@ -301,10 +307,11 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	}
 	for workload, list := range routes {
 		for _, route := range routeTargets(list) {
-			ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
+			selected, err := e.trafficContainers(ctx, workload, route.Service, false)
 			if err != nil {
 				return err
 			}
+			ids := strings.Join(selected, " ")
 			if ids == "" {
 				continue
 			}
@@ -321,6 +328,13 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 						return err
 					}
 				} else if !slices.Contains(fields[1:], alias) {
+					traffic, err := e.loadTraffic(workload)
+					if err != nil {
+						return err
+					}
+					if len(traffic[route.Service]) > 0 {
+						continue
+					}
 					return fmt.Errorf("service %q joins cove-ingress without Cove's routing alias; remove that network from its Compose file", route.Service)
 				}
 			}
@@ -361,11 +375,11 @@ func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
 	for _, route := range routeTargets(list) {
-		ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
+		ids, err := e.trafficContainers(ctx, workload, route.Service, false)
 		if err != nil {
 			return err
 		}
-		if ids == "" {
+		if len(ids) == 0 {
 			return fmt.Errorf("route service %q has no container; check the service name against the deployed Compose file", route.Service)
 		}
 	}
@@ -563,6 +577,9 @@ func (e *Engine) settleRoutes(ctx context.Context, id, state string) error {
 	e.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if j.RolloutChange != nil {
+		return e.settleRollout(ctx, id, state)
 	}
 	if j.Operation.State != "running" || j.RouteChange == nil {
 		return nil

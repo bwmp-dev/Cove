@@ -35,7 +35,7 @@ import { errorMessage, isStatus } from "../api/client";
 import { useCancelOperation, useQueueOperation } from "../api/mutations";
 import { projectsQuery, useAssignEnvironment, type Project } from "../api/projects";
 import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
-import type { Operation, Workload } from "../api/types";
+import type { Operation, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
@@ -43,12 +43,14 @@ import { LogViewer } from "../components/LogViewer";
 import { OperationsTable } from "../components/OperationsTable";
 import { RelativeTime } from "../components/RelativeTime";
 import { ContainerLogs, RuntimeContainers } from "../components/Runtime";
+import { PendingRolloutMessage, StagedRollout, usePendingRollout } from "../components/StagedRollout";
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can } from "../lib/permissions";
 import { actionLabels, activeOperation, allowedActions, isActive, latestDeploymentOperation, stateLabels, workloadKind } from "../lib/operations";
+import { resultSummary } from "../lib/rollouts";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -92,12 +94,22 @@ function LatestOperation({ operation, kind }: { operation: Operation; kind: "ser
         )}
       </div>
       {message && <p className="text-[13px] text-fg-muted">{message}</p>}
+      {operation.result?.rollout && <RolloutResult rollout={operation.result.rollout} />}
       {error && (
         <Notice tone="error" title="Worker error">
           <span className="font-mono text-xs break-words">{error}</span>
         </Notice>
       )}
       <LogViewer operationId={operation.id} active={isActive(operation.state)} />
+    </div>
+  );
+}
+
+function RolloutResult({ rollout }: { rollout: NonNullable<WorkerOperation["rollout"]> }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[13px] text-fg-muted">{resultSummary(rollout)}</p>
+      {rollout.reason && <p className="text-xs break-words text-fg-muted">{rollout.reason}</p>}
     </div>
   );
 }
@@ -168,8 +180,10 @@ function useResourceActions(workload: Workload) {
   const [confirmStop, setConfirmStop] = useState(false);
   const kind = workloadKind(workload.kind);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const pendingRollout = usePendingRollout(workload, Boolean(active));
   const blocked = !online || Boolean(active) || queue.isPending || operations.isPending;
   const statusId = useId();
+  const rolloutId = useId();
 
   return {
     buttons: (
@@ -179,12 +193,13 @@ function useResourceActions(workload: Workload) {
             const Icon = actionIcons[action];
             const pending = queue.isPending && queue.variables.action === action;
             const label = kind === "job" && action === "deploy" ? "Deploy and run" : actionLabels[action];
+            const waitsForRollout = action === "deploy" && Boolean(pendingRollout);
             return (
               <Button
                 key={action}
                 variant={action === "deploy" ? "primary" : "secondary"}
-                disabled={blocked}
-                aria-describedby={active ? statusId : undefined}
+                disabled={blocked || waitsForRollout}
+                aria-describedby={active ? statusId : waitsForRollout ? rolloutId : undefined}
                 pending={pending}
                 onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate({ action }))}
               >
@@ -195,6 +210,7 @@ function useResourceActions(workload: Workload) {
           })}
         </div>
         {active && <ActiveOperationStatus id={statusId} operation={active} kind={kind} />}
+        {!active && pendingRollout && <PendingRolloutMessage id={rolloutId} workloadId={workload.id} action="deploy again" className="max-w-md md:text-right" />}
       </div>
     ),
     feedback: (
@@ -549,6 +565,7 @@ export function ResourceOverview() {
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       <div className="min-w-0">
+        <StagedRollout workload={workload} operationActive={Boolean(active)} />
         <Section title={active ? "Active operation" : kind === "job" ? "Last run" : "Latest operation"}>
           {operations.isPending ? (
             <p className="text-[13px] text-fg-muted">Loading operations</p>
@@ -567,7 +584,7 @@ export function ResourceOverview() {
           description={kind === "job" ? "Containers from the latest run. An exited job container is expected after a run completes." : "Live Docker state on the node."}
           flush
         >
-          <RuntimeContainers workloadId={workload.id} kind={kind} operationActive={Boolean(active)} />
+          <RuntimeContainers workloadId={workload.id} kind={kind} operationActive={Boolean(active)} manuallyStopped={workload.manually_stopped} />
         </Section>
       </div>
       <Section title="Details">

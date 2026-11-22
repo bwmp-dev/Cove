@@ -23,6 +23,7 @@ func resourceID() string {
 }
 
 type workloadInput struct {
+	Rollout          *worker.RolloutOptions          `json:"rollout,omitempty"`
 	GuardedDeploy    *bool                           `json:"guarded_deploy,omitempty"`
 	FileSecrets      []worker.FileSecret             `json:"file_secrets,omitempty"`
 	Hooks            *worker.DeploymentHooks         `json:"hooks,omitempty"`
@@ -77,6 +78,10 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	if err := s.DB.QueryRow(r.Context(), "SELECT state FROM nodes WHERE id=$1", in.NodeID).Scan(&state); err != nil || state != "ready" {
 		http.Error(w, "select a ready node", 409)
 		return
+	}
+	if in.Rollout != nil {
+		value := in.Rollout.Normalized()
+		in.Rollout = &value
 	}
 	data, err := json.Marshal(in)
 	if err != nil {
@@ -169,7 +174,7 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch in.Action {
-	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check", "build":
+	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check", "build", "rollout_promote", "rollout_abort":
 	default:
 		http.Error(w, "unsupported action", 400)
 		return
@@ -201,10 +206,31 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := resourceID()
-	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
 	request.PullLatest = in.PullLatest
+	if in.Action != "deploy" && in.Action != "rollback" || request.Rollout != nil && request.Rollout.Strategy == "disabled" {
+		request.Rollout = nil
+	}
+	if in.Action == "rollout_promote" || in.Action == "rollout_abort" {
+		if config.Kind == "job" || in.PullLatest || in.Build != nil {
+			http.Error(w, "rollout actions require a service", 400)
+			return
+		}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: in.Action, Kind: "service"}
+	}
 	request.Build = in.Build
+	if request.Rollout != nil || in.Action == "rollout_promote" || in.Action == "rollout_abort" {
+		var supported bool
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'rollouts')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
+			http.Error(w, "worker capabilities unavailable", 503)
+			return
+		}
+		if !supported {
+			http.Error(w, "upgrade and verify the worker before using deployment rollouts", 409)
+			return
+		}
+	}
 	if in.Build != nil && in.Action != "build" {
 		http.Error(w, "build options require a build operation", 400)
 		return
@@ -626,6 +652,20 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if request.Action == "routes" && state == "succeeded" {
 		return s.commitRoutes(ctx, id, request, result)
+	}
+	if rollout := response.Operation.Rollout; rollout != nil && rollout.Release != "" && rollout.Release != id && (rollout.Phase == "completed" || rollout.Phase == "aborted") {
+		tx, err := s.DB.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if _, err = tx.Exec(ctx, `UPDATE operations SET result=jsonb_set(result,'{rollout,phase}',to_jsonb($3::text)),updated_at=now() WHERE id=$1 AND workload_id=$2 AND action IN ('deploy','rollback') AND result->'rollout'->>'phase'='waiting'`, rollout.Release, request.Workload, rollout.Phase); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	_, err = s.DB.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id)
 	return err

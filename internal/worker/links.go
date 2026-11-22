@@ -486,10 +486,20 @@ func (e *Engine) ensureLinkNetwork(ctx context.Context, networks map[string]*lin
 }
 
 func (e *Engine) serviceContainers(ctx context.Context, workload, service string) ([]string, bool, error) {
-	out, err := e.output(ctx, "docker", "ps", "-a", "--no-trunc", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+service, "--filter", "label=com.docker.compose.oneoff=False", "--format", "{{.ID}} {{.State}}")
+	names, err := e.serviceNames(workload, service)
 	if err != nil {
 		return nil, false, err
 	}
+	var output strings.Builder
+	for _, name := range names {
+		part, err := e.output(ctx, "docker", "ps", "-a", "--no-trunc", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+name, "--filter", "label=com.docker.compose.oneoff=False", "--format", "{{.ID}} {{.State}}")
+		if err != nil {
+			return nil, false, err
+		}
+		output.WriteString(part)
+		output.WriteByte('\n')
+	}
+	out := output.String()
 	var ids []string
 	running := false
 	for _, line := range strings.Split(out, "\n") {
@@ -1002,7 +1012,7 @@ func (e *Engine) prepareLinks(ctx context.Context, r Request, dir string, args, 
 		return "", false, errors.New("could not resolve Compose for private connections")
 	}
 	var config map[string]any
-	if err = json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err = decodeResolvedCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", false, errors.New("invalid resolved Compose configuration")
 	}
 	if err = addLinkNetworks(config, attachments); err != nil {

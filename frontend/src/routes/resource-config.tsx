@@ -22,7 +22,9 @@ import { RouteEditor } from "../components/RouteEditor";
 import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
 import { Webhook } from "../components/Webhook";
 import { SourceFields, TypeFields } from "../components/WorkloadForm";
+import { RolloutAvailability, RolloutEligibility, RolloutServiceEditors, RolloutStrategyRows, useRolloutSupport } from "../components/RolloutSettings";
 import { Button, DefinitionList, EmptyState, Field, Notice, Section, SettingRow, SettingRows, Spinner, SwitchField } from "../components/ui";
+import { rolloutChanged, rolloutDraft, rolloutsApply, validateRollout, type RolloutDraft, type RolloutErrors } from "../lib/rollouts";
 import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
 import { can } from "../lib/permissions";
@@ -33,22 +35,114 @@ import { useResource } from "./workload-detail";
 const nextDeploy = "Changes apply on the next deploy.";
 
 export function ResourceDeploymentSafety() {
- const resource = useResource();
- const { save, update } = useSectionSave(resource);
- const blocked = useSaveBlocked(resource.id);
- const [enabled, setEnabled] = useState(Boolean(resource.guarded_deploy));
- const [errors, setErrors] = useState<WorkloadFormErrors>({});
- const dirty = enabled !== Boolean(resource.guarded_deploy);
- return <form onSubmit={event => { event.preventDefault(); setErrors(save({}, event.currentTarget, undefined, input => { input.guarded_deploy = enabled; })); }}>
-  <UnsavedChangesGuard dirty={dirty} />
-  <Section width="form" title="Deployment safety" description="Health-test a temporary candidate before replacing the application, then recover the previous release automatically if replacement fails." footer={can(resource.permissions, "edit") && <SaveBar dirty={dirty} pending={update.isPending} blocked={blocked} onDiscard={() => setEnabled(Boolean(resource.guarded_deploy))} status={update.isSuccess ? `Saved. ${nextDeploy}` : undefined} />}>
-   <div className="space-y-4">
-    <Notice>This is for one stateless service with an enabled Docker healthcheck. Persistent volumes, host ports, fixed container names, and privileged options are rejected. A brief replacement interruption is possible; this is not a rolling or highly available deployment.</Notice>
-    <SwitchField layout="row" id="guarded-deploy" checked={enabled} onChange={event => setEnabled(event.target.checked)} disabled={!can(resource.permissions, "edit")} label="Enable guarded deployment" description="The candidate receives the application's credentials and can reach its databases. Startup tasks must tolerate overlap. Hooks and database migrations are not undone by recovery. Post-deployment hook failures leave the new healthy release running." />
-    <FormError errors={errors} error={update.error} />
-   </div>
-  </Section>
- </form>;
+  const resource = useResource();
+  return <DeploymentSafetyForm workload={resource} />;
+}
+
+function GuardedDeploymentSwitch({ id, checked, disabled, strategySelected, onChange }: { id: string; checked: boolean; disabled: boolean; strategySelected: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <SwitchField
+      layout="row"
+      id={id}
+      checked={checked}
+      onChange={(event) => onChange(event.target.checked)}
+      disabled={disabled}
+      label="Enable guarded deployment"
+      description={strategySelected ? guardedWithStrategy : guardedDescription}
+    />
+  );
+}
+
+const guardedDescription =
+  "Health-tests a temporary candidate before replacing the application, then recovers the previous release if replacement fails. The candidate receives the application's credentials and can reach its databases. Startup tasks must tolerate overlap. Hooks and database migrations are not undone by recovery.";
+const guardedWithStrategy = "Applies only while the replacement strategy is off. With a strategy selected, ineligible deploys always use guarded replacement.";
+
+function DeploymentSafetyForm({ workload }: { workload: Workload }) {
+  const id = useId();
+  const { save, update } = useSectionSave(workload);
+  const blocked = useSaveBlocked(workload.id);
+  const editable = can(workload.permissions, "edit");
+  const supported = useRolloutSupport(workload).supported;
+  const [guarded, setGuarded] = useState(Boolean(workload.guarded_deploy));
+  const [draft, setDraft] = useState(() => rolloutDraft(workload.rollout));
+  const [errors, setErrors] = useState<WorkloadFormErrors>({});
+  const [rolloutErrors, setRolloutErrors] = useState<RolloutErrors>({});
+  const applies = rolloutsApply(workload);
+  const strategySelected = applies && draft.strategy !== "disabled";
+  const rolloutDirty = applies && rolloutChanged(draft, workload.rollout);
+  const dirty = guarded !== Boolean(workload.guarded_deploy) || rolloutDirty;
+  const rolloutLocked = !editable || !supported || update.isPending;
+
+  function change(next: (current: RolloutDraft) => RolloutDraft) {
+    update.reset();
+    setDraft(next);
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const rollout = rolloutDirty ? validateRollout(draft, workload.rollout) : { errors: {} };
+    setRolloutErrors(rollout.errors);
+    if (rolloutDirty && !rollout.options) {
+      focusFirstInvalid(form);
+      return;
+    }
+    setErrors(save({}, form, undefined, (input) => {
+      input.guarded_deploy = guarded;
+      // Sent only when changed: omitting it keeps the saved options, and an unchanged "off" stays unsaved.
+      if (rollout.options) input.rollout = rollout.options;
+    }));
+  }
+
+  function discard() {
+    setGuarded(Boolean(workload.guarded_deploy));
+    setDraft(rolloutDraft(workload.rollout));
+    setErrors({});
+    setRolloutErrors({});
+  }
+
+  return (
+    <form onSubmit={submit} noValidate>
+      <UnsavedChangesGuard dirty={dirty} />
+      <Section
+        width="form"
+        title="Deployment safety"
+        description={`How a deploy replaces running containers. ${nextDeploy}`}
+        footer={editable && <SaveBar dirty={dirty} pending={update.isPending} blocked={blocked} onDiscard={discard} status={update.isSuccess ? `Saved. ${nextDeploy}` : undefined} />}
+      >
+        <div className="space-y-5">
+          {editable ? <SaveBlockers workload={workload} /> : <ViewOnly />}
+          <RolloutAvailability workload={workload} editable={editable} />
+          <SettingRows>
+            {applies && <RolloutStrategyRows id={id} draft={draft} errors={rolloutErrors} disabled={rolloutLocked} onChange={change} />}
+            <GuardedDeploymentSwitch
+              id={`${id}-guarded`}
+              checked={guarded}
+              disabled={!editable || update.isPending}
+              strategySelected={strategySelected}
+              onChange={(checked) => {
+                update.reset();
+                setGuarded(checked);
+              }}
+            />
+          </SettingRows>
+          {strategySelected ? (
+            <>
+              <RolloutServiceEditors id={id} draft={draft} errors={rolloutErrors} disabled={rolloutLocked} onChange={change} />
+              <RolloutEligibility resourceId={workload.id} />
+            </>
+          ) : (
+            <Notice>
+              Guarded deployment is for one stateless service with an enabled Docker healthcheck. Persistent volumes, host ports, fixed container names and privileged options are
+              rejected. A brief interruption is possible: it is a health check before replacement, not a traffic handoff.
+            </Notice>
+          )}
+          {Object.keys(rolloutErrors).length > 0 && <Notice tone="error" title="Check the deployment settings">Fix the highlighted fields.</Notice>}
+          <FormError errors={errors} error={update.error} />
+        </div>
+      </Section>
+    </form>
+  );
 }
 
 function ResourceFileSecrets() {

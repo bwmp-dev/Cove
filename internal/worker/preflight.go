@@ -115,7 +115,13 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 	if len(r.FileSecrets) > 0 {
 		add("File secrets", "pass", "Source variables and selected runtime/build services exist; no secret files were mounted.")
 	}
-	if r.GuardedDeploy != nil && *r.GuardedDeploy {
+	if r.Rollout != nil && r.Rollout.Strategy != "disabled" {
+		if reason := rolloutEligibility(r, config); reason != "" {
+			add("Replacement strategy", "warning", reason)
+		} else {
+			add("Replacement strategy", "pass", "Compose can run parallel generations. Image storage declarations and actual health are checked during deployment.")
+		}
+	} else if r.GuardedDeploy != nil && *r.GuardedDeploy {
 		if _, err = guardedService(config); err != nil {
 			add("Deployment safety", "error", err.Error())
 			return report

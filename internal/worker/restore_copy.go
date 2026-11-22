@@ -23,6 +23,9 @@ type RestoreCopy struct {
 }
 
 func isolateRestore(config map[string]any, manifest backupManifest, target string) ([]string, []backupMount, error) {
+	if err := restoreServiceNames(config, manifest.State.Traffic); err != nil {
+		return nil, nil, err
+	}
 	services, ok := config["services"].(map[string]any)
 	if !ok || len(services) == 0 {
 		return nil, nil, errors.New("snapshot has no services")
