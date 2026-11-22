@@ -121,7 +121,7 @@ func rolloutEligibility(r Request, config map[string]any) string {
 	if len(r.Routes) == 0 {
 		return "A managed HTTP route is required for an atomic traffic switch."
 	}
-	hooks := r.Hooks != nil && (r.Hooks.Before != nil || r.Hooks.After != nil || len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil)
+	hooks := r.Hooks.Enabled()
 	if r.Private != nil || len(r.Networks) > 0 || hooks {
 		return "Private connections, shared networks or deployment hooks require guarded Compose replacement."
 	}
@@ -445,10 +445,15 @@ func (e *Engine) performRollout(ctx context.Context, r Request, dir string, args
 	}
 	reason := rolloutEligibility(r, config)
 	if reason != "" {
+		if r.Scale != nil {
+			return errors.New(reason)
+		}
 		return e.guardedRolloutFallback(ctx, r, dir, args, env, out, reason)
 	}
-	if err := e.Run(ctx, dir, append(append([]string{}, args...), "pull", "--ignore-buildable"), env, out); err != nil {
-		return err
+	if r.Scale == nil {
+		if err := e.Run(ctx, dir, append(append([]string{}, args...), "pull", "--ignore-buildable"), env, out); err != nil {
+			return err
+		}
 	}
 	for name, raw := range config["services"].(map[string]any) {
 		service := raw.(map[string]any)

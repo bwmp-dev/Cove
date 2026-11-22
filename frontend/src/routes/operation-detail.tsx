@@ -25,6 +25,7 @@ import { useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
 import { idleReason } from "../lib/idle";
+import { ScaleOutcome } from "../components/CpuAutoscale";
 
 const route = getRouteApi("/app/operations/$operationId");
 
@@ -265,6 +266,7 @@ export function OperationPage() {
                     },
                   ]
                 : []),
+              ...(result?.scale ? [{ term: "CPU scaling", value: <ScaleOutcome scale={result.scale} /> }] : []),
               ...(result?.suspension ? [{ term: suspensionTerms[result.suspension.reason], value: <SuspensionOutcome suspension={result.suspension} /> }] : []),
               ...(result?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{result.revision}</span> }] : []),
               ...(!result ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),

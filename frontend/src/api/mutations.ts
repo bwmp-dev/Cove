@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { rememberTeam } from "../lib/team";
 import { keys } from "./queries";
-import type { Enrollment, IdlePolicy, NodeInput, OperationRequest, QueuedOperation, RestartPolicy, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
+import type { AutoscalePolicy, AutoscaleState, Enrollment, IdlePolicy, NodeInput, OperationRequest, QueuedOperation, RestartPolicy, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
 
 // Mutations carrying credentials (passwords, setup commands, secrets) use gcTime 0 so
 // their variables and results leave the in-memory mutation cache once the form unmounts.
@@ -128,6 +128,15 @@ export function useUpdateIdlePolicy(workloadId: string) {
   return useMutation({
     mutationFn: (policy: IdlePolicy) => request<QueuedOperation>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/idle-policy`, policy),
     onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
+  });
+}
+
+// Saved immediately without an operation; the response is the new saved state.
+export function useUpdateAutoscalePolicy(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (policy: AutoscalePolicy) => request<AutoscaleState>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/autoscale-policy`, policy),
+    onSuccess: (state) => client.setQueryData(keys.autoscalePolicy(workloadId), state),
   });
 }
 

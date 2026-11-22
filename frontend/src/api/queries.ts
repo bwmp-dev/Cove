@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, IdlePolicy, Node, Operation, OperationLogs, RestartPolicy, TeamMembership, Workload, WorkloadImages, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, AutoscaleState, IdlePolicy, Node, Operation, OperationLogs, RestartPolicy, TeamMembership, Workload, WorkloadImages, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -17,6 +17,7 @@ export const keys = {
   workloadImages: (id: string) => ["workloads", id, "images"] as const,
   restartPolicy: (id: string) => ["workloads", id, "restart-policy"] as const,
   idlePolicy: (id: string) => ["workloads", id, "idle-policy"] as const,
+  autoscalePolicy: (id: string) => ["workloads", id, "autoscale-policy"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -126,6 +127,14 @@ export const idlePolicyQuery = (id: string, applied: string | null) =>
   queryOptions({
     queryKey: [...keys.idlePolicy(id), applied] as const,
     queryFn: ({ signal }) => request<IdlePolicy>("GET", `/api/workloads/${encodeURIComponent(id)}/idle-policy`, undefined, signal),
+  });
+
+// The panel samples about once a minute, so polling at half that keeps the shown sample and status current.
+export const autoscalePolicyQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.autoscalePolicy(id),
+    queryFn: ({ signal }) => request<AutoscaleState>("GET", `/api/workloads/${encodeURIComponent(id)}/autoscale-policy`, undefined, signal),
+    refetchInterval: 30_000,
   });
 
 export const workloadLogsQuery = (id: string) =>

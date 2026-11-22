@@ -23,6 +23,7 @@ func resourceID() string {
 }
 
 type workloadInput struct {
+	Autoscale        *worker.AutoscalePolicy         `json:"autoscale,omitempty"`
 	Rollout          *worker.RolloutOptions          `json:"rollout,omitempty"`
 	GuardedDeploy    *bool                           `json:"guarded_deploy,omitempty"`
 	FileSecrets      []worker.FileSecret             `json:"file_secrets,omitempty"`
@@ -47,6 +48,10 @@ type workloadInput struct {
 func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	var in workloadInput
 	if !decode(w, r, &in) {
+		return
+	}
+	if in.Autoscale != nil {
+		http.Error(w, "create the resource first, then configure CPU scaling", 400)
 		return
 	}
 	if in.Backup != nil && (in.Backup.Remote != nil || in.Backup.StorageID != "" || in.Backup.Database != nil) {
@@ -528,6 +533,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.scheduleImageChecks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.scheduleUnhealthyRestarts(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -644,7 +652,7 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		return err
 	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
-	if !cancelRequested && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
+	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
 			if errors.Is(err, errSharedVariables) {
 				return s.failOperation(ctx, id, "Shared variable resolution failed; check for missing names in this resource's team, project, and environment, or values exceeding 64 KiB.")
@@ -656,6 +664,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		}
 	}
 	method := "submit"
+	if request.Scale != nil {
+		method = "submit_cpu_scale"
+	}
 	if cancelRequested {
 		method = "cancel"
 	}
@@ -707,6 +718,13 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	result, err := json.Marshal(response.Operation)
 	if err != nil {
 		return err
+	}
+	if request.Scale != nil && state == "succeeded" {
+		if !confirmedCPUScale(request.Scale, response.Operation) {
+			_, err = s.DB.Exec(ctx, `UPDATE operations SET result=$2,updated_at=now() WHERE id=$1`, id, []byte(`{"error":"Waiting for the worker to confirm the CPU scaling outcome; the resource remains locked."}`))
+			return err
+		}
+		return s.commitCPUScale(ctx, id, request, result)
 	}
 	if request.Action == "idle_policy" && state == "succeeded" {
 		return s.commitIdlePolicy(ctx, id, request, result)

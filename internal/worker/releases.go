@@ -16,7 +16,19 @@ import (
 
 // Escape resolved literal dollars before Compose reads the snapshot a second time.
 func literalCompose(value any) any {
-	return composeDollars(value, "$", "$$")
+	next := composeDollars(value, "$", "$$")
+	if config, ok := next.(map[string]any); ok {
+		services, _ := config["services"].(map[string]any)
+		for _, raw := range services {
+			service, _ := raw.(map[string]any)
+			deploy, _ := service["deploy"].(map[string]any)
+			// Compose emits this empty default, then warns on re-reading it as a Swarm setting.
+			if placement, ok := deploy["placement"].(map[string]any); ok && len(placement) == 0 {
+				delete(deploy, "placement")
+			}
+		}
+	}
+	return next
 }
 
 func decodeResolvedCompose(data []byte, config *map[string]any) error {

@@ -41,6 +41,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
 import { EnvironmentHoldNotice, useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { IdleHoldNotice, useIdleState } from "../components/IdleSleep";
+import { ScaleOutcome } from "../components/CpuAutoscale";
 import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
 import { OperationsTable } from "../components/OperationsTable";
@@ -102,6 +103,11 @@ function LatestOperation({ operation, kind }: { operation: Operation; kind: "ser
       {message && <p className="text-[13px] text-fg-muted">{message}</p>}
       {operation.result?.job && <JobOutcome job={operation.result.job} />}
       {operation.result?.rollout && <RolloutResult rollout={operation.result.rollout} />}
+      {operation.result?.scale && (
+        <div className="text-[13px]">
+          <ScaleOutcome scale={operation.result.scale} />
+        </div>
+      )}
       {error && (
         <Notice tone="error" title="Worker error">
           <span className="font-mono text-xs break-words">{error}</span>

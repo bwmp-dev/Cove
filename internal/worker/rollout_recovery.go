@@ -11,6 +11,9 @@ import (
 )
 
 func (e *Engine) guardedRolloutFallback(ctx context.Context, r Request, dir string, args, env []string, out io.Writer, reason string) (result error) {
+	if r.Scale != nil {
+		return errors.New(reason)
+	}
 	if r.Rollout != nil && len(r.Rollout.Replicas) > 0 {
 		reason += " Replica overrides apply only to eligible parallel replacements; Compose scaling is used in guarded mode."
 	}

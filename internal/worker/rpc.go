@@ -27,6 +27,7 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	CPUScale      *CPUScaleObservation `json:"cpu_scale,omitempty"`
 	Idle          *IdleStatus          `json:"idle,omitempty"`
 	Rollout       *RolloutStatus       `json:"rollout,omitempty"`
 	Suspension    *SuspensionStatus    `json:"suspension,omitempty"`
@@ -52,6 +53,12 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "cpu_scale_sample":
+		sample, err := e.CPUScaleSample(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{CPUScale: sample}
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()
 		if err != nil {
@@ -231,9 +238,12 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit":
+	case "submit", "submit_cpu_scale":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
+		}
+		if (r.Request.Scale != nil) != (r.Method == "submit_cpu_scale") {
+			return RPCResponse{Error: "CPU scaling requires its dedicated submission method"}
 		}
 		op, err := e.Submit(*r.Request)
 		if err != nil {

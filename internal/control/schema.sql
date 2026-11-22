@@ -725,3 +725,11 @@ CREATE TRIGGER cove_paused_operation BEFORE INSERT ON operations FOR EACH ROW EX
 
 -- Deploy track: desired idle sleep policy is committed only after worker route confirmation.
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS idle_policy jsonb NOT NULL DEFAULT '{"enabled":false,"after_seconds":300,"request_driven":false}'::jsonb;
+
+-- CPU scaling samples and attempt cooldown survive control-plane restarts.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_cpu_check_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_samples jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_cpu_scale_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_operation_id text NOT NULL DEFAULT '';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_status text NOT NULL DEFAULT 'disabled';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_error text NOT NULL DEFAULT '';

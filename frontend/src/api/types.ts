@@ -22,6 +22,8 @@ export interface Capabilities {
   suspensions?: boolean;
   // The worker can stop idle request-driven services and wake them on the next authorized request.
   idle_sleep?: boolean;
+  // The worker reports per-service CPU samples, so the panel can scale rolling services between replica bounds.
+  cpu_autoscale?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -242,6 +244,17 @@ export interface WorkerOperation {
   job?: JobResult;
   // Reported by environment pause and resume operations, and by a Start that wakes a sleeping app (reason idle).
   suspension?: SuspensionResult;
+  // Present on a deploy the panel's CPU scaler queued: a rolling replacement of the current release with new replica counts.
+  scale?: ScaleResult;
+}
+
+export interface ScaleResult {
+  // The deployed generation the CPU samples were read from.
+  generation: string;
+  before: Record<string, number>;
+  replicas: Record<string, number>;
+  // Each replica's CPU as a percentage of its CPU limit, averaged over all replicas of the service.
+  cpu_percent: Record<string, number>;
 }
 
 export type SuspensionPhase = "active" | "pausing" | "paused" | "resuming" | "error";
@@ -404,6 +417,38 @@ export interface IdleRuntime {
   last_sleep?: string;
   last_wake?: string;
   error?: string;
+}
+
+export interface AutoscaleService {
+  min_replicas: number;
+  max_replicas: number;
+  target_cpu_percent: number;
+}
+
+// Saved through the CPU scaling endpoint only; ordinary resource saves keep it unchanged.
+export interface AutoscalePolicy {
+  enabled: boolean;
+  services: Record<string, AutoscaleService>;
+}
+
+export interface CPUSample {
+  sampled_at: string;
+  generation: string;
+  // Deployed replicas per service when the sample was read, not the configured count.
+  replicas: Record<string, number>;
+  cpu_percent: Record<string, number>;
+}
+
+// status stays a string because newer panels may add states.
+export interface AutoscaleState {
+  policy: AutoscalePolicy;
+  // At most the latest 3 samples, oldest first.
+  samples: CPUSample[] | null;
+  last_queued_at: string | null;
+  // Empty when the scaler has not queued an operation.
+  operation_id: string;
+  status: string;
+  last_error: string;
 }
 
 export interface QueuedOperation {

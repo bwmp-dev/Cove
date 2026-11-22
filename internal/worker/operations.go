@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	Scale                  *CPUScaleOptions         `json:"scale,omitempty"`
 	Idle                   *IdlePolicy              `json:"idle,omitempty"`
 	Suspension             *SuspensionOptions       `json:"suspension,omitempty"`
 	ResumeSuspended        bool                     `json:"resume_suspended,omitempty"`
@@ -58,6 +59,7 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
+	Scale      *CPUScaleOptions  `json:"scale,omitempty"`
 	Suspension *SuspensionStatus `json:"suspension,omitempty"`
 	Job        *JobResult        `json:"job,omitempty"`
 	Rollout    *RolloutStatus    `json:"rollout,omitempty"`
@@ -189,6 +191,9 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if err := validateCPUScale(r); err != nil {
+		return err
+	}
 	if r.Idle != nil {
 		if r.Action != "idle_policy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
 			return errors.New("idle policies require a service outside previews")
@@ -412,7 +417,7 @@ func (e *Engine) submitLocked(r Request) (Operation, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return Operation{}, err
 	}
-	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC()}, Request: r, Digest: digest}
+	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC(), Scale: r.Scale}, Request: r, Digest: digest}
 	if err = writeJSON(e.path(r.ID), j); err != nil {
 		return Operation{}, err
 	}
@@ -1023,6 +1028,12 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		return e.refreshTrafficIngress(ctx, r.Workload, log)
 	}
+	if r.Scale != nil {
+		r, err = e.prepareCPUScale(ctx, r)
+		if err != nil {
+			return err
+		}
+	}
 	composePath := filepath.Join(dir, "compose.yaml")
 	if r.Action == "deploy" {
 		if r.Preview {
@@ -1112,6 +1123,9 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				options = *release.Rollout
 			}
 			options.Strategy = "rolling"
+			if r.Scale != nil {
+				options.Replicas = mergedCPUReplicas(options.Replicas, r.Scale.Replicas)
+			}
 			r.Rollout = &options
 			r.Environment = release.Environment
 			r.Hooks = nil

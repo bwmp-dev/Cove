@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	CPUAutoscale        bool         `json:"cpu_autoscale"`
 	IdleSleep           bool         `json:"idle_sleep"`
 	Suspensions         bool         `json:"suspensions"`
 	UnhealthyRestart    bool         `json:"unhealthy_restart"`
@@ -57,6 +58,7 @@ func Inspect(ctx context.Context) Probe {
 	p.GuardedHooks = true
 	p.RoutePolicies = true
 	p.Rollouts = true
+	p.CPUAutoscale = true
 	p.JobRuns = true
 	p.UnhealthyRestart = true
 	p.Suspensions = true

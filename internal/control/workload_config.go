@@ -11,6 +11,9 @@ import (
 )
 
 func validateWorkload(in workloadInput) error {
+	if err := validateAutoscale(in); err != nil {
+		return err
+	}
 	if in.Kind == "job" && in.Backup != nil {
 		return errors.New("disable backups before converting a service to a job")
 	}
@@ -94,6 +97,10 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in := input.workloadInput
+	if in.Autoscale != nil {
+		http.Error(w, "use the CPU scaling policy endpoint", 400)
+		return
+	}
 	if in.Backup != nil {
 		http.Error(w, "use the backup policy endpoint to change backups", 400)
 		return
@@ -188,6 +195,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		if in.GuardedDeploy == nil {
 			in.GuardedDeploy = old.GuardedDeploy
 		}
+		in.Autoscale = old.Autoscale
 		if in.Rollout == nil {
 			in.Rollout = old.Rollout
 		}

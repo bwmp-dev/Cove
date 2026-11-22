@@ -263,6 +263,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/nodes/{id}/private-links", s.admin(http.HandlerFunc(s.nodePrivateLinks)))
 	mux.Handle("GET /api/workloads/{id}/schedule", s.admin(http.HandlerFunc(s.jobSchedule)))
 	mux.Handle("PUT /api/workloads/{id}/schedule", s.admin(http.HandlerFunc(s.jobSchedule)))
+	mux.Handle("GET /api/workloads/{id}/autoscale-policy", s.admin(http.HandlerFunc(s.autoscalePolicy)))
+	mux.Handle("PUT /api/workloads/{id}/autoscale-policy", s.admin(http.HandlerFunc(s.autoscalePolicy)))
 	mux.Handle("GET /api/workloads/{id}/idle-policy", s.admin(http.HandlerFunc(s.idlePolicy)))
 	mux.Handle("PUT /api/workloads/{id}/idle-policy", s.admin(http.HandlerFunc(s.idlePolicy)))
 	mux.Handle("GET /api/workloads/{id}/restart-policy", s.admin(http.HandlerFunc(s.unhealthyRestartPolicy)))

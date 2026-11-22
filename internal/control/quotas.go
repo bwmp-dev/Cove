@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"cove/internal/worker"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -19,11 +20,16 @@ type teamQuota struct {
 func configuredUsage(config workloadInput) (float64, int64) {
 	var cpus float64
 	var memory int64
+	var scaling map[string]worker.AutoscaleService
+	if config.Autoscale != nil && config.Autoscale.Enabled {
+		scaling = config.Autoscale.Normalized().Services
+	}
 	for service, limit := range config.Limits {
 		count := 1
 		if config.Rollout != nil && config.Rollout.Strategy != "disabled" && config.Rollout.Replicas[service] > 0 {
 			count = config.Rollout.Replicas[service]
 		}
+		count = max(count, scaling[service].MaxReplicas)
 		cpus += limit.CPUs * float64(count)
 		memory += limit.MemoryMB * int64(count)
 	}
