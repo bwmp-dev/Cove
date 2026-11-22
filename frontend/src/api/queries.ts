@@ -13,6 +13,7 @@ export const keys = {
   workload: (id: string) => ["workloads", id] as const,
   workloadRuntime: (id: string) => ["workloads", id, "runtime"] as const,
   workloadLogs: (id: string) => ["workloads", id, "logs"] as const,
+  workloadOwner: (id: string) => ["workloads", id, "owner"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -69,6 +70,19 @@ export const workloadQuery = (id: string) =>
   queryOptions({
     queryKey: keys.workload(id),
     queryFn: ({ signal }) => request<Workload>("GET", `/api/workloads/${encodeURIComponent(id)}`, undefined, signal),
+  });
+
+export interface WorkloadOwner {
+  user_id: string;
+  name: string;
+  // Active team members, sent only to callers who can edit the resource.
+  candidates: { user_id: string; name: string }[];
+}
+
+export const workloadOwnerQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.workloadOwner(id),
+    queryFn: ({ signal }) => request<WorkloadOwner>("GET", `/api/workloads/${encodeURIComponent(id)}/owner`, undefined, signal),
   });
 
 export const operationsQuery = queryOptions({

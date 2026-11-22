@@ -13,6 +13,7 @@ import { DatabaseAccess } from "../components/DatabaseAccess";
 import { GitHubSource } from "../components/GitHubApp";
 import { Networks } from "../components/Networks";
 import { PrivateNetwork } from "../components/PrivateNetwork";
+import { ResourceOwner } from "../components/ResourceOwner";
 import { ResourceRegistry } from "../components/ResourceRegistry";
 import { RouteEditor } from "../components/RouteEditor";
 import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
@@ -145,24 +146,33 @@ export function ResourceGeneral() {
   const nodes = useQuery(nodesQuery);
   const nodeName = nodes.data?.find((node) => node.id === workload.node_id)?.name ?? "Node";
   const kind = workloadKind(workload.kind);
-  if (!can(workload.permissions, "edit")) {
+  const editable = can(workload.permissions, "edit");
+  if (!editable) {
     return (
-      <Section width="form" title="General">
-        <div className="space-y-4">
-          <ViewOnly />
-          <DefinitionList
-            items={[
-              { term: "Name", value: workload.name },
-              { term: "Type", value: kind === "job" ? "Job: runs to completion on each deploy" : "Service: long-running" },
-              ...(kind === "job" ? [{ term: "Job service", value: <span className="font-mono text-xs">{workload.job_service}</span> }] : []),
-              { term: "Node", value: nodeName },
-            ]}
-          />
-        </div>
-      </Section>
+      <>
+        <Section width="form" title="General">
+          <div className="space-y-4">
+            <ViewOnly />
+            <DefinitionList
+              items={[
+                { term: "Name", value: workload.name },
+                { term: "Type", value: kind === "job" ? "Job: runs to completion on each deploy" : "Service: long-running" },
+                ...(kind === "job" ? [{ term: "Job service", value: <span className="font-mono text-xs">{workload.job_service}</span> }] : []),
+                { term: "Node", value: nodeName },
+              ]}
+            />
+          </div>
+        </Section>
+        <ResourceOwner id={workload.id} editable={false} />
+      </>
     );
   }
-  return <GeneralForm workload={workload} nodeName={nodeName} />;
+  return (
+    <>
+      <GeneralForm workload={workload} nodeName={nodeName} />
+      <ResourceOwner id={workload.id} editable />
+    </>
+  );
 }
 
 function GeneralForm({ workload, nodeName }: { workload: Workload; nodeName: string }) {

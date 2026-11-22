@@ -674,3 +674,26 @@ LANGUAGE sql STABLE AS $$
   g->>'scope'='team' OR (g->>'scope'='project' AND g->>'scope_id'=project) OR
   (g->>'scope'='environment' AND g->>'scope_id'=s.scope))
 $$;
+
+ALTER TABLE health_deliveries ADD COLUMN IF NOT EXISTS alert_key text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS health_deliveries_incident_pending ON health_deliveries(connection_id,alert_key,created_at,id) WHERE state='pending';
+
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS owner_user_id text;
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='workloads_owner_member' AND conrelid='workloads'::regclass) THEN
+  ALTER TABLE workloads ADD CONSTRAINT workloads_owner_member FOREIGN KEY(team_id,owner_user_id) REFERENCES team_members(team_id,user_id) ON DELETE SET NULL (owner_user_id);
+ END IF;
+END $$;
+ALTER TABLE health_deliveries ADD COLUMN IF NOT EXISTS subject_id text NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS threshold_rules (
+ id text PRIMARY KEY, team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ name text NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+ metric text NOT NULL CHECK(metric IN ('cpu','memory','disk')),
+ threshold double precision NOT NULL CHECK(threshold>0 AND threshold<=100),
+ confirmation_seconds integer NOT NULL CHECK(confirmation_seconds BETWEEN 60 AND 3600),
+ repeat_seconds integer NOT NULL CHECK(repeat_seconds BETWEEN 300 AND 604800),
+ channel_ids text[] NOT NULL CHECK(cardinality(channel_ids) BETWEEN 1 AND 32)
+);
+CREATE INDEX IF NOT EXISTS threshold_rules_node ON threshold_rules(node_id);

@@ -273,6 +273,12 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST "+prefix+"/{id}/test", s.admin(http.HandlerFunc(s.testConnection)))
 	}
 	mux.Handle("GET /api/notifications/history", s.admin(http.HandlerFunc(s.notificationHistory)))
+	mux.Handle("GET /api/notifications/events", s.admin(http.HandlerFunc(s.notificationCatalogue)))
+	mux.Handle("GET /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
+	mux.Handle("POST /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
+	mux.Handle("DELETE /api/notifications/rules/{id}", s.admin(http.HandlerFunc(s.thresholdRules)))
+	mux.Handle("GET /api/workloads/{id}/owner", s.admin(http.HandlerFunc(s.workloadOwner)))
+	mux.Handle("PUT /api/workloads/{id}/owner", s.admin(http.HandlerFunc(s.workloadOwner)))
 	mux.Handle("GET /api/workloads/{id}/registry", s.admin(http.HandlerFunc(s.resourceRegistry)))
 	mux.Handle("PUT /api/workloads/{id}/registry", s.admin(http.HandlerFunc(s.resourceRegistry)))
 	mux.Handle("POST /api/terminal", s.admin(http.HandlerFunc(s.terminalOpen)))
