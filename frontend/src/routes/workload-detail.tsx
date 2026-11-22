@@ -39,14 +39,17 @@ import { projectsQuery, useAssignEnvironment, type Project } from "../api/projec
 import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
 import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
+import { useCapacityGate } from "../components/CapacityCheck";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
+import { LiveLogs } from "../components/LiveLogs";
 import { LogHistory } from "../components/LogHistory";
 import { LogViewer } from "../components/LogViewer";
 import { WorkloadMetricHistory } from "../components/MetricHistory";
 import { OperationsTable } from "../components/OperationsTable";
 import { RelativeTime } from "../components/RelativeTime";
-import { ContainerLogs, RuntimeContainers } from "../components/Runtime";
+import { RouteTraffic } from "../components/RouteTraffic";
+import { RuntimeContainers } from "../components/Runtime";
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
@@ -173,7 +176,8 @@ function useResourceActions(workload: Workload) {
   const [confirmStop, setConfirmStop] = useState(false);
   const kind = workloadKind(workload.kind);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
-  const blocked = !online || Boolean(active) || queue.isPending || operations.isPending;
+  const capacity = useCapacityGate({ workloadId: workload.id, actionLabel: kind === "job" ? "Deploy and run" : "Deploy", onDeploy: () => queue.mutate("deploy") });
+  const blocked = !online || Boolean(active) || queue.isPending || operations.isPending || capacity.checking;
   const statusId = useId();
 
   return {
@@ -182,7 +186,7 @@ function useResourceActions(workload: Workload) {
         <div className="flex flex-wrap items-center gap-2">
           {allowedActions(kind).filter(action => !workload.preview_source_id || action === "stop").map((action) => {
             const Icon = actionIcons[action];
-            const pending = queue.isPending && queue.variables === action;
+            const pending = (queue.isPending && queue.variables === action) || (action === "deploy" && capacity.checking);
             const label = kind === "job" && action === "deploy" ? "Deploy and run" : actionLabels[action];
             return (
               <Button
@@ -191,7 +195,7 @@ function useResourceActions(workload: Workload) {
                 disabled={blocked}
                 aria-describedby={active ? statusId : undefined}
                 pending={pending}
-                onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate(action))}
+                onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? capacity.start() : queue.mutate(action))}
               >
                 {!pending && <Icon aria-hidden className="size-3.5" />}
                 {label}
@@ -204,6 +208,7 @@ function useResourceActions(workload: Workload) {
     ),
     feedback: (
       <>
+        {capacity.dialog}
         <ConfirmDialog
           open={confirmStop}
           title={`Stop ${workload.name}?`}
@@ -625,10 +630,12 @@ export function ResourceOverview() {
 
 export function ResourceLogs() {
   const workload = useResource();
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
   return (
     <>
-      <Section title="Live tail" description="Recent output read directly from the containers on the node. Not stored by Cove.">
-        <ContainerLogs workloadId={workload.id} />
+      <Section title="Live tail" description="Output from every container, merged in timestamp order and read directly from the node. Kept only on this page, never stored by Cove.">
+        <LiveLogs workloadId={workload.id} supported={node ? Boolean(node.capabilities?.structured_logs) : undefined} />
       </Section>
       <Section title="Stored log history" description="Lines Cove collected from the containers and kept under the instance retention settings. Search and filters apply to all stored lines, 500 per page." flush>
         <LogHistory workloadId={workload.id} />
@@ -640,9 +647,12 @@ export function ResourceLogs() {
 export function ResourceMetrics() {
   const workload = useResource();
   return (
-    <Section title="Metric history" description="Container usage recorded by Cove, with deploys and rollbacks." flush>
-      <WorkloadMetricHistory workloadId={workload.id} />
-    </Section>
+    <>
+      <Section title="Metric history" description="Container usage recorded by Cove, with deploys and rollbacks." flush>
+        <WorkloadMetricHistory workloadId={workload.id} />
+      </Section>
+      {workloadKind(workload.kind) !== "job" && <RouteTraffic workloadId={workload.id} />}
+    </>
   );
 }
 

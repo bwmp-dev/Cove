@@ -17,6 +17,7 @@ import { NodeForm } from "../components/NodeForm";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
 import { nodeStates } from "../lib/nodes";
+import { NodeCost } from "../components/NodeCost";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Meter, MeterGroup, Notice, PageHeader, QueryError, Section, SectionGrid } from "../components/ui";
 import { projectsQuery } from "../api/projects";
 import { findPlacement } from "../lib/hierarchy";
@@ -234,6 +235,8 @@ function NodeDetail({ node }: { node: Node }) {
             ]}
           />
         </Section>}
+
+        {admin && <NodeCost nodeId={node.id} />}
 
         {admin && <NodeLinks nodeId={node.id} />}
 

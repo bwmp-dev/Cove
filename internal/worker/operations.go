@@ -94,6 +94,8 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	observationMu sync.Mutex
+	tailSlots     chan struct{}
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -444,6 +446,9 @@ func (e *Engine) Serve(ctx context.Context) error {
 	if err := e.Recover(); err != nil {
 		return err
 	}
+	if err := e.recoverTrafficOnStartup(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "Proxy traffic recovery needs repair; deployments remain paused:", err)
+	}
 	if err := e.recoverDrills(ctx); err != nil {
 		return err
 	}
@@ -452,7 +457,7 @@ func (e *Engine) Serve(ctx context.Context) error {
 	}
 	if routes, err := e.loadIngress(); err != nil {
 		return err
-	} else if len(routes) > 0 {
+	} else if len(routes) > 0 && !e.trafficRecoveryPending() {
 		if err = e.syncIngress(ctx, routes, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "Ingress recovery failed; worker remains available for repairs:", err)
 		}
@@ -475,6 +480,9 @@ func (e *Engine) Serve(ctx context.Context) error {
 	}
 }
 func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
+	if e.trafficRecoveryPending() {
+		return nil
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := time.Now()
@@ -962,6 +970,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), "config", "--quiet"), env, log); err != nil {
 			return err
 		}
+		e.warnDeploymentCapacity(ctx, dir, args, env, log)
 		if err = e.buildImages(ctx, dir, args, env, log); err != nil {
 			return err
 		}

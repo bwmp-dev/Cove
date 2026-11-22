@@ -5,6 +5,7 @@ import { useState } from "react";
 import { nodesQuery } from "../api/queries";
 import { proxyConfigQuery, unsettled, type ProxyConfig } from "../api/proxy";
 import type { Node } from "../api/types";
+import { ProxyTraffic } from "../components/ProxyTraffic";
 import { ChangeOutcome, LastChange, ProxyFileEditor, ProxyFiles, StaticSettings } from "../components/ProxyConfig";
 import { Breadcrumbs, Button, EmptyState, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { useSession } from "../lib/session";
@@ -151,6 +152,7 @@ export function NodeProxyPage() {
     <>
       <Header node={node} />
       <ProxyConfiguration node={node} />
+      <ProxyTraffic node={node} />
     </>
   );
 }

@@ -15,6 +15,8 @@ import { DeploymentPlan } from "../components/DeploymentPlan";
 import { CloneForm } from "../components/Clone";
 import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { PlacementRow } from "../components/EnvironmentList";
+import { ProjectCosts } from "../components/ProjectCosts";
+import { StatusPageSettings } from "../components/StatusPageSettings";
 import { Breadcrumbs, Button, EmptyState, Field, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section, SectionGrid, TabNav } from "../components/ui";
 import { countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
@@ -384,6 +386,8 @@ export function ProjectOverview() {
           <DeploymentPolicy scope="project" id={project.id} />
         </SectionGrid>
       )}
+      {can(project.permissions, "read") && <ProjectCosts projectId={project.id} />}
+      {editable && <StatusPageSettings projectId={project.id} />}
       {can(project.permissions, "read") && <DependencyMap projectId={project.id} />}
     </>
   );
@@ -439,6 +443,7 @@ export function EnvironmentPage() {
           <DeploymentPolicy scope="environment" id={environment.id} />
         </SectionGrid>
       )}
+      {can(project.permissions, "read") && <ProjectCosts projectId={project.id} environmentId={environment.id} />}
     </Fragment>
   );
 }

@@ -77,6 +77,105 @@ func TestWorkloadObservationsDocker(t *testing.T) {
 	if err != nil || !result.EventsAvailable || result.RestartEvents != 3 || result.CrashEvents != 4 || len(result.Containers) != 1 || result.Containers[0].ExitCode != 7 {
 		t.Fatal(result, err)
 	}
+	manualName := name + "-manual"
+	manualID := run("run", "-d", "--name", manualName, "--label", "com.docker.compose.project=cove-"+id, "alpine:3.21", "sh", "-c", "trap 'exit 0' TERM; while :; do sleep 0.1; done")
+	t.Cleanup(func() {
+		if output, err := exec.Command("docker", "rm", "-f", manualName).CombinedOutput(); err != nil {
+			t.Error(err, string(output))
+		}
+	})
+	run("stop", "-t", "2", manualName)
+	result, err = e.ObserveWorkload(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualFound := false
+	for _, container := range result.Containers {
+		if strings.HasPrefix(manualID, container.ID) {
+			manualFound = container.ManualStop && !container.ExitUnknown
+		}
+	}
+	if !manualFound || result.CrashEvents != 4 {
+		t.Fatal("Docker manual stop counted as crash", result)
+	}
+	oomName := name + "-oom"
+	oomID := run("run", "-d", "--name", oomName, "--memory", "16m", "--memory-swap", "16m", "--label", "com.docker.compose.project=cove-"+id, "alpine:3.21", "awk", `BEGIN { x = "0123456789"; for (;;) x = x x }`)
+	t.Cleanup(func() {
+		if output, err := exec.Command("docker", "rm", "-f", oomName).CombinedOutput(); err != nil {
+			t.Error(err, string(output))
+		}
+	})
+	for attempt := 0; attempt < 50; attempt++ {
+		if run("inspect", "--format", "{{.State.OOMKilled}}", oomName) == "true" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	result, err = e.ObserveWorkload(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oomFound := false
+	for _, container := range result.Containers {
+		if strings.HasPrefix(oomID, container.ID) {
+			oomFound = container.OOMKilled && !container.ManualStop
+		}
+	}
+	if !oomFound || result.OOMEvents < 1 {
+		t.Fatal("real OOM event unavailable", result)
+	}
+}
+
+func TestManualExitEventsAndBoundedMemory(t *testing.T) {
+	var events []observationEvent
+	for _, action := range []string{"die", "start", "kill", "die", "stop", "start", "restart", "die", "start", "kill", "die", "stop"} {
+		events = append(events, observationEvent{container: "app", action: action, timestamp: time.Now()})
+	}
+	classified, manual := classifyObservationEvents(events, map[string]int{"app": 3})
+	crashes, restarts := 0, 0
+	for _, event := range classified {
+		if event.Action == "die" {
+			crashes++
+		}
+		if event.AutomaticRestart {
+			restarts++
+		}
+	}
+	if crashes != 2 || restarts != 2 || !manual["app"] {
+		t.Fatal(crashes, restarts, manual)
+	}
+	e := &Engine{Root: t.TempDir()}
+	if err := os.MkdirAll(filepath.Join(e.Root, "workloads", "app"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	sample := &WorkloadObservations{SampledAt: time.Now(), Containers: []ContainerObservation{{ID: "app", Exited: true}}}
+	if err := e.rememberManualExits("app", sample, map[string]string{"app": stamp}, manual); err != nil {
+		t.Fatal(err)
+	}
+	sample.Containers[0].ManualStop = false
+	sample.SampledAt = sample.SampledAt.Add(11 * time.Minute)
+	if err := e.rememberManualExits("app", sample, map[string]string{"app": stamp}, nil); err != nil || !sample.Containers[0].ManualStop {
+		t.Fatal("old manual stop forgotten", sample, err)
+	}
+	stamp = time.Now().Add(time.Second).UTC().Format(time.RFC3339Nano)
+	if err := e.rememberManualExits("app", sample, map[string]string{"app": stamp}, nil); err != nil || !sample.Containers[0].ExitUnknown {
+		t.Fatal("old stamp classified a later exit", sample, err)
+	}
+	if err := e.rememberManualExits("app", sample, map[string]string{"app": stamp}, map[string]bool{"app": false}); err != nil || sample.Containers[0].ExitUnknown || sample.Containers[0].ManualStop {
+		t.Fatal("unexpected exit not recorded", sample, err)
+	}
+	if err := e.rememberManualExits("app", sample, map[string]string{"app": stamp}, nil); err != nil || sample.Containers[0].ExitUnknown {
+		t.Fatal("known crash forgotten", sample, err)
+	}
+	sample.Containers[0].Exited = false
+	if err := e.rememberManualExits("app", sample, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(e.Root, "workloads", "app", "observed-manual-exits.json"))
+	if err != nil || len(data) > 16384 || strings.Contains(string(data), stamp) {
+		t.Fatal("obsolete exit retained", string(data), err)
+	}
 }
 
 func TestWorkloadObservationsOwnershipAndBoundaries(t *testing.T) {
@@ -118,5 +217,12 @@ func TestWorkloadObservationsOwnershipAndBoundaries(t *testing.T) {
 	}
 	if _, err = e.ObserveWorkload(context.Background(), "../other"); err == nil {
 		t.Fatal("invalid workload accepted")
+	}
+	if err = writeJSON(filepath.Join(root, "ingress.json"), map[string][]Route{"app": {{Domain: "app.example.test", Service: "app", Port: 80}}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = e.ObserveWorkload(context.Background(), "app")
+	if err != nil || len(result.Certificates) != 1 || result.Certificates[0].ExpiresAt != nil {
+		t.Fatal("foreign proxy certificate ownership was not respected", result, err)
 	}
 }

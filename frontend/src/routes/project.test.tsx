@@ -18,7 +18,7 @@ vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ environmentId: route.environmentId }),
   useNavigate: () => () => undefined,
 }));
-vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => String(error) }));
+vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => String(error), isStatus: () => false }));
 vi.mock("../components/SharedVariables", () => ({ SharedVariables: ({ id }: { id: string }) => <section aria-label={`Shared variables ${id}`} /> }));
 vi.mock("../components/DeploymentPolicy", () => ({ DeploymentPolicy: ({ id }: { id: string }) => <section aria-label={`Deployment policy ${id}`} /> }));
 afterEach(() => vi.clearAllMocks());

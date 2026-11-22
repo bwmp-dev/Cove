@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	TrafficControl *ProxyTrafficControl  `json:"traffic_control,omitempty"`
 	CleanupControl *CleanupControl       `json:"cleanup_control,omitempty"`
 	JournalPrune   *JournalPruneRequest  `json:"journal_prune,omitempty"`
 	Files          *FileRequest          `json:"files,omitempty"`
@@ -31,6 +32,9 @@ type RPCRequest struct {
 	ID             string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	TrafficState  *ProxyTrafficState    `json:"traffic_state,omitempty"`
+	TrafficPlan   *ProxyTrafficPlan     `json:"traffic_plan,omitempty"`
+	Traffic       *TrafficReport        `json:"traffic,omitempty"`
 	CleanupState  *CleanupState         `json:"cleanup_state,omitempty"`
 	CleanupPlan   *CleanupPlan          `json:"cleanup_plan,omitempty"`
 	JournalPrune  *JournalPruneResult   `json:"journal_prune,omitempty"`
@@ -59,6 +63,25 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "traffic_control":
+		if r.TrafficControl == nil {
+			return RPCResponse{Error: "traffic settings required"}
+		}
+		state, plan, err := e.ConfigureTraffic(ctx, *r.TrafficControl)
+		response := RPCResponse{TrafficState: state, TrafficPlan: plan}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
+	case "traffic":
+		if r.Telemetry == nil {
+			return RPCResponse{Error: "traffic cursor required"}
+		}
+		report, err := e.CollectTraffic(ctx, r.Telemetry.Since)
+		if err != nil {
+			return RPCResponse{Error: "traffic collection unavailable"}
+		}
+		return RPCResponse{Traffic: report}
 	case "cleanup_control":
 		if r.CleanupControl == nil {
 			return RPCResponse{Error: "cleanup request required"}
@@ -93,6 +116,21 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: err.Error()}
 		}
 		return RPCResponse{Files: result}
+	case "capacity":
+		if r.Request == nil {
+			return RPCResponse{Error: "deployment request required"}
+		}
+		report := e.Capacity(ctx, *r.Request)
+		return RPCResponse{Preflight: &report}
+	case "live_logs":
+		if r.Telemetry == nil {
+			return RPCResponse{Error: "live log cursor required"}
+		}
+		report, err := e.CollectLiveLogs(ctx, r.ID, r.Telemetry.Since)
+		if err != nil {
+			return RPCResponse{Error: "live logs unavailable; check worker state or retry after other readers finish"}
+		}
+		return RPCResponse{Telemetry: report}
 	case "telemetry":
 		if r.Telemetry == nil {
 			return RPCResponse{Error: "telemetry request required"}
@@ -367,7 +405,7 @@ func RPCTimeout(method string) time.Duration {
 	switch method {
 	case "ingress_config_change":
 		return 5 * time.Minute
-	case "links_apply":
+	case "links_apply", "traffic_control":
 		return 4 * time.Minute
 	case "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
 		return 3 * time.Minute

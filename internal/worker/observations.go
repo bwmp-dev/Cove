@@ -13,6 +13,8 @@ import (
 )
 
 type ContainerObservation struct {
+	ExitUnknown       bool   `json:"exit_unknown,omitempty"`
+	ManualStop        bool   `json:"manual_stop,omitempty"`
 	ID                string `json:"id"`
 	RestartCount      int    `json:"restart_count"`
 	OOMKilled         bool   `json:"oom_killed"`
@@ -56,17 +58,23 @@ func (e *Engine) ObserveWorkload(ctx context.Context, id string) (*WorkloadObser
 	args := []string{"docker", "events", "--since", now.Add(-10 * time.Minute).Format(time.RFC3339Nano), "--until", now.Format(time.RFC3339Nano), "--format", "{{json .}}", "--filter", "type=container"}
 	allowed := map[string]bool{}
 	remainingRestarts := map[string]int{}
-	pendingExit := map[string]bool{}
+	finished := map[string]string{}
+	var events []observationEvent
 	for _, container := range containers {
-		output, err := e.output(ctx, "docker", "inspect", "--format", `{"restart_count":{{.RestartCount}},"oom_killed":{{.State.OOMKilled}},"exit_code":{{.State.ExitCode}},"exited":{{eq .State.Status "exited"}}}`, container.ID)
+		output, err := e.output(ctx, "docker", "inspect", "--format", `{"restart_count":{{.RestartCount}},"oom_killed":{{.State.OOMKilled}},"exit_code":{{.State.ExitCode}},"exited":{{eq .State.Status "exited"}},"finished_at":{{json .State.FinishedAt}}}`, container.ID)
 		if err != nil {
 			return nil, errors.New("container state unavailable")
 		}
-		var c ContainerObservation
-		if json.Unmarshal([]byte(output), &c) != nil {
+		var inspected struct {
+			ContainerObservation
+			FinishedAt string `json:"finished_at"`
+		}
+		if json.Unmarshal([]byte(output), &inspected) != nil {
 			return nil, errors.New("invalid container state")
 		}
+		c := inspected.ContainerObservation
 		c.ID = container.ID
+		finished[c.ID] = inspected.FinishedAt
 		c.ExpectedCompleted = container.ExpectedCompleted
 		result.Containers = append(result.Containers, c)
 		if !c.ExpectedCompleted {
@@ -106,28 +114,28 @@ func (e *Engine) ObserveWorkload(ctx context.Context, id string) (*WorkloadObser
 				if !owned {
 					continue
 				}
-				automaticRestart := false
-				switch event.Action {
-				case "start":
-					if pendingExit[containerID] && remainingRestarts[containerID] > 0 {
-						automaticRestart = true
-						result.RestartEvents++
-						remainingRestarts[containerID]--
-					}
-					pendingExit[containerID] = false
-				case "oom":
-					result.OOMEvents++
-				case "die":
-					result.CrashEvents++
-					pendingExit[containerID] = true
-				default:
-					continue
-				}
-				result.Events = append(result.Events, ContainerEvent{Action: event.Action, AutomaticRestart: automaticRestart, Timestamp: time.Unix(0, event.TimeNano).UTC()})
+				events = append(events, observationEvent{container: containerID, action: event.Action, timestamp: time.Unix(0, event.TimeNano).UTC()})
 			}
 		}
 	} else {
 		result.EventsAvailable = true
+	}
+	var manual map[string]bool
+	result.Events, manual = classifyObservationEvents(events, remainingRestarts)
+	for _, event := range result.Events {
+		switch event.Action {
+		case "start":
+			if event.AutomaticRestart {
+				result.RestartEvents++
+			}
+		case "oom":
+			result.OOMEvents++
+		case "die":
+			result.CrashEvents++
+		}
+	}
+	if err = e.rememberManualExits(id, result, finished, manual); err != nil {
+		return nil, err
 	}
 	owned, err := e.loadIngress()
 	if err != nil {
@@ -137,6 +145,10 @@ func (e *Engine) ObserveWorkload(ctx context.Context, id string) (*WorkloadObser
 		result.Certificates = append(result.Certificates, CertificateObservation{Domain: route.Domain})
 	}
 	if len(result.Certificates) > 0 {
+		label, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "cove.managed"}}`, "cove-ingress")
+		if err != nil || label != "ingress" {
+			return result, nil
+		}
 		for _, file := range []string{"/data/traefik-acme.json", "/data/cloudflare-acme.json"} {
 			out := &limitedBuffer{Limit: 4 * 1024 * 1024}
 			if e.Run(ctx, e.Root, []string{"docker", "exec", "cove-ingress", "cat", file}, nil, out) != nil {

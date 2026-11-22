@@ -136,6 +136,7 @@ func (s *Server) storeWorkloadTelemetry(ctx context.Context, node, id string, re
 		}
 	}
 	occurrences := map[string]int{}
+	var forwards []forwardedLog
 	limited := result.LogsLimited
 	for _, entry := range result.Logs {
 		entry.Message = strings.ReplaceAll(strings.ToValidUTF8(entry.Message, ""), "\x00", "\\0")
@@ -150,10 +151,17 @@ func (s *Server) storeWorkloadTelemetry(ctx context.Context, node, id string, re
 			limited = true
 			entry.Message = strings.ToValidUTF8(entry.Message[:8192], "")
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO workload_log_entries(id,workload_id,container_id,container,timestamp,message,clipped) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, hex.EncodeToString(hash[:]), id, entry.ContainerID, entry.Container, entry.Timestamp, entry.Message, clipped)
+		inserted, insertErr := tx.Exec(ctx, `INSERT INTO workload_log_entries(id,workload_id,container_id,container,timestamp,message,clipped) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, hex.EncodeToString(hash[:]), id, entry.ContainerID, entry.Container, entry.Timestamp, entry.Message, clipped || entry.Clipped)
+		err = insertErr
 		if err != nil {
 			return err
 		}
+		if inserted.RowsAffected() > 0 {
+			forwards = append(forwards, forwardedLog{Workload: id, Container: entry.Container, Timestamp: entry.Timestamp, Message: entry.Message})
+		}
+	}
+	if err = s.enqueueLogForwards(ctx, tx, id, forwards); err != nil {
+		return err
 	}
 	_, err = tx.Exec(ctx, `UPDATE workloads SET telemetry_since=$2,telemetry_limited=$3,telemetry_error='' WHERE id=$1 AND node_id=$4`, id, result.SampledAt, limited, node)
 	if err != nil {
@@ -205,6 +213,7 @@ func (s *Server) telemetryRetention(w http.ResponseWriter, r *http.Request) {
 func (s *Server) telemetryStorageUsage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	type store struct {
+		Limit string `json:"limit,omitempty"`
 		Rows  int64  `json:"rows"`
 		Bytes int64  `json:"bytes"`
 		Basis string `json:"basis"`
@@ -215,6 +224,9 @@ func (s *Server) telemetryStorageUsage(w http.ResponseWriter, r *http.Request) {
 		{"logs", `SELECT count(*),COALESCE(sum(octet_length(message)+octet_length(container)+256),0) FROM workload_log_entries`},
 		{"audit", `SELECT count(*),pg_total_relation_size('audit_events') FROM audit_events`},
 		{"operations", `SELECT count(*),pg_total_relation_size('operations') FROM operations`},
+		{"traffic", `SELECT count(*),COALESCE(sum(octet_length(id)+octet_length(workload_id)+octet_length(node_id)+octet_length(domain)+octet_length(client_ip)+128),0) FROM route_traffic`},
+		{"uptime", `SELECT count(*),pg_total_relation_size('route_check_results') FROM route_check_results`},
+		{"forwarding", `SELECT count(*),COALESCE(sum(octet_length(payload)+256),0) FROM log_forward_deliveries`},
 	} {
 		var value store
 		if err := s.DB.QueryRow(ctx, item.query).Scan(&value.Rows, &value.Bytes); err != nil {
@@ -222,8 +234,16 @@ func (s *Server) telemetryStorageUsage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		value.Basis = "accounted payload and row allowance"
-		if item.name == "audit" || item.name == "operations" {
+		if item.name == "audit" || item.name == "operations" || item.name == "uptime" {
 			value.Basis = "PostgreSQL table and indexes"
+		}
+		switch item.name {
+		case "traffic":
+			value.Limit = "200,000 rows, 64 MiB accounted, 7 days"
+		case "uptime":
+			value.Limit = "500,000 sequence positions, 30 days"
+		case "forwarding":
+			value.Limit = "2,000 batches, 64 MiB accounted, 24 hours"
 		}
 		out[item.name] = value
 	}

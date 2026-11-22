@@ -62,6 +62,15 @@ func TestResourceThresholdRoutingSuppressionAndRecovery(t *testing.T) {
 	if err := f.s.DB.QueryRow(ctx, `SELECT count(*) FROM health_deliveries WHERE subject_id='observed' AND event='threshold.alert'`).Scan(&count); err != nil || count != 1 {
 		t.Fatal(count, err)
 	}
+	sample.Events = nil
+	sample.Containers = []worker.ContainerObservation{{Exited: true, ExitUnknown: true}}
+	check()
+	if err := f.s.DB.QueryRow(ctx, `SELECT count(*) FROM health_deliveries WHERE event='threshold.recovered'`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("unknown exit caused recovery", count, err)
+	}
+	sample.Containers[0].ExitUnknown = false
+	sample.Containers[0].ManualStop = true
+	check()
 	f.sql(`UPDATE workloads SET manually_stopped=true WHERE id='observed'`)
 	check()
 	if err := f.s.DB.QueryRow(ctx, `SELECT count(*) FROM health_deliveries WHERE event='threshold.recovered'`).Scan(&count); err != nil || count != 1 {

@@ -57,17 +57,22 @@ function Observations({ observations, workload }: { observations: WorkloadObserv
           <p className="text-[13px] text-fg-muted">No containers were found for this service. It may not be deployed yet.</p>
         ) : (
           <ul className="divide-y divide-line" aria-label="Inspected containers">
-            {observations.containers.map((container) => (
-              <li key={container.id} className="space-y-0.5 py-2 first:pt-0 last:pb-0">
-                <p className="break-all font-mono text-xs text-fg" title={container.id}>{container.id.slice(0, 12)}</p>
-                <MetaList className="text-xs text-fg-muted">
-                  <span className="tabular-nums">Docker restart count {container.restart_count}</span>
-                  <span className={container.exited && !container.expected_completed ? "text-bad" : undefined}>{container.exited ? `Exited with code ${container.exit_code}` : "Not exited"}</span>
-                  <span className={container.oom_killed && !container.expected_completed ? "text-bad" : undefined}>{container.oom_killed ? "Stopped by an out-of-memory kill" : "No out-of-memory kill"}</span>
-                  {container.expected_completed && <span>One-shot container expected to complete, excluded from alerts</span>}
-                </MetaList>
-              </li>
-            ))}
+            {observations.containers.map((container) => {
+              const counted = !container.expected_completed && !container.manual_stop && !container.exit_unknown;
+              return (
+                <li key={container.id} className="space-y-0.5 py-2 first:pt-0 last:pb-0">
+                  <p className="break-all font-mono text-xs text-fg" title={container.id}>{container.id.slice(0, 12)}</p>
+                  <MetaList className="text-xs text-fg-muted">
+                    <span className="tabular-nums">Docker restart count {container.restart_count}</span>
+                    <span className={container.exited && counted ? "text-bad" : undefined}>{container.exited ? `Exited with code ${container.exit_code}` : "Not exited"}</span>
+                    <span className={container.oom_killed && counted ? "text-bad" : undefined}>{container.oom_killed ? "Stopped by an out-of-memory kill" : "No out-of-memory kill"}</span>
+                    {container.expected_completed && <span>One-shot container expected to complete, excluded from alerts</span>}
+                    {container.manual_stop && <span>Manual stop (excluded)</span>}
+                    {container.exit_unknown && <span className="text-warn">Exit cause unknown (not counted)</span>}
+                  </MetaList>
+                </li>
+              );
+            })}
           </ul>
         )}
       </Subsection>
@@ -118,7 +123,7 @@ export function AlertObservations({ workload, node }: { workload: Workload; node
     <Section title="Alert observations" description={description} actions={action} flush>
       {body}
       <p className="border-t border-line px-4 py-3 text-xs text-fg-muted">
-        Rules skip values that are unknown instead of treating them as zero. Docker keeps a finite event backlog, so counts cover at most the last ten minutes. Alerts ignore events during Cove operations such as deploys, restarts and stops, stay quiet while the service is manually stopped, and exclude completed one-shot containers and jobs.
+        Rules skip values that are unknown instead of treating them as zero. Docker keeps a finite event backlog, so counts cover at most the last ten minutes, and a container that exited before then without a recorded cause is shown as exit cause unknown and neither triggers nor clears crash alerts. Stops, kills and restarts made through Docker are treated as manual stops. Alerts ignore events during Cove operations such as deploys, restarts and stops, stay quiet while the service is manually stopped, and exclude completed one-shot containers and jobs.
       </p>
     </Section>
   );

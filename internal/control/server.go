@@ -90,6 +90,24 @@ func (s *Server) Init(ctx context.Context) error {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /metrics", s.prometheus)
+	mux.HandleFunc("GET /api/status/{slug}", s.publicStatusPage)
+	for _, pattern := range []string{"GET /api/settings/metrics-token", "POST /api/settings/metrics-token", "DELETE /api/settings/metrics-token"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.metricsToken)))
+	}
+	for _, pattern := range []string{"GET /api/notifications/forwarders", "POST /api/notifications/forwarders", "PUT /api/notifications/forwarders/{id}", "DELETE /api/notifications/forwarders/{id}", "POST /api/notifications/forwarders/{id}/test"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.logForwarders)))
+	}
+	for _, pattern := range []string{"GET /api/workloads/{id}/uptime", "POST /api/workloads/{id}/uptime", "PUT /api/workloads/{id}/uptime/{check}", "DELETE /api/workloads/{id}/uptime/{check}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.uptimeChecks)))
+	}
+	for _, pattern := range []string{"GET /api/projects/{id}/status-page", "PUT /api/projects/{id}/status-page"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.statusPageSettings)))
+	}
+	for _, pattern := range []string{"GET /api/nodes/{id}/traffic", "POST /api/nodes/{id}/traffic"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.nodeTraffic)))
+	}
+	mux.Handle("GET /api/workloads/{id}/traffic", s.admin(http.HandlerFunc(s.workloadTraffic)))
 	for _, pattern := range []string{"GET /api/cloudflare/connections", "POST /api/cloudflare/connections", "PUT /api/cloudflare/connections/{connection}/credentials"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.cloudflareAccounts)))
 	}
@@ -291,6 +309,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
 	mux.Handle("DELETE /api/notifications/rules/{id}", s.admin(http.HandlerFunc(s.thresholdRules)))
 	mux.Handle("GET /api/workloads/{id}/owner", s.admin(http.HandlerFunc(s.workloadOwner)))
+	mux.Handle("GET /api/workloads/{id}/capacity", s.admin(http.HandlerFunc(s.workloadCapacity)))
+	mux.Handle("GET /api/workloads/{id}/sizing", s.admin(http.HandlerFunc(s.workloadSizing)))
+	mux.Handle("GET /api/workloads/{id}/logs/live", s.admin(http.HandlerFunc(s.workloadLiveLogs)))
+	mux.Handle("GET /api/nodes/{id}/cost", s.admin(http.HandlerFunc(s.nodeCost)))
+	mux.Handle("PUT /api/nodes/{id}/cost", s.admin(http.HandlerFunc(s.nodeCost)))
+	mux.Handle("GET /api/projects/{id}/costs", s.admin(http.HandlerFunc(s.projectCosts)))
 	mux.Handle("GET /api/workloads/{id}/observations", s.admin(http.HandlerFunc(s.workloadObservations)))
 	mux.Handle("GET /api/workloads/{id}/files", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("GET /api/workloads/{id}/files/targets", s.admin(http.HandlerFunc(s.workloadFiles)))

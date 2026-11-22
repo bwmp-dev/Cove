@@ -1,7 +1,7 @@
 import type { Notification, ThresholdMetric, ThresholdRuleInput } from "../api/connections";
 
 export type ThresholdScope = "node" | "resource";
-export type ThresholdUnit = "percent" | "days" | "events";
+export type ThresholdUnit = "percent" | "days" | "events" | "failures";
 
 interface ThresholdMetricOption { value: ThresholdMetric; label: string; description: string; scope: ThresholdScope; unit: ThresholdUnit }
 
@@ -11,16 +11,18 @@ export const thresholdMetrics: ThresholdMetricOption[] = [
   defaultThresholdMetric,
   { value: "memory", label: "Memory used", description: "Memory in use: total memory minus the memory available to new processes.", scope: "node", unit: "percent" },
   { value: "disk", label: "Disk used", description: "Used space on the filesystem that holds /var/lib/cove, on the fullest mount, or on one mount you choose.", scope: "node", unit: "percent" },
-  { value: "certificate", label: "Certificate expiry", description: "Days until the certificate served for one of the service's configured domains expires.", scope: "resource", unit: "days" },
+  { value: "certificate", label: "Certificate expiry", description: "Days until the managed ACME certificate stored by the node's proxy for one of the service's configured domains expires. The live certificate served to visitors is not probed.", scope: "resource", unit: "days" },
+  { value: "uptime", label: "Uptime check failures", description: "Consecutive failed HTTPS checks from the Cove panel to one of the service's domains. Only domains with an enabled uptime check can be watched.", scope: "resource", unit: "failures" },
   { value: "restarts", label: "Container restarts", description: "Automatic restarts by Docker's restart policy in the last ten minutes.", scope: "resource", unit: "events" },
   { value: "oom", label: "Out-of-memory kills", description: "Out-of-memory events in the last ten minutes, or at least one container currently stopped by one.", scope: "resource", unit: "events" },
-  { value: "crashes", label: "Container crashes", description: "Container exits in the last ten minutes, or at least one container that is currently exited.", scope: "resource", unit: "events" },
+  { value: "crashes", label: "Container crashes", description: "Known unexpected container exits in the last ten minutes, or at least one container currently stopped by a known crash. Manual stops and completed one-shot containers are excluded, and exits with an unknown cause are skipped.", scope: "resource", unit: "events" },
 ];
 
 export const thresholdUnits: Record<ThresholdUnit, { label: string; hint: string; min: number; max: number; step: string; message: string }> = {
   percent: { label: "Threshold (%)", hint: "Alert at or above this percentage, above 0 and at most 100.", min: 0.1, max: 100, step: "any", message: "Enter a percentage above 0 and at most 100." },
   days: { label: "Threshold (days)", hint: "Alert when the remaining days are at or below this value, above 0 and at most 3650.", min: 0.1, max: 3650, step: "any", message: "Enter a number of days above 0 and at most 3650." },
   events: { label: "Threshold (events)", hint: "Alert at or above this many in ten minutes, a whole number from 1 to 1000.", min: 1, max: 1000, step: "1", message: "Enter a whole number from 1 to 1000." },
+  failures: { label: "Threshold (consecutive failures)", hint: "Alert after this many failed checks in a row, a whole number from 1 to 1000.", min: 1, max: 1000, step: "1", message: "Enter a whole number from 1 to 1000." },
 };
 
 export function thresholdMetric(metric: string) {
@@ -86,6 +88,8 @@ export function thresholdCondition(rule: Pick<ThresholdRuleInput, "metric" | "th
       return `${label} for ${rule.domain} at or below ${formatDays(rule.threshold)} ${lasting}`;
     case "events":
       return `${label} at or above ${rule.threshold} in ten minutes ${lasting}`;
+    case "failures":
+      return `${rule.domain} failing ${rule.threshold} uptime ${rule.threshold === 1 ? "check" : "checks"} in a row ${lasting}`;
     default:
       return `${label} at or above ${formatPercent(rule.threshold)} ${lasting}`;
   }
@@ -128,14 +132,14 @@ export function thresholdRuleFromForm(data: FormData): ThresholdRuleInput | Thre
   } else {
     workloadID = text("workload_id");
     if (workloadID === "") return { field: "workload_id", message: "Select a service." };
-    if (metric.unit === "days") {
+    if (metric.unit === "days" || metric.unit === "failures") {
       domain = text("domain");
       if (domain === "") return { field: "domain", message: "Select a domain." };
     }
   }
   const unit = thresholdUnits[metric.unit];
   const threshold = text("threshold") === "" ? Number.NaN : Number(text("threshold"));
-  if (!Number.isFinite(threshold) || threshold <= 0 || threshold > unit.max || (metric.unit === "events" && !Number.isInteger(threshold))) return { field: "threshold", message: unit.message };
+  if (!Number.isFinite(threshold) || threshold <= 0 || threshold > unit.max || (unit.step === "1" && !Number.isInteger(threshold))) return { field: "threshold", message: unit.message };
   const confirmation = Number(text("confirmation_seconds"));
   if (!Number.isInteger(confirmation) || confirmation < 60 || confirmation > 3600) return { field: "confirmation_seconds", message: "Select how long the condition must last." };
   const repeat = Number(text("repeat_seconds"));

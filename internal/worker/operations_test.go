@@ -49,7 +49,7 @@ func TestDurableOperationLifecycle(t *testing.T) {
 	}
 	jobs.Wait()
 	op, err = engine.Status(request.ID)
-	if err != nil || op.State != "succeeded" || calls != 9 {
+	if err != nil || op.State != "succeeded" || calls != 10 {
 		t.Fatalf("unexpected result %+v calls=%d err=%v", op, calls, err)
 	}
 	logs, err := engine.Logs(request.ID)
@@ -63,7 +63,7 @@ func TestDurableOperationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs.Wait()
-	if calls != 9 {
+	if calls != 10 {
 		t.Fatal("completed operation executed again")
 	}
 	if _, err = os.Stat(filepath.Join(root, "workloads", "app", "current.json")); err != nil {

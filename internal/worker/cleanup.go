@@ -136,6 +136,20 @@ func (e *Engine) scheduledCleanup(ctx context.Context) error {
 	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	_, plan, err := e.CleanupPolicy(cleanupCtx, CleanupControl{Action: "preview"})
+	if err == nil && len(plan.Items) == 0 {
+		e.buildMu.Lock()
+		defer e.buildMu.Unlock()
+		current, err := e.cleanupState()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		current.LastRun = &now
+		current.LastError = ""
+		current.Removed = 0
+		current.EstimatedBytes = 0
+		return writeJSON(filepath.Join(e.Root, "cleanup-policy.json"), current)
+	}
 	if err == nil {
 		_, _, err = e.CleanupPolicy(cleanupCtx, CleanupControl{Action: "run", Revision: plan.Revision})
 	}

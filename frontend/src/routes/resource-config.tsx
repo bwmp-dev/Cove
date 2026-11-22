@@ -10,6 +10,7 @@ import type { Workload, WorkloadInput, DeploymentHooks, FileSecret } from "../ap
 import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
 import { DatabaseAccess } from "../components/DatabaseAccess";
+import { RightSizing } from "../components/RightSizing";
 import { GitHubSource } from "../components/GitHubApp";
 import { Networks } from "../components/Networks";
 import { PrivateNetwork } from "../components/PrivateNetwork";
@@ -25,6 +26,7 @@ import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/op
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 import { formValues, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { UptimeChecks } from "../components/UptimeChecks";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -477,7 +479,12 @@ export function ResourceDomains() {
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Jobs cannot have domains">Domains route HTTPS traffic to long-running services. Change the resource type to a service first.</EmptyState>;
   }
-  return <DomainsPanel workload={workload} />;
+  return (
+    <>
+      <DomainsPanel workload={workload} />
+      <UptimeChecks workload={workload} />
+    </>
+  );
 }
 
 function DomainsPanel({ workload }: { workload: Workload }) {
@@ -653,7 +660,7 @@ export function ResourceRegistryPage() {
 
 export function ResourceLimits() {
   const workload = useResource();
-  return <LimitsForm key={JSON.stringify(workload.limits)} workload={workload} />;
+  return <><LimitsForm key={JSON.stringify(workload.limits)} workload={workload} /><RightSizing workloadId={workload.id} limits={workload.limits} /></>;
 }
 
 function LimitsForm({ workload }: { workload: Workload }) {

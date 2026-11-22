@@ -13,7 +13,7 @@ export function connectionsQuery(kind: ConnectionKind) {
 export const notificationEventsQuery = queryOptions({ queryKey: ["notification-events"], queryFn: ({ signal }) => request<string[]>("GET", "/api/notifications/events", undefined, signal), staleTime: Infinity });
 
 export type NodeThresholdMetric = "cpu" | "memory" | "disk";
-export type ResourceThresholdMetric = "certificate" | "restarts" | "oom" | "crashes";
+export type ResourceThresholdMetric = "certificate" | "uptime" | "restarts" | "oom" | "crashes";
 export type ThresholdMetric = NodeThresholdMetric | ResourceThresholdMetric;
 // Resource rules leave node_id blank on create; the API derives it from the resource. Node rules send empty workload_id and domain.
 // mount_path applies to disk rules only: empty is the Cove data filesystem, "*" the fullest mount, an absolute path one mount.

@@ -101,4 +101,24 @@ it("labels accounted telemetry size separately from PostgreSQL size and shows el
   expect(within(table).getAllByText("Accounted payload and row allowance").length).toBeGreaterThan(0);
   expect(screen.getByText(/not database file size/)).toBeInTheDocument();
   expect(await screen.findByRole("meter", { name: "Metric history" })).toHaveAttribute("aria-valuetext", "3.00 MiB of 256 MiB, 1%");
+  expect(within(table).queryByText("Uptime check results")).not.toBeInTheDocument();
+});
+
+it("lists bounded output stores with the server's limit text when reported", async () => {
+  const usage: Usage = {
+    metrics: { rows: 0, bytes: 0, basis: "accounted payload and row allowance" },
+    logs: { rows: 0, bytes: 0, basis: "accounted payload and row allowance" },
+    audit: { rows: 0, bytes: 0, basis: "PostgreSQL table and indexes" },
+    operations: { rows: 0, bytes: 0, basis: "PostgreSQL table and indexes" },
+    traffic: { rows: 300, bytes: 4096, basis: "accounted payload and row allowance", limit: "200,000 rows, 64 MiB, 7 days" },
+    uptime: { rows: 20, bytes: 8192, basis: "PostgreSQL table and indexes", limit: "500,000 rows, 30 days" },
+  };
+  vi.mocked(request).mockImplementation((_method: string, path: string) => Promise.resolve(path.endsWith("storage-usage") ? usage : saved));
+  wrap(<StorageUsage />);
+  const table = await screen.findByRole("table", { name: "Stored data by category" });
+  const traffic = within(table).getByText("Traffic access entries").closest("tr") as HTMLElement;
+  expect(within(traffic).getAllByText(/200,000 rows, 64 MiB, 7 days/).length).toBeGreaterThan(0);
+  const uptime = within(table).getByText("Uptime check results").closest("tr") as HTMLElement;
+  expect(within(uptime).getAllByText("PostgreSQL table and indexes").length).toBeGreaterThan(0);
+  expect(within(table).queryByText("Log forwarding queue")).not.toBeInTheDocument();
 });

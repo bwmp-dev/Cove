@@ -3,6 +3,7 @@ import { Plus } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 import { errorMessage, isStatus, request } from "../api/client";
 import { connectionsQuery, notificationMountsQuery, thresholdRulesQuery, type Connection, type ThresholdMetric, type ThresholdRule, type ThresholdRuleInput } from "../api/connections";
+import { uptimeChecksQuery } from "../api/outputs";
 import { nodesQuery, workloadQuery, workloadsQuery } from "../api/queries";
 import { teamNodesQuery } from "../api/teams";
 import type { Node, WorkloadSummary } from "../api/types";
@@ -19,7 +20,7 @@ import { Select } from "./Select";
 import { Button, Field, LoadingRows, Notice, QueryError, Section } from "./ui";
 
 const maxRules = 100;
-const description = "Alert when a node's CPU, memory, data disk or mount usage stays at or above a percentage, when a service's certificate nears expiry, or when its containers keep restarting, run out of memory or crash. Rules are checked about once a minute against fresh samples; samples older than two minutes and values that cannot be read neither trigger nor clear an alert. Rules cannot be edited: delete one and create a new rule to change it.";
+const description = "Alert when a node's CPU, memory, data disk or mount usage stays at or above a percentage, when a service's certificate nears expiry or its uptime check keeps failing, or when its containers keep restarting, run out of memory or crash. Rules are checked about once a minute against fresh samples; samples older than two minutes and values that cannot be read neither trigger nor clear an alert. Rules cannot be edited: delete one and create a new rule to change it.";
 
 function placement(workload: WorkloadSummary) {
   return `${workload.project ?? "Unknown project"} / ${workload.environment ?? "Project resources"}`;
@@ -50,6 +51,43 @@ function DomainField({ workloadID, value, onChange, error, fieldID }: { workload
         </Select>
       )}
     </Field>
+  );
+}
+
+// Uptime rules need an enabled panel check on the domain; the API refuses others with a conflict.
+function UptimeDomainField({ workloadID, value, onChange, error, fieldID }: { workloadID: string; value: string; onChange: (value: string) => void; error?: string; fieldID: string }) {
+  const checks = useQuery({ ...uptimeChecksQuery(workloadID), enabled: workloadID !== "", refetchInterval: false });
+  const domains = [...new Set((checks.data ?? []).filter((check) => check.enabled).map((check) => check.domain))].sort();
+  let hint = "Domains with an enabled uptime check. Checks run from the Cove panel, so failures reflect its network vantage.";
+  if (workloadID === "") hint = "Select a service first.";
+  else if (checks.isPending) hint = "Loading the service's uptime checks…";
+  else if (checks.isSuccess && domains.length === 0) hint = "This service has no enabled uptime checks. Create one on its Domains page first.";
+  const disabled = workloadID === "" || !checks.isSuccess || domains.length === 0;
+  return (
+    <Field id={fieldID} label="Domain" hint={checks.isError ? undefined : hint} error={error}>
+      {checks.isError ? (
+        <QueryError what="the service's uptime checks" error={checks.error} onRetry={() => void checks.refetch()} retrying={checks.isFetching} />
+      ) : (
+        <Select id={fieldID} name="domain" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} required aria-invalid={error ? true : undefined} aria-describedby={describedBy(fieldID, error, true)}>
+          <option value="" disabled>Select a domain</option>
+          {domains.map((domain) => <option key={domain} value={domain}>{domain}</option>)}
+        </Select>
+      )}
+    </Field>
+  );
+}
+
+function RouteDomainField({ uptime, ...props }: { uptime: boolean; workloadID: string; value: string; onChange: (value: string) => void; error?: string; fieldID: string }) {
+  return uptime ? <UptimeDomainField {...props} /> : <DomainField {...props} />;
+}
+
+function ResourceRuleNote({ metric }: { metric: ThresholdMetric }) {
+  return (
+    <p className="text-xs text-fg-muted">
+      {metric === "uptime"
+        ? "Uptime rules need no worker support. A check that has not reported for two intervals plus its timeout neither triggers nor clears the alert, and disabling or deleting the check leaves an open alert unresolved."
+        : "Unknown values, such as a certificate that cannot be read or Docker events that exceed the bounded backlog, are skipped. Events during Cove operations are not counted, container rules stay quiet while the service is manually stopped, and completed one-shot containers are excluded."}
+    </p>
   );
 }
 
@@ -198,7 +236,7 @@ function ThresholdRuleForm({ nodes, services, channels, close }: { nodes: Node[]
   const unit = thresholdUnits[selected.unit];
   const service = services.find((workload) => workload.id === workloadID);
   const serviceNode = service ? nodes.find((node) => node.id === service.node_id) : undefined;
-  const needsUpgrade = scope === "resource" && serviceNode !== undefined && !serviceNode.capabilities?.alert_observations;
+  const needsUpgrade = scope === "resource" && metric !== "uptime" && serviceNode !== undefined && !serviceNode.capabilities?.alert_observations;
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -222,7 +260,10 @@ function ThresholdRuleForm({ nodes, services, channels, close }: { nodes: Node[]
             <input id={fieldID("name")} name="name" className={inputClass} maxLength={120} autoComplete="off" required aria-invalid={message("name") ? true : undefined} aria-describedby={message("name") ? `${fieldID("name")}-error` : undefined} />
           </Field>
           <Field id={fieldID("metric")} label="Metric" hint={selected.description} error={message("metric")}>
-            <Select id={fieldID("metric")} name="metric" value={metric} onChange={(event) => setMetric(thresholdMetric(event.target.value)?.value ?? "cpu")} aria-describedby={describedBy(fieldID("metric"), message("metric"), true)}>
+            <Select id={fieldID("metric")} name="metric" value={metric} onChange={(event) => {
+                setMetric(thresholdMetric(event.target.value)?.value ?? "cpu");
+                setDomain("");
+              }} aria-describedby={describedBy(fieldID("metric"), message("metric"), true)}>
               <optgroup label="Node">
                 {thresholdMetrics.filter((option) => option.scope === "node").map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </optgroup>
@@ -251,7 +292,7 @@ function ThresholdRuleForm({ nodes, services, channels, close }: { nodes: Node[]
             />
           )}
           {metric === "disk" && <DiskScopeFields key={nodeID} node={nodes.find((item) => item.id === nodeID)} error={message("mount_path")} fieldID={fieldID("mount_path")} />}
-          {selected.unit === "days" && <DomainField workloadID={workloadID} value={domain} onChange={setDomain} error={message("domain")} fieldID={fieldID("domain")} />}
+          {(selected.unit === "days" || selected.unit === "failures") && <RouteDomainField uptime={selected.unit === "failures"} workloadID={workloadID} value={domain} onChange={setDomain} error={message("domain")} fieldID={fieldID("domain")} />}
           <Field id={fieldID("threshold")} label={unit.label} hint={unit.hint} error={message("threshold")}>
             <input key={selected.unit} id={fieldID("threshold")} name="threshold" type="number" inputMode={selected.unit === "events" ? "numeric" : "decimal"} min={unit.min} max={unit.max} step={unit.step} className={inputClass} required aria-invalid={message("threshold") ? true : undefined} aria-describedby={describedBy(fieldID("threshold"), message("threshold"), true)} />
           </Field>
@@ -266,11 +307,7 @@ function ThresholdRuleForm({ nodes, services, channels, close }: { nodes: Node[]
             </Select>
           </Field>
         </div>
-        {scope === "resource" && (
-          <p className="text-xs text-fg-muted">
-            Unknown values, such as a certificate that cannot be read or Docker events that exceed the bounded backlog, are skipped. Events during Cove operations are not counted, container rules stay quiet while the service is manually stopped, and completed one-shot containers are excluded.
-          </p>
-        )}
+        {scope === "resource" && <ResourceRuleNote metric={metric} />}
         {needsUpgrade && (
           <Notice tone="warn" title="Upgrade this service's worker first">
             {serviceNode.name} has not reported support for certificate and container observations. Upgrade the worker on that node and verify it again before creating this rule.

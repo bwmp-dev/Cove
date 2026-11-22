@@ -11,6 +11,9 @@ import (
 )
 
 type Probe struct {
+	TrafficLogs         bool         `json:"traffic_logs"`
+	CapacityAdvice      bool         `json:"capacity_advice"`
+	StructuredLogs      bool         `json:"structured_logs"`
 	ScheduledCleanup    bool         `json:"scheduled_cleanup"`
 	JournalRetention    bool         `json:"journal_retention"`
 	MountMetrics        bool         `json:"mount_metrics"`
@@ -57,6 +60,9 @@ func Inspect(ctx context.Context) Probe {
 	p.BackupRetention = true
 	p.BackblazeB2 = true
 	p.FileBrowser = true
+	p.CapacityAdvice = true
+	p.TrafficLogs = runtime.GOOS == "linux"
+	p.StructuredLogs = true
 	p.AlertObservations = true
 	p.ScheduledCleanup = true
 	p.JournalRetention = true

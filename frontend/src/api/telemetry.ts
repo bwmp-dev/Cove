@@ -78,11 +78,19 @@ export interface StorageCategory {
   basis: string;
 }
 
+// Stores with fixed global caps report the cap as display text; older control planes omit them.
+export interface BoundedStorageCategory extends StorageCategory {
+  limit: string;
+}
+
 export interface StorageUsage {
   metrics: StorageCategory;
   logs: StorageCategory;
   audit: StorageCategory;
   operations: StorageCategory;
+  traffic?: BoundedStorageCategory;
+  uptime?: BoundedStorageCategory;
+  forwarding?: BoundedStorageCategory;
 }
 
 // Values describe each node's last bounded pass only; they are not cumulative or instance-wide totals.

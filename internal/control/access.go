@@ -283,6 +283,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/environment-previews") && r.Method == "GET":
 		// Each preview is filtered by access to its production environment.
 		return true
+	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/costs") && r.Method == "GET":
+		return s.requireAccess(w, r, "project", id, 1)
 	case strings.HasPrefix(path, "/api/projects/"):
 		if r.Method == "GET" && strings.HasSuffix(path, "/connections") {
 			// Environment-scoped members view their environment's graph; each resource is still filtered by access.

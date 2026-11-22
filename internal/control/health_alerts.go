@@ -22,9 +22,10 @@ func (s *Server) recordHealthRouted(ctx context.Context, team, kind, subject, me
 	}
 	defer tx.Rollback(ctx)
 	confirmation, repeat := 120, 86400
+	maxGap := 120
 	var channels []string
 	if ruleID != "" {
-		err = tx.QueryRow(ctx, `SELECT confirmation_seconds,repeat_seconds,channel_ids FROM threshold_rules WHERE id=$1 AND team_id=$2 FOR SHARE`, ruleID, team).Scan(&confirmation, &repeat, &channels)
+		err = tx.QueryRow(ctx, `SELECT confirmation_seconds,repeat_seconds,channel_ids,GREATEST(120,COALESCE((SELECT interval_seconds*2+timeout_seconds FROM route_checks c WHERE c.workload_id=r.workload_id AND c.domain=r.domain AND r.metric='uptime'),120)) FROM threshold_rules r WHERE id=$1 AND team_id=$2 FOR SHARE`, ruleID, team).Scan(&confirmation, &repeat, &channels, &maxGap)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -37,7 +38,7 @@ func (s *Server) recordHealthRouted(ctx context.Context, team, kind, subject, me
 		return err
 	}
 	if ruleID != "" && bad {
-		if _, err = tx.Exec(ctx, `UPDATE health_alerts SET first_seen=now() WHERE team_id=$1 AND kind=$2 AND subject=$3 AND NOT active AND checked_at<now()-interval '2 minutes'`, team, kind, subject); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE health_alerts SET first_seen=now() WHERE team_id=$1 AND kind=$2 AND subject=$3 AND NOT active AND checked_at<now()-make_interval(secs=>$4)`, team, kind, subject, maxGap); err != nil {
 			return err
 		}
 	}

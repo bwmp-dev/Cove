@@ -725,7 +725,7 @@ ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_error text NOT NULL DEF
 ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS workload_id text REFERENCES workloads(id) ON DELETE CASCADE;
 ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS domain text NOT NULL DEFAULT '';
 ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_metric_check;
-ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_metric_check CHECK(metric IN ('cpu','memory','disk','certificate','restarts','oom','crashes'));
+ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_metric_check CHECK(metric IN ('cpu','memory','disk','certificate','restarts','oom','crashes','uptime'));
 ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_threshold_check;
 ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_threshold_check CHECK(threshold>0 AND threshold<=100000);
 CREATE INDEX IF NOT EXISTS threshold_rules_workload ON threshold_rules(workload_id) WHERE workload_id IS NOT NULL;
@@ -738,3 +738,54 @@ CREATE TABLE IF NOT EXISTS operation_retention_runs (
  pruned integer NOT NULL DEFAULT 0,
  protected integer NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS node_costs (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ monthly_minor bigint NOT NULL CHECK(monthly_minor BETWEEN 0 AND 100000000000),
+ currency text NOT NULL CHECK(currency ~ '^[A-Z]{3}$')
+);
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS metrics_token_hash bytea;
+CREATE TABLE IF NOT EXISTS log_forwarders (
+ id text PRIMARY KEY,team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ name text NOT NULL,enabled boolean NOT NULL,configuration bytea NOT NULL,
+ last_success timestamptz,last_error text NOT NULL DEFAULT '',sent_entries bigint NOT NULL DEFAULT 0,
+ dropped_entries bigint NOT NULL DEFAULT 0,UNIQUE(team_id,name)
+);
+CREATE TABLE IF NOT EXISTS log_forward_deliveries (
+ id text PRIMARY KEY,forwarder_id text NOT NULL REFERENCES log_forwarders(id) ON DELETE CASCADE,
+ payload bytea NOT NULL CHECK(octet_length(payload)<=524288),entries integer NOT NULL CHECK(entries BETWEEN 1 AND 100),
+ attempts integer NOT NULL DEFAULT 0,next_attempt timestamptz NOT NULL DEFAULT now(),created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS log_forward_due ON log_forward_deliveries(next_attempt,created_at);
+CREATE TABLE IF NOT EXISTS route_checks (
+ id text PRIMARY KEY,workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,domain text NOT NULL,path text NOT NULL,
+ enabled boolean NOT NULL,interval_seconds integer NOT NULL CHECK(interval_seconds BETWEEN 60 AND 86400),
+ timeout_seconds integer NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 10),expected_min integer NOT NULL,expected_max integer NOT NULL,
+ public_label text NOT NULL DEFAULT '',next_check_at timestamptz NOT NULL DEFAULT now(),checked_at timestamptz,
+ last_up boolean,last_status integer,latency_ms double precision,last_error text NOT NULL DEFAULT '',
+ consecutive_failures integer NOT NULL DEFAULT 0,version integer NOT NULL DEFAULT 1,UNIQUE(workload_id,domain)
+);
+CREATE INDEX IF NOT EXISTS route_checks_due ON route_checks(next_check_at) WHERE enabled;
+CREATE TABLE IF NOT EXISTS route_check_results (
+ id bigserial PRIMARY KEY,check_id text NOT NULL REFERENCES route_checks(id) ON DELETE CASCADE,
+ checked_at timestamptz NOT NULL,up boolean NOT NULL,status integer NOT NULL,latency_ms double precision NOT NULL
+);
+CREATE INDEX IF NOT EXISTS route_check_history ON route_check_results(check_id,checked_at DESC);
+CREATE INDEX IF NOT EXISTS route_check_result_age ON route_check_results(checked_at);
+CREATE TABLE IF NOT EXISTS project_status_pages (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,enabled boolean NOT NULL DEFAULT false,
+ title text NOT NULL,slug text NOT NULL UNIQUE CHECK(length(slug)=64)
+);
+CREATE TABLE IF NOT EXISTS traffic_collection (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,cursor_at timestamptz,checked_at timestamptz,
+ available boolean NOT NULL DEFAULT false,limited boolean NOT NULL DEFAULT false,last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS route_traffic (
+ id text PRIMARY KEY,workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,domain text NOT NULL,timestamp timestamptz NOT NULL,
+ status integer NOT NULL,bytes bigint NOT NULL,duration_ms double precision NOT NULL,client_ip text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS route_traffic_recent ON route_traffic(timestamp DESC,id DESC);
+CREATE INDEX IF NOT EXISTS route_traffic_resource ON route_traffic(workload_id,timestamp DESC);

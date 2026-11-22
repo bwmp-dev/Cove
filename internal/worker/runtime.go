@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Container struct {
+	Service            string            `json:"service"`
 	ExpectedCompleted  bool              `json:"expected_completed,omitempty"`
 	Metrics            *ContainerMetrics `json:"metrics,omitempty"`
 	MetricsUnavailable bool              `json:"metrics_unavailable,omitempty"`
@@ -46,7 +48,7 @@ func (e *Engine) Containers(ctx context.Context, id string) ([]Container, error)
 	decoder := json.NewDecoder(&output.data)
 	containers := []Container{}
 	for {
-		var docker struct{ ID, Names, Image, State, Status, Ports string }
+		var docker struct{ ID, Names, Image, State, Status, Ports, Labels string }
 		err := decoder.Decode(&docker)
 		if errors.Is(err, io.EOF) {
 			break
@@ -54,7 +56,13 @@ func (e *Engine) Containers(ctx context.Context, id string) ([]Container, error)
 		if err != nil {
 			return nil, err
 		}
-		containers = append(containers, Container{ID: docker.ID, Name: docker.Names, Image: docker.Image, State: docker.State, Status: docker.Status, Ports: docker.Ports})
+		service := ""
+		for _, label := range strings.Split(docker.Labels, ",") {
+			if value, found := strings.CutPrefix(label, "com.docker.compose.service="); found && serviceIdentifier.MatchString(value) {
+				service = value
+			}
+		}
+		containers = append(containers, Container{Service: service, ID: docker.ID, Name: docker.Names, Image: docker.Image, State: docker.State, Status: docker.Status, Ports: docker.Ports})
 	}
 
 	return containers, nil

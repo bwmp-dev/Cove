@@ -67,4 +67,8 @@ func TestTelemetryDockerCollection(t *testing.T) {
 	if len(result.Logs) != 1 || strings.Contains(result.Logs[0].Message, "synthetic-telemetry-secret") || result.Logs[0].Timestamp.IsZero() {
 		t.Fatal("missing or unredacted log", result.Logs)
 	}
+	live, err := e.CollectLiveLogs(ctx, id, time.Now().Add(-time.Minute))
+	if err != nil || len(live.Logs) != 1 || strings.Contains(live.Logs[0].Message, "synthetic-telemetry-secret") || live.Containers[0].Metrics != nil {
+		t.Fatal("structured live tail failed or collected unnecessary stats", live, err)
+	}
 }

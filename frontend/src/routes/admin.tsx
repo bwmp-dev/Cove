@@ -1,4 +1,5 @@
 import { InstanceIntegrations } from "../components/InstanceIntegrations";
+import { MetricsExport } from "../components/MetricsExport";
 import { OperationRetentionPasses, StorageUsage, TelemetryRetention } from "../components/TelemetryRetention";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -211,6 +212,7 @@ export function AdminPage() {
       <InstanceIntegrations />
       <Section title="Updates" width="form"><UpdateChannel /></Section>
       <TelemetryRetention />
+      <MetricsExport />
       <StorageUsage />
       <OperationRetentionPasses />
     </>

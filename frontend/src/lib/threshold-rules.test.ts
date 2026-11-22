@@ -47,12 +47,20 @@ describe("thresholdRuleFromForm", () => {
     expect(thresholdRuleFromForm(replaceIn(restarts, "threshold", "1000"))).toMatchObject({ threshold: 1000 });
     for (const value of ["0", "1.5", "1001"]) expect(thresholdRuleFromForm(replaceIn(restarts, "threshold", value))).toMatchObject({ field: "threshold", message: "Enter a whole number from 1 to 1000." });
   });
+
+  it("requires a domain and whole consecutive failures for uptime rules", () => {
+    const uptime = certificate.filter(([key]) => key !== "metric").concat([["metric", "uptime"]]);
+    expect(thresholdRuleFromForm(replaceIn(uptime, "threshold", "3"))).toMatchObject({ metric: "uptime", workload_id: "w1", domain: "app.example.test", node_id: "", threshold: 3 });
+    expect(thresholdRuleFromForm(replaceIn(uptime, "domain", ""))).toEqual({ field: "domain", message: "Select a domain." });
+    for (const value of ["0", "2.5", "1001"]) expect(thresholdRuleFromForm(replaceIn(uptime, "threshold", value))).toMatchObject({ field: "threshold", message: "Enter a whole number from 1 to 1000." });
+  });
 });
 
 it("describes each rule in its own unit", () => {
   expect(thresholdCondition({ metric: "memory", threshold: 92.5, domain: "", confirmation_seconds: 300 })).toBe("Memory used at or above 92.5% for 5 minutes");
   expect(thresholdCondition({ metric: "certificate", threshold: 1, domain: "app.example.test", confirmation_seconds: 600 })).toBe("Certificate expiry for app.example.test at or below 1 day for 10 minutes");
   expect(thresholdCondition({ metric: "oom", threshold: 2, domain: "", confirmation_seconds: 60 })).toBe("Out-of-memory kills at or above 2 in ten minutes for 1 minute");
+  expect(thresholdCondition({ metric: "uptime", threshold: 3, domain: "app.example.test", confirmation_seconds: 120 })).toBe("app.example.test failing 3 uptime checks in a row for 2 minutes");
 });
 
 describe("thresholdDeliveryProblem", () => {

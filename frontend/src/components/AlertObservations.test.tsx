@@ -15,6 +15,8 @@ const observations = {
   containers: [
     { id: "0123456789abcdef", restart_count: 4, oom_killed: true, exit_code: 137, exited: true, expected_completed: false },
     { id: "fedcba9876543210", restart_count: 0, oom_killed: false, exit_code: 0, exited: true, expected_completed: true },
+    { id: "aaaaaaaaaaaa0000", restart_count: 0, oom_killed: false, exit_code: 143, exited: true, expected_completed: false, manual_stop: true },
+    { id: "bbbbbbbbbbbb0000", restart_count: 0, oom_killed: false, exit_code: 1, exited: true, expected_completed: false, exit_unknown: true },
   ],
   certificates: [{ domain: "app.example.test", expires_at: "2026-12-02T12:00:00Z" }],
   events_available: true,
@@ -41,6 +43,12 @@ it("reads observations only when asked and shows raw counters, state and unknown
   expect(within(containers).getByText("0123456789ab")).toBeInTheDocument();
   expect(within(containers).getByText("Exited with code 137")).toBeInTheDocument();
   expect(within(containers).getByText(/excluded from alerts/)).toBeInTheDocument();
+  const manual = within(containers).getByText("aaaaaaaaaaaa").closest("li") as HTMLElement;
+  expect(within(manual).getByText("Manual stop (excluded)")).toBeInTheDocument();
+  expect(within(manual).getByText("Exited with code 143")).not.toHaveClass("text-bad");
+  const unknown = within(containers).getByText("bbbbbbbbbbbb").closest("li") as HTMLElement;
+  expect(within(unknown).getByText("Exit cause unknown (not counted)")).toBeInTheDocument();
+  expect(within(unknown).getByText("Exited with code 1")).not.toHaveClass("text-bad");
   const certificates = screen.getByRole("list", { name: "Inspected certificates" });
   expect(within(certificates).getByText("10 days remaining when inspected")).toBeInTheDocument();
   expect(within(within(certificates).getByText("missing.example.test").closest("li") as HTMLElement).getByText(/Unknown/)).toBeInTheDocument();

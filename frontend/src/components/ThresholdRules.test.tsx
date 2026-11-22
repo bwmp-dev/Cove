@@ -38,6 +38,8 @@ function renderRules(rules: unknown[]) {
     if (path === "/api/teams/one/nodes") return Promise.resolve(["n1", "n3"]);
     if (path === "/api/workloads") return Promise.resolve(workloads);
     if (path === "/api/notifications/mounts?node_id=n1") return Promise.resolve({ limited: true, sampled_at: "2026-11-22T12:00:00Z", mounts: [{ path: "/proc", filesystem: "proc", total: 0, available: 0, known: false }, { path: "/srv/data", filesystem: "ext4", total: 100, available: 10, known: true }, { path: "/mnt/nfs", filesystem: "nfs", total: 0, available: 0, known: true, error: "stale file handle" }] });
+    if (path === "/api/workloads/w1/uptime") return Promise.resolve([{ id: "u1", domain: "b.example.test", enabled: true }, { id: "u2", domain: "a.example.test", enabled: false }]);
+    if (path === "/api/workloads/w3/uptime") return Promise.resolve([{ id: "u3", domain: "legacy.example.test", enabled: true }]);
     if (path === "/api/workloads/w1") return Promise.resolve({ id: "w1", routes: [{ domain: "b.example.test", service: "web", port: 80 }, { domain: "a.example.test", service: "web", port: 80 }, { domain: "a.example.test", service: "admin", port: 81 }] });
     return Promise.reject(new Error(`unexpected ${path}`));
   });
@@ -57,7 +59,7 @@ it("creates a rule on a team node with the selected channels", async () => {
   expect(screen.queryByRole("option", { name: "other-team-node" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("option", { name: "edge-1" }));
   fireEvent.click(screen.getByRole("combobox", { name: "Metric" }));
-  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["CPU usage", "Memory used", "Disk used", "Certificate expiry", "Container restarts", "Out-of-memory kills", "Container crashes"]);
+  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["CPU usage", "Memory used", "Disk used", "Certificate expiry", "Uptime check failures", "Container restarts", "Out-of-memory kills", "Container crashes"]);
   fireEvent.click(screen.getByRole("option", { name: "Disk used" }));
   expect(screen.getByText(/Only the filesystem that holds \/var\/lib\/cove/)).toBeInTheDocument();
   expect(screen.getByText("This channel does not select threshold events.")).toBeInTheDocument();
@@ -186,4 +188,22 @@ it("lists resource rules with their service, route and unit", async () => {
   expect(within(list).getByText(/on an unavailable service/)).toBeInTheDocument();
   expect(within(list).getByText(/service is no longer available to this team/)).toBeInTheDocument();
   expect(within(list).queryByText(/%/)).not.toBeInTheDocument();
+});
+
+it("creates uptime rules only for enabled checks, without requiring worker observations", async () => {
+  renderRules([]);
+  fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+  choose("Metric", "Uptime check failures");
+  choose("Service", "legacy");
+  expect(screen.queryByText("Upgrade this service's worker first")).not.toBeInTheDocument();
+  choose("Service", "api");
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Domain" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("combobox", { name: "Domain" }));
+  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Select a domain", "b.example.test"]);
+  fireEvent.click(screen.getByRole("option", { name: "b.example.test" }));
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "API down" } });
+  fireEvent.change(screen.getByLabelText("Threshold (consecutive failures)"), { target: { value: "3" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: /Ops chat/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/notifications/rules", { name: "API down", node_id: "", workload_id: "w1", domain: "b.example.test", mount_path: "", metric: "uptime", threshold: 3, confirmation_seconds: 300, repeat_seconds: 3600, channel_ids: ["c1"] }));
 });

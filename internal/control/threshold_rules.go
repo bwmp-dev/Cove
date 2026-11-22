@@ -115,7 +115,7 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "resource unavailable", 503)
 			return
 		}
-		if rule.Metric == "certificate" {
+		if rule.Metric == "certificate" || rule.Metric == "uptime" {
 			plain, openErr := unseal(s.Key, configuration)
 			var config workloadInput
 			if openErr != nil || json.Unmarshal(plain, &config) != nil {
@@ -132,6 +132,17 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "select a configured resource route", 400)
 				return
 			}
+			if rule.Metric == "uptime" {
+				var exists bool
+				if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM route_checks WHERE workload_id=$1 AND domain=$2 AND team_id=$3 AND enabled)`, rule.WorkloadID, rule.Domain, team).Scan(&exists); err != nil {
+					http.Error(w, "uptime checks unavailable", 503)
+					return
+				}
+				if !exists {
+					http.Error(w, "create and enable this route's uptime check first", 409)
+					return
+				}
+			}
 		}
 	}
 	err = tx.QueryRow(ctx, `SELECT n.id FROM nodes n JOIN team_nodes t ON t.node_id=n.id WHERE n.id=$1 AND t.team_id=$2 FOR SHARE OF n,t`, rule.NodeID, team).Scan(&found)
@@ -144,7 +155,7 @@ func (s *Server) thresholdRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if rule.WorkloadID != "" {
+	if rule.WorkloadID != "" && rule.Metric != "uptime" {
 		var supported bool
 		if err = tx.QueryRow(ctx, `SELECT COALESCE((capabilities->>'alert_observations')::boolean,false) FROM nodes WHERE id=$1`, rule.NodeID).Scan(&supported); err != nil {
 			http.Error(w, "node unavailable", 503)

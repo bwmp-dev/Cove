@@ -376,6 +376,13 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	}()
 	timer := time.NewTicker(3 * time.Second)
 	defer timer.Stop()
+	telemetryContext, stopTelemetry := context.WithCancel(ctx)
+	telemetryDone := make(chan error, 3)
+	var telemetryJobs sync.WaitGroup
+	for _, run := range []func(context.Context) error{s.runUptimeChecks, s.runLogForwards, s.runTrafficCollection} {
+		telemetryJobs.Go(func() { telemetryDone <- run(telemetryContext) })
+	}
+	defer func() { stopTelemetry(); telemetryJobs.Wait() }()
 	dnsContext, stopDNS := context.WithCancel(ctx)
 	dnsDone := make(chan error, 1)
 	go func() { dnsDone <- s.runDNS(dnsContext) }()
@@ -438,6 +445,8 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		select {
+		case err := <-telemetryDone:
+			return err
 		case <-ctx.Done():
 			return nil
 		case <-timer.C:

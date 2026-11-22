@@ -205,6 +205,11 @@ export function StorageUsage() {
       { key: "logs", label: "Log lines", category: data.logs, limit: limits ? `${rows(limits.log_rows)} rows, ${formatBinaryBytes(limits.log_bytes)}, ${limits.log_days} days` : undefined },
       { key: "audit", label: "Audit entries", category: data.audit, limit: limits ? `${rows(limits.audit_rows)} rows, ${limits.audit_days} days` : undefined },
       { key: "operations", label: "Operations and worker journals", category: data.operations, limit: limits ? `${rows(limits.operation_rows)} eligible rows, ${limits.operation_days} days` : undefined },
+      ...[
+        { key: "traffic", label: "Traffic access entries", category: data.traffic },
+        { key: "uptime", label: "Uptime check results", category: data.uptime },
+        { key: "forwarding", label: "Log forwarding queue", category: data.forwarding },
+      ].flatMap(({ category, ...item }) => (category ? [{ ...item, category, limit: category.limit }] : [])),
     ];
     body = (
       <>

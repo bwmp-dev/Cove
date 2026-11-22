@@ -15,6 +15,7 @@ type TelemetryRequest struct {
 	Since time.Time `json:"since"`
 }
 type LogEntry struct {
+	Clipped     bool      `json:"clipped,omitempty"`
 	ContainerID string    `json:"container_id"`
 	Container   string    `json:"container"`
 	Timestamp   time.Time `json:"timestamp"`
@@ -28,6 +29,44 @@ type Telemetry struct {
 }
 
 func (e *Engine) CollectTelemetry(ctx context.Context, id string, since time.Time) (*Telemetry, error) {
+	return e.collectTelemetry(ctx, id, since, true)
+}
+func (e *Engine) CollectLiveLogs(ctx context.Context, id string, since time.Time) (*Telemetry, error) {
+	e.mu.Lock()
+	if e.tailSlots == nil {
+		e.tailSlots = make(chan struct{}, 4)
+	}
+	slots := e.tailSlots
+	e.mu.Unlock()
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	default:
+		return nil, errors.New("live tail concurrency limit reached")
+	}
+	limited := false
+	if since.IsZero() {
+		since = time.Now().Add(-30 * time.Second)
+	}
+	if since.Before(time.Now().Add(-5 * time.Minute)) {
+		since = time.Now().Add(-5 * time.Minute)
+		limited = true
+	}
+	result, err := e.collectTelemetry(ctx, id, since, false)
+	if err != nil {
+		return nil, err
+	}
+	result.LogsLimited = result.LogsLimited || limited
+	for i := range result.Logs {
+		if len(result.Logs[i].Message) > 8192 {
+			result.Logs[i].Message = strings.ToValidUTF8(result.Logs[i].Message[:8192], "")
+			result.Logs[i].Clipped = true
+			result.LogsLimited = true
+		}
+	}
+	return result, nil
+}
+func (e *Engine) collectTelemetry(ctx context.Context, id string, since time.Time, metrics bool) (*Telemetry, error) {
 	if !workloadIdentifier.MatchString(id) {
 		return nil, errors.New("invalid workload ID")
 	}
@@ -52,10 +91,12 @@ func (e *Engine) CollectTelemetry(ctx context.Context, id string, since time.Tim
 	if len(containers) > 32 {
 		return nil, errors.New("telemetry supports at most 32 containers per resource")
 	}
-	if err = e.containerMetrics(ctx, containers); err != nil {
-		for i := range containers {
-			containers[i].MetricsUnavailable = true
-			containers[i].Metrics = nil
+	if metrics {
+		if err = e.containerMetrics(ctx, containers); err != nil {
+			for i := range containers {
+				containers[i].MetricsUnavailable = true
+				containers[i].Metrics = nil
+			}
 		}
 	}
 	data, err := os.ReadFile(filepath.Join(e.Root, "workloads", id, "current.json"))

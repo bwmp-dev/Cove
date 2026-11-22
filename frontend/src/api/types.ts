@@ -17,6 +17,9 @@ export interface Capabilities {
   scheduled_cleanup?: boolean;
   journal_retention?: boolean;
   mount_metrics?: boolean;
+  structured_logs?: boolean;
+  capacity_advice?: boolean;
+  traffic_logs?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -165,7 +168,8 @@ export interface Route { domain: string; service: string; port: number }
 // Raw worker diagnostics, read before the panel removes events inside operation windows, so these are not alert counts.
 export interface WorkloadObservations {
   sampled_at: string;
-  containers: { id: string; restart_count: number; oom_killed: boolean; exit_code: number; exited: boolean; expected_completed: boolean }[];
+  // manual_stop and exit_unknown are absent from workers that predate exit classification.
+  containers: { id: string; restart_count: number; oom_killed: boolean; exit_code: number; exited: boolean; expected_completed: boolean; manual_stop?: boolean; exit_unknown?: boolean }[];
   certificates: { domain: string; expires_at: string | null }[];
   events_available: boolean;
   restart_events: number;
@@ -227,6 +231,8 @@ export interface ContainerUsage {
 export interface Container {
   metrics?: { cpu: string; memory: string; memory_percent: string; network: string; disk_io: string; pids: string; usage?: ContainerUsage };
   metrics_unavailable?: boolean;
+  // Compose service label; absent in samples from workers that predate it.
+  service?: string;
   id: string;
   name: string;
   image: string;

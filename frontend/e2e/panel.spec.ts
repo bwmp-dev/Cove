@@ -86,6 +86,14 @@ function proxyRouters() {
   return execFileSync("docker", ["exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers"], { encoding: "utf8" });
 }
 
+// Manual deploys check capacity first. Passing checks queue at once; otherwise the dialog needs an explicit choice.
+async function deployFromHeader(page: Page) {
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  const proceed = page.getByRole("dialog", { name: "Capacity before deploy" }).getByRole("button", { name: /^Deploy (anyway|without check)$/ });
+  await expect(proceed.or(page.getByText("Deploy queued", { exact: true }))).toBeVisible({ timeout: 60_000 });
+  if (await proceed.isVisible()) await proceed.click();
+}
+
 async function createResource(page: Page, name: string) {
   await page.getByRole("link", { name: "New resource", exact: true }).first().click();
   await page.getByRole("button", { name: "Custom Compose or Git" }).click();
@@ -264,7 +272,7 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await expect(networks.getByText("Connections saved", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Overview", exact: true }).click();
 
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText("running", { exact: true }).first()).toBeVisible();
   await capture(page, testInfo, "resource");
@@ -771,7 +779,7 @@ test("shared variables stay hidden and resolve in a real deployment", async ({ p
   const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string; compose: string };
   const saved = await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: config.name, node_id: config.node_id, compose: config.compose + "    environment:\n      CHECK: ${CHECK}\n", kind: "service", environment: { CHECK: "{{environment.CHECK}}" } } });
   expect(saved.status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   const ids = execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${id}`], { encoding: "utf8" }).trim().split(/\s+/);
   expect(ids.length).toBe(1);
@@ -792,7 +800,7 @@ test("restore drills verify copied volume data without restarting the resource",
   const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
   const yaml = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo original > /data/marker; sleep 3600']\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\nvolumes:\n  data: {}\n";
   expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
   await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
   await page.getByRole("button", { name: "Configure backups", exact: true }).click();
@@ -851,7 +859,7 @@ test("resource bindings, hooks and promotion keep target configuration", async (
   const source = await (await page.request.get(`/api/workloads/${sourceID}`)).json() as { name: string; node_id: string; compose: string; project_id: string };
   const headers = { Origin: new URL(sourceURL).origin };
   expect((await page.request.put(`/api/workloads/${sourceID}`, { headers, data: { name: source.name, node_id: source.node_id, kind: "service", compose: source.compose, environment: { MODE: "source-fixture" } } })).status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   const sourceContainer = containers(sourceURL).split("|")[0] ?? "";
   const sourceImage = execFileSync("docker", ["inspect", "--format", "{{.Image}}", sourceContainer], { encoding: "utf8" }).trim();
@@ -973,7 +981,7 @@ test("temporary SSH access reaches one service and revocation closes it", async 
 `;
   expect((await page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
   await page.reload();
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   // This fixture's worker is containerized; attach it to emulate the real host's bridge reachability.
   execFileSync("docker", ["network", "connect", `cove-${id}_default`, process.env.COVE_BROWSER_WORKER ?? ""]);
@@ -1025,7 +1033,7 @@ test("guarded deployment rejects an unhealthy candidate without replacing the ap
   await createProject(page, "Guarded project");
   const url = await createResource(page, "guarded-app");
   const id = new URL(url).pathname.split("/")[2];
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60000 });
   const original = containers(url);
   await page.goto(`${url}/deployment-safety`);
@@ -1181,7 +1189,7 @@ test("administrators browse, edit, download and delete container files on the re
   const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
   expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: compose("files-service") } })).status()).toBe(200);
   await page.reload();
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
 
   await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true }).click();
@@ -1236,7 +1244,7 @@ test("alert observations inspect a real service and certificate and container ru
   const restarting = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo alerts; sleep 300; echo stopped']\n    restart: unless-stopped\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n";
   expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: restarting, routes: [{ domain: hostname, service: "app", port: 8080 }] } })).status()).toBe(200);
   await page.reload();
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
   const container = containers(url).split("|")[0] ?? "";
   // Ending the main process outside a Cove operation makes Docker's restart policy restart the container.
@@ -1292,6 +1300,67 @@ test("alert observations inspect a real service and certificate and container ru
     await page.getByRole("dialog", { name: `Delete ${name}?` }).getByRole("button", { name: "Delete rule", exact: true }).click();
     await expect(rules.getByText(name, { exact: true })).toHaveCount(0);
   }
+});
+
+test("merged live logs, capacity before deploy, right-sizing and cost estimates on the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  await page.goto("/projects");
+  await signIn(page);
+  await createProject(page, "Operations project");
+  const url = await createResource(page, "operations-service");
+  const id = new URL(url).pathname.split("/")[2];
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string; project_id: string };
+  // Exact Compose text through the API; the sidecar has no limits, so capacity cannot be fully confirmed.
+  const services = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'while true; do echo app-tick; sleep 1; done']\n  sidecar:\n    image: busybox:1.37\n    command: [sh, -c, 'while true; do echo sidecar-tick; sleep 1; done']\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: services, limits: { app: { cpus: 0.1, memory_mb: 32 } } } })).status()).toBe(200);
+  await page.reload();
+
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  const capacity = page.getByRole("dialog", { name: "Capacity before deploy" });
+  const proceed = capacity.getByRole("button", { name: /^Deploy (anyway|without check)$/ });
+  await expect(proceed).toBeVisible({ timeout: 60_000 });
+  await expect(capacity.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  await capture(page, testInfo, "capacity-before-deploy");
+  await proceed.click();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+
+  await page.goto(`${url}/logs`);
+  const live = page.getByRole("region", { name: "Live log lines", exact: true });
+  await expect(live.getByText("app-tick", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  await expect(live.getByText("sidecar-tick", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect(page.getByText(/^Paused\./)).toBeVisible();
+  await chooseOption(page.getByRole("combobox", { name: "Container", exact: true }).first(), { index: 1 });
+  await expect(live.getByText("app-tick", { exact: true }).first().or(live.getByText("sidecar-tick", { exact: true }).first())).toBeVisible();
+  await capture(page, testInfo, "live-logs");
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+
+  await page.goto(`${url}/limits`);
+  await expect(page.getByRole("heading", { name: "Right-sizing suggestions", exact: true })).toBeVisible();
+  await expect(page.getByText(/No per-service usage history yet|distinct hours?/).first()).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "right-sizing");
+
+  await page.goto(`${url}/preflight`);
+  await page.getByRole("button", { name: "Check capacity", exact: true }).click();
+  await expect(page.getByText(/^Inspection snapshot\. Checks compare/)).toBeVisible({ timeout: 60_000 });
+
+  await page.goto(`/nodes/${resource.node_id}`);
+  const price = page.getByRole("region", { name: "Node price", exact: true });
+  await price.getByLabel("Currency", { exact: true }).fill("eur");
+  await price.getByLabel("Monthly price", { exact: true }).fill("12.505");
+  await price.getByRole("button", { name: "Save price", exact: true }).click();
+  await expect(price.getByText("EUR uses at most 2 decimal places.", { exact: true })).toBeVisible();
+  await price.getByLabel("Monthly price", { exact: true }).fill("12.50");
+  await price.getByRole("button", { name: "Save price", exact: true }).click();
+  await expect(price.getByText("Price saved", { exact: true })).toBeVisible();
+  await expect(price.getByText(/EUR\s12\.50/)).toBeVisible();
+  await capture(page, testInfo, "node-price");
+
+  await page.goto(`/projects/${resource.project_id}`);
+  const costs = page.getByRole("region", { name: "Estimated monthly cost", exact: true });
+  await expect(costs.getByText(/^Project total:/)).toBeVisible();
+  await expect(costs.getByText(/EUR\s\d/).first()).toBeVisible();
+  await capture(page, testInfo, "project-costs");
 });
 
 test("every page adapts to phone tablet laptop and wide desktop", async ({ page, browser }, testInfo) => {

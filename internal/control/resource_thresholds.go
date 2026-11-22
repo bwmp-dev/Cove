@@ -24,6 +24,8 @@ func validThresholdRule(r thresholdRule) bool {
 		return r.WorkloadID == "" && r.Domain == "" && r.Threshold <= 100
 	case "certificate":
 		return r.WorkloadID != "" && r.Domain != "" && len(r.Domain) <= 253 && r.Threshold <= 3650
+	case "uptime":
+		return r.WorkloadID != "" && r.Domain != "" && len(r.Domain) <= 253 && r.Threshold <= 1000 && math.Trunc(r.Threshold) == r.Threshold
 	case "restarts", "oom", "crashes":
 		return r.WorkloadID != "" && r.Domain == "" && r.Threshold <= 1000 && math.Trunc(r.Threshold) == r.Threshold
 	}
@@ -58,10 +60,10 @@ func resourceThresholdValue(metric, domain string, sample *worker.WorkloadObserv
 	}
 	current := 0
 	for _, c := range sample.Containers {
-		if c.ExpectedCompleted {
+		if c.ExpectedCompleted || c.ManualStop {
 			continue
 		}
-		if metric == "oom" && c.OOMKilled || metric == "crashes" && c.Exited {
+		if metric == "oom" && c.OOMKilled || metric == "crashes" && c.Exited && !c.ExitUnknown {
 			current++
 		}
 	}
@@ -69,7 +71,7 @@ func resourceThresholdValue(metric, domain string, sample *worker.WorkloadObserv
 }
 
 func (s *Server) evaluateResourceThresholds(ctx context.Context, id string) error {
-	rows, err := s.DB.Query(ctx, `SELECT r.id,r.team_id,r.name,r.metric,r.threshold,r.domain,w.node_id FROM threshold_rules r JOIN workloads w ON w.id=r.workload_id AND w.team_id=r.team_id JOIN team_nodes t ON t.team_id=w.team_id AND t.node_id=w.node_id WHERE w.id=$1`, id)
+	rows, err := s.DB.Query(ctx, `SELECT r.id,r.team_id,r.name,r.metric,r.threshold,r.domain,w.node_id FROM threshold_rules r JOIN workloads w ON w.id=r.workload_id AND w.team_id=r.team_id JOIN team_nodes t ON t.team_id=w.team_id AND t.node_id=w.node_id WHERE w.id=$1 AND r.metric<>'uptime'`, id)
 	if err != nil {
 		return err
 	}
@@ -165,6 +167,17 @@ func (s *Server) evaluateResourceThresholds(ctx context.Context, id string) erro
 		value, known := resourceThresholdValue(r.metric, r.domain, &sample)
 		if !known {
 			continue
+		}
+		if r.metric == "crashes" && value < r.threshold {
+			uncertain := false
+			for _, container := range sample.Containers {
+				if container.Exited && container.ExitUnknown && !container.ExpectedCompleted && !container.ManualStop {
+					uncertain = true
+				}
+			}
+			if uncertain {
+				continue
+			}
 		}
 		bad := value >= r.threshold
 		unit := "events in ten minutes"

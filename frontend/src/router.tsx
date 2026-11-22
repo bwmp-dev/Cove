@@ -39,6 +39,8 @@ const verifyRoute = createRoute({ getParentRoute: () => rootRoute, path: "/verif
 const forgotRoute = createRoute({ getParentRoute: () => rootRoute, path: "/forgot-password", component: lazyRouteComponent(() => import("./routes/auth"), "ForgotPasswordPage") });
 const resetRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reset-password", component: lazyRouteComponent(() => import("./routes/auth"), "ResetPasswordPage") });
 const inviteRoute = createRoute({ getParentRoute: () => rootRoute, path: "/invite", component: lazyRouteComponent(() => import("./routes/auth"), "InvitationPage") });
+// Public project status pages sit outside the authenticated shell and never read the session.
+const statusRoute = createRoute({ getParentRoute: () => rootRoute, path: "/status/$slug", component: lazyRouteComponent(() => import("./routes/status"), "PublicStatusPage") });
 
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -147,6 +149,7 @@ const routeTree = rootRoute.addChildren([
   forgotRoute,
   resetRoute,
   inviteRoute,
+  statusRoute,
   appRoute.addChildren([
     indexRoute,
     dashboardRoute,
