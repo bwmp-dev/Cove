@@ -18,12 +18,17 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
   errorComponent: RouteError,
 });
 
+const flag = (value: unknown) => value === true || value === 1 || value === "1" || value === "true";
+
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  validateSearch: (search: Record<string, unknown>): { redirect?: string; error?: string } => ({
+  // authenticated marks the return from a provider sign-in; break_glass is the administrator password route that skips auto-redirect.
+  validateSearch: (search: Record<string, unknown>): { redirect?: string; error?: string; authenticated?: true; break_glass?: true } => ({
     ...(typeof search.redirect === "string" ? { redirect: search.redirect } : {}),
     ...(typeof search.error === "string" ? { error: search.error } : {}),
+    ...(flag(search.authenticated) ? { authenticated: true } : {}),
+    ...(flag(search.break_glass) ? { break_glass: true } : {}),
   }),
   beforeLoad: async ({ context, search }) => {
     const session = await context.queryClient.ensureQueryData(sessionQuery).catch(() => null);

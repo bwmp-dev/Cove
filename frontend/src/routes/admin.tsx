@@ -1,4 +1,7 @@
 import { InstanceIntegrations } from "../components/InstanceIntegrations";
+import { AuditExport, InstanceSecondFactor, SignInProviders } from "../components/InstanceSecurity";
+import { LoginHistory, loginHistoryDescription } from "../components/LoginHistory";
+import { useResetSecondFactor } from "../api/security";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -119,8 +122,11 @@ function Users() {
   const users = useQuery(usersQuery);
   const update = useUpdateUser();
   const online = useOnline();
+  const resetFactor = useResetSecondFactor();
   const [resetting, setResetting] = useState<string | null>(null);
+  const [history, setHistory] = useState<string | null>(null);
   const [disabling, setDisabling] = useState<User | null>(null);
+  const [clearing, setClearing] = useState<User | null>(null);
   if (users.isPending) return <LoadingRows label="Loading users" rows={2} />;
   if (users.isError) {
     return (
@@ -135,6 +141,20 @@ function Users() {
         <div className="p-3">
           <Notice tone="error" title="Could not update the user">
             {errorMessage(update.error)}
+          </Notice>
+        </div>
+      )}
+      {resetFactor.isError && (
+        <div className="p-3">
+          <Notice tone="error" title="Could not reset the second factor">
+            {errorMessage(resetFactor.error)}
+          </Notice>
+        </div>
+      )}
+      {resetFactor.isSuccess && (
+        <div className="p-3">
+          <Notice tone="success" title="Second factor reset">
+            Their authenticator app, passkeys and recovery codes were removed and their sessions signed out. If a second factor is required, they enrol again after signing in.
           </Notice>
         </div>
       )}
@@ -167,9 +187,22 @@ function Users() {
                   <Button variant="ghost" size="sm" disabled={!online || user.disabled} onClick={() => setResetting(user.id)}>
                     Reset link<span className="sr-only"> for {user.email}</span>
                   </Button>
+                  <Button variant="ghost" size="sm" disabled={!online} pending={resetFactor.isPending && resetFactor.variables === user.id} onClick={() => setClearing(user)}>
+                    Reset second factor<span className="sr-only"> for {user.email}</span>
+                  </Button>
+                  <Button variant="ghost" size="sm" aria-expanded={history === user.id} onClick={() => setHistory(history === user.id ? null : user.id)}>
+                    {history === user.id ? "Hide sign-in history" : "Sign-in history"}
+                    <span className="sr-only"> for {user.email}</span>
+                  </Button>
                 </div>
               </div>
               {resetting === user.id && <ResetLink user={user} onClose={() => setResetting(null)} />}
+              {history === user.id && (
+                <div className="border-t border-line bg-panel">
+                  <p className="px-4 pt-3 text-xs text-fg-muted">{loginHistoryDescription}</p>
+                  <LoginHistory userId={user.id} />
+                </div>
+              )}
             </li>
           );
         })}
@@ -187,6 +220,21 @@ function Users() {
       >
         They are signed out and cannot sign in until enabled again. Their team memberships are kept. Cove refuses to disable the last administrator.
       </ConfirmDialog>
+      <ConfirmDialog
+        open={clearing !== null}
+        title={`Reset the second factor for ${clearing?.email ?? "this user"}?`}
+        confirmLabel="Reset second factor"
+        danger
+        onCancel={() => setClearing(null)}
+        onConfirm={() => {
+          if (clearing) resetFactor.mutate(clearing.id);
+          setClearing(null);
+        }}
+      >
+        Removes their authenticator app, every passkey and their recovery codes, and signs out all of their sessions. Confirm their identity another way first. If the
+        instance or one of their teams requires a second factor, they must enrol again before using projects and resources.
+        {clearing?.id === session?.user_id && " This is your own account: you will be signed out."}
+      </ConfirmDialog>
     </>
   );
 }
@@ -203,11 +251,14 @@ export function AdminPage() {
   }
   return (
     <>
-      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in and update settings for this Cove instance." />
+      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, security, audit export and update settings for this Cove instance." />
       <Section title="Sign-in" width="form">
         <SignInSettings />
       </Section>
+      <SignInProviders />
+      <InstanceSecondFactor />
       <InstanceIntegrations />
+      <AuditExport />
       <Section title="Updates" width="form"><UpdateChannel /></Section>
     </>
   );

@@ -652,6 +652,21 @@ CREATE TABLE IF NOT EXISTS preview_branch_deliveries (
  received_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS preview_branch_deliveries_age ON preview_branch_deliveries(received_at);
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS require_second_factor boolean NOT NULL DEFAULT false;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS require_second_factor boolean NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS second_factor_verified boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS account_totp (
+ user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ secret bytea NOT NULL,
+ confirmed boolean NOT NULL DEFAULT false,
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '10 minutes',
+ last_step bigint NOT NULL DEFAULT -1
+);
+CREATE TABLE IF NOT EXISTS recovery_codes (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ code_hash bytea NOT NULL,
+ PRIMARY KEY(user_id,code_hash)
+);
 -- Branch heads of removed previews. The periodic scan must not bring back a preview that was deleted
 -- or expired; only a new head or an explicit request starts one again.
 CREATE TABLE IF NOT EXISTS preview_branch_dismissals (
@@ -673,4 +688,128 @@ LANGUAGE sql STABLE AS $$
  WHERE m.user_id=actor AND m.team_id=team AND (m.role IN ('owner','admin') OR
   g->>'scope'='team' OR (g->>'scope'='project' AND g->>'scope_id'=project) OR
   (g->>'scope'='environment' AND g->>'scope_id'=s.scope))
+$$;
+
+CREATE TABLE IF NOT EXISTS passkeys (
+ id bytea PRIMARY KEY,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ name text NOT NULL,
+ credential jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+ browser_hash bytea PRIMARY KEY,
+ user_id text REFERENCES users(id) ON DELETE CASCADE,
+ user_version bigint,
+ session_hash bytea,
+ ceremony text NOT NULL CHECK(ceremony IN ('register','login')),
+ data jsonb NOT NULL,
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '5 minutes'
+);
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS password_login_disabled boolean NOT NULL DEFAULT false;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS oidc_registration_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS oidc_auto_redirect text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS oidc_providers (
+ id text PRIMARY KEY,
+ configuration bytea NOT NULL,
+ version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS oidc_identities (
+ provider_id text NOT NULL REFERENCES oidc_providers(id) ON DELETE CASCADE,
+ subject text NOT NULL,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ PRIMARY KEY(provider_id,subject),
+ UNIQUE(provider_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS oidc_states (
+ token_hash bytea PRIMARY KEY,
+ browser_hash bytea NOT NULL,
+ provider_id text NOT NULL REFERENCES oidc_providers(id) ON DELETE CASCADE,
+ provider_version bigint NOT NULL,
+ nonce_hash bytea NOT NULL,
+ verifier bytea NOT NULL,
+ link_user_id text REFERENCES users(id) ON DELETE CASCADE,
+ link_version bigint,
+ session_hash bytea,
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '10 minutes'
+);
+
+CREATE TABLE IF NOT EXISTS login_events (
+ id bigserial PRIMARY KEY,
+ user_id text REFERENCES users(id) ON DELETE SET NULL,
+ success boolean NOT NULL,
+ method text NOT NULL,
+ address text NOT NULL,
+ user_agent text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS login_events_user ON login_events(user_id,id DESC);
+CREATE INDEX IF NOT EXISTS login_events_age ON login_events(created_at);
+CREATE TABLE IF NOT EXISTS authentication_failures (
+ key text PRIMARY KEY,
+ failures integer NOT NULL DEFAULT 0,
+ window_start timestamptz NOT NULL DEFAULT now(),
+ locked_until timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS account_devices (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ device_hash bytea NOT NULL,
+ last_seen timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(user_id,device_hash)
+);
+
+CREATE TABLE IF NOT EXISTS audit_export_settings (
+ id integer PRIMARY KEY CHECK(id=1),
+ configuration bytea NOT NULL,
+ webhook_enabled boolean NOT NULL DEFAULT false,
+ syslog_enabled boolean NOT NULL DEFAULT false,
+ retention_days integer NOT NULL DEFAULT 365 CHECK(retention_days BETWEEN 1 AND 3650)
+);
+CREATE TABLE IF NOT EXISTS audit_deliveries (
+ id bigserial PRIMARY KEY,
+ event_id bigint NOT NULL,
+ destination text NOT NULL CHECK(destination IN ('webhook','syslog')),
+ configuration bytea NOT NULL,
+ payload jsonb NOT NULL,
+ attempts integer NOT NULL DEFAULT 0,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(event_id,destination)
+);
+CREATE INDEX IF NOT EXISTS audit_deliveries_due ON audit_deliveries(next_attempt_at,id);
+CREATE OR REPLACE FUNCTION cove_queue_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ INSERT INTO audit_deliveries(event_id,destination,configuration,payload)
+ SELECT NEW.id,d.destination,s.configuration,to_jsonb(NEW)
+ FROM audit_export_settings s CROSS JOIN (VALUES ('webhook'),('syslog')) d(destination)
+ WHERE (d.destination='webhook' AND s.webhook_enabled) OR (d.destination='syslog' AND s.syslog_enabled);
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_audit_export ON audit_events;
+CREATE TRIGGER cove_audit_export AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION cove_queue_audit();
+
+CREATE TABLE IF NOT EXISTS team_roles (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ id text NOT NULL,
+ name text NOT NULL,
+ permissions text[] NOT NULL,
+ PRIMARY KEY(team_id,id)
+);
+CREATE OR REPLACE FUNCTION cove_role_permissions(team text,role text) RETURNS text[] LANGUAGE sql STABLE AS $$
+ SELECT CASE role WHEN 'viewer' THEN ARRAY['view'] WHEN 'operator' THEN ARRAY['view','operate','manage_backups']
+ WHEN 'editor' THEN ARRAY['view','operate','edit_configuration','read_secrets','manage_backups']
+ ELSE COALESCE((SELECT permissions FROM team_roles WHERE team_id=team AND id=role),ARRAY[]::text[]) END
+$$;
+CREATE OR REPLACE FUNCTION cove_permission(actor text,team text,project text,environment text,permission text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+ SELECT COALESCE(bool_or(m.role IN ('owner','admin') OR permission=ANY(cove_role_permissions(team,g->>'role'))),false)
+ FROM team_members m LEFT JOIN LATERAL jsonb_array_elements(m.grants) g ON true
+ CROSS JOIN LATERAL (SELECT COALESCE((SELECT p.base_environment_id FROM environment_previews p WHERE p.environment_id=environment AND p.team_id=team),environment) AS scope) s
+ WHERE m.user_id=actor AND m.team_id=team AND (m.role IN ('owner','admin') OR
+ g->>'scope'='team' OR (g->>'scope'='project' AND g->>'scope_id'=project) OR (g->>'scope'='environment' AND g->>'scope_id'=s.scope))
+$$;
+CREATE OR REPLACE FUNCTION cove_access(actor text,team text,project text,environment text) RETURNS integer LANGUAGE sql STABLE AS $$
+ SELECT CASE WHEN cove_permission(actor,team,project,environment,'view') THEN
+ CASE WHEN cove_permission(actor,team,project,environment,'edit_configuration') AND cove_permission(actor,team,project,environment,'read_secrets') AND cove_permission(actor,team,project,environment,'manage_backups') AND cove_permission(actor,team,project,environment,'operate') THEN 3
+ WHEN cove_permission(actor,team,project,environment,'operate') THEN 2 ELSE 1 END ELSE 0 END
 $$;

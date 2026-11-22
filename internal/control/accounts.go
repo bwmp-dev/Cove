@@ -31,6 +31,13 @@ func passwordHash(password string) ([]byte, bool) {
 	return hash, err == nil
 }
 func setSession(w http.ResponseWriter, token string, expiry time.Time) {
+	cookies := w.Header().Values("Set-Cookie")
+	w.Header().Del("Set-Cookie")
+	defer func() {
+		for _, cookie := range cookies {
+			w.Header().Add("Set-Cookie", cookie)
+		}
+	}()
 	http.SetCookie(w, &http.Cookie{Name: "__Host-cove", Value: token, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expiry})
 }
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user string) {
@@ -92,7 +99,11 @@ func (s *Server) publicAccount(next http.HandlerFunc) http.HandlerFunc {
 		if !s.authLimit(w, r) {
 			return
 		}
-		s.authenticated(next, w, r, "account authentication")
+		handler := next
+		if r.URL.Path == "/auth/second-factor" || r.URL.Path == "/auth/forgot-password" || r.URL.Path == "/auth/reset-password" || r.URL.Path == "/auth/passkeys/finish" {
+			handler = s.loginAttempt(next)
+		}
+		s.authenticated(handler, w, r, "account authentication")
 	}
 }
 

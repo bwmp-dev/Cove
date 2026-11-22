@@ -45,13 +45,16 @@ export interface VerifyResult {
 }
 
 export type Permission = "read" | "operate" | "edit";
+// The fixed custom-role catalogue; GET /api/session reports which of these apply team-wide in the active team.
+export type TeamPermission = "view" | "read_secrets" | "operate" | "edit_configuration" | "manage_backups" | "manage_members";
 export type TeamRole = "owner" | "admin" | "member";
 export type GrantRole = "viewer" | "operator" | "editor";
 
 export interface Grant {
   scope: "team" | "project" | "environment";
   scope_id: string;
-  role: GrantRole;
+  // A built-in GrantRole or the ID of one of the team's custom roles.
+  role: string;
 }
 
 export interface TeamMembership {

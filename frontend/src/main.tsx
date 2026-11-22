@@ -22,7 +22,8 @@ function handleUnauthorized(error: unknown) {
 
 const queryClient = new QueryClient({
   queryCache: new QueryCache({ onError: handleUnauthorized }),
-  mutationCache: new MutationCache({ onError: handleUnauthorized }),
+  // Some account flows answer 401 for a rejected ceremony or code while the session itself is still valid.
+  mutationCache: new MutationCache({ onError: (error, _variables, _context, mutation) => { if (!mutation.meta?.sessionSurvives401) handleUnauthorized(error); } }),
   defaultOptions: {
     queries: {
       staleTime: 5_000,

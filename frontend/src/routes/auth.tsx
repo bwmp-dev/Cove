@@ -9,7 +9,7 @@ import { AuthFrame } from "../components/AuthFrame";
 import { Button, Field, Notice } from "../components/ui";
 import { forgetFragmentToken, fragmentToken } from "../lib/fragment";
 import { passwordError } from "../lib/password";
-import { grantRoleLabels, teamRoleLabels } from "../lib/permissions";
+import { roleLabel, teamRoleLabels } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 import { GitHubButton } from "./login";
 
@@ -249,7 +249,7 @@ function InvitationSummary({ invitation }: { invitation: InvitationDetails }) {
         <>
           <dt className="text-fg-muted">Access</dt>
           <dd>
-            {teamWide && <p>{grantRoleLabels[teamWide.role]} across the team</p>}
+            {teamWide && <p>{roleLabel(teamWide.role)} across the team</p>}
             {scoped.length > 0 && <p>{scoped.length === 1 ? "1 project or environment grant" : `${scoped.length} project or environment grants`}</p>}
             {invitation.grants.length === 0 && <p className="text-fg-muted">No access until an admin adds grants</p>}
           </dd>

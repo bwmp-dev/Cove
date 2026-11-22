@@ -380,11 +380,15 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	dnsDone := make(chan error, 1)
 	go func() { dnsDone <- s.runDNS(dnsContext) }()
 	defer func() { stopDNS(); <-dnsDone }()
+	auditCtx, stopAudit := context.WithCancel(ctx)
+	auditDone := make(chan struct{})
+	go func() { defer close(auditDone); s.runAuditExport(auditCtx) }()
+	defer func() { stopAudit(); <-auditDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {
 		if time.Now().After(nextAuthCleanup) {
-			if _, err := s.DB.Exec(ctx, "DELETE FROM terminal_sessions WHERE expires_at<now(); DELETE FROM oauth_states WHERE expires_at<now(); DELETE FROM account_actions WHERE expires_at<now(); DELETE FROM sessions WHERE expires_at<now(); DELETE FROM login_attempts WHERE window_start<now()-interval '1 day'"); err != nil {
+			if _, err := s.DB.Exec(ctx, "DELETE FROM audit_events WHERE created_at<now()-make_interval(days=>COALESCE((SELECT retention_days FROM audit_export_settings WHERE id=1),365)) AND NOT EXISTS(SELECT 1 FROM audit_deliveries WHERE event_id=audit_events.id); DELETE FROM login_events WHERE created_at<now()-interval '90 days'; DELETE FROM account_devices WHERE last_seen<now()-interval '90 days'; DELETE FROM authentication_failures WHERE window_start<now()-interval '1 day' AND locked_until<now(); DELETE FROM account_totp WHERE NOT confirmed AND expires_at<now(); DELETE FROM webauthn_challenges WHERE expires_at<now(); DELETE FROM oidc_states WHERE expires_at<now(); DELETE FROM terminal_sessions WHERE expires_at<now(); DELETE FROM oauth_states WHERE expires_at<now(); DELETE FROM account_actions WHERE expires_at<now(); DELETE FROM sessions WHERE expires_at<now(); DELETE FROM login_attempts WHERE window_start<now()-interval '1 day'"); err != nil {
 				return err
 			}
 			nextAuthCleanup = time.Now().Add(time.Hour)

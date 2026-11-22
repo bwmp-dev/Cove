@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, TeamPermission, Workload, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -27,6 +27,7 @@ export interface Session {
   github_linked: boolean;
   team_id: string;
   teams: TeamMembership[];
+  permissions: TeamPermission[];
 }
 
 export const sessionQuery = queryOptions({

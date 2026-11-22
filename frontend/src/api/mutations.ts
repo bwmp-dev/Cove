@@ -12,7 +12,8 @@ export function useLogin() {
   const client = useQueryClient();
   return useMutation({
     ...transient,
-    mutationFn: (input: { email?: string; password: string }) => request<{ user: string }>("POST", "/auth/login", input),
+    // A second_factor_required response carries a session that only proves the password; the dashboard stays closed until the challenge passes.
+    mutationFn: (input: { email?: string; password: string; break_glass?: boolean }) => request<{ user: string; second_factor_required: boolean }>("POST", "/auth/login", input),
     // The session (teams, permissions) is reloaded in full rather than taken from the login response, starting from the account's default team.
     onSuccess: () => {
       rememberTeam(null);

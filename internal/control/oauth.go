@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -124,6 +125,14 @@ func (s *Server) githubRequest(r *http.Request, method, endpoint, token string, 
 	return json.Unmarshal(b, out)
 }
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
+	ensureLoginDevice(w, r)
+	status := 401
+	userForEvent := ""
+	defer func() {
+		s.recordAudit(r, "GitHub callback", status)
+		address, _, _ := net.SplitHostPort(r.RemoteAddr)
+		s.recordLogin(r, userForEvent, status == 200, "github", address)
+	}()
 	fail := func(code string) { http.Redirect(w, r, "/login?error="+code, http.StatusSeeOther) }
 	config, _, configErr := s.integrationConfig(r.Context(), s.DB)
 	if configErr != nil {
@@ -199,7 +208,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	var team, inviteEmail, role string
 	var grants json.RawMessage
 	if invite != nil {
-		err = tx.QueryRow(r.Context(), `SELECT i.team_id,i.email,i.role,i.grants FROM invitations i JOIN users creator ON creator.id=i.created_by WHERE i.id=$1 AND i.consumed_at IS NULL AND i.expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin'))) FOR UPDATE OF i`, invite).Scan(&team, &inviteEmail, &role, &grants)
+		err = tx.QueryRow(r.Context(), `SELECT i.team_id,i.email,i.role,i.grants FROM invitations i JOIN users creator ON creator.id=i.created_by WHERE i.id=$1 AND i.consumed_at IS NULL AND i.expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR (cove_permission(i.created_by,i.team_id,'','','manage_members') AND (i.role<>'admin' OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin'))))) FOR UPDATE OF i`, invite).Scan(&team, &inviteEmail, &role, &grants)
 		if err != nil || !verified[inviteEmail] {
 			fail("oauth_failed")
 			return
@@ -276,6 +285,10 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_, err = tx.Exec(r.Context(), "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)", tokenHash(token), user, expiry)
 	}
+	var pending bool
+	if err == nil {
+		err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM account_totp WHERE user_id=$1 AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=$1)", user).Scan(&pending)
+	}
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}
@@ -283,6 +296,12 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		fail("oauth_failed")
 		return
 	}
+	status = 200
+	userForEvent = user
 	setSession(w, token, expiry)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	destination := "/"
+	if pending {
+		destination = "/login?authenticated=1"
+	}
+	http.Redirect(w, r, destination, http.StatusSeeOther)
 }

@@ -3,6 +3,7 @@ package control
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -49,10 +50,21 @@ func TestSessionSecurityIntegration(t *testing.T) {
 		t.Fatalf("login failed: %s", response.Body.String())
 	}
 	cookies := response.Result().Cookies()
-	if len(cookies) != 1 || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].Path != "/" {
-		t.Fatal("insecure session cookie")
+	if len(cookies) != 2 {
+		t.Fatalf("expected session and device cookies, got %d", len(cookies))
 	}
-	cookie := cookies[0]
+	var cookie *http.Cookie
+	for _, candidate := range cookies {
+		if !candidate.Secure || !candidate.HttpOnly || candidate.Path != "/" || candidate.SameSite != http.SameSiteStrictMode {
+			t.Fatal("insecure authentication cookie")
+		}
+		if candidate.Name == "__Host-cove" {
+			cookie = candidate
+		}
+	}
+	if cookie == nil {
+		t.Fatal("missing session cookie")
+	}
 	request := httptest.NewRequest("GET", "/api/session", nil)
 	request.AddCookie(cookie)
 	response = httptest.NewRecorder()

@@ -24,6 +24,7 @@ type membership struct {
 	Grants []grant `json:"grants"`
 }
 type identity struct {
+	Permissions  []string     `json:"permissions"`
 	ID           string       `json:"user_id"`
 	Email        string       `json:"email"`
 	Name         string       `json:"name"`
@@ -105,13 +106,27 @@ func (s *Server) sessionIdentity(r *http.Request) (*identity, error) {
 		return nil, pgx.ErrNoRows
 	}
 	var id string
-	err = s.DB.QueryRow(r.Context(), "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>now()", tokenHash(c.Value)).Scan(&id)
+	err = s.DB.QueryRow(r.Context(), "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>now() AND (second_factor_verified OR NOT EXISTS(SELECT 1 FROM account_totp WHERE user_id=sessions.user_id AND confirmed) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id=sessions.user_id))", tokenHash(c.Value)).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
 	return s.identity(r, id)
 }
-func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request) { respond(w, 200, actor(r)) }
+func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request) {
+	p := actor(r)
+	p.Permissions = []string{}
+	for _, permission := range permissionCatalogue {
+		allowed, err := s.permission(r, "team", "", permission)
+		if err != nil {
+			http.Error(w, "authorization unavailable", 503)
+			return
+		}
+		if allowed {
+			p.Permissions = append(p.Permissions, permission)
+		}
+	}
+	respond(w, 200, p)
+}
 func permissions(level int) []string {
 	p := []string{}
 	if level >= 1 {
@@ -142,20 +157,35 @@ func (s *Server) access(r *http.Request, kind, id string) (int, error) {
 	return level, err
 }
 func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, kind, id string, needed int) bool {
-	level, err := s.access(r, kind, id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.NotFound(w, r)
-		return false
+	permission := "view"
+	if needed == 2 {
+		permission = "operate"
 	}
-	if err != nil {
-		http.Error(w, "authorization unavailable", 503)
-		return false
+	if needed == 3 {
+		permission = "edit_configuration"
+		if r.Method == "GET" {
+			permission = "read_secrets"
+		}
 	}
-	if level < needed {
-		http.Error(w, "permission denied", 403)
-		return false
+	if strings.HasSuffix(r.URL.Path, "/credentials") {
+		permission = "read_secrets"
 	}
-	return true
+	if strings.HasSuffix(r.URL.Path, "/backup-policy") && r.Method != "GET" {
+		permission = "manage_backups"
+	}
+	if strings.HasSuffix(r.URL.Path, "/operations") && r.Method == "POST" {
+		fields, ok := bodyFields(w, r)
+		if !ok {
+			return false
+		}
+		if action := field(fields, "action"); action == "backup" || action == "restore" || action == "drill" {
+			if action != "backup" && !s.requirePermission(w, r, kind, id, "edit_configuration") {
+				return false
+			}
+			permission = "manage_backups"
+		}
+	}
+	return s.requirePermission(w, r, kind, id, permission)
 }
 func (s *Server) teamAdmin(r *http.Request, team string) bool {
 	p := actor(r)
@@ -205,6 +235,22 @@ func field(v map[string]json.RawMessage, k string) string {
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	p := actor(r)
 	path := r.URL.Path
+	if bearer(r) != s.AdminToken && path != "/api/session" && path != "/api/teams" && !strings.HasPrefix(path, "/api/account") {
+		var required bool
+		policyTeam := p.Team
+		if strings.HasPrefix(path, "/api/teams/") {
+			policyTeam = r.PathValue("id")
+		}
+		err := s.DB.QueryRow(r.Context(), `SELECT (c.require_second_factor OR COALESCE((SELECT require_second_factor FROM teams WHERE id=$2),false)) AND NOT EXISTS(SELECT 1 FROM account_totp WHERE user_id=$1 AND confirmed) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id=$1) FROM control_settings c WHERE id=1`, p.ID, policyTeam).Scan(&required)
+		if err != nil {
+			http.Error(w, "authorization unavailable", 503)
+			return false
+		}
+		if required {
+			respond(w, 403, map[string]string{"error": "second_factor_enrolment_required"})
+			return false
+		}
+	}
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
@@ -233,7 +279,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			return deny()
 		}
 		return true
-	case strings.HasPrefix(path, "/api/account/sessions") || path == "/api/session" || path == "/api/account" || path == "/api/password" || path == "/api/teams":
+	case strings.HasPrefix(path, "/api/account/") || path == "/api/session" || path == "/api/account" || path == "/api/password" || path == "/api/teams":
 		return true
 	case strings.HasPrefix(path, "/api/users") || (path == "/api/settings" || strings.HasPrefix(path, "/api/settings/")) || path == "/api/updates":
 		if !p.Admin {
@@ -242,7 +288,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case strings.HasPrefix(path, "/api/teams/"):
 		if !s.teamAdmin(r, id) {
-			return deny()
+			if !strings.Contains(path, "/members") && !strings.Contains(path, "/invitations") && !(r.Method == "GET" && path == "/api/teams/"+id+"/roles") {
+				return deny()
+			}
+			var allowed bool
+			if s.DB.QueryRow(r.Context(), "SELECT cove_permission($1,$2,'','','manage_members')", p.ID, id).Scan(&allowed) != nil || !allowed {
+				return deny()
+			}
 		}
 		if strings.HasSuffix(path, "/nodes") && r.Method != "GET" && !p.Admin {
 			return deny()
