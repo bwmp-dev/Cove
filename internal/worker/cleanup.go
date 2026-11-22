@@ -138,6 +138,9 @@ func (e *Engine) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 	for {
+		if err := e.pruneIdleOperations(); err != nil {
+			fmt.Fprintln(os.Stderr, "Cove idle journal cleanup failed:", err)
+		}
 		cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		err := e.cleanupBuilds(cleanupCtx, os.Stderr)
 		cancel()

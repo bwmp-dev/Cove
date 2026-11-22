@@ -11,7 +11,7 @@ import (
 
 func main() {
 	if len(os.Args) != 2 && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck")) {
-		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|volume-copy|volume-free|volume-digest")
+		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|idle-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -35,6 +35,8 @@ func main() {
 		reload := make(chan os.Signal, 1)
 		signal.Notify(reload, syscall.SIGHUP)
 		err = worker.RunLinkGateway(ctx, reload)
+	case "idle-gateway":
+		err = worker.RunIdleGateway(ctx)
 	case "probe":
 		err = worker.Serve(ctx, os.Stdout)
 	case "rpc":

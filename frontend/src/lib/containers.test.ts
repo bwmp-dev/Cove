@@ -78,3 +78,18 @@ describe("containerStatus while the environment is paused", () => {
     expect(containerStatus(container("running", "Up", { health: "unhealthy" }), "service", paused)).toEqual({ tone: "bad", label: "Unhealthy" });
   });
 });
+
+describe("containerStatus while idle sleep holds the app", () => {
+  const sleeping = { idleSleeping: true };
+  it("shows stopped containers as sleeping rather than paused or failed", () => {
+    expect(containerStatus(container("exited", "Exited (137) 1 minute ago", { exit_code: 137 }), "service", sleeping)).toEqual({ tone: "neutral", label: "Sleeping" });
+    expect(containerStatus(container("exited", "Exited (0) 1 minute ago", { exit_code: 0 }), "service", sleeping)).toEqual({ tone: "neutral", label: "Sleeping" });
+    expect(containerStatus(container("dead", "Dead"), "service", sleeping)).toEqual({ tone: "neutral", label: "Sleeping" });
+  });
+
+  it("keeps a manual stop, completed init containers and live health", () => {
+    expect(containerStatus(container("exited", "Exited (137)", { exit_code: 137 }), "service", { ...sleeping, manuallyStopped: true })).toEqual({ tone: "neutral", label: "Stopped" });
+    expect(containerStatus(container("exited", "Exited (0)", { exit_code: 0, expected_completed: true }), "service", sleeping)).toEqual({ tone: "ok", label: "Completed" });
+    expect(containerStatus(container("running", "Up", { health: "healthy" }), "service", sleeping)).toEqual({ tone: "ok", label: "Healthy" });
+  });
+});

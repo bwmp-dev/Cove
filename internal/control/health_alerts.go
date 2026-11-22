@@ -256,7 +256,7 @@ func (s *Server) checkResourceHealth(ctx context.Context) error {
 		} else if err != nil {
 			return err
 		}
-		if suppressed {
+		if suppressed || response.Suspension != nil && (response.Suspension.Reason == "idle" || response.Suspension.Reason == "manual_stop") && response.Suspension.Phase != "awake" {
 			continue
 		}
 		if err = s.recordHealth(ctx, i.team, "resource_unhealthy", i.id, "Resource stopped unexpectedly or unhealthy: "+i.name, bad); err != nil {

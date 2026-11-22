@@ -171,7 +171,7 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 		add("-redirect", ingressMiddleware{RedirectRegex: map[string]any{"regex": "^https?://" + regexp.QuoteMeta(r.Domain) + "(?::[0-9]+)?(.*)$", "replacement": "https://" + p.RedirectHost + "${1}", "permanent": p.RedirectPermanent}})
 	}
 	for _, target := range p.Upstreams {
-		service.LoadBalancer.Servers = append(service.LoadBalancer.Servers, map[string]string{"url": fmt.Sprintf("http://%s:%d", routeAlias(workload, target.Service), target.Port)})
+		service.LoadBalancer.Servers = append(service.LoadBalancer.Servers, map[string]any{"url": fmt.Sprintf("http://%s:%d", routeAlias(workload, target.Service), target.Port)})
 	}
 	if p.Sticky {
 		service.LoadBalancer.Sticky = map[string]any{"cookie": map[string]any{"name": "cove_affinity_" + hex.EncodeToString(sum[:8]), "secure": true, "httpOnly": true, "sameSite": "lax"}}

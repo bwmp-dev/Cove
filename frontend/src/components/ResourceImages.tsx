@@ -5,6 +5,8 @@ import { useId, useState } from "react";
 import { errorMessage, isStatus } from "../api/client";
 import { useQueueOperation } from "../api/mutations";
 import { useEnvironmentHold } from "./EnvironmentSuspension";
+import { useIdleState } from "./IdleSleep";
+import { idleReason } from "../lib/idle";
 import { holdReason } from "../lib/suspension";
 import { nodesQuery, workloadImagesQuery, workloadOperationsQuery } from "../api/queries";
 import type { ImageStatus, Workload } from "../api/types";
@@ -128,7 +130,8 @@ export function ResourceImages({ workload }: { workload: Workload }) {
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const pendingRollout = usePendingRollout(workload, Boolean(active));
   const { hold } = useEnvironmentHold(workload);
-  const held = holdReason(hold, "deploy", "Pulling images and redeploying");
+  const idle = useIdleState(workload);
+  const held = holdReason(hold, "deploy", "Pulling images and redeploying") ?? idleReason(idle.hold, "deploy", "Pulling images and redeploying");
   const blocked = !online || !ready || !supported || Boolean(active) || queue.isPending || operations.isPending;
   const reason = !online
     ? "You are offline. Image actions are available when the connection returns."

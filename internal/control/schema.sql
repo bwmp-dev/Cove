@@ -722,3 +722,6 @@ END
 $$;
 DROP TRIGGER IF EXISTS cove_paused_operation ON operations;
 CREATE TRIGGER cove_paused_operation BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_cancel_paused_operation();
+
+-- Deploy track: desired idle sleep policy is committed only after worker route confirmation.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS idle_policy jsonb NOT NULL DEFAULT '{"enabled":false,"after_seconds":300,"request_driven":false}'::jsonb;

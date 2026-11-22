@@ -68,3 +68,8 @@ it("still reports states that are known while other reads are pending", () => {
   expect(restartStatus(policy, { ...unknown, activeAction: "deploy" })).toMatchObject({ label: "Waiting" });
   expect(restartStatus({ ...policy, attempts_in_window: 1, last_queued_at: "2026-11-22T11:58:00Z", window_started_at: "2026-11-22T11:58:00Z" }, unknown)).toMatchObject({ label: "Cooling down" });
 });
+
+it("reports a sleeping app as paused instead of checking", () => {
+  expect(restartStatus(policy, { ...context, idleAsleep: true })).toEqual({ tone: "neutral", label: "Paused", detail: "The app is asleep after being idle. Checks resume after it wakes." });
+  expect(restartStatus(policy, { ...context, idleAsleep: true, manuallyStopped: true })).toMatchObject({ detail: "The resource was stopped manually. Checks resume after it is started." });
+});

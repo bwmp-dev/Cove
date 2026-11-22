@@ -10,6 +10,8 @@ const minute = 60_000;
 export interface RestartContext {
   now: number;
   manuallyStopped: boolean;
+  // Idle sleep stopped the containers, or is stopping or waking them, as reported by the worker.
+  idleAsleep?: boolean;
   // Undefined fields are still loading or could not be read, so the monitor's next step cannot be confirmed.
   node?: { name: string; state: NodeState; supported: boolean };
   heldRollout?: boolean;
@@ -40,6 +42,7 @@ export function restartStatus(policy: RestartPolicy, context: RestartContext): R
   if (!policy.enabled) return { tone: "neutral", label: "Off" };
   const { node } = context;
   if (context.manuallyStopped) return { tone: "neutral", label: "Paused", detail: "The resource was stopped manually. Checks resume after it is started." };
+  if (context.idleAsleep) return { tone: "neutral", label: "Paused", detail: "The app is asleep after being idle. Checks resume after it wakes." };
   if (node && !node.supported) return { tone: "warn", label: "Not checking", detail: `${node.name} does not report health restart support. Upgrade and verify the worker.` };
   if (node && node.state !== "ready") return { tone: "warn", label: "Paused", detail: `${node.name} is ${nodeStates[node.state].label.toLowerCase()}. Checks resume when it is ready.` };
   if (context.heldRollout) return { tone: "neutral", label: "Paused", detail: "A staged rollout is waiting for promote or abort. Checks resume after it finishes." };

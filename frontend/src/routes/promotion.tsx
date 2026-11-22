@@ -13,6 +13,8 @@ import { inputClass, linkClass } from "../lib/styles";
 import { useResource } from "./workload-detail";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { holdReason } from "../lib/suspension";
+import { useIdleState } from "../components/IdleSleep";
+import { idleReason } from "../lib/idle";
 
 // The server rejects promotion while either resource has a queued or running operation, so the form
 // waits for both. An unknown status (loading or failed) also blocks, because it may hide an active one.
@@ -38,7 +40,8 @@ export function Promotion() {
  const releases = useQuery({ queryKey: ["promotion-releases", source], queryFn: ({ signal }) => request<{ releases: { id: string; created_at: string }[] }>("GET", `/api/workloads/${source}/releases`, undefined, signal), enabled: Boolean(source) });
  const sourceGate = useOperationGate(source, "source resource");
  const targetGate = useOperationGate(target.id, "target resource");
- const held = holdReason(useEnvironmentHold(target).hold, "promote_release", "Promoting a release");
+ const idle = useIdleState(target);
+ const held = holdReason(useEnvironmentHold(target).hold, "promote_release", "Promoting a release") ?? idleReason(idle.hold, "promote_release", "Promoting a release");
  const promote = useMutation({
   mutationFn: (input: { source_id: string; release: string; registry_repository: string }) => request<{ id: string }>("POST", `/api/workloads/${target.id}/promote`, input),
   onSuccess: async () => { await client.invalidateQueries({ queryKey: keys.operations }); },

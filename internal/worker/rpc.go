@@ -27,6 +27,7 @@ type RPCRequest struct {
 	ID        string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Idle          *IdleStatus          `json:"idle,omitempty"`
 	Rollout       *RolloutStatus       `json:"rollout,omitempty"`
 	Suspension    *SuspensionStatus    `json:"suspension,omitempty"`
 	Links         *LinkStatus          `json:"links,omitempty"`
@@ -193,7 +194,11 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		if err != nil {
 			return RPCResponse{Error: "could not inspect resource health"}
 		}
-		return RPCResponse{Containers: containers}
+		suspension, err := e.suspensionStatus(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect resource suspension"}
+		}
+		return RPCResponse{Containers: containers, Suspension: suspension}
 	case "containers":
 		containers, err := e.HealthContainers(ctx, r.ID)
 		if err != nil {
@@ -212,7 +217,11 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		if err != nil {
 			return RPCResponse{Error: "could not inspect resource suspension"}
 		}
-		return RPCResponse{Containers: containers, Rollout: rollout, Suspension: suspension}
+		idle, err := e.IdleStatus(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect idle policy"}
+		}
+		return RPCResponse{Containers: containers, Rollout: rollout, Suspension: suspension, Idle: idle}
 	case "container_logs":
 		logs, err := e.ContainerLogs(ctx, r.ID)
 		if err != nil {

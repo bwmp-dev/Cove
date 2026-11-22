@@ -37,6 +37,18 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) error {
 	if err = e.applyIngress(ctx, id, nil, io.Discard); err != nil {
 		return err
 	}
+	idle, err := e.readIdle(id)
+	if err != nil {
+		return err
+	}
+	if idle != nil {
+		if err = e.removeIdleGateway(ctx, id); err != nil {
+			return err
+		}
+		if err = e.writeIdle(id, nil); err != nil {
+			return err
+		}
+	}
 	if err = e.removeWorkloadLinks(ctx, id); err != nil {
 		return err
 	}

@@ -38,14 +38,21 @@ func (c suspensionContainer) restartArgument() (string, error) {
 	return policy, nil
 }
 
+type idleSuspensionOrigin struct {
+	Operation string    `json:"operation"`
+	Created   time.Time `json:"created"`
+}
+
 type workloadSuspension struct {
-	Operation  string                `json:"operation"`
-	Options    SuspensionOptions     `json:"options"`
-	Phase      string                `json:"phase"`
-	Created    time.Time             `json:"created"`
-	Deadline   time.Time             `json:"deadline,omitempty"`
-	Containers []suspensionContainer `json:"containers"`
-	ManualStop bool                  `json:"manual_stop,omitempty"`
+	IdleEpisode string                `json:"idle_episode,omitempty"`
+	BeforeIdle  *idleSuspensionOrigin `json:"before_idle,omitempty"`
+	Operation   string                `json:"operation"`
+	Options     SuspensionOptions     `json:"options"`
+	Phase       string                `json:"phase"`
+	Created     time.Time             `json:"created"`
+	Deadline    time.Time             `json:"deadline,omitempty"`
+	Containers  []suspensionContainer `json:"containers"`
+	ManualStop  bool                  `json:"manual_stop,omitempty"`
 }
 
 type SuspensionStatus struct {
@@ -60,7 +67,7 @@ type SuspensionStatus struct {
 func (s workloadSuspension) status() *SuspensionStatus {
 	status := &SuspensionStatus{Operation: s.Operation, Scope: s.Options.Scope, Reason: s.Options.Reason, Phase: s.Phase, Captured: len(s.Containers)}
 	for _, container := range s.Containers {
-		if container.WasRunning {
+		if container.WasRunning && s.BeforeIdle == nil {
 			status.PreviouslyRunning++
 		}
 	}
@@ -71,9 +78,6 @@ func (e *Engine) suspensionStatus(workload string) (*SuspensionStatus, error) {
 	state, err := e.readSuspension(workload)
 	if err != nil || state == nil {
 		return nil, err
-	}
-	if state.Options.Reason == "manual_stop" {
-		return nil, nil
 	}
 	return state.status(), nil
 }
@@ -96,7 +100,7 @@ func (e *Engine) readSuspension(workload string) (*workloadSuspension, error) {
 	if !identifier.MatchString(state.Operation) || !identifier.MatchString(state.Options.Scope) {
 		return nil, errors.New("invalid suspension identity")
 	}
-	if state.Options.Reason != "environment" && state.Options.Reason != "manual_stop" {
+	if state.Options.Reason != "environment" && state.Options.Reason != "manual_stop" && state.Options.Reason != "idle" {
 		return nil, errors.New("invalid suspension reason")
 	}
 	if state.Created.IsZero() || state.Phase != "pausing" && state.Phase != "paused" && state.Phase != "resuming" && state.Phase != "awake" {

@@ -2,8 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import { errorMessage, isStatus } from "../api/client";
 import { workloadLogsQuery, workloadRuntimeQuery } from "../api/queries";
-import type { Container, ResourceSuspension } from "../api/types";
+import type { Container, IdleRuntime, ResourceSuspension } from "../api/types";
 import { formatRelative } from "../lib/format";
+import { idlePhase, idlePhases } from "../lib/idle";
 import { countLabel } from "../lib/hierarchy";
 import { useNow } from "../lib/hooks";
 import { LogPanel } from "./LogViewer";
@@ -13,8 +14,8 @@ import { tableHeadClass, tableRowClass } from "../lib/styles";
 
 const toneClass: Record<Tone, string> = { ok: "bg-ok", warn: "bg-warn", bad: "bg-bad", neutral: "bg-fg-subtle" };
 
-function ContainerRow({ container, kind, manuallyStopped, environmentPaused }: { container: Container; kind: "service" | "job"; manuallyStopped: boolean; environmentPaused: boolean }) {
-  const { tone, label } = containerStatus(container, kind, { manuallyStopped, environmentPaused });
+function ContainerRow({ container, kind, manuallyStopped, environmentPaused, idleSleeping }: { container: Container; kind: "service" | "job"; manuallyStopped: boolean; environmentPaused: boolean; idleSleeping: boolean }) {
+  const { tone, label } = containerStatus(container, kind, { manuallyStopped, environmentPaused, idleSleeping });
   return (
     <tr className={tableRowClass}>
       <td className="py-2.5 pr-4 pl-4">
@@ -50,14 +51,37 @@ function ContainerRow({ container, kind, manuallyStopped, environmentPaused }: {
   );
 }
 
+function suspensionText(suspension: ResourceSuspension) {
+  if (suspension.reason === "idle") {
+    if (suspension.phase === "resuming") return `The worker is waking this app: ${countLabel(suspension.previously_running, "container")} that ran before it went to sleep start again.`;
+    return `${suspension.phase === "pausing" ? "The worker is putting this app to sleep" : "This app is asleep after being idle"}: ${countLabel(suspension.captured, "container")} captured, ${suspension.previously_running} of them running before it went to sleep. The next authorized request wakes it.`;
+  }
+  if (suspension.reason === "manual_stop") {
+    return `This resource was stopped intentionally: ${countLabel(suspension.captured, "container")} held stopped by the worker. Requests do not wake it; Start, Restart or Deploy starts it again.`;
+  }
+  if (suspension.phase === "resuming") return `The worker is resuming this resource for its environment: ${countLabel(suspension.previously_running, "container")} that ran before the pause start again.`;
+  return `${suspension.phase === "pausing" ? "The worker is pausing" : "The environment paused"} this resource: ${countLabel(suspension.captured, "container")} captured, ${suspension.previously_running} of them running before the pause.`;
+}
+
 function SuspensionSummary({ suspension }: { suspension: ResourceSuspension }) {
+  return <p className="border-b border-line px-4 py-2 text-xs text-fg-muted">{suspensionText(suspension)}</p>;
+}
+
+function IdleSummary({ idle, now }: { idle: IdleRuntime; now: number }) {
+  const phase = idlePhases[idlePhase(idle.phase)];
   return (
     <p className="border-b border-line px-4 py-2 text-xs text-fg-muted">
-      {suspension.phase === "resuming"
-        ? `The worker is resuming this resource for its environment: ${countLabel(suspension.previously_running, "container")} that ran before the pause start again.`
-        : `${suspension.phase === "pausing" ? "The worker is pausing" : "The environment paused"} this resource: ${countLabel(suspension.captured, "container")} captured, ${suspension.previously_running} of them running before the pause.`}
+      Idle sleep: <span className="text-fg">{phase.label}</span>. {countLabel(idle.active_requests, "active request")}.
+      {idle.last_activity && ` Idle timer reset ${formatRelative(idle.last_activity, now)}.`}
+      {idle.error && <span className="block break-words text-warn">{idle.error}</span>}
     </p>
   );
+}
+
+// Only the worker's own report marks stopped containers as paused or sleeping; the requested state alone does not.
+function stoppedBy(suspension: ResourceSuspension | null | undefined) {
+  const stopping = suspension?.phase === "paused" || suspension?.phase === "pausing";
+  return { environmentPaused: stopping && suspension.reason === "environment", idleSleeping: stopping && suspension.reason === "idle", manualStop: stopping && suspension.reason === "manual_stop" };
 }
 
 export function RuntimeContainers({ workloadId, kind, operationActive, manuallyStopped }: { workloadId: string; kind: "service" | "job"; operationActive: boolean; manuallyStopped: boolean }) {
@@ -97,12 +121,14 @@ export function RuntimeContainers({ workloadId, kind, operationActive, manuallyS
       </>
     );
   }
-  const { containers, suspension } = runtime.data;
-  // Only the worker's own report marks stopped containers as paused; the environment's requested state alone does not.
-  const environmentPaused = suspension?.phase === "paused" || suspension?.phase === "pausing";
+  const { containers, suspension, idle } = runtime.data;
+  const { environmentPaused, idleSleeping, manualStop } = stoppedBy(suspension);
+  // A worker-confirmed manual stop holds the containers even when the saved resource is not marked manually stopped.
+  const stopped = manuallyStopped || manualStop;
   return (
     <>
       {header}
+      {idle && kind === "service" && <IdleSummary idle={idle} now={now} />}
       {suspension && <SuspensionSummary suspension={suspension} />}
       {containers.length === 0 ? (
         <p className="px-4 py-3 text-[13px] text-fg-muted">
@@ -131,7 +157,7 @@ export function RuntimeContainers({ workloadId, kind, operationActive, manuallyS
           </thead>
           <tbody>
             {containers.map((container) => (
-              <ContainerRow key={container.id} container={container} kind={kind} manuallyStopped={manuallyStopped} environmentPaused={environmentPaused} />
+              <ContainerRow key={container.id} container={container} kind={kind} manuallyStopped={stopped} environmentPaused={environmentPaused} idleSleeping={idleSleeping} />
             ))}
           </tbody>
         </table>

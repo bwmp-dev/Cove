@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, Node, Operation, OperationLogs, RestartPolicy, TeamMembership, Workload, WorkloadImages, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, IdlePolicy, Node, Operation, OperationLogs, RestartPolicy, TeamMembership, Workload, WorkloadImages, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -16,6 +16,7 @@ export const keys = {
   workloadLogs: (id: string) => ["workloads", id, "logs"] as const,
   workloadImages: (id: string) => ["workloads", id, "images"] as const,
   restartPolicy: (id: string) => ["workloads", id, "restart-policy"] as const,
+  idlePolicy: (id: string) => ["workloads", id, "idle-policy"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -118,6 +119,13 @@ export const restartPolicyQuery = (id: string) =>
     queryKey: keys.restartPolicy(id),
     queryFn: ({ signal }) => request<RestartPolicy>("GET", `/api/workloads/${encodeURIComponent(id)}/restart-policy`, undefined, signal),
     refetchInterval: 60_000,
+  });
+
+// The saved policy changes only when an idle_policy operation succeeds, so the newest successful one is part of the key.
+export const idlePolicyQuery = (id: string, applied: string | null) =>
+  queryOptions({
+    queryKey: [...keys.idlePolicy(id), applied] as const,
+    queryFn: ({ signal }) => request<IdlePolicy>("GET", `/api/workloads/${encodeURIComponent(id)}/idle-policy`, undefined, signal),
   });
 
 export const workloadLogsQuery = (id: string) =>

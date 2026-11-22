@@ -214,6 +214,14 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if err = s.idleOperationGate(r.Context(), tx, r.PathValue("id"), in.Action); err != nil {
+		if errors.Is(err, errIdleAsleep) {
+			http.Error(w, err.Error(), 409)
+		} else {
+			http.Error(w, "idle state unavailable; confirm the app is awake before deploying", 502)
+		}
+		return
+	}
 	id := resourceID()
 	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
@@ -636,7 +644,7 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		return err
 	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
-	if !cancelRequested && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" {
+	if !cancelRequested && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
 			if errors.Is(err, errSharedVariables) {
 				return s.failOperation(ctx, id, "Shared variable resolution failed; check for missing names in this resource's team, project, and environment, or values exceeding 64 KiB.")
@@ -665,6 +673,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		if request.Action == "routes" {
 			return s.deferRouteResult(ctx, id)
 		}
+		if request.Action == "idle_policy" {
+			return s.deferIdlePolicyResult(ctx, id)
+		}
 		var rejected *RemoteError
 		if errors.As(err, &rejected) {
 			return s.failOperation(ctx, id, "Worker rejected the operation; check its configuration.")
@@ -676,6 +687,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		if request.Action == "routes" {
 			return s.deferRouteResult(ctx, id)
 		}
+		if request.Action == "idle_policy" {
+			return s.deferIdlePolicyResult(ctx, id)
+		}
 		return s.failOperation(ctx, id, "Worker returned an invalid response.")
 	}
 	state := response.Operation.State
@@ -685,11 +699,17 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		if request.Action == "routes" {
 			return s.deferRouteResult(ctx, id)
 		}
+		if request.Action == "idle_policy" {
+			return s.deferIdlePolicyResult(ctx, id)
+		}
 		return s.failOperation(ctx, id, "Worker returned an unsupported state.")
 	}
 	result, err := json.Marshal(response.Operation)
 	if err != nil {
 		return err
+	}
+	if request.Action == "idle_policy" && state == "succeeded" {
+		return s.commitIdlePolicy(ctx, id, request, result)
 	}
 	if request.Action == "routes" && state == "succeeded" {
 		return s.commitRoutes(ctx, id, request, result)

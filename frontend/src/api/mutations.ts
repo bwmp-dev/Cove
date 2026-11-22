@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { rememberTeam } from "../lib/team";
 import { keys } from "./queries";
-import type { Enrollment, NodeInput, OperationRequest, QueuedOperation, RestartPolicy, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
+import type { Enrollment, IdlePolicy, NodeInput, OperationRequest, QueuedOperation, RestartPolicy, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
 
 // Mutations carrying credentials (passwords, setup commands, secrets) use gcTime 0 so
 // their variables and results leave the in-memory mutation cache once the form unmounts.
@@ -118,6 +118,15 @@ export function useUpdateRestartPolicy(workloadId: string) {
     mutationFn: (enabled: boolean) => request<RestartPolicy>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/restart-policy`, { enabled }),
     onSuccess: (policy) => client.setQueryData(keys.restartPolicy(workloadId), policy),
     onError: () => client.invalidateQueries({ queryKey: keys.restartPolicy(workloadId) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
+  });
+}
+
+// The worker applies the policy in an operation; the saved policy is refreshed once that operation succeeds.
+export function useUpdateIdlePolicy(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (policy: IdlePolicy) => request<QueuedOperation>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/idle-policy`, policy),
     onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
   });
 }

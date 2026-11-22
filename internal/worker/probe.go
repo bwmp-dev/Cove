@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	IdleSleep           bool         `json:"idle_sleep"`
 	Suspensions         bool         `json:"suspensions"`
 	UnhealthyRestart    bool         `json:"unhealthy_restart"`
 	JobRuns             bool         `json:"job_runs"`
@@ -59,6 +60,7 @@ func Inspect(ctx context.Context) Probe {
 	p.JobRuns = true
 	p.UnhealthyRestart = true
 	p.Suspensions = true
+	p.IdleSleep = runtime.GOOS == "linux"
 	if _, err := exec.CommandContext(ctx, "docker", "buildx", "version").Output(); err == nil {
 		if help, err := exec.CommandContext(ctx, "docker", "compose", "build", "--help").Output(); err == nil {
 			if push, err := exec.CommandContext(ctx, "docker", "push", "--help").Output(); err == nil {

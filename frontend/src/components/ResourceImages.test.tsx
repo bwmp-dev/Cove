@@ -72,3 +72,19 @@ it("shows results read-only without operator access", async () => {
   expect(await screen.findByText(/need operator access/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Check images" })).not.toBeInTheDocument();
 });
+
+it("holds pull and redeploy while idle sleep keeps the app asleep, but still allows image checks", async () => {
+  // Test fixture: a worker runtime report for a sleeping app.
+  const runtime = { containers: [], idle: { enabled: true, after_seconds: 300, phase: "sleeping", active_requests: 0 } };
+  vi.mocked(request).mockImplementation((_method: string, path: string) => {
+    if (path === "/api/nodes") return Promise.resolve([node(true)]);
+    if (path.startsWith("/api/operations")) return Promise.resolve([]);
+    if (path === "/api/workloads/w1/runtime") return Promise.resolve(runtime);
+    if (path === "/api/workloads/w1/idle-policy") return Promise.resolve({ enabled: true, after_seconds: 300, request_driven: true });
+    return Promise.resolve({ checked_at: null, stale: true, images: [] });
+  });
+  renderImages();
+  expect(await screen.findByText("The app is asleep. Pulling images and redeploying is available after it wakes: use Start or Wake now first.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Pull images and redeploy" })).toBeDisabled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Check images" })).toBeEnabled());
+});

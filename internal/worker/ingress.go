@@ -107,8 +107,8 @@ type ingressService struct {
 }
 
 type ingressLoadBalancer struct {
-	Servers []map[string]string `json:"servers"`
-	Sticky  map[string]any      `json:"sticky,omitempty"`
+	Servers []map[string]any `json:"servers"`
+	Sticky  map[string]any   `json:"sticky,omitempty"`
 }
 
 type dynamicIngress struct {
@@ -147,7 +147,7 @@ func (c *dynamicIngress) addNamed(domain, upstream, auth, name string) {
 	}
 	c.HTTP.Routers[name] = router
 	service := ingressService{LoadBalancer: &ingressLoadBalancer{}}
-	service.LoadBalancer.Servers = []map[string]string{{"url": upstream}}
+	service.LoadBalancer.Servers = []map[string]any{{"url": upstream}}
 	c.HTTP.Services[name] = service
 }
 
@@ -313,6 +313,13 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 		if suspension != nil && suspension.Phase != "awake" {
 			continue
 		}
+		idle, err := e.readIdle(workload)
+		if err != nil {
+			return err
+		}
+		if idle != nil {
+			continue
+		}
 		for _, route := range routeTargets(list) {
 			selected, err := e.trafficContainers(ctx, workload, route.Service, false)
 			if err != nil {
@@ -455,6 +462,9 @@ var errRoutesCancelled = errors.New("route change cancelled")
 // the journal records Committed after the proxy and current.json hold the new routes. Failure or
 // cancellation before the commit restores the previous routes; after it the change is final.
 func (e *Engine) updateRoutes(ctx context.Context, r Request, dir string, out io.Writer) error {
+	if err := e.validateIdleRoutes(ctx, r.Workload, r.Routes); err != nil {
+		return err
+	}
 	path := filepath.Join(dir, "current.json")
 	current, released, err := readCurrent(path)
 	if err != nil {
@@ -592,7 +602,7 @@ func (e *Engine) settleRoutes(ctx context.Context, id, state string) error {
 	if err != nil {
 		return err
 	}
-	if j.SuspensionChange != nil {
+	if j.SuspensionChange != nil || j.IdleChange != nil {
 		return e.settleSuspension(ctx, id)
 	}
 	if j.JobRun != nil {

@@ -40,6 +40,7 @@ import { Backups } from "../components/Backups";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
 import { EnvironmentHoldNotice, useEnvironmentHold } from "../components/EnvironmentSuspension";
+import { IdleHoldNotice, useIdleState } from "../components/IdleSleep";
 import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
 import { OperationsTable } from "../components/OperationsTable";
@@ -53,6 +54,7 @@ import { useOnline } from "../lib/hooks";
 import { can } from "../lib/permissions";
 import { actionLabels, activeOperation, allowedActions, isActive, isSuspensionAction, latestDeploymentOperation, stateLabels, workloadKind } from "../lib/operations";
 import { holdBlocks, holdReason, type EnvironmentHold } from "../lib/suspension";
+import { idleBlocks, type IdleHold } from "../lib/idle";
 import { resultSummary } from "../lib/rollouts";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
@@ -180,7 +182,7 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
   );
 }
 
-function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: string) {
+function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: string, idle: IdleHold, idleId: string) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
@@ -202,12 +204,13 @@ function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: s
             const label = kind === "job" && action === "deploy" ? "Deploy and run" : actionLabels[action];
             const waitsForRollout = action === "deploy" && Boolean(pendingRollout);
             const held = action !== "stop" && holdBlocks(hold, action);
+            const asleep = action !== "stop" && idleBlocks(idle, action);
             return (
               <Button
                 key={action}
                 variant={action === "deploy" ? "primary" : "secondary"}
-                disabled={blocked || waitsForRollout || held}
-                aria-describedby={active ? statusId : held && hold.kind !== "loading" ? holdId : waitsForRollout ? rolloutId : undefined}
+                disabled={blocked || waitsForRollout || held || asleep}
+                aria-describedby={active ? statusId : held && hold.kind !== "loading" ? holdId : asleep && idle.kind !== "loading" ? idleId : waitsForRollout ? rolloutId : undefined}
                 pending={pending}
                 onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate({ action }))}
               >
@@ -265,7 +268,9 @@ function ResourceHeader({ workload }: { workload: Workload }) {
   const projects = useQuery(projectsQuery);
   const { hold, state: holdState } = useEnvironmentHold(workload);
   const holdId = useId();
-  const actions = useResourceActions(workload, hold, holdId);
+  const idle = useIdleState(workload);
+  const idleId = useId();
+  const actions = useResourceActions(workload, hold, holdId, idle.hold, idleId);
   const kind = workloadKind(workload.kind);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   const placement = findPlacement(projects.data, workload.environment_id, workload.project_id);
@@ -355,6 +360,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
             )
           }
         />
+        <IdleHoldNotice id={idleId} workload={workload} idle={idle} />
         {workload.preview_source_id && <Notice>This is a temporary preview. Its configuration is managed by <Link to="/resources/$resourceId/previews" params={{ resourceId: workload.preview_source_id }} className="underline">the source resource</Link>. Closing it deletes its preview data.</Notice>}
         {node && node.state !== "ready" && (
           <Notice

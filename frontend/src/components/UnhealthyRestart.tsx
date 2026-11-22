@@ -9,6 +9,7 @@ import { useNow, useOnline } from "../lib/hooks";
 import { activeOperation } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { restartLimits, restartStatus, type RestartContext } from "../lib/restart-policy";
+import { idleHold } from "../lib/idle";
 import { rolloutsApply } from "../lib/rollouts";
 import { linkClass } from "../lib/styles";
 import { RelativeTime } from "./RelativeTime";
@@ -34,6 +35,7 @@ export function UnhealthyRestartSettings({ workload }: { workload: Workload }) {
   const context: Omit<RestartContext, "now" | "manuallyStopped"> = {
     node: node && capabilities ? { name: node.name, state: node.state, supported } : undefined,
     heldRollout: heldRollout(workload, capabilities, runtime),
+    idleAsleep: runtime.data && !runtime.isError ? idleHold({ runtime: runtime.data, read: "success" }).kind !== "none" : false,
     activeAction: operations.isError || !operations.data ? undefined : (active?.action ?? null),
     readFailed: nodes.isError || (nodes.isSuccess && !capabilities) || operations.isError || runtime.isError,
   };

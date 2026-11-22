@@ -23,13 +23,16 @@ import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRo
 import type { SuspensionResult, WorkloadSummary } from "../api/types";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { holdReason } from "../lib/suspension";
+import { useIdleState } from "../components/IdleSleep";
+import { idleReason } from "../lib/idle";
 
 const route = getRouteApi("/app/operations/$operationId");
 
 function RollbackRelease({ workload, release }: { workload: WorkloadSummary; release: string }) {
   const workloadId = workload.id;
   const pendingRollout = usePendingRollout(workload);
-  const held = holdReason(useEnvironmentHold(workload).hold, "rollback", "Rolling back");
+  const idle = useIdleState(workload);
+  const held = holdReason(useEnvironmentHold(workload).hold, "rollback", "Rolling back") ?? idleReason(idle.hold, "rollback", "Rolling back");
   const retained = useQuery({ queryKey: ["releases", workloadId], queryFn: ({ signal }) => request<{ releases: { id: string }[] }>("GET", `/api/workloads/${workloadId}/releases`, undefined, signal) });
   const rollback = useRollback(workloadId);
   const [confirm, setConfirm] = useState(false);
@@ -59,13 +62,27 @@ const suspensionPhases: Record<SuspensionResult["phase"], string> = {
   stopped: "Left stopped",
 };
 
+const idleSuspensionPhases: Record<SuspensionResult["phase"], string> = {
+  pausing: "Going to sleep",
+  paused: "Asleep",
+  resuming: "Waking",
+  resumed: "Woke the sleeping app",
+  stopped: "Left stopped",
+};
+
+const suspensionTerms: Record<SuspensionResult["reason"], string> = { idle: "Idle sleep", environment: "Environment pause", manual_stop: "Manual stop" };
+
+// A manual Start can wake an app that idle sleep stopped, so its result is not an environment resume.
 function SuspensionOutcome({ suspension }: { suspension: SuspensionResult }) {
+  const idle = suspension.reason === "idle";
+  const labels = idle ? idleSuspensionPhases : suspensionPhases;
+  const before = idle ? "before it went to sleep" : suspension.reason === "manual_stop" ? "before the stop" : "before the pause";
   return (
     <div className="space-y-1">
-      <p>{suspensionPhases[suspension.phase] ?? suspension.phase}</p>
+      <p>{labels[suspension.phase] ?? suspension.phase}</p>
       <p className="text-xs text-fg-muted">
-        {suspension.captured} {suspension.captured === 1 ? "container" : "containers"} captured, {suspension.previously_running} running before the pause.
-        {suspension.phase === "stopped" && " It was stopped manually while paused, so the resume left it stopped."}
+        {suspension.captured} {suspension.captured === 1 ? "container" : "containers"} captured, {suspension.previously_running} running {before}.
+        {suspension.phase === "stopped" && (idle ? " It was stopped manually while asleep, so it was left stopped." : " It was stopped manually while paused, so the resume left it stopped.")}
       </p>
     </div>
   );
@@ -248,7 +265,7 @@ export function OperationPage() {
                     },
                   ]
                 : []),
-              ...(result?.suspension ? [{ term: "Environment pause", value: <SuspensionOutcome suspension={result.suspension} /> }] : []),
+              ...(result?.suspension ? [{ term: suspensionTerms[result.suspension.reason], value: <SuspensionOutcome suspension={result.suspension} /> }] : []),
               ...(result?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{result.revision}</span> }] : []),
               ...(!result ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),
             ]}

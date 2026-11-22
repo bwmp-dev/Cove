@@ -156,6 +156,10 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 		if err != nil {
 			return "", err
 		}
+		idle, err := e.refreshIdleGateway(ctx, workload, routes[workload])
+		if err != nil {
+			return "", err
+		}
 		traffic, err := e.loadTraffic(workload)
 		if err != nil {
 			return "", err
@@ -166,7 +170,7 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 				before[name] = true
 			}
 			config.addRoute(workload, route)
-			if len(traffic) == 0 && suspension == nil {
+			if len(traffic) == 0 && suspension == nil && idle == nil {
 				continue
 			}
 			name := ""
@@ -180,16 +184,16 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 				return "", errors.New("traffic router was not generated")
 			}
 			router, base := config.HTTP.Routers[name], config.HTTP.Services[name]
-			if suspension != nil && suspension.Phase != "awake" {
+			if suspension != nil && suspension.Phase != "awake" && (idle == nil || suspension.Options.Reason != "idle" || suspension.ManualStop) {
 				sum := sha256.Sum256([]byte(suspension.Operation + suspension.Phase))
 				key := name + "-paused-" + hex.EncodeToString(sum[:6])
 				delete(config.HTTP.Services, name)
-				config.HTTP.Services[key] = ingressService{LoadBalancer: &ingressLoadBalancer{Servers: []map[string]string{}}}
+				config.HTTP.Services[key] = ingressService{LoadBalancer: &ingressLoadBalancer{Servers: []map[string]any{}}}
 				router.Service = key
 				config.HTTP.Routers[name] = router
 				continue
 			}
-			if len(traffic) == 0 {
+			if len(traffic) == 0 && idle == nil {
 				continue
 			}
 			targets := []Route{{Service: route.Service, Port: route.Port}}
@@ -208,20 +212,27 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 					if generation.Weight == 0 {
 						continue
 					}
-					ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+generation.Service)
-					if err != nil {
-						return "", err
-					}
-					servers := []map[string]string{}
-					for _, id := range strings.Fields(ids) {
-						if !containerIdentity.MatchString(id) {
-							return "", errors.New("invalid traffic container")
-						}
-						address, err := e.attachTrafficContainer(ctx, workload, id, out)
+					servers := []map[string]any{}
+					if idle != nil {
+						servers, err = idle.servers(generation.Service, target.Port)
 						if err != nil {
 							return "", err
 						}
-						servers = append(servers, map[string]string{"url": "http://" + net.JoinHostPort(address, strconv.Itoa(target.Port))})
+					} else {
+						ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+generation.Service)
+						if err != nil {
+							return "", err
+						}
+						for _, id := range strings.Fields(ids) {
+							if !containerIdentity.MatchString(id) {
+								return "", errors.New("invalid traffic container")
+							}
+							address, err := e.attachTrafficContainer(ctx, workload, id, out)
+							if err != nil {
+								return "", err
+							}
+							servers = append(servers, map[string]any{"url": "http://" + net.JoinHostPort(address, strconv.Itoa(target.Port))})
+						}
 					}
 					data, _ := json.Marshal(servers)
 					sum := sha256.Sum256(append(data, []byte(generation.Service+strconv.Itoa(generation.Weight))...))

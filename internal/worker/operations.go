@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	Idle                   *IdlePolicy              `json:"idle,omitempty"`
 	Suspension             *SuspensionOptions       `json:"suspension,omitempty"`
 	ResumeSuspended        bool                     `json:"resume_suspended,omitempty"`
 	Job                    *JobOptions              `json:"job,omitempty"`
@@ -73,6 +74,7 @@ type Operation struct {
 	Preview    *PreviewReport    `json:"environment_preview,omitempty"`
 }
 type journal struct {
+	IdleChange       *idleChange       `json:"idle_change,omitempty"`
 	SuspensionChange *suspensionChange `json:"suspension_change,omitempty"`
 	JobRun           *jobRun           `json:"job_run,omitempty"`
 	RolloutChange    *rolloutChange    `json:"rollout_change,omitempty"`
@@ -112,6 +114,8 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	helperImageMu sync.Mutex
+	idleMu        sync.Mutex
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -185,6 +189,14 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.Idle != nil {
+		if r.Action != "idle_policy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("idle policies require a service outside previews")
+		}
+		if err := r.Idle.validate(); err != nil {
+			return err
+		}
+	}
 	if err := validateSuspensionRequest(r); err != nil {
 		return err
 	}
@@ -271,6 +283,17 @@ func ValidateRequest(r Request) error {
 		}
 	case "stop", "start", "restart":
 	case "suspend", "resume":
+	case "idle_policy":
+		if r.Idle == nil {
+			return errors.New("idle policy required")
+		}
+	case "idle_sleep", "idle_wake":
+		if r.Action == "idle_sleep" && (!strings.HasPrefix(r.ID, "idle-") || len(r.ID) > 59) || r.Action == "idle_wake" && !strings.HasPrefix(r.ID, "wake-idle-") {
+			return errors.New("invalid idle operation identity")
+		}
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("idle operations require a service")
+		}
 	case "restart_unhealthy":
 		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
 			return errors.New("health restarts require a service outside managed previews")
@@ -447,7 +470,7 @@ func (e *Engine) Recover() error {
 		if err != nil {
 			return err
 		}
-		if j.Operation.State == "running" && j.SuspensionChange != nil {
+		if j.Operation.State == "running" && (j.SuspensionChange != nil || j.IdleChange != nil) {
 			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
 			continue
 		}
@@ -542,6 +565,11 @@ func (e *Engine) Serve(ctx context.Context) error {
 	if err := e.recoverStorage(ctx); err != nil {
 		return err
 	}
+	closeWake, err := e.startIdleWake(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeWake()
 	if routes, err := e.loadIngress(); err != nil {
 		return err
 	} else if len(routes) > 0 {
@@ -551,6 +579,7 @@ func (e *Engine) Serve(ctx context.Context) error {
 	}
 	jobs.Go(func() { e.cleanupLoop(ctx) })
 	jobs.Go(func() { e.linkLoop(ctx) })
+	jobs.Go(func() { e.idleLoop(ctx) })
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -703,6 +732,7 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	committed := false
 	persisted, readErr := e.read(j.Request.ID)
 	if readErr == nil {
+		j.IdleChange = persisted.IdleChange
 		j.SuspensionChange, j.Operation.Suspension = persisted.SuspensionChange, persisted.Operation.Suspension
 		j.Operation.Job = persisted.Operation.Job
 		j.JobRun = persisted.JobRun
@@ -717,7 +747,7 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	}
 	if errors.Is(err, errRoutesUnresolved) || errors.Is(err, errRolloutUnresolved) || errors.Is(err, errJobUnresolved) || errors.Is(err, errSuspensionUnresolved) {
 		// The operation stays running, which keeps its hostnames claimed until recovery settles it.
-		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed", activeSlot: j.JobRun != nil || j.SuspensionChange != nil}
+		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed", activeSlot: j.JobRun != nil || j.SuspensionChange != nil || j.IdleChange != nil}
 		if readErr == nil && !committed {
 			persisted.Operation.Error = routeRestoring
 			if j.JobRun != nil {
@@ -766,7 +796,10 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	if j.Operation.Job != nil && j.Operation.Job.TimedOut && j.Operation.State != "cancelled" {
 		j.Operation.State, j.Operation.Error = "failed", "Job exceeded its execution timeout; its containers were stopped."
 	}
-	if j.SuspensionChange != nil && (j.SuspensionChange.ExposureCommitted || j.SuspensionChange.Action == "suspend" && j.SuspensionChange.Complete) && j.SuspensionChange.Failure == "" {
+	if j.IdleChange == nil && j.SuspensionChange != nil && (j.SuspensionChange.ExposureCommitted || j.SuspensionChange.Action == "suspend" && j.SuspensionChange.Complete) && j.SuspensionChange.Failure == "" {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
+	}
+	if j.IdleChange != nil && j.IdleChange.Committed {
 		j.Operation.State, j.Operation.Error = "succeeded", ""
 	}
 	if saveErr := writeJSON(e.path(j.Request.ID), j); saveErr != nil {
@@ -870,6 +903,16 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			fmt.Fprintln(log, err)
 		}
 		return err
+	}
+	if r.Action == "idle_policy" {
+		err := e.performIdlePolicy(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "idle_sleep" || r.Action == "idle_wake" {
+		return e.idleOperation(ctx, r, log)
 	}
 	if r.Action == "suspend" {
 		return e.performSuspension(ctx, r, false, log)
@@ -1083,6 +1126,9 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			return err
 		}
+		if err = e.validateIdleCandidate(ctx, r, dir, []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}, env); err != nil {
+			return err
+		}
 		args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}
 		if err = e.Run(ctx, dir, args, env, log); err != nil {
 			return err
@@ -1187,6 +1233,10 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+		}
+		if err = e.validateIdleCandidate(ctx, r, dir, args, env); err != nil {
+			fmt.Fprintln(log, err)
+			return err
 		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), "config", "--quiet"), env, log); err != nil {
 			return err

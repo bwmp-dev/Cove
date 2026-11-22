@@ -422,6 +422,9 @@ func HTTPHealth(ctx context.Context, address string) error {
 }
 
 func (e *Engine) performRollout(ctx context.Context, r Request, dir string, args, env []string, out io.Writer) (result error) {
+	if err := e.validateIdleCandidate(ctx, r, dir, args, env); err != nil {
+		return err
+	}
 	if r.Rollout != nil {
 		options := r.Rollout.Normalized()
 		r.Rollout = &options

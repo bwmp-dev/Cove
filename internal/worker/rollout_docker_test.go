@@ -20,6 +20,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "idle-gateway" {
+		if err := RunIdleGateway(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 3 && os.Args[1] == "rollout-daemon" {
 		e, err := NewEngine(os.Args[2])
 		if err == nil {
@@ -130,6 +137,7 @@ func TestRolloutDocker(t *testing.T) {
 		return operation
 	}
 	run(Request{ID: "first", Action: "deploy", Compose: compose("first", 0, true, true), Rollout: options("rolling", 2)}, "succeeded")
+	run(Request{ID: "enable-idle", Action: "idle_policy", Idle: &IdlePolicy{Enabled: true, AfterSeconds: 60, RequestDriven: true}}, "succeeded")
 	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, DisableKeepAlives: true}}
 	request := func() (string, error) {
 		req, err := http.NewRequestWithContext(ctx, "GET", "https://127.0.0.1/", nil)
@@ -235,6 +243,7 @@ func TestRolloutDocker(t *testing.T) {
 	if body, err := request(); err != nil || !strings.HasPrefix(body, "green-") {
 		t.Fatal(body, err)
 	}
+	run(Request{ID: "disable-idle", Action: "idle_policy", Idle: &IdlePolicy{}}, "succeeded")
 	image := "cove-rollout-health:" + workload
 	buildDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(buildDir, "Dockerfile"), []byte("FROM busybox:1.37\nHEALTHCHECK --interval=1s --timeout=1s --start-period=10s --retries=1 CMD wget -q -O /dev/null http://127.0.0.1:8080/\n"), 0600); err != nil {

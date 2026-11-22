@@ -20,6 +20,8 @@ export interface Capabilities {
   unhealthy_restart?: boolean;
   // The worker can pause and resume a resource for its environment, keeping the containers it captured.
   suspensions?: boolean;
+  // The worker can stop idle request-driven services and wake them on the next authorized request.
+  idle_sleep?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -221,7 +223,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {
@@ -238,7 +240,7 @@ export interface WorkerOperation {
   rollout?: RolloutStatus;
   // Reported only by workers with the job_runs capability.
   job?: JobResult;
-  // Reported by environment pause and resume operations.
+  // Reported by environment pause and resume operations, and by a Start that wakes a sleeping app (reason idle).
   suspension?: SuspensionResult;
 }
 
@@ -269,7 +271,9 @@ export interface EnvironmentSuspension {
 export interface ResourceSuspension {
   operation: string;
   scope: string;
-  reason: "environment";
+  // idle: the worker put the service to sleep after its idle timeout; environment: the environment was paused;
+  // manual_stop: the worker holds containers that were deliberately stopped, which Start, Restart or Deploy repairs.
+  reason: "environment" | "idle" | "manual_stop";
   phase: "pausing" | "paused" | "resuming";
   captured: number;
   previously_running: number;
@@ -349,8 +353,8 @@ export type WorkloadImages =
   | { images: ImageStatus[]; stale: boolean; checked_at: string; operation_id: string };
 
 export interface OperationRequest {
-  // Only the panel's health monitor queues restart_unhealthy and only environment pause and resume queue suspend and resume; the API rejects them here.
-  action: Exclude<OperationAction, "routes" | "restart_unhealthy" | "suspend" | "resume">;
+  // Only the panel's health monitor queues restart_unhealthy, only environment pause and resume queue suspend and resume, and idle policy changes have their own endpoint; the API rejects them here.
+  action: Exclude<OperationAction, "routes" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy">;
   // Deploy only: pull the configured tags before building and replacing containers.
   pull_latest?: boolean;
   build?: BuildOptions;
@@ -378,6 +382,28 @@ export interface RestartPolicy {
   window_started_at: string | null;
   operation_id: string | null;
   last_error: string;
+}
+
+// The saved idle sleep policy. It changes only after the worker applies an idle_policy operation.
+export interface IdlePolicy {
+  enabled: boolean;
+  after_seconds: number;
+  request_driven: boolean;
+}
+
+export type IdlePhase = "awake" | "sleeping_pending" | "quiescing" | "sleeping" | "wake_queued" | "waking" | "wake_failed" | "paused" | "blocked" | "unknown";
+
+// What the worker's idle helper reports now. phase stays a string because newer workers may add phases.
+export interface IdleRuntime {
+  enabled: boolean;
+  after_seconds: number;
+  phase: string;
+  active_requests: number;
+  // When the idle timer last reset: a request finished, or the app was started, restarted or woken.
+  last_activity?: string;
+  last_sleep?: string;
+  last_wake?: string;
+  error?: string;
 }
 
 export interface QueuedOperation {
@@ -414,8 +440,10 @@ export interface WorkloadRuntime {
   containers: Container[];
   // Null when no replacement is pending or staged. This, not operation history, is the current rollout state.
   rollout?: RolloutStatus | null;
-  // Null when the environment has not paused the resource. Present from pausing until the resume finishes.
+  // Null when the worker holds no containers stopped for the resource. Present from the stop (environment pause, idle sleep or manual stop) until it is resumed; `reason` says which.
   suspension?: ResourceSuspension | null;
+  // Null or missing when the worker has no idle policy for the resource.
+  idle?: IdleRuntime | null;
 }
 
 export interface FileSecret { name: string; variable: string; services: string[]; build_services: string[] }

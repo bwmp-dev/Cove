@@ -82,7 +82,15 @@ func (e *Engine) beginSuspension(ctx context.Context, r Request, manual bool) (*
 			return nil, err
 		}
 		change.Next = workloadSuspension{Operation: r.ID, Options: *r.Suspension, Phase: "pausing", Created: time.Now().UTC(), Containers: captured}
+		if r.Suspension.Reason == "idle" {
+			change.Next.IdleEpisode = r.ID
+		}
 		if prior != nil {
+			if prior.Options.Reason == "idle" && r.Suspension.Reason == "environment" {
+				change.Next.Containers = prior.Containers
+				change.Next.BeforeIdle = &idleSuspensionOrigin{Operation: prior.idleEpisode(), Created: prior.Created}
+				change.Next.ManualStop = prior.ManualStop
+			}
 			if prior.Options.Reason == "environment" && prior.Options.Scope != r.Suspension.Scope {
 				return nil, errors.New("workload is suspended by another environment")
 			}
@@ -189,6 +197,14 @@ func (e *Engine) finishSuspensionPause(ctx context.Context, r Request, change *s
 func (e *Engine) finishSuspensionResume(ctx context.Context, r Request, change *suspensionChange, out io.Writer) error {
 	if !change.ExposureCommitted {
 		if !change.Next.Options.Start {
+			if change.Next.BeforeIdle != nil && !change.Next.ManualStop {
+				change.Next.Operation, change.Next.Created = change.Next.BeforeIdle.Operation, change.Next.BeforeIdle.Created
+				change.Next.Options = SuspensionOptions{Reason: "idle", Scope: r.Workload}
+				change.Next.IdleEpisode = change.Next.Operation
+				change.Next.BeforeIdle = nil
+				change.ExposureCommitted = true
+				return e.finishSuspensionPause(ctx, r, change, out)
+			}
 			change.Next.Options.Reason, change.Next.ManualStop = "manual_stop", true
 			change.ExposureCommitted = true
 			return e.finishSuspensionPause(ctx, r, change, out)
@@ -426,6 +442,18 @@ func (e *Engine) suspensionGate(ctx context.Context, r Request, out io.Writer) (
 		return true, err
 	}
 	if state == nil || state.Phase == "awake" {
+		if r.Action == "stop" {
+			idle, err := e.readIdle(r.Workload)
+			if err != nil {
+				return true, err
+			}
+			if idle != nil {
+				pause := r
+				pause.Action = "suspend"
+				pause.Suspension = &SuspensionOptions{Reason: "manual_stop", Scope: r.Workload}
+				return true, e.performSuspension(ctx, pause, false, out)
+			}
+		}
 		return false, nil
 	}
 	if r.Action == "stop" {
@@ -433,11 +461,14 @@ func (e *Engine) suspensionGate(ctx context.Context, r Request, out io.Writer) (
 		return false, writeJSON(filepath.Join(e.Root, "workloads", r.Workload, "suspension.json"), state)
 	}
 	if r.Action == "start" || r.Action == "restart" {
-		if state.Options.Reason == "manual_stop" || r.ResumeSuspended {
+		if state.Options.Reason == "manual_stop" || state.Options.Reason == "idle" || r.ResumeSuspended {
 			return true, e.performSuspension(ctx, r, true, out)
 		}
 	}
-	if r.Action == "deploy" && (state.Options.Reason == "manual_stop" || r.ResumeSuspended) {
+	if r.Action == "deploy" && state.Options.Reason == "idle" {
+		return true, errors.New("start the sleeping resource before deploying a replacement")
+	}
+	if r.Action == "deploy" && (state.Options.Reason == "manual_stop" || state.Options.Reason == "idle" || r.ResumeSuspended) {
 		present, err := e.survivingSuspension(ctx, r.Workload, state.Containers)
 		if err != nil {
 			return true, err
@@ -452,6 +483,9 @@ func (e *Engine) suspensionGate(ctx context.Context, r Request, out io.Writer) (
 			return true, err
 		}
 		return false, syncDirectory(filepath.Dir(path))
+	}
+	if r.Action == "image_check" || r.Action == "build" || r.Action == "restart_unhealthy" {
+		return false, nil
 	}
 	if r.Action == "backup" || r.Action == "restore" && r.ResumeSuspended {
 		return false, nil

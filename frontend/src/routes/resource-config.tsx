@@ -24,6 +24,7 @@ import { Webhook } from "../components/Webhook";
 import { SourceFields, TypeFields } from "../components/WorkloadForm";
 import { RolloutAvailability, RolloutEligibility, RolloutServiceEditors, RolloutStrategyRows, useRolloutSupport } from "../components/RolloutSettings";
 import { UnhealthyRestartSettings } from "../components/UnhealthyRestart";
+import { IdleSleepSettings } from "../components/IdleSleep";
 import { Button, DefinitionList, EmptyState, Field, Notice, Section, SettingRow, SettingRows, Spinner, SwitchField } from "../components/ui";
 import { rolloutChanged, rolloutDraft, rolloutsApply, validateRollout, type RolloutDraft, type RolloutErrors } from "../lib/rollouts";
 import { useOnline } from "../lib/hooks";
@@ -41,6 +42,7 @@ export function ResourceDeploymentSafety() {
     <>
       <DeploymentSafetyForm workload={resource} />
       {rolloutsApply(resource) && <UnhealthyRestartSettings workload={resource} />}
+      {rolloutsApply(resource) && <IdleSleepSettings workload={resource} />}
     </>
   );
 }

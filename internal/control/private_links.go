@@ -45,6 +45,7 @@ func (in *privateConnectionInput) normalize() error {
 }
 
 type connectionEndpoint struct {
+	idle    bool
 	ready   bool
 	kind    string
 	config  workloadInput
@@ -73,7 +74,7 @@ func composeServices(c workloadInput) []string {
 func (s *Server) lockConnectionEndpoint(ctx context.Context, tx pgx.Tx, team, id string) (connectionEndpoint, error) {
 	var e connectionEndpoint
 	var encrypted []byte
-	err := tx.QueryRow(ctx, `SELECT w.kind,w.configuration,COALESCE((n.capabilities->>'private_links')::boolean,false),(EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources r WHERE r.resource_id=w.id)),n.state='ready' FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1 AND w.team_id=$2 FOR UPDATE OF w`, id, team).Scan(&e.kind, &encrypted, &e.capable, &e.preview, &e.ready)
+	err := tx.QueryRow(ctx, `SELECT w.kind,w.configuration,COALESCE((n.capabilities->>'private_links')::boolean,false),(EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources r WHERE r.resource_id=w.id)),n.state='ready',COALESCE((w.idle_policy->>'enabled')::boolean,false) OR EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action='idle_policy' AND o.state IN ('queued','running')) FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1 AND w.team_id=$2 FOR UPDATE OF w`, id, team).Scan(&e.kind, &encrypted, &e.capable, &e.preview, &e.ready, &e.idle)
 	if err != nil {
 		return e, err
 	}
@@ -86,6 +87,8 @@ func (s *Server) lockConnectionEndpoint(ctx context.Context, tx pgx.Tx, team, id
 
 func checkEndpoint(e connectionEndpoint, role, service string) (int, string) {
 	switch {
+	case e.idle:
+		return 409, "disable idle sleep and wait for its operation before adding private connections"
 	case e.preview:
 		return 409, "preview resources cannot have manually managed private connections; environment previews copy their production connections"
 	case role == "target" && e.kind != "service":
