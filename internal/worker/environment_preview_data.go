@@ -214,6 +214,10 @@ func (e *Engine) InventoryPreviewSource(ctx context.Context, workload string, da
 
 func (e *Engine) inspectSourceDatabase(ctx context.Context, workload string, d *DatabaseBackup) *PreviewInventoryDatabase {
 	result := &PreviewInventoryDatabase{Engine: d.Engine, Service: d.Service, Name: d.Name}
+	if extendedDatabase(d.Engine) {
+		result.Reason = "environment preview refresh supports PostgreSQL and MariaDB; use an isolated backup restore copy for this engine"
+		return result
+	}
 	container, err := e.databaseContainer(ctx, Request{Workload: workload, Backup: &BackupConfig{Database: d}})
 	if err != nil {
 		result.Reason = "the production database service is not running"

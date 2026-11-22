@@ -28,3 +28,27 @@ export function retentionSummary(policy: { keep_last: number } & Partial<Calenda
   const latest = `${policy.keep_last} latest ${policy.keep_last === 1 ? "snapshot" : "snapshots"}`;
   return tiers.length ? `Keep ${latest} plus ${tiers.join(", ")}` : `Keep ${latest}`;
 }
+
+export type DatabaseScope = "database" | "instance";
+export interface DatabaseEngine { value: string; name: string; option: string; scope: DatabaseScope }
+
+// Instance engines back up the whole server; the API requires name "all" for them.
+export const databaseEngines: DatabaseEngine[] = [
+  { value: "postgresql", name: "PostgreSQL", option: "PostgreSQL logical dump (online)", scope: "database" },
+  { value: "mariadb", name: "MariaDB", option: "MariaDB logical dump (online, InnoDB only)", scope: "database" },
+  { value: "mongodb", name: "MongoDB", option: "MongoDB replica set archive (online)", scope: "instance" },
+  { value: "redis", name: "Redis", option: "Redis RDB snapshot (online)", scope: "instance" },
+  { value: "valkey", name: "Valkey", option: "Valkey RDB snapshot (online)", scope: "instance" },
+];
+
+export const INSTANCE_SCOPE_NAME = "all";
+
+export function databaseEngine(value: string | undefined) {
+  return databaseEngines.find((engine) => engine.value === value);
+}
+
+export function backupScopeLabel(database: { engine: string; name: string }) {
+  const engine = databaseEngine(database.engine);
+  if (!engine) return `${database.engine} database ${database.name}`;
+  return engine.scope === "instance" ? `${engine.name} complete instance` : `${engine.name} database ${database.name}`;
+}

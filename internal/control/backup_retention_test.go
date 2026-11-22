@@ -59,3 +59,27 @@ func TestBackupCalendarPolicyCapabilitiesAndSealing(t *testing.T) {
 	}
 	f.call("root", "default", "POST", "/api/storage-locations/"+id+"/test", map[string]string{"node_id": "calendar-node"}, 200)
 }
+
+func TestExtendedDatabasePolicyRequiresVerifiedWorker(t *testing.T) {
+	f := newAccountFixture(t)
+	f.sql("INSERT INTO nodes(id,name,address,port,public_key,private_key,state,capabilities) VALUES('engine-node','Node','localhost',22,'',$1,'ready','{\"logical_backups\":true}')", []byte{})
+	f.sql("INSERT INTO projects(id,name,team_id) VALUES('engine-project','Project','default')")
+	data, _ := json.Marshal(workloadInput{Name: "Database", Kind: "service"})
+	sealed, _ := seal(f.s.Key, data)
+	f.sql("INSERT INTO workloads(id,node_id,name,configuration,project_id,team_id) VALUES('engine-resource','engine-node','Database',$1,'engine-project','default')", sealed)
+	for _, engine := range []string{"mongodb", "redis", "valkey"} {
+		policy := worker.BackupConfig{Repository: "local", Password: "synthetic-engine-password", KeepLast: 2, Database: &worker.DatabaseBackup{Engine: engine, Service: "db", Name: "all"}}
+		f.sql(`UPDATE nodes SET capabilities='{"logical_backups":true}' WHERE id='engine-node'`)
+		f.call("root", "default", "PUT", "/api/workloads/engine-resource/backup-policy", map[string]any{"backup": policy}, 409)
+		if f.s.prepareInfrastructure(context.Background(), &worker.Request{Workload: "engine-resource", Action: "backup", Backup: &policy}) == nil {
+			t.Fatal("old worker accepted extended engine", engine)
+		}
+		f.sql(`UPDATE nodes SET capabilities='{"logical_backups":true,"extended_logical_backups":true}' WHERE id='engine-node'`)
+		f.call("root", "default", "PUT", "/api/workloads/engine-resource/backup-policy", map[string]any{"backup": policy}, 200)
+		if body := f.call("root", "default", "GET", "/api/workloads/engine-resource/backup-policy", nil, 200).Body.String(); strings.Contains(body, policy.Password) || !strings.Contains(body, engine) {
+			t.Fatal("policy or secret handling changed", body)
+		}
+		policy.Database.Name = "app"
+		f.call("root", "default", "PUT", "/api/workloads/engine-resource/backup-policy", map[string]any{"backup": policy}, 400)
+	}
+}

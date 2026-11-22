@@ -849,6 +849,90 @@ test("restore drills verify copied volume data without restarting the resource",
 
 });
 
+test("Redis complete-instance backups verify, restore in place and restore as a new resource", async ({ page }, testInfo) => {
+  test.setTimeout(480_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Redis backup project");
+  const url = await createResource(page, "redis-backup-app");
+  const id = new URL(url).pathname.split("/")[2];
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // CodeMirror input is unreliable for exact YAML, so the Compose file is saved through the API.
+  const yaml = "services:\n  cache:\n    image: redis:7.4-alpine\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, redis-cli, ping]\n      interval: 1s\nvolumes:\n  data: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+  const container = containers(url).split("|")[0] ?? "";
+  const redis = (...args: string[]) => execFileSync("docker", ["exec", container, "redis-cli", ...args], { encoding: "utf8" }).trim();
+  expect(redis("SET", "marker", "original")).toBe("OK");
+  expect(redis("-n", "3", "SET", "other-db", "kept")).toBe("OK");
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await chooseOption(page.getByLabel("Backup method"), "redis");
+  await expect(page.getByLabel("Database name", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Complete instance: every logical database/)).toBeVisible();
+  await page.getByLabel("Database Compose service", { exact: true }).fill("cache");
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-redis-backup-password");
+  await page.getByLabel("Interval in hours", { exact: true }).fill("0");
+  await capture(page, testInfo, "redis-backup-policy");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit policy", exact: true })).toBeVisible();
+  expect(await (await page.request.get(`/api/workloads/${id}/backup-policy`)).json()).toMatchObject({ backup: { database: { engine: "redis", service: "cache", name: "all" } } });
+  await expect(page.getByText(/Redis complete instance \(cache\)/)).toBeVisible();
+
+  const finished = async (action: string, after: Set<string>) => {
+    let operation: { id: string; action: string; state: string } | undefined;
+    await expect.poll(async () => {
+      const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+      operation = operations.find(item => item.action === action && !after.has(item.id));
+      return operation && !["queued", "running"].includes(operation.state);
+    }, { timeout: 240_000 }).toBe(true);
+    expect(operation?.state, await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()).toBe("succeeded");
+  };
+  const seen = async () => new Set(((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as { id: string }[]).map(item => item.id));
+
+  let before = await seen();
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await finished("backup", before);
+  await expect(page.getByText("Redis complete instance", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/Database restore verified/)).toBeVisible();
+  const backups = await (await page.request.get(`/api/workloads/${id}/backups`)).json() as { backups: { verification?: string; database?: { engine: string; name: string } }[] };
+  expect(backups.backups[0]).toMatchObject({ verification: "database", database: { engine: "redis", name: "all" } });
+  await capture(page, testInfo, "redis-backups");
+
+  expect(redis("SET", "marker", "changed")).toBe("OK");
+  expect(redis("-n", "3", "DEL", "other-db")).toBe("1");
+  await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeEnabled({ timeout: 60_000 });
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "Restore Redis complete instance?" });
+  await expect(confirm.getByText(/pauses this resource's containers/)).toBeVisible();
+  await capture(page, testInfo, "redis-restore-confirm");
+  before = await seen();
+  await confirm.getByRole("button", { name: "Restore data", exact: true }).click();
+  await finished("restore", before);
+  const restored = containers(url).split("|")[0] ?? "";
+  const redisAfter = (...args: string[]) => execFileSync("docker", ["exec", restored, "redis-cli", ...args], { encoding: "utf8" }).trim();
+  await expect.poll(() => redisAfter("GET", "marker"), { timeout: 60_000 }).toBe("original");
+  expect(redisAfter("-n", "3", "GET", "other-db")).toBe("kept");
+
+  await page.goto(url);
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Restore as new resource", exact: true }).first().click();
+  const copy = page.getByRole("dialog", { name: "Restore as a separate resource" });
+  await expect(copy.getByText(/The complete Redis instance snapshot is restored into the database service/)).toBeVisible();
+  await expect(copy.getByText(/PostgreSQL ownership and grants/)).toHaveCount(0);
+  await copy.getByLabel("New resource name", { exact: true }).fill("Restored Redis copy");
+  await capture(page, testInfo, "redis-restore-copy-form");
+  await copy.getByRole("button", { name: "Restore separate resource", exact: true }).click();
+  const progress = copy.getByRole("link", { name: "View restore progress", exact: true });
+  await expect(progress).toBeVisible();
+  const operationID = (await progress.getAttribute("href"))?.split("/")[2];
+  await expect.poll(async () => (await (await page.request.get(`/api/operations/${operationID}`)).json() as { state: string }).state, { timeout: 240_000 }).toMatch(/succeeded|failed/);
+  const result = await (await page.request.get(`/api/operations/${operationID}`)).json() as { state: string };
+  expect(result.state, await (await page.request.get(`/api/operations/${operationID}/logs`)).text()).toBe("succeeded");
+});
+
 test("resource bindings, hooks and promotion keep target configuration", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   await page.goto("/projects"); await signIn(page);

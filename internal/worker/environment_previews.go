@@ -159,6 +159,9 @@ func validateEnvironmentPreview(r Request) error {
 		}
 	}
 	if p.Database != nil {
+		if extendedDatabase(p.Database.Engine) {
+			return errors.New("environment preview database refresh supports PostgreSQL and MariaDB; use an isolated backup restore copy for this engine")
+		}
 		if err := validateDatabaseBackup(&DatabaseBackup{Engine: p.Database.Engine, Service: p.Database.Service, Name: p.Database.Name}); err != nil {
 			return err
 		}

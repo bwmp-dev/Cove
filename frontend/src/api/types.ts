@@ -11,6 +11,7 @@ export interface Capabilities {
   terminal?: boolean;
   infrastructure?: boolean;
   backup_retention?: boolean;
+  extended_logical_backups?: boolean;
   backblaze_b2?: boolean;
   file_browser?: boolean;
   alert_observations?: boolean;

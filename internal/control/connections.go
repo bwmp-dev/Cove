@@ -416,6 +416,18 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			return errors.New("upgrade and verify the worker before applying daily, weekly or monthly retention")
 		}
 	}
+	if r.Backup != nil && r.Backup.Database != nil && (r.Action == "backup" || r.Action == "restore" || r.Action == "drill" || r.Action == "restore_copy") {
+		d := r.Backup.Database
+		if d.Engine == "mongodb" || d.Engine == "redis" || d.Engine == "valkey" {
+			var capable bool
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'extended_logical_backups')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {
+				return err
+			}
+			if !capable {
+				return errors.New("upgrade and verify the worker before using MongoDB, Redis or Valkey backups")
+			}
+		}
+	}
 	if r.Action == "deploy" && r.Hooks != nil && (len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil) {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'guarded_hooks')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
@@ -499,6 +511,18 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		}
 		if !supported {
 			return errors.New("upgrade and verify the worker before promoting images")
+		}
+	}
+	if r.Backup != nil && r.Backup.Database != nil && (r.Action == "backup" || r.Action == "restore" || r.Action == "drill" || r.Action == "restore_copy") {
+		d := r.Backup.Database
+		if d.Engine == "mongodb" || d.Engine == "redis" || d.Engine == "valkey" {
+			var capable bool
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'extended_logical_backups')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {
+				return err
+			}
+			if !capable {
+				return errors.New("upgrade and verify the worker before using MongoDB, Redis or Valkey backups")
+			}
 		}
 	}
 	if r.Action == "deploy" && r.Hooks != nil && (r.Hooks.Before != nil || r.Hooks.After != nil) {

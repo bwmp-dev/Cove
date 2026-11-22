@@ -91,6 +91,17 @@ func (s *Server) setBackupPolicy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if in.Backup.Database != nil && (in.Backup.Database.Engine == "mongodb" || in.Backup.Database.Engine == "redis" || in.Backup.Database.Engine == "valkey") {
+			var capable bool
+			if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'extended_logical_backups')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.PathValue("id")).Scan(&capable); err != nil {
+				http.Error(w, "worker capabilities unavailable", 503)
+				return
+			}
+			if !capable {
+				http.Error(w, "upgrade and verify this worker before configuring MongoDB, Redis or Valkey backups", 409)
+				return
+			}
+		}
 		if in.Backup.Remote != nil {
 			http.Error(w, "select a storage location instead of supplying remote credentials", 400)
 			return

@@ -687,8 +687,8 @@ export function ResourceBackups() {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
-    <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts. Containers stop briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} retention={{ supported: node ? Boolean(node.capabilities?.backup_retention) : undefined, nodeName: node?.name }} />
+    <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
+      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, nodeName: node?.name }} />
     </Section>
   );
 }
