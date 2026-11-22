@@ -261,6 +261,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/nodes/{id}/private-links", s.admin(http.HandlerFunc(s.nodePrivateLinks)))
 	mux.Handle("GET /api/workloads/{id}/schedule", s.admin(http.HandlerFunc(s.jobSchedule)))
 	mux.Handle("PUT /api/workloads/{id}/schedule", s.admin(http.HandlerFunc(s.jobSchedule)))
+	mux.Handle("GET /api/workloads/{id}/restart-policy", s.admin(http.HandlerFunc(s.unhealthyRestartPolicy)))
+	mux.Handle("PUT /api/workloads/{id}/restart-policy", s.admin(http.HandlerFunc(s.unhealthyRestartPolicy)))
 	mux.Handle("GET /api/workloads/{id}/configuration-history", s.admin(http.HandlerFunc(s.configurationHistory)))
 	for _, method := range []string{"GET", "PUT", "DELETE"} {
 		mux.Handle(method+" /api/workloads/{id}/variable-bindings", s.admin(http.HandlerFunc(s.resourceVariables)))

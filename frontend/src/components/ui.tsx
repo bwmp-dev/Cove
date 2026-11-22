@@ -359,13 +359,15 @@ export function DefinitionList({ items, compact = false }: { items: { term: stri
 
 // Metadata items separated by middle dots that wrap as whole items. Each item draws its dot in the gap before it,
 // and the wrapper clips the dot of whichever item starts a line, so no line begins with a separator.
+// Each item is a flex item beside its dot, so content that wraps never falls under the clipped dot, and an item that
+// sets min-w-0 can shrink and truncate inside the line.
 export function MetaList({ children, className = "" }: { children: ReactNode; className?: string }) {
   const items = Children.toArray(children).filter(Boolean);
   return (
     <span className={`-mx-1 -my-1 block overflow-hidden px-1 py-1 ${className}`}>
       <span className="-ml-4 flex flex-wrap items-center gap-y-1">
         {items.map((item, index) => (
-          <span key={isValidElement(item) && item.key !== null ? item.key : index} className="min-w-0 before:inline-block before:w-4 before:text-center before:text-fg-subtle before:content-['·']">
+          <span key={isValidElement(item) && item.key !== null ? item.key : index} className="flex min-w-0 items-baseline before:w-4 before:shrink-0 before:text-center before:text-fg-subtle before:content-['·']">
             {item}
           </span>
         ))}

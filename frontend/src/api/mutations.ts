@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { rememberTeam } from "../lib/team";
 import { keys } from "./queries";
-import type { Enrollment, NodeInput, OperationRequest, QueuedOperation, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
+import type { Enrollment, NodeInput, OperationRequest, QueuedOperation, RestartPolicy, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
 
 // Mutations carrying credentials (passwords, setup commands, secrets) use gcTime 0 so
 // their variables and results leave the in-memory mutation cache once the form unmounts.
@@ -108,6 +108,17 @@ export function useQueueOperation(workloadId: string) {
     mutationFn: (input: OperationRequest) =>
       request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, input),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
+  });
+}
+
+// Turning the policy off cancels queued automatic restarts, so operations are refreshed as well.
+export function useUpdateRestartPolicy(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) => request<RestartPolicy>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/restart-policy`, { enabled }),
+    onSuccess: (policy) => client.setQueryData(keys.restartPolicy(workloadId), policy),
+    onError: () => client.invalidateQueries({ queryKey: keys.restartPolicy(workloadId) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
   });
 }
 

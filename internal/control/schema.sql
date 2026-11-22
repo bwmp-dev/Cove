@@ -690,3 +690,11 @@ CREATE TRIGGER cove_operation_notification AFTER UPDATE OF state ON operations F
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_overlap_policy text NOT NULL DEFAULT 'skip' CHECK (job_overlap_policy IN ('skip','queue_one','replace'));
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timeout_seconds integer NOT NULL DEFAULT 1800 CHECK (job_timeout_seconds BETWEEN 5 AND 86400);
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_pending_at timestamptz;
+
+-- Deploy track: health restarts share the durable operation queue and workload lock.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS restart_unhealthy boolean NOT NULL DEFAULT false;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_unhealthy_check_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_unhealthy_restart_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_operation_id text REFERENCES operations(id) ON DELETE SET NULL;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_error text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS unhealthy_restart_attempts ON operations(workload_id,created_at) WHERE action='restart_unhealthy';

@@ -497,6 +497,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.scheduleImageChecks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.scheduleUnhealthyRestarts(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.reconcilePreviews(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}

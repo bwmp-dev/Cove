@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadImages, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, Node, Operation, OperationLogs, RestartPolicy, TeamMembership, Workload, WorkloadImages, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -14,6 +14,7 @@ export const keys = {
   workloadRuntime: (id: string) => ["workloads", id, "runtime"] as const,
   workloadLogs: (id: string) => ["workloads", id, "logs"] as const,
   workloadImages: (id: string) => ["workloads", id, "images"] as const,
+  restartPolicy: (id: string) => ["workloads", id, "restart-policy"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -108,6 +109,14 @@ export const workloadRuntimeQuery = (id: string, operationActive: boolean) =>
     refetchInterval: operationActive ? 3_000 : 15_000,
     staleTime: 0,
     retry: false,
+  });
+
+// The panel's health monitor checks about once a minute, so status refreshes on the same cadence.
+export const restartPolicyQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.restartPolicy(id),
+    queryFn: ({ signal }) => request<RestartPolicy>("GET", `/api/workloads/${encodeURIComponent(id)}/restart-policy`, undefined, signal),
+    refetchInterval: 60_000,
   });
 
 export const workloadLogsQuery = (id: string) =>

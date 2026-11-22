@@ -16,6 +16,8 @@ export interface Capabilities {
   rollouts?: boolean;
   // The worker enforces job timeouts, reports job results and stops every service a job run started.
   job_runs?: boolean;
+  // The worker can recheck Docker health and restart only the running containers that report unhealthy.
+  unhealthy_restart?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -215,7 +217,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "build" | "rollout_promote" | "rollout_abort";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {
@@ -304,7 +306,8 @@ export type WorkloadImages =
   | { images: ImageStatus[]; stale: boolean; checked_at: string; operation_id: string };
 
 export interface OperationRequest {
-  action: Exclude<OperationAction, "routes">;
+  // Only the panel's health monitor queues restart_unhealthy; the API rejects it here.
+  action: Exclude<OperationAction, "routes" | "restart_unhealthy">;
   // Deploy only: pull the configured tags before building and replacing containers.
   pull_latest?: boolean;
   build?: BuildOptions;
@@ -321,6 +324,17 @@ export interface Operation {
   state: OperationState;
   result: WorkerOperation | null;
   created_at: string;
+}
+
+// Automatic restart of unhealthy containers. Attempts and the window cover the last 60 minutes; window_started_at is the
+// oldest attempt still counted. last_error is empty or a safe message about the most recent failed health read.
+export interface RestartPolicy {
+  enabled: boolean;
+  last_queued_at: string | null;
+  attempts_in_window: number;
+  window_started_at: string | null;
+  operation_id: string | null;
+  last_error: string;
 }
 
 export interface QueuedOperation {

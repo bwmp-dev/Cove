@@ -1075,6 +1075,114 @@ test("guarded deployment rejects an unhealthy candidate without replacing the ap
   expect(containers(url).split("|")[0]).not.toBe(original.split("|")[0]);
 });
 
+test("automatic health restarts restart only the unhealthy container through the real monitor and worker", async ({ page }, testInfo) => {
+  test.setTimeout(420_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Health restart project");
+  const url = await createResource(page, "health-restart-app");
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const headers = { Origin: new URL(url).origin };
+  // app is healthy only while /tmp/healthy exists; its command recreates the file, so a restart makes it healthy again.
+  const restartCompose = [
+    "services:",
+    "  app:",
+    "    image: busybox:1.37",
+    "    pull_policy: never",
+    "    command: [sh, -c, 'touch /tmp/healthy; sleep 3600']",
+    "    healthcheck:",
+    "      test: [CMD, test, -f, /tmp/healthy]",
+    "      interval: 2s",
+    "      timeout: 2s",
+    "      retries: 1",
+    "  steady:",
+    "    image: busybox:1.37",
+    "    pull_policy: never",
+    "    command: [sh, -c, 'sleep 3600']",
+    "    healthcheck:",
+    "      test: [CMD, 'true']",
+    "      interval: 2s",
+    "",
+  ].join("\n");
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  expect((await page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: restartCompose } })).status()).toBe(200);
+  await page.reload();
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+  const service = (name: string) => {
+    const ids = execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${id}`, "--filter", `label=com.docker.compose.service=${name}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
+    expect(ids).toHaveLength(1);
+    const [container = "", startedAt = "", health = ""] = execFileSync("docker", ["inspect", "--format", "{{.Id}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}", ids[0] ?? ""], { encoding: "utf8" }).trim().split("|");
+    return { container, startedAt, health };
+  };
+  await expect.poll(() => service("app").health, { timeout: 60_000 }).toBe("healthy");
+  await expect.poll(() => service("steady").health, { timeout: 60_000 }).toBe("healthy");
+  const app = service("app");
+  const steady = service("steady");
+
+  await page.goto(`${url}/deployment-safety`);
+  const section = page.getByRole("region", { name: "Automatic health restarts" });
+  const enabled = section.getByRole("switch", { name: "Restart unhealthy containers" });
+  await expect(enabled).toBeEnabled();
+  await expect(enabled).not.toBeChecked();
+  await enabled.focus();
+  await page.keyboard.press("Space");
+  await expect(enabled).toBeChecked();
+  const saved = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}/restart-policy` && response.request().method() === "PUT");
+  await section.getByRole("button", { name: "Save changes", exact: true }).click();
+  expect((await saved).status()).toBe(200);
+  await expect(section.getByText(/no deploy is needed/)).toBeVisible();
+  // The control plane queues an image check once the deployed resource is idle, and the monitor shows Waiting until it finishes.
+  const activeOperations = async () => {
+    const response = await page.request.get(`/api/operations?workload_id=${id}`);
+    expect(response.status()).toBe(200);
+    return (await response.json() as { action: string; state: string }[]).filter(operation => ["queued", "running"].includes(operation.state)).map(operation => operation.action);
+  };
+  await expect.poll(activeOperations, { timeout: 120_000 }).toEqual([]);
+  await expect(section.getByText("Checking", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "health-restart-enabled");
+
+  execFileSync("docker", ["exec", app.container, "rm", "-f", "/tmp/healthy"]);
+  await expect.poll(() => service("app").health, { timeout: 30_000 }).toBe("unhealthy");
+  type Listed = { id: string; action: string; state: string };
+  const automatic = async () => ((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as Listed[]).find(operation => operation.action === "restart_unhealthy");
+  await expect.poll(async () => (await automatic())?.state ?? "not queued", { timeout: 240_000, intervals: [5_000] }).toMatch(/^(succeeded|failed|cancelled|interrupted)$/);
+  const operation = await automatic();
+  if (operation?.state !== "succeeded") throw new Error(`restart_unhealthy operation ${operation?.id} ended ${operation?.state}:\n${await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()}`);
+  await expect.poll(() => service("app").health, { timeout: 60_000 }).toBe("healthy");
+  const restarted = service("app");
+  expect(restarted.container).toBe(app.container);
+  expect(restarted.startedAt).not.toBe(app.startedAt);
+  expect(service("steady")).toEqual(steady);
+
+  const policy = await (await page.request.get(`/api/workloads/${id}/restart-policy`)).json() as { enabled: boolean; attempts_in_window: number; operation_id: string | null; last_queued_at: string | null; window_started_at: string | null };
+  expect(policy).toMatchObject({ enabled: true, attempts_in_window: 1, operation_id: operation?.id });
+  expect(policy.last_queued_at).not.toBeNull();
+  expect(policy.window_started_at).not.toBeNull();
+  expect((await page.request.post(`/api/workloads/${id}/operations`, { headers, data: { action: "restart_unhealthy" } })).status()).toBe(400);
+
+  await page.reload();
+  await expect(section.getByText("1 of 3", { exact: true })).toBeVisible();
+  await expect(section.getByText("Cooling down", { exact: true })).toBeVisible();
+  await expect(section.getByRole("link", { name: "View operation" })).toBeVisible();
+  // The resource header's latest-operation label is long; every line of it must stay inside the header's clipping box.
+  const latestOperation = page.locator("main header").getByRole("link", { name: "Restart unhealthy containers", exact: true });
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const outside = await latestOperation.evaluate((link) => {
+      let clip = link.parentElement;
+      while (clip && getComputedStyle(clip).overflow !== "hidden") clip = clip.parentElement;
+      const box = (clip ?? document.documentElement).getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(link);
+      return [...range.getClientRects()].filter(line => line.left < box.left - 0.5 || line.right > box.right + 0.5).length;
+    });
+    expect(outside).toBe(0);
+  }
+  await capture(page, testInfo, "health-restart-history");
+  await page.goto(`/operations/${operation?.id}`);
+  await expect(page.getByRole("heading", { name: /^Restart unhealthy containers/ })).toBeVisible();
+});
+
 test("replacement strategies stage, abort and promote rollouts through the real worker and ingress", async ({ page }, testInfo) => {
   // Above the earlier 300s: each step may first wait out a background image check the control plane queues once the resource is idle.
   test.setTimeout(420_000);

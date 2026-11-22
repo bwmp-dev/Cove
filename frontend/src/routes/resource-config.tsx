@@ -23,6 +23,7 @@ import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
 import { Webhook } from "../components/Webhook";
 import { SourceFields, TypeFields } from "../components/WorkloadForm";
 import { RolloutAvailability, RolloutEligibility, RolloutServiceEditors, RolloutStrategyRows, useRolloutSupport } from "../components/RolloutSettings";
+import { UnhealthyRestartSettings } from "../components/UnhealthyRestart";
 import { Button, DefinitionList, EmptyState, Field, Notice, Section, SettingRow, SettingRows, Spinner, SwitchField } from "../components/ui";
 import { rolloutChanged, rolloutDraft, rolloutsApply, validateRollout, type RolloutDraft, type RolloutErrors } from "../lib/rollouts";
 import { useOnline } from "../lib/hooks";
@@ -36,7 +37,12 @@ const nextDeploy = "Changes apply on the next deploy.";
 
 export function ResourceDeploymentSafety() {
   const resource = useResource();
-  return <DeploymentSafetyForm workload={resource} />;
+  return (
+    <>
+      <DeploymentSafetyForm workload={resource} />
+      {rolloutsApply(resource) && <UnhealthyRestartSettings workload={resource} />}
+    </>
+  );
 }
 
 function GuardedDeploymentSwitch({ id, checked, disabled, strategySelected, onChange }: { id: string; checked: boolean; disabled: boolean; strategySelected: boolean; onChange: (checked: boolean) => void }) {

@@ -106,6 +106,7 @@ function NumberInput({ id, value, min, max, unit, disabled, error, hint, onChang
         step={1}
         value={value}
         disabled={disabled}
+        aria-labelledby={`${id}-label`}
         aria-invalid={invalid(error)}
         aria-describedby={describedBy(id, error, hint)}
         onChange={(event) => onChange(event.target.value)}

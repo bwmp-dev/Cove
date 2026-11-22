@@ -260,6 +260,10 @@ func ValidateRequest(r Request) error {
 			return errors.New("compose is required and must not exceed 1 MiB")
 		}
 	case "stop", "start", "restart":
+	case "restart_unhealthy":
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("health restarts require a service outside managed previews")
+		}
 	case "rollout_promote", "rollout_abort":
 		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
 			return errors.New("rollout actions require a service outside managed previews")
@@ -895,6 +899,13 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		if err == nil && r.Action == "backup" {
 			err = e.pruneBackups(ctx, r, log)
 		}
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "restart_unhealthy" {
+		err := e.restartUnhealthy(ctx, r.Workload, log)
 		if err != nil {
 			fmt.Fprintln(log, err)
 		}
