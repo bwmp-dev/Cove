@@ -58,3 +58,7 @@ Private connections are explicit, directional TCP grants from one source service
 ## Completion requirement
 
 The user explicitly requires a fully fleshed-out, production-ready product, not a proof of concept. The delivery order above describes implementation increments, not acceptable stopping points. Release acceptance must cover authenticated dashboard workflows, durable execution and recovery, secret handling, Git/build deployment, routing, backup/restore, installation/upgrades, and real Linux validation. Unverified production behavior must remain explicitly identified.
+
+### Git provider boundary
+
+GitHub clone credentials, repository and branch listing, webhook signature verification, pull-request decoding and commit-status publishing are accessed through the control plane's internal `gitProvider` interface (`internal/control/git_provider.go`). Installation ownership and team sharing checks remain at the handler/deployment boundary; durable webhook deduplication, commit pinning, superseding and preview reconciliation remain in their existing queues. Clone tokens continue to request only repository-scoped contents read access. Commit-status publishing requests a separate repository-scoped statuses write token; clone tokens never gain write permissions. The status adapter is not yet wired to automatic deployment feedback. This extraction does not enable additional providers.

@@ -3,9 +3,6 @@ package control
 import (
 	"context"
 	"cove/internal/worker"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -107,10 +104,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webhook unavailable", 500)
 		return
 	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(body)
-	signature, err := hex.DecodeString(strings.TrimPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256="))
-	if err != nil || !strings.HasPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256=") || !hmac.Equal(signature, mac.Sum(nil)) {
+	if !s.githubProvider().VerifyWebhook(secret, body, r.Header) {
 		http.Error(w, "invalid webhook signature", 401)
 		return
 	}

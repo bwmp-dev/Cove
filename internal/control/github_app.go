@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -321,11 +319,15 @@ func (s *Server) syncGithubInstallations(w http.ResponseWriter, r *http.Request)
 	s.githubAppInfo(w, r)
 }
 func (s *Server) installationToken(ctx context.Context, id, repo int64) (string, error) {
+	return s.installationAccessToken(ctx, id, repo, map[string]string{"contents": "read"})
+}
+
+func (s *Server) installationAccessToken(ctx context.Context, id, repo int64, permissions map[string]string) (string, error) {
 	jwt, err := s.appToken(ctx)
 	if err != nil {
 		return "", err
 	}
-	input := map[string]any{"permissions": map[string]string{"contents": "read"}}
+	input := map[string]any{"permissions": permissions}
 	if repo > 0 {
 		input["repository_ids"] = []int64{repo}
 	}
@@ -370,28 +372,14 @@ func (s *Server) githubRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	all := []appRepository{}
+	provider := s.githubProvider()
 	for _, id := range ids {
-		token, err := s.installationToken(r.Context(), id, 0)
+		repositories, err := provider.Repositories(r.Context(), id)
 		if err != nil {
-			http.Error(w, "GitHub installation is unavailable; check its permissions or suspension", 502)
+			http.Error(w, err.Error(), 502)
 			return
 		}
-		for page := 1; ; page++ {
-			var result struct {
-				Repositories []appRepository `json:"repositories"`
-			}
-			if err = s.appAPI(r.Context(), "GET", fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page), token, nil, &result); err != nil {
-				http.Error(w, "could not list GitHub repositories", 502)
-				return
-			}
-			for _, repo := range result.Repositories {
-				repo.InstallationID = id
-				all = append(all, repo)
-			}
-			if len(result.Repositories) < 100 {
-				break
-			}
-		}
+		all = append(all, repositories...)
 	}
 	respond(w, 200, all)
 }
@@ -545,7 +533,7 @@ func (s *Server) prepareAppDeployment(ctx context.Context, request *worker.Reque
 	if repository != request.Source.Repository {
 		return errors.New("GitHub source changed; reconnect the repository")
 	}
-	token, err := s.installationToken(ctx, installation, repo)
+	token, err := s.githubProvider().CloneToken(ctx, installation, repo)
 	if err != nil {
 		return err
 	}
@@ -574,10 +562,7 @@ func (s *Server) githubAppWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid webhook", 400)
 		return
 	}
-	mac := hmac.New(sha256.New, []byte(credentials.WebhookSecret))
-	mac.Write(body)
-	signature, err := hex.DecodeString(strings.TrimPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256="))
-	if err != nil || !strings.HasPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256=") || !hmac.Equal(signature, mac.Sum(nil)) {
+	if !s.githubProvider().VerifyWebhook([]byte(credentials.WebhookSecret), body, r.Header) {
 		http.Error(w, "invalid signature", 401)
 		return
 	}

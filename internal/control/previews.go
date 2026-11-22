@@ -286,8 +286,8 @@ type previewEvent struct {
 }
 
 func (s *Server) previewWebhook(ctx context.Context, body []byte, delivery string) error {
-	var event previewEvent
-	if json.Unmarshal(body, &event) != nil || !regexp.MustCompile(`^[a-zA-Z0-9-]{1,100}$`).MatchString(delivery) || event.Number < 1 {
+	event, parseErr := s.githubProvider().PullRequest(body)
+	if parseErr != nil || !regexp.MustCompile(`^[a-zA-Z0-9-]{1,100}$`).MatchString(delivery) || event.Number < 1 {
 		return errors.New("invalid pull request")
 	}
 	if event.Action != "opened" && event.Action != "reopened" && event.Action != "synchronize" && event.Action != "closed" {
