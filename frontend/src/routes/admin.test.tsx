@@ -5,7 +5,7 @@ import { request } from "../api/client";
 import { AdminPage } from "./admin";
 
 const session = vi.hoisted(() => ({ is_admin: true }));
-vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: () => "Update unavailable" }));
+vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: () => "Update unavailable", isStatus: () => false }));
 vi.mock("../lib/session", () => ({ useSession: () => session }));
 vi.mock("@tanstack/react-router", () => ({ useRouterState: () => "", useBlocker: () => ({ status: "idle" }), Link: ({ children }: { children: React.ReactNode }) => <span>{children}</span> }));
 // jsdom does not implement modal dialogs.
@@ -19,6 +19,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
 function securityResponse(path: string) {
   if (path === "/api/settings/oidc/providers") return Promise.resolve([]);
   if (path === "/api/settings/sign-in") return Promise.resolve({ password_login_disabled: false, oidc_registration_enabled: false, oidc_auto_redirect: "" });
+  if (path === "/api/settings/template-repositories") return Promise.resolve({ repositories: [] });
   if (path === "/api/settings/second-factor") return Promise.resolve({ require_second_factor: false });
   if (path === "/api/settings/audit-export") return Promise.resolve({ configuration: { webhook_url: "", syslog_address: "", syslog_tls: true, retention_days: 365 }, webhook_secret_configured: false, pending_deliveries: 0 });
   return undefined;

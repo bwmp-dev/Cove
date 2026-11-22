@@ -1,5 +1,6 @@
 import { ResourcePlacement } from "../components/ResourcePlacement";
 import { Clone } from "../components/Clone";
+import { SaveAsTemplate } from "../components/SaveAsTemplate";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
@@ -49,7 +50,8 @@ import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
-import { can } from "../lib/permissions";
+import { can, currentTeam, managesTeam } from "../lib/permissions";
+import { useSession } from "../lib/session";
 import { actionLabels, activeOperation, allowedActions, isActive, reasonError, stateLabels, workerResult, workloadKind } from "../lib/operations";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
@@ -724,6 +726,8 @@ function PlacementForm({ workload }: { workload: Workload }) {
 
 export function ResourceSettings() {
   const workload = useResource();
+  const session = useSession();
+  const publishesTemplates = Boolean(session?.is_admin) || managesTeam(currentTeam(session));
   if (!can(workload.permissions, "edit")) {
     return (
       <EmptyState title="Settings need editor access">
@@ -738,6 +742,7 @@ export function ResourceSettings() {
         <PlacementForm workload={workload} />
       </Section>
       <Clone kind="resource" id={workload.id} name={workload.name} />
+      {publishesTemplates && !workload.preview_source_id && <SaveAsTemplate workloadId={workload.id} workloadName={workload.name} />}
       <Section width="form" title="Danger zone" tone="danger">
         <DeleteResource kind="workload" id={workload.id} />
       </Section>

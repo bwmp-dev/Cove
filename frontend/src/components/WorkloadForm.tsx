@@ -1,6 +1,6 @@
 import { Select } from "./Select";
 import { ResourcePlacement } from "./ResourcePlacement";
-import type { ResourceDraft } from "../lib/templates";
+import type { ResourceDraft } from "../api/templates";
 import { Link } from "@tanstack/react-router";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import type { Project } from "../api/projects";
@@ -229,6 +229,7 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
   const set: SetValue = (key, value) => setValues((current) => ({ ...current, [key]: value }));
 
   const readyNodes = nodes.filter((node) => node.state === "ready");
+  const fileSecrets = draft?.file_secrets ?? [];
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -238,7 +239,9 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
     setRouteErrors(checkedRoutes.errors);
     if (result.input && checkedRoutes.routes && resourcePlacement) {
       const [projectId, environmentId] = resourcePlacement.split(":");
-      onSubmit({ ...result.input, routes: checkedRoutes.routes, project_id: projectId, environment_id: environmentId });
+      const input: WorkloadInput = { ...result.input, routes: checkedRoutes.routes, project_id: projectId, environment_id: environmentId };
+      if (fileSecrets.length > 0) input.file_secrets = fileSecrets;
+      onSubmit(input);
     } else {
       const form = event.currentTarget;
       requestAnimationFrame(() => form.querySelector<HTMLElement>("[aria-invalid=true]")?.focus());
@@ -317,6 +320,19 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
         <FormSection title="Environment" description="Delivered to Compose on the node at deploy time. Values are encrypted at rest and never shown again after saving.">
           <EnvironmentEditor rows={environment} errors={errors.rows} onChange={(rows: EnvRow[]) => set("environment", rows)} />
           {errors.environment && <p className="text-xs text-bad">{errors.environment}</p>}
+          {fileSecrets.length > 0 && (
+            <div className="space-y-1 text-xs text-fg-muted">
+              <p>The template mounts these variables as files instead of exposing them as environment values. Keep the variables listed here.</p>
+              <ul className="space-y-0.5">
+                {fileSecrets.map((file) => (
+                  <li key={file.name} className="break-all">
+                    <span className="font-mono text-fg">{file.variable}</span> → <span className="font-mono">{file.name}</span>
+                    {file.services.length > 0 && ` in ${file.services.join(", ")}`}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </FormSection>
       </fieldset>
 

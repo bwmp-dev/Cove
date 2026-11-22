@@ -254,6 +254,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
+	case path == "/api/templates" || path == "/api/templates/draft":
+		return true
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):
 		return true
 	case path == "/api/github/app" || path == "/api/github/app/connect" || strings.HasPrefix(path, "/api/github/app/installations/") && r.Method == "PUT":

@@ -412,6 +412,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	auditDone := make(chan struct{})
 	go func() { defer close(auditDone); s.runAuditExport(auditCtx) }()
 	defer func() { stopAudit(); <-auditDone }()
+	templateCtx, stopTemplates := context.WithCancel(ctx)
+	templateDone := make(chan struct{})
+	go func() { defer close(templateDone); s.runTemplateRepositories(templateCtx) }()
+	defer func() { stopTemplates(); <-templateDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {

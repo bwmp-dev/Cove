@@ -44,7 +44,8 @@ type Server struct {
 	SendMail              func(context.Context, string, string, string) error
 	dummyPasswordHash     []byte
 	// workerRPC replaces node transports in tests that simulate several workers.
-	workerRPC func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
+	workerRPC     func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
+	templateFetch func(context.Context, string, string, string) ([]byte, string, error)
 }
 
 func (s *Server) Init(ctx context.Context) error {
@@ -95,6 +96,16 @@ func (s *Server) Init(ctx context.Context) error {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /api/templates", s.admin(http.HandlerFunc(s.templates)))
+	mux.Handle("POST /api/templates/draft", s.admin(http.HandlerFunc(s.templates)))
+	mux.Handle("POST /api/workloads/{id}/template", s.admin(http.HandlerFunc(s.saveWorkloadTemplate)))
+	mux.Handle("DELETE /api/teams/{id}/templates/{template}", s.admin(http.HandlerFunc(s.deleteTeamTemplate)))
+	for _, prefix := range []string{"/api/settings/template-repositories", "/api/teams/{id}/template-repositories"} {
+		mux.Handle("GET "+prefix, s.admin(http.HandlerFunc(s.templateRepositories)))
+		mux.Handle("POST "+prefix, s.admin(http.HandlerFunc(s.templateRepositories)))
+		mux.Handle("DELETE "+prefix+"/{repository}", s.admin(http.HandlerFunc(s.templateRepositories)))
+		mux.Handle("POST "+prefix+"/{repository}/refresh", s.admin(http.HandlerFunc(s.templateRepositories)))
+	}
 	mux.Handle("GET /api/workloads/{id}/release-diff", s.admin(http.HandlerFunc(s.releaseDiff)))
 	for _, method := range []string{"GET", "PUT"} {
 		mux.Handle(method+" /api/teams/{id}/deployment-policy", s.admin(http.HandlerFunc(s.deploymentPolicy)))

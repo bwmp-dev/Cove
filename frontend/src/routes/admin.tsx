@@ -2,6 +2,7 @@ import { InstanceIntegrations } from "../components/InstanceIntegrations";
 import { AuditExport, InstanceSecondFactor, SignInProviders } from "../components/InstanceSecurity";
 import { PanelAccessSettings } from "../components/PanelAccess";
 import { OutboundProxy } from "../components/OutboundProxy";
+import { TemplateRepositories } from "../components/TemplateRepositories";
 import { SecurityPosture } from "../components/SecurityPosture";
 import { LoginHistory, loginHistoryDescription } from "../components/LoginHistory";
 import { useResetSecondFactor } from "../api/security";
@@ -349,7 +350,7 @@ export function AdminPage() {
   }
   return (
     <>
-      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, security, panel access, outbound proxy, audit export and update settings for this Cove instance." />
+      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, security, panel access, outbound proxy, template sources, audit export and update settings for this Cove instance." />
       <SecurityPosture />
       <Section title="Sign-in" width="form">
         <SignInSettings />
@@ -359,6 +360,7 @@ export function AdminPage() {
       <PanelAccessSettings />
       <InstanceIntegrations />
       <OutboundProxy />
+      <TemplateRepositories scope={{ kind: "instance" }} />
       <AuditExport />
       <Section title="Updates" width="form"><UpdateChannel /></Section>
     </>

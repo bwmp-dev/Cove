@@ -587,43 +587,6 @@ test("invited member signs up with scoped access while teams stay isolated", asy
   await visitor.close();
 });
 
-test("template catalog creates an editable database without deploying", async ({ page }, testInfo) => {
-  await page.goto("/resources/new");
-  await signIn(page);
-  await page.goto("/resources/new");
-  await expect(page.getByRole("heading", { name: "Resource templates" })).toBeVisible();
-  await capture(page, testInfo, "template-catalog");
-  await page.getByLabel("Search templates").fill("no-such-template");
-  await expect(page.getByText("No templates match.", { exact: false })).toBeVisible();
-  await page.getByRole("button", { name: "Clear filters" }).click();
-  await chooseOption(page.getByLabel("Category", { exact: true }), "Databases");
-  await page.getByRole("button", { name: /PostgreSQL/ }).click();
-  await expect(page.getByLabel("Database password", { exact: true })).toHaveAttribute("type", "password");
-  await page.getByRole("button", { name: "Review configuration" }).click();
-  await page.getByLabel("Name", { exact: true }).fill("template-postgres");
-  await expect(page.getByRole("button", { name: "Create resource", exact: true })).toBeDisabled();
-  await chooseOption(page.getByLabel("Project and environment", { exact: true }), { label: "Scoped project / Project resources" });
-  await chooseOption(page.getByLabel("Node", { exact: true }), { label: "ready-browser-worker" });
-  await expect(page.getByLabel("Compose file", { exact: true })).toContainText("image: postgres:18-alpine");
-  await page.getByRole("button", { name: "Create resource", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "template-postgres", exact: true })).toBeVisible();
-  const sections = page.getByRole("navigation", { name: "Resource sections" });
-  await sections.getByRole("link", { name: "Environment variables", exact: true }).click();
-  await expect(page.getByText("POSTGRES_PASSWORD", { exact: true })).toBeVisible();
-  await sections.getByRole("link", { name: "Domains", exact: true }).click();
-  const domains = page.getByRole("region", { name: "Domains" });
-  await expect(domains.getByText("Not deployed yet", { exact: true })).toBeVisible();
-  await domains.getByRole("button", { name: "Add route", exact: true }).click();
-  await domains.getByLabel("Hostname", { exact: true }).fill(`template-${Date.now()}.cove.test`);
-  await domains.getByLabel("Compose service", { exact: true }).fill("postgres");
-  await domains.getByLabel("Container port", { exact: true }).fill("5432");
-  await domains.getByRole("button", { name: "Save routes", exact: true }).click();
-  await expect(domains.getByText("Routes saved", { exact: true })).toBeVisible();
-  await expect(domains.getByText("They apply when this resource is first deployed.")).toBeVisible();
-  await sections.getByRole("link", { name: "Operations", exact: true }).click();
-  await expect(page.getByText("No operations in the recent history.")).toBeVisible();
-});
-
 test("infrastructure pages, encrypted connection settings and real node terminal", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

@@ -37,6 +37,7 @@ import { currentTeam, memberManagement, teamRoleDescriptions, teamRoleLabels, ty
 import { useOnline } from "../lib/hooks";
 import { useSession, useSwitchTeam } from "../lib/session";
 import { inputClass, listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
+import { TemplateRepositories } from "../components/TemplateRepositories";
 
 function RoleSelect({ id, value, onChange, allowOwner }: { id: string; value: TeamRole; onChange: (role: TeamRole) => void; allowOwner: boolean }) {
   return (
@@ -493,6 +494,7 @@ export function TeamPage() {
         {manager && <TeamSecondFactor team={team} canChange={owner} />}
         {manager && <TeamQuota teamId={team.id} admin={Boolean(session?.is_admin)} />}
         {manager && <DeploymentPolicy scope="team" id={team.id} />}
+        {manager && <TemplateRepositories scope={{ kind: "team", teamId: team.id }} />}
         <Section title="Create another team">
           <CreateTeam />
         </Section>

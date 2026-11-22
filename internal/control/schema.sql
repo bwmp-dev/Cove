@@ -863,3 +863,16 @@ ALTER TABLE panel_channel_observations ADD COLUMN IF NOT EXISTS source_generatio
 
 ALTER TABLE workload_security_observations ADD COLUMN IF NOT EXISTS attempted_at timestamptz;
 ALTER TABLE workload_security_observations ALTER COLUMN observed_at DROP NOT NULL;
+
+CREATE TABLE IF NOT EXISTS template_repositories (
+ id text PRIMARY KEY, team_id text REFERENCES teams(id) ON DELETE CASCADE,
+ name text NOT NULL, kind text NOT NULL CHECK(kind IN ('git','index')),
+ url text NOT NULL, ref text NOT NULL DEFAULT '', revision text NOT NULL DEFAULT '',
+ snapshot jsonb, last_error text NOT NULL DEFAULT '', checked_at timestamptz,
+ next_refresh_at timestamptz NOT NULL DEFAULT now(), refresh_until timestamptz NOT NULL DEFAULT '-infinity'
+);
+CREATE TABLE IF NOT EXISTS team_templates (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ id text NOT NULL, definition jsonb NOT NULL, revision text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(team_id,id)
+);

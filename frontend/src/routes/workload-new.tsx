@@ -1,7 +1,7 @@
 import { Boxes } from "lucide-react";
 import { useState } from "react";
 import { TemplateBrowser } from "../components/TemplateBrowser";
-import type { ResourceDraft } from "../lib/templates";
+import type { ResourceDraft } from "../api/templates";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { errorMessage } from "../api/client";

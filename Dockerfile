@@ -34,7 +34,7 @@ COPY --from=backend /out/cove-worker-linux-${TARGETARCH} /usr/local/bin/cove-wor
 ENTRYPOINT ["/usr/local/bin/cove-worker", "daemon"]
 
 FROM alpine:3.23 AS panel
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 cove
+RUN apk add --no-cache ca-certificates git && adduser -D -u 10001 cove
 WORKDIR /app
 COPY --from=backend /out/ /app/bin/
 COPY release-signatures/ /app/bin/
