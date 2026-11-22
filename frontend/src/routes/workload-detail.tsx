@@ -48,7 +48,7 @@ import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList,
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can } from "../lib/permissions";
-import { actionLabels, activeOperation, allowedActions, isActive, stateLabels, workloadKind } from "../lib/operations";
+import { actionLabels, activeOperation, allowedActions, isActive, latestDeploymentOperation, stateLabels, workloadKind } from "../lib/operations";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -177,7 +177,7 @@ function useResourceActions(workload: Workload) {
         <div className="flex flex-wrap items-center gap-2">
           {allowedActions(kind).filter(action => !workload.preview_source_id || action === "stop").map((action) => {
             const Icon = actionIcons[action];
-            const pending = queue.isPending && queue.variables === action;
+            const pending = queue.isPending && queue.variables.action === action;
             const label = kind === "job" && action === "deploy" ? "Deploy and run" : actionLabels[action];
             return (
               <Button
@@ -186,7 +186,7 @@ function useResourceActions(workload: Workload) {
                 disabled={blocked}
                 aria-describedby={active ? statusId : undefined}
                 pending={pending}
-                onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate(action))}
+                onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate({ action }))}
               >
                 {!pending && <Icon aria-hidden className="size-3.5" />}
                 {label}
@@ -207,7 +207,7 @@ function useResourceActions(workload: Workload) {
           onCancel={() => setConfirmStop(false)}
           onConfirm={() => {
             setConfirmStop(false);
-            queue.mutate("stop");
+            queue.mutate({ action: "stop" });
           }}
         >
           {kind === "job"
@@ -217,7 +217,7 @@ function useResourceActions(workload: Workload) {
         {queue.isSuccess && (
           <Notice
             tone="success"
-            title={`${actionLabels[queue.variables]} queued`}
+            title={`${actionLabels[queue.variables.action]} queued`}
             action={
               <Link to="/operations/$operationId" params={{ operationId: queue.data.id }} className={buttonClass("ghost")}>
                 View operation
@@ -226,7 +226,7 @@ function useResourceActions(workload: Workload) {
           />
         )}
         {queue.isError && (
-          <Notice tone={isStatus(queue.error, 409) ? "warn" : "error"} title={`Could not queue ${actionLabels[queue.variables].toLowerCase()}`}>
+          <Notice tone={isStatus(queue.error, 409) ? "warn" : "error"} title={`Could not queue ${actionLabels[queue.variables.action].toLowerCase()}`}>
             {isStatus(queue.error, 409) ? "Another operation is already active for this resource. Wait for it to finish." : errorMessage(queue.error)}
           </Notice>
         )}
@@ -243,7 +243,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
   const kind = workloadKind(workload.kind);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   const placement = findPlacement(projects.data, workload.environment_id, workload.project_id);
-  const latest = operations.data?.find((operation) => operation.workload_id === workload.id);
+  const latest = operations.data ? latestDeploymentOperation(operations.data, workload.id) : undefined;
 
   return (
     <>
@@ -542,9 +542,9 @@ export function ResourceOverview() {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const projects = useQuery(projectsQuery);
   const kind = workloadKind(workload.kind);
-  const history = useMemo(() => (operations.data ?? []).filter((operation) => operation.workload_id === workload.id), [operations.data, workload.id]);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
-  const latest = history[0];
+  // An active image check shows its progress here; otherwise housekeeping checks do not replace the latest deployment.
+  const latest = active ?? (operations.data ? latestDeploymentOperation(operations.data, workload.id) : undefined);
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">

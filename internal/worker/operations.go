@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	PullLatest             bool                     `json:"pull_latest,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
@@ -51,6 +52,7 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
+	ImageCheck *ImageCheck    `json:"image_check,omitempty"`
 	ID         string         `json:"id"`
 	Workload   string         `json:"workload"`
 	Action     string         `json:"action"`
@@ -167,6 +169,9 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.PullLatest && (r.Action != "deploy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || len(r.ImagePins) > 0) {
+		return errors.New("pull latest requires an unpinned service deployment")
+	}
 	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
 		return errors.New("preview deployment must use a pinned revision and isolated configuration")
 	}
@@ -227,6 +232,10 @@ func ValidateRequest(r Request) error {
 			return errors.New("previews require a repository Compose file")
 		}
 	case "stop", "start", "restart":
+	case "image_check":
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("image checks require a service outside managed previews")
+		}
 	case "routes":
 		if r.Kind == "job" {
 			return errors.New("only services can have routes")
@@ -609,6 +618,7 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	if readErr == nil {
 		j.Operation.Revision = persisted.Operation.Revision
 		j.Operation.Preview = persisted.Operation.Preview
+		j.Operation.ImageCheck = persisted.Operation.ImageCheck
 		j.CancelRequested = persisted.CancelRequested
 		committed = persisted.RouteChange != nil && persisted.RouteChange.Committed
 	}
@@ -684,7 +694,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		env = append(env, k+"="+v)
 		log.secrets = append(log.secrets, v)
 	}
-	if r.Registry != nil && r.Action == "deploy" {
+	if r.Registry != nil && (r.Action == "deploy" || r.Action == "image_check") {
 		log.secrets = append(log.secrets, r.Registry.Password)
 		config, err := registryConfig(dir, r.Registry)
 		if err != nil {
@@ -706,6 +716,13 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		err := e.updateRoutes(ctx, r, dir, log)
 		if err != nil {
 			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "image_check" {
+		err := e.performImageCheck(ctx, r, env, log)
+		if err != nil {
+			fmt.Fprintln(log, "Image check failed:", err)
 		}
 		return err
 	}
@@ -961,6 +978,11 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), "config", "--quiet"), env, log); err != nil {
 			return err
+		}
+		if r.PullLatest {
+			if err = e.Run(ctx, dir, append(append([]string{}, args...), "pull", "--ignore-buildable", "--policy", "always"), env, log); err != nil {
+				return err
+			}
 		}
 		if err = e.buildImages(ctx, dir, args, env, log); err != nil {
 			return err

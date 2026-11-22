@@ -33,6 +33,7 @@ type Probe struct {
 	PrivateLinks        bool         `json:"private_links"`
 	LiveRoutes          bool         `json:"live_routes"`
 	RoutePolicies       bool         `json:"route_policies"`
+	ImageLifecycle      bool         `json:"image_lifecycle"`
 	Protocol            int          `json:"protocol"`
 	OS                  string       `json:"os"`
 	Arch                string       `json:"arch"`
@@ -49,6 +50,11 @@ func Inspect(ctx context.Context) Probe {
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	p.RoutePolicies = true
+	if _, err := exec.CommandContext(ctx, "docker", "buildx", "version").Output(); err == nil {
+		if help, err := exec.CommandContext(ctx, "docker", "compose", "pull", "--help").Output(); err == nil {
+			p.ImageLifecycle = strings.Contains(string(help), "--policy") && strings.Contains(string(help), "--ignore-buildable")
+		}
+	}
 	if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Output(); err == nil {
 		p.Docker = strings.TrimSpace(string(out))
 	}

@@ -16,10 +16,22 @@ export function isActive(state: OperationState) {
   return state === "queued" || state === "running";
 }
 
+// Image checks are housekeeping: they run hourly in the background and never change what is deployed,
+// so deployment summaries skip them. Operation lists and details still show them.
+export function isHousekeeping(operation: Operation) {
+  return operation.action === "image_check";
+}
+
+// The newest operation that changed or acted on the resource, ignoring housekeeping.
+export function latestDeploymentOperation(operations: Operation[], workloadId: string) {
+  return operations.find((operation) => operation.workload_id === workloadId && !isHousekeeping(operation));
+}
+
 // The list endpoint returns operations newest first.
 export function latestByWorkload(operations: Operation[]) {
   const latest = new Map<string, Operation>();
   for (const operation of operations) {
+    if (isHousekeeping(operation)) continue;
     const current = latest.get(operation.workload_id);
     if (!current || Date.parse(operation.created_at) > Date.parse(current.created_at)) {
       latest.set(operation.workload_id, operation);
@@ -53,6 +65,7 @@ export const actionLabels = {
   stop: "Stop",
   restart: "Restart",
   routes: "Update routes",
+  image_check: "Check images",
 } as const;
 
 export const stateLabels: Record<OperationState, string> = {

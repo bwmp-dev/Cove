@@ -14,6 +14,8 @@ import { GitHubSource } from "../components/GitHubApp";
 import { Networks } from "../components/Networks";
 import { PrivateNetwork } from "../components/PrivateNetwork";
 import { ResourceRegistry } from "../components/ResourceRegistry";
+import { ResourceImages } from "../components/ResourceImages";
+import { supportsImageLifecycle } from "../lib/images";
 import { RouteEditor } from "../components/RouteEditor";
 import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
 import { Webhook } from "../components/Webhook";
@@ -641,7 +643,7 @@ export function ResourceNetworking() {
 export function ResourceRegistryPage() {
   const workload = useResource();
   const active = useActiveOperation(workload.id);
-  return <ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />;
+  return <div className="space-y-6"><ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />{supportsImageLifecycle(workload) && <ResourceImages workload={workload} />}</div>;
 }
 
 export function ResourceLimits() {

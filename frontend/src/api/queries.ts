@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, Node, Operation, OperationLogs, TeamMembership, Workload, WorkloadImages, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -13,6 +13,7 @@ export const keys = {
   workload: (id: string) => ["workloads", id] as const,
   workloadRuntime: (id: string) => ["workloads", id, "runtime"] as const,
   workloadLogs: (id: string) => ["workloads", id, "logs"] as const,
+  workloadImages: (id: string) => ["workloads", id, "images"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -117,4 +118,12 @@ export const workloadLogsQuery = (id: string) =>
     staleTime: 0,
     gcTime: 0,
     retry: false,
+  });
+
+// Cached results only; the API never contacts a registry on read. The key includes the newest finished
+// check, deploy or rollback so a completed check or a new deployment refreshes the result.
+export const workloadImagesQuery = (id: string, refresh: string | null) =>
+  queryOptions({
+    queryKey: [...keys.workloadImages(id), refresh] as const,
+    queryFn: ({ signal }) => request<WorkloadImages>("GET", `/api/workloads/${encodeURIComponent(id)}/images`, undefined, signal),
   });

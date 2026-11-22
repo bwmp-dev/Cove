@@ -187,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/workloads/{id}/logs", s.admin(http.HandlerFunc(s.workloadLogs)))
 	mux.Handle("GET /api/workloads/{id}/backups", s.admin(http.HandlerFunc(s.workloadBackups)))
 	mux.Handle("GET /api/workloads/{id}/releases", s.admin(http.HandlerFunc(s.workloadReleases)))
+	mux.Handle("GET /api/workloads/{id}/images", s.admin(http.HandlerFunc(s.workloadImages)))
 	mux.Handle("GET /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.getBackupPolicy)))
 	mux.Handle("PUT /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.setBackupPolicy)))
 	mux.Handle("GET /api/workloads/{id}/webhook", s.admin(http.HandlerFunc(s.getWebhook)))

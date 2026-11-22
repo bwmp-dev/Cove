@@ -59,6 +59,8 @@ Managed HTTP routes optionally carry a validated policy for path prefixes, reque
 
 Runtime inspection exposes Docker health separately from lifecycle state and reports exit codes plus successful Compose init completion. Job schedules use a saved IANA timezone (UTC for existing schedules), with embedded timezone data in the control plane. These changes do not alter container restart policies or replace the guarded-deploy algorithm: guarded deploys test a stateless candidate, then perform ordinary Compose replacement with a possible brief interruption; they are not zero-downtime route handoffs.
 
+Image lifecycle checks are durable, cancellable metadata operations on upgraded workers. Background checks use the existing workload lock and queue, with at most four background checks at once, and run hourly for deployed, non-stopped services outside managed previews. Workers compare registry manifests and platform configuration digests against deployed images, using the resource's team registry connection. Jobs are excluded so metadata checks cannot consume scheduled run slots. Explicit image refresh remains an ordinary approved/frozen deploy operation with forced pulls; existing releases remain available for rollback.
+
 ## Completion requirement
 
 The user explicitly requires a fully fleshed-out, production-ready product, not a proof of concept. The delivery order above describes implementation increments, not acceptable stopping points. Release acceptance must cover authenticated dashboard workflows, durable execution and recovery, secret handling, Git/build deployment, routing, backup/restore, installation/upgrades, and real Linux validation. Unverified production behavior must remain explicitly identified.

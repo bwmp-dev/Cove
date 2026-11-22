@@ -677,3 +677,11 @@ $$;
 
 -- Deploy track: per-job calendar timezone. Existing schedules retain UTC semantics.
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timezone text NOT NULL DEFAULT 'UTC';
+
+-- Deploy track: bounded hourly image digest checks use the existing durable operation queue.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_image_check_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS due_image_checks ON workloads(next_image_check_at) WHERE kind='service';
+-- Metadata polling must not generate generic deployment notifications every hour.
+DROP TRIGGER IF EXISTS cove_operation_notification ON operations;
+CREATE TRIGGER cove_operation_notification AFTER UPDATE OF state ON operations FOR EACH ROW
+ WHEN (OLD.state IS DISTINCT FROM NEW.state AND NEW.action <> 'image_check' AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();

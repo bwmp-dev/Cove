@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { rememberTeam } from "../lib/team";
 import { keys } from "./queries";
-import type { Enrollment, NodeInput, OperationAction, QueuedOperation, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
+import type { Enrollment, NodeInput, OperationRequest, QueuedOperation, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
 
 // Mutations carrying credentials (passwords, setup commands, secrets) use gcTime 0 so
 // their variables and results leave the in-memory mutation cache once the form unmounts.
@@ -105,8 +105,8 @@ export function useUpdateRoutes(workloadId: string) {
 export function useQueueOperation(workloadId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (action: Exclude<OperationAction, "routes">) =>
-      request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, { action }),
+    mutationFn: (input: OperationRequest) =>
+      request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, input),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
   });
 }

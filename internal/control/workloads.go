@@ -159,15 +159,16 @@ func (s *Server) listWorkloads(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Action   string `json:"action"`
-		Release  string `json:"release"`
-		BackupID string `json:"backup_id"`
+		Action     string `json:"action"`
+		Release    string `json:"release"`
+		BackupID   string `json:"backup_id"`
+		PullLatest bool   `json:"pull_latest"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
 	switch in.Action {
-	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill":
+	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check":
 	default:
 		http.Error(w, "unsupported action", 400)
 		return
@@ -201,6 +202,29 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	id := resourceID()
 	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
+	request.PullLatest = in.PullLatest
+	if in.Action == "image_check" {
+		if config.Kind == "job" {
+			http.Error(w, "image checks require a service", 400)
+			return
+		}
+		if in.PullLatest {
+			http.Error(w, "pull latest requires a deploy operation", 400)
+			return
+		}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: "image_check", Kind: "service"}
+	}
+	if in.PullLatest || in.Action == "image_check" {
+		var supported bool
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
+			http.Error(w, "worker capabilities unavailable", 503)
+			return
+		}
+		if !supported {
+			http.Error(w, "upgrade and verify the worker before using image lifecycle operations", 409)
+			return
+		}
+	}
 	if in.Action == "drill" {
 		var supported bool
 		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'restore_drills')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
@@ -258,6 +282,12 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "could not queue operation", 500)
 		return
+	}
+	if in.Action == "image_check" {
+		if _, err = tx.Exec(r.Context(), `UPDATE workloads SET next_image_check_at=now()+interval '1 hour' WHERE id=$1`, request.Workload); err != nil {
+			http.Error(w, "could not schedule the next image check", 503)
+			return
+		}
 	}
 	if in.Action == "stop" || in.Action == "start" || in.Action == "restart" || in.Action == "deploy" || in.Action == "rollback" {
 		if _, err = tx.Exec(r.Context(), "UPDATE workloads SET manually_stopped=$2 WHERE id=$1", request.Workload, in.Action == "stop"); err != nil {
@@ -399,6 +429,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if err := s.scheduleJobs(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
+		if err := s.scheduleImageChecks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
 		if err := s.reconcilePreviews(ctx); err != nil && ctx.Err() == nil {

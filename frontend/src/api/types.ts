@@ -8,6 +8,8 @@ export interface Capabilities {
   terminal?: boolean;
   infrastructure?: boolean;
   route_policies?: boolean;
+  // Docker Buildx is present, so the worker can check deployed images and pull before redeploying.
+  image_lifecycle?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -175,7 +177,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {
@@ -187,6 +189,35 @@ export interface WorkerOperation {
   finished_at?: string;
   error?: string;
   revision?: string;
+  image_check?: ImageCheck;
+}
+
+export type ImageStatusValue = "current" | "update_available" | "pinned" | "unpublished" | "unknown";
+
+export interface ImageStatus {
+  service: string;
+  reference: string;
+  image_id: string;
+  registry_digest?: string;
+  status: ImageStatusValue;
+  message?: string;
+  release_notes?: string;
+}
+
+export interface ImageCheck {
+  checked_at: string;
+  images: ImageStatus[];
+}
+
+// The most recent successful image check. Stale means a deploy or rollback succeeded after it.
+export type WorkloadImages =
+  | { images: ImageStatus[]; stale: boolean; checked_at: null; operation_id?: undefined }
+  | { images: ImageStatus[]; stale: boolean; checked_at: string; operation_id: string };
+
+export interface OperationRequest {
+  action: Exclude<OperationAction, "routes">;
+  // Deploy only: pull the configured tags before building and replacing containers.
+  pull_latest?: boolean;
 }
 
 export interface Operation {

@@ -354,6 +354,15 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if r.PullLatest || r.Action == "image_check" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before using image lifecycle operations")
+		}
+	}
 	if r.Action == "deploy" && worker.HasRoutePolicies(r.Routes) {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'route_policies')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
@@ -492,7 +501,7 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		}
 		r.Environment = resolved
 	}
-	if r.Action == "deploy" && r.Registry == nil {
+	if (r.Action == "deploy" || r.Action == "image_check") && r.Registry == nil {
 		var id string
 		err := s.DB.QueryRow(ctx, `SELECT connection_id FROM workload_connections WHERE workload_id=$1 AND kind='registry'`, r.Workload).Scan(&id)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
