@@ -27,6 +27,7 @@ def output_lines(*args):
 
 def main():
     name = "cove-browser-" + secrets.token_hex(6)
+    panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
     network_created = False
     ingress = []
@@ -50,7 +51,7 @@ def main():
                     "services":{"panel":{"loadBalancer":{"servers":[{"url":"http://panel:8080"}]}}}},
             "tls":{"certificates":[{"certFile":"/fixture/cert.pem","keyFile":"/fixture/key.pem"}]}}))
         try:
-            run("docker", "build", "-t", "cove:development", ".")
+            run("docker", "build", "-t", panel_image, ".")
             run("docker", "network", "create", name, stdout=subprocess.DEVNULL)
             network_created = True
             for suffix, image, extra in [
@@ -74,7 +75,7 @@ def main():
             env.update(DATABASE_URL=f"postgres://postgres:{env['POSTGRES_PASSWORD']}@db:5432/cove?sslmode=disable", COVE_PUBLIC_URL=origin)
             options = [item for key in ("DATABASE_URL", "COVE_PUBLIC_URL", "COVE_ADMIN_PASSWORD", "COVE_ADMIN_TOKEN", "COVE_ENCRYPTION_KEY") for item in ("-e", key)]
             run("docker", "run", "-d", "--name", name + "-panel", "--network", name,
-                "--network-alias", "panel", *options, "cove:development", env=env, stdout=subprocess.DEVNULL)
+                "--network-alias", "panel", *options, panel_image, env=env, stdout=subprocess.DEVNULL)
             containers.append(name + "-panel")
             run("docker", "run", "-d", "--name", name + "-tls", "--network", name,
                 "-p", f"127.0.0.1:{port}:443", "--mount", f"type=bind,source={fixture},target=/fixture,readonly",
@@ -91,7 +92,7 @@ def main():
             else:
                 raise RuntimeError("Disposable panel did not start")
             run("go", "build", "-o", "bin/cove-worker-linux-amd64", "./cmd/cove-worker", env=env | {"GOOS": "linux", "GOARCH": "amd64"})
-            run("docker", "build", "-f", "test/worker/Dockerfile", "-t", "cove-browser-worker:development", ".", stdout=subprocess.DEVNULL)
+            run("docker", "build", "-f", "test/worker/Dockerfile", "-t", worker_image, ".", stdout=subprocess.DEVNULL)
             for resource in ("container", "network", "volume"):
                 if subprocess.run(["docker", resource, "inspect", "cove-ingress"], capture_output=True).returncode == 0:
                     raise RuntimeError("Refusing to replace an existing cove-ingress " + resource)
@@ -118,12 +119,12 @@ def main():
             # Docker helpers need the same absolute state path as this containerized worker.
             # Refuse any existing host state rather than adopting or overwriting it.
             run("docker", "run", "--rm", "--entrypoint", "sh", "-v", "/var/lib/cove:/fixture",
-                "cove-browser-worker:development", "-ec",
+                worker_image, "-ec",
                 'test -z "$(ls -A /fixture)" || { echo "Refusing existing /var/lib/cove state" >&2; exit 1; }; cp -a /var/lib/cove/. /fixture/; printf %s "$1" > /fixture/.browser-owner; chown -R cove:cove /fixture', "sh", name)
             worker_state_owned = True
             worker = name + "-worker"
             run("docker", "run", "-d", "--name", worker, "--network", name, "--network-alias", "worker",
-                "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", "cove-browser-worker:development", stdout=subprocess.DEVNULL)
+                "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
             containers.append(worker)
 
             def api(method, path, body=None, credential=None, raw=False):
@@ -191,10 +192,12 @@ def main():
                     subprocess.run(["docker", resource, "rm", "-f", "cove-ingress"] if resource == "container" else ["docker", resource, "rm", "cove-ingress"], check=False, stdout=subprocess.DEVNULL)
                 if worker_state_owned:
                     run("docker", "run", "--rm", "--entrypoint", "sh", "-v", "/var/lib/cove:/fixture",
-                        "cove-browser-worker:development", "-ec",
+                        worker_image, "-ec",
                         'test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; find /fixture -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +', "sh", name)
                 if network_created:
                     subprocess.run(["docker", "network", "rm", name], check=False, stdout=subprocess.DEVNULL)
+                for image in (worker_image, panel_image):
+                    subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":
