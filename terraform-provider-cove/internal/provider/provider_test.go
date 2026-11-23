@@ -358,6 +358,7 @@ func TestRoutesRefreshKeepsHiddenForwardAuthAndPolicies(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes[0].Policy.ForwardAuth.URL = ""
+	routes[0].Policy.ResponseHeaders["X-App"] = worker.RedactedRouteHeader
 	fixture.objects["/workloads/app"] = map[string]any{"routes": routes}
 	r := &managedResource{kind: "routes", api: api}
 	var definition resource.SchemaResponse

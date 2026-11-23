@@ -22,7 +22,7 @@ func TestRoutePolicyPersistenceAndCapability(t *testing.T) {
 	f.call("root", "default", "PUT", "/api/workloads/"+id+"/routes", request, 200)
 	response := f.call("root", "default", "GET", "/api/workloads/"+id, nil, 200)
 	var saved workloadInput
-	if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil || !worker.RoutesEqual(saved.Routes, routes) {
+	if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil || !worker.RoutesEqual(saved.Routes, routesWithoutSecrets(routes)) {
 		t.Fatal(response.Body.String(), err)
 	}
 	response = f.call("root", "default", "PUT", "/api/workloads/"+id+"/routes", request, 200)

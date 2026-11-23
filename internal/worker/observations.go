@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"time"
 )
@@ -141,8 +142,24 @@ func (e *Engine) ObserveWorkload(ctx context.Context, id string) (*WorkloadObser
 	if err != nil {
 		return nil, errors.New("route observations unavailable")
 	}
+	var acme []CertificateObservation
+	var acmeIndexes []int
 	for _, route := range owned[id] {
-		result.Certificates = append(result.Certificates, CertificateObservation{Domain: route.Domain})
+		observation := CertificateObservation{Domain: route.Domain}
+		if route.Policy != nil && route.Policy.CertificateID != "" {
+			if material, err := e.readRouteCertificate(id, route.Policy.CertificateID); err == nil {
+				if block, _ := pem.Decode([]byte(material.CertificatePEM)); block != nil {
+					if certificate, err := x509.ParseCertificate(block.Bytes); err == nil {
+						stamp := certificate.NotAfter.UTC()
+						observation.ExpiresAt = &stamp
+					}
+				}
+			}
+		} else if route.Policy == nil || route.Policy.CertificateSource != "default" {
+			acmeIndexes = append(acmeIndexes, len(result.Certificates))
+			acme = append(acme, observation)
+		}
+		result.Certificates = append(result.Certificates, observation)
 	}
 	if len(result.Certificates) > 0 {
 		label, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "cove.managed"}}`, "cove-ingress")
@@ -154,7 +171,10 @@ func (e *Engine) ObserveWorkload(ctx context.Context, id string) (*WorkloadObser
 			if e.Run(ctx, e.Root, []string{"docker", "exec", "cove-ingress", "cat", file}, nil, out) != nil {
 				continue
 			}
-			applyCertificateExpiries(out.data.Bytes(), result.Certificates)
+			applyCertificateExpiries(out.data.Bytes(), acme)
+		}
+		for i, index := range acmeIndexes {
+			result.Certificates[index] = acme[i]
 		}
 	}
 	return result, nil
@@ -184,7 +204,11 @@ func applyCertificateExpiries(data []byte, routes []CertificateObservation) {
 				continue
 			}
 			for i := range routes {
-				if cert.VerifyHostname(routes[i].Domain) == nil && (routes[i].ExpiresAt == nil || cert.NotAfter.After(*routes[i].ExpiresAt)) {
+				covered := cert.VerifyHostname(routes[i].Domain) == nil
+				if strings.HasPrefix(routes[i].Domain, "*.") {
+					covered = slices.Contains(cert.DNSNames, routes[i].Domain)
+				}
+				if covered && (routes[i].ExpiresAt == nil || cert.NotAfter.After(*routes[i].ExpiresAt)) {
 					stamp := cert.NotAfter.UTC()
 					routes[i].ExpiresAt = &stamp
 				}

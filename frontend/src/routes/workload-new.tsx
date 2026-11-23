@@ -1,5 +1,5 @@
 import { Boxes } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { TemplateBrowser } from "../components/TemplateBrowser";
 import type { ResourceDraft } from "../api/templates";
 import { useQuery } from "@tanstack/react-query";
@@ -12,7 +12,7 @@ import { WorkloadForm, type ProviderLink } from "../components/WorkloadForm";
 import { DatabaseForm } from "../components/DatabaseForm";
 import type { WorkloadInput } from "../api/types";
 import { Breadcrumbs, Button, LoadingRows, Notice, PageHeader, QueryError } from "../components/ui";
-import { saveProviderSource } from "../api/git-providers";
+import { saveProviderSource, type ProviderSourceInput } from "../api/git-providers";
 import { findPlacement, type Placement } from "../lib/hierarchy";
 import { buttonClass } from "../lib/styles";
 
@@ -57,15 +57,32 @@ export function NewWorkloadPage() {
   const [unlinked, setUnlinked] = useState<{ id: string; message: string } | null>(null);
   const nodes = useQuery(nodesQuery);
   const projects = useQuery(projectsQuery);
-  const create = useCreateWorkload();
+  // The input of the creation in progress; held outside the mutation so routes, typed header values, forward-auth URLs
+  // and the source token never become mutation variables.
+  const submitted = useRef<WorkloadInput | null>(null);
+  const create = useCreateWorkload(() => {
+    if (!submitted.current) throw new Error("No resource to create.");
+    return submitted.current;
+  });
   const navigate = useNavigate();
   const placement = findPlacement(projects.data, search.environment, search.project);
 
-  async function finish(id: string, input: WorkloadInput, provider?: ProviderLink) {
-    if (provider && input.source) {
+  function submit(input: WorkloadInput, provider?: ProviderLink) {
+    const link = provider && input.source ? { ...provider, branch: input.source.branch, compose_path: input.source.compose_path, ...(input.source.inline_compose ? { inline_compose: true } : {}) } : undefined;
+    submitted.current = input;
+    create.mutate(undefined, {
+      onSuccess: ({ id }) => void finish(id, link),
+      onSettled: () => {
+        submitted.current = null;
+      },
+    });
+  }
+
+  async function finish(id: string, link?: ProviderSourceInput) {
+    if (link) {
       setLinking(true);
       try {
-        await saveProviderSource(id, { ...provider, branch: input.source.branch, compose_path: input.source.compose_path, ...(input.source.inline_compose ? { inline_compose: true } : {}) });
+        await saveProviderSource(id, link);
       } catch (error) {
         setUnlinked({ id, message: errorMessage(error) });
         return;
@@ -143,7 +160,7 @@ export function NewWorkloadPage() {
           serverError={create.isError ? errorMessage(create.error) : null}
           submitLabel="Create resource"
           cancel={cancel}
-          onSubmit={(input, provider) => create.mutate(input, { onSuccess: ({ id }) => void finish(id, input, provider) })}
+          onSubmit={submit}
         />
         </>
       )}

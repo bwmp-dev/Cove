@@ -1467,3 +1467,37 @@ CREATE TABLE IF NOT EXISTS object_buckets (
  configuration bytea NOT NULL, state text NOT NULL DEFAULT 'pending',
  created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(workload_id)
 );
+
+-- Resource-scoped immutable TLS versions keep private keys outside configuration and history.
+CREATE TABLE IF NOT EXISTS route_certificates (
+ id text PRIMARY KEY,
+ workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ name text NOT NULL,
+ material bytea NOT NULL,
+ metadata jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS route_certificates_workload_idx ON route_certificates(workload_id);
+
+-- Issuer ownership and pending private requests survive outages and prevent premature resource deletion.
+ALTER TABLE route_certificates ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'uploaded';
+CREATE TABLE IF NOT EXISTS route_certificate_issuers (
+ id text PRIMARY KEY,
+ workload_id text NOT NULL REFERENCES workloads(id),
+ zone_id text NOT NULL REFERENCES cloudflare_zones(zone_id),
+ name text NOT NULL,
+ provider text NOT NULL CHECK (provider IN ('cloudflare_origin')),
+ domains text[] NOT NULL,
+ validity_days integer NOT NULL,
+ auto_renew boolean NOT NULL,
+ phase text NOT NULL DEFAULT 'requesting',
+ state bytea NOT NULL,
+ certificate_id text REFERENCES route_certificates(id),
+ operation_id text NOT NULL DEFAULT '',
+ last_error text NOT NULL DEFAULT '',
+ next_check_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS route_certificate_issuers_due ON route_certificate_issuers(next_check_at) WHERE next_check_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS route_certificate_issuers_workload ON route_certificate_issuers(workload_id);

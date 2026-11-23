@@ -18,7 +18,7 @@ import (
 func mergedProtectedRoutes() []worker.Route {
 	return []worker.Route{{Domain: "app.example.test", Service: "web", Port: 8080, Auth: "user:$2y$10$" + strings.Repeat("a", 53), Policy: &worker.RoutePolicy{
 		PathPrefix: "/api", SecurityHeaders: true, IPAllowList: []string{"192.0.2.0/24"}, Sticky: true,
-		RequestHeaders: map[string]string{"X-App": "api"}, ResponseHeaders: map[string]string{"X-Version": "v1"},
+		RequestHeaders: map[string]string{"X-App": "protected-request-header-marker"}, ResponseHeaders: map[string]string{"X-Version": "protected-response-header-marker"},
 		CertificateSource: "default", Upstreams: []worker.RouteUpstream{{Service: "other", Port: 8081}},
 		Maintenance: &worker.RouteMaintenance{Enabled: true, HTML: "<h1>Unavailable</h1>"}, ErrorPages: map[string]string{"503": "<h1>Retry</h1>"},
 		ForwardAuth: &worker.RouteForwardAuth{URL: "https://auth.example.test/check?token=protected-url-marker", ResponseHeaders: []string{"Remote-User"}},
@@ -44,7 +44,7 @@ func TestDeploysMergeRouteHistoryAndPortableRoundTrip(t *testing.T) {
 		manifest := projectConfiguration{APIVersion: "cove/v1", Project: "Project", Resources: []configurationResource{{Key: "app", Configuration: old}}}
 		public := publicProjectConfiguration(manifest, includeSecrets)
 		data := encode(public)
-		for _, marker := range []string{routes[0].Auth, "protected-url-marker", "protected-path-marker"} {
+		for _, marker := range []string{routes[0].Auth, "protected-url-marker", "protected-path-marker", "protected-request-header-marker", "protected-response-header-marker", "PRIVATE KEY", "CERTIFICATE REQUEST", "private_key_pem", "ca-account-marker"} {
 			if strings.Contains(string(data), marker) {
 				t.Fatal("portable configuration disclosed route protection", includeSecrets)
 			}
@@ -230,6 +230,20 @@ func TestDeploysMergePublicRoutePoliciesAreDocumented(t *testing.T) {
 func TestDeploysMergeStoredHistoryDraftAndExportProtectRoutes(t *testing.T) {
 	f, id := variablesFixture(t)
 	config := workloadInput{Name: "Variables", NodeID: "variable-node", Kind: "service", Compose: "services:\n  web:\n    image: busybox:1.37\n", Routes: mergedProtectedRoutes()}
+	f.sql(`UPDATE nodes SET capabilities=capabilities||'{"route_protocol":4,"route_policies":true}' WHERE id='variable-node'`)
+	certificate, key := certificateFixture(t, "app.example.test", "service.example.test")
+	version := jsonString(t, f.call("root", "default", "POST", "/api/workloads/"+id+"/certificates", routeCertificateInput{Name: "Private version", CertificatePEM: certificate, PrivateKeyPEM: key}, 201), "id")
+	for i := range config.Routes {
+		config.Routes[i].Policy.CertificateSource = "uploaded"
+		config.Routes[i].Policy.CertificateID = version
+	}
+	zone := strings.Repeat("a", 32)
+	secret, err := f.s.sealJSON(map[string]string{"private_key_pem": key, "csr": "CERTIFICATE REQUEST", "token": "ca-account-marker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sql(`INSERT INTO cloudflare_zones(zone_id,domain,configuration) VALUES($1,'example.test',$2)`, zone, secret)
+	f.sql(`INSERT INTO route_certificate_issuers(id,workload_id,zone_id,name,provider,domains,validity_days,auto_renew,state) VALUES('export-issuer',$1,$2,'Export issuer','cloudflare_origin',ARRAY['app.example.test'],7,false,$3)`, id, zone, secret)
 	protected, err := f.s.sealJSON(config)
 	if err != nil {
 		t.Fatal(err)
@@ -237,7 +251,7 @@ func TestDeploysMergeStoredHistoryDraftAndExportProtectRoutes(t *testing.T) {
 	f.sql(`UPDATE workloads SET configuration=$2 WHERE id=$1`, id, protected)
 	assertSafe := func(body []byte) {
 		t.Helper()
-		for _, marker := range []string{config.Routes[0].Auth, "protected-url-marker", "protected-path-marker"} {
+		for _, marker := range []string{config.Routes[0].Auth, "protected-url-marker", "protected-path-marker", "protected-request-header-marker", "protected-response-header-marker", "PRIVATE KEY", "CERTIFICATE REQUEST", "private_key_pem", "ca-account-marker"} {
 			if bytes.Contains(body, []byte(marker)) {
 				t.Fatal("route protection disclosed", marker)
 			}

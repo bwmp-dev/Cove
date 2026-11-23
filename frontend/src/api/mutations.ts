@@ -78,11 +78,13 @@ export function useVerifyNode() {
   });
 }
 
-export function useCreateWorkload() {
+// The input can carry routes with typed header values and forward-auth URLs, and a source access token. Mutation
+// variables stay in the cache after a failure, so the mutation takes none: mutationFn reads the input from the caller when it runs.
+export function useCreateWorkload(input: () => WorkloadInput) {
   const client = useQueryClient();
   return useMutation({
     ...transient,
-    mutationFn: (input: WorkloadInput) => request<{ id: string }>("POST", "/api/workloads", input),
+    mutationFn: () => request<{ id: string }>("POST", "/api/workloads", input()),
     onSettled: () => client.invalidateQueries({ queryKey: keys.workloads }),
   });
 }
@@ -96,11 +98,13 @@ export function useUpdateWorkload(workloadId: string) {
   });
 }
 
-export function useUpdateRoutes(workloadId: string) {
+// Routes can carry typed header values and forward-auth URLs. Mutation variables stay in the cache after a failure, so
+// the mutation takes none: mutationFn reads the routes from the caller when it runs.
+export function useUpdateRoutes(workloadId: string, routes: () => Route[]) {
   const client = useQueryClient();
   return useMutation({
     ...transient,
-    mutationFn: (routes: Route[]) => request<RoutesUpdate>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/routes`, { routes }),
+    mutationFn: () => request<RoutesUpdate>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/routes`, { routes: routes() }),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
   });
 }

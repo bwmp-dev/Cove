@@ -10,7 +10,8 @@ import (
 
 func TestRoutePolicies(t *testing.T) {
 	r := Route{Domain: "app.example.com", Service: "web", Port: 80, Policy: &RoutePolicy{PathPrefix: "/api", SecurityHeaders: true, RequestHeaders: map[string]string{"X-App": "api"}, ResponseHeaders: map[string]string{"X-Version": "1"}, IPAllowList: []string{"10.0.0.0/8", "fd00::/8"}, Upstreams: []RouteUpstream{{Service: "api", Port: 8080}}, Sticky: true, CertificateSource: "default"}}
-	data, err := ingressConfig(map[string][]Route{"app": {r, {Domain: r.Domain, Service: r.Service, Port: r.Port}}})
+	root := Route{Domain: r.Domain, Service: r.Service, Port: r.Port, Policy: &RoutePolicy{CertificateSource: "default"}}
+	data, err := ingressConfig(map[string][]Route{"app": {r, root}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +46,7 @@ func TestRoutePolicies(t *testing.T) {
 	if RoutesEqual([]Route{r}, []Route{copy}) {
 		t.Fatal("different policies compare equal")
 	}
-	changed, err := ingressConfig(map[string][]Route{"app": {copy, {Domain: r.Domain, Service: r.Service, Port: r.Port}}})
+	changed, err := ingressConfig(map[string][]Route{"app": {copy, root}})
 	if err != nil || changed == data {
 		t.Fatal("changed middleware must change router identity", err)
 	}

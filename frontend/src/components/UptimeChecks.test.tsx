@@ -85,3 +85,33 @@ it("is read-only for viewers", async () => {
   expect(screen.queryByRole("button", { name: "New check" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Edit/ })).not.toBeInTheDocument();
 });
+
+it("checks one concrete hostname under a wildcard domain and never sends the wildcard", async () => {
+  const wildcard = { ...editor, routes: [...routes, { domain: "*.shops.example.test", service: "web", port: 80 }] } as Workload;
+  const shop = { ...check, id: "u2", domain: "acme.shops.example.test", public_label: "" };
+  renderChecks(wildcard, [check, shop]);
+  // A check under the wildcard is still routed, so it is editable and not reported as unconfigured.
+  const row = (await screen.findByText("acme.shops.example.test")).closest("li") as HTMLElement;
+  expect(within(row).queryByText(/no longer configured/)).not.toBeInTheDocument();
+  expect(within(row).getByRole("button", { name: "Edit check for acme.shops.example.test" })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "New check" }));
+  fireEvent.click(screen.getByRole("combobox", { name: "Domain" }));
+  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["*.shops.example.test", "www.example.test"]);
+  fireEvent.click(screen.getByRole("option", { name: "www.example.test" }));
+  expect(screen.queryByLabelText("Hostname to check")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("combobox", { name: "Domain" }));
+  fireEvent.click(screen.getByRole("option", { name: "*.shops.example.test" }));
+  const host = screen.getByLabelText("Hostname to check");
+  expect(host).toHaveAccessibleDescription(/The wildcard itself is never requested/);
+  for (const value of ["", "a.b", "*", "-bad"]) {
+    fireEvent.change(host, { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Create check" }));
+    expect(await screen.findByText("Enter one DNS label, such as shop, to check under *.shops.example.test.")).toBeInTheDocument();
+  }
+  expect(request).not.toHaveBeenCalledWith("POST", expect.anything(), expect.anything());
+  fireEvent.change(host, { target: { value: "Beta" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create check" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/workloads/w1/uptime", expect.objectContaining({ domain: "beta.shops.example.test", path: "/" })));
+  expect(vi.mocked(request).mock.calls.filter(([method]) => method === "POST").map(([, , body]) => (body as { domain: string }).domain)).toEqual(["beta.shops.example.test"]);
+});

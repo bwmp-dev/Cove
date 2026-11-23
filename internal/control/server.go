@@ -379,6 +379,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/workloads", s.admin(http.HandlerFunc(s.createWorkload)))
 	mux.Handle("GET /api/workloads/{id}", s.admin(http.HandlerFunc(s.getWorkload)))
 	mux.Handle("PUT /api/workloads/{id}", s.admin(http.HandlerFunc(s.updateWorkload)))
+	for _, method := range []string{"GET", "POST"} {
+		mux.Handle(method+" /api/workloads/{id}/certificates", s.admin(http.HandlerFunc(s.routeCertificates)))
+	}
+	mux.Handle("DELETE /api/workloads/{id}/certificates/{certificate}", s.admin(http.HandlerFunc(s.routeCertificates)))
+	mux.Handle("GET /api/workloads/{id}/certificate-zones", s.admin(http.HandlerFunc(s.certificateZones)))
+	mux.Handle("GET /api/workloads/{id}/certificate-issuers", s.admin(http.HandlerFunc(s.certificateIssuers)))
+	mux.Handle("POST /api/workloads/{id}/certificate-issuers", s.admin(http.HandlerFunc(s.certificateIssuers)))
+	mux.Handle("PUT /api/workloads/{id}/certificate-issuers/{issuer}", s.admin(http.HandlerFunc(s.updateCertificateIssuer)))
+	mux.Handle("DELETE /api/workloads/{id}/certificate-issuers/{issuer}", s.admin(http.HandlerFunc(s.updateCertificateIssuer)))
 	mux.Handle("PUT /api/workloads/{id}/routes", s.admin(http.HandlerFunc(s.updateRoutes)))
 	mux.Handle("DELETE /api/workloads/{id}", s.admin(http.HandlerFunc(s.deleteWorkload)))
 	mux.Handle("GET /api/workloads/{id}/runtime", s.admin(http.HandlerFunc(s.workloadRuntime)))

@@ -11,7 +11,7 @@ import { byteLength, composeLimit, formValues, isSSHRepository, routeRows, valid
 import { ComposeEditor } from "./ComposeEditor";
 import { EnvironmentEditor } from "./EnvironmentEditor";
 import { RouteEditor } from "./RouteEditor";
-import { nodeStates } from "../lib/nodes";
+import { nodeStates, routeProtocolOf } from "../lib/nodes";
 import { Button, Field, Notice, SwitchField } from "./ui";
 import { GitProviderPicker } from "./GitProviderPicker";
 import { automaticDescription, emptySelection, reportingDescription, type ProviderRepository, type ProviderSelection, type ProviderSourceInput } from "../api/git-providers";
@@ -279,7 +279,7 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
       result.errors.repository = "Select a connection, repository and branch.";
       delete result.input;
     }
-    const checkedRoutes = values.kind === "job" ? { routes: [], errors: {} } : validateRoutes(routes);
+    const checkedRoutes = values.kind === "job" ? { routes: [], errors: {} } : validateRoutes(routes, [], [], routeProtocolOf(selectedNode));
     setErrors(result.errors);
     setRouteErrors(checkedRoutes.errors);
     if (result.input && checkedRoutes.routes && resourcePlacement) {
@@ -380,13 +380,14 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
         {values.kind === "service" && (
           <FormSection
             title="Routes"
-            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced."
+            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced. To serve a certificate you provide, upload it on the resource's Domains page after creating it."
           >
             <RouteEditor
               routes={routes}
               errors={routeErrors}
               policies={selectedNode ? Boolean(selectedNode.capabilities?.route_policies) : undefined}
               extensions={selectedNode ? (selectedNode.capabilities?.route_protocol ?? 0) >= 2 : undefined}
+              routeProtocol={routeProtocolOf(selectedNode)}
               onChange={setRoutes}
             />
           </FormSection>

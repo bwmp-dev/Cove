@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"cove/internal/worker"
 	"encoding/json"
 	"errors"
 	"io"
@@ -116,7 +117,7 @@ func (s *Server) uptimeChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	found := false
 	for _, route := range config.Routes {
-		if route.Domain == c.Domain {
+		if !strings.Contains(c.Domain, "*") && worker.RouteDomainsOverlap(route.Domain, c.Domain) {
 			found = true
 		}
 	}
@@ -283,7 +284,7 @@ func (s *Server) collectUptime(ctx context.Context) error {
 			}
 			configured := false
 			for _, route := range config.Routes {
-				if route.Domain == j.check.Domain {
+				if !strings.Contains(j.check.Domain, "*") && worker.RouteDomainsOverlap(route.Domain, j.check.Domain) {
 					configured = true
 				}
 			}

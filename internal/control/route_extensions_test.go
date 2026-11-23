@@ -85,3 +85,34 @@ func TestRouteExtensionsOmittedFieldsKeepProtection(t *testing.T) {
 		t.Fatal("ambiguous path silently lost protection")
 	}
 }
+
+func TestRouteCertificateDefaultsSurvivePartialUpdates(t *testing.T) {
+	previous := []worker.Route{{Domain: "app.example.test", Service: "web", Port: 80, Policy: &worker.RoutePolicy{CertificateSource: "default"}}}
+	for _, policy := range []string{"", `,"policy":{"path_prefix":"/new"}`} {
+		var input []routeInput
+		if err := json.Unmarshal([]byte(`[{"domain":"app.example.test","service":"web","port":8081`+policy+`}]`), &input); err != nil {
+			t.Fatal(err)
+		}
+		routes, err := retainedRouteAuth(input, previous)
+		if err != nil || routes[0].Policy == nil || routes[0].Policy.CertificateSource != "default" {
+			t.Fatal("partial edit re-enabled ACME", err)
+		}
+	}
+	var explicit []routeInput
+	if err := json.Unmarshal([]byte(`[{"domain":"app.example.test","service":"web","port":8081,"policy":{"certificate_source":"acme"}}]`), &explicit); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := retainedRouteAuth(explicit, previous)
+	if err != nil || routes[0].Policy.CertificateSource != "acme" {
+		t.Fatal("explicit ACME selection was ignored", err)
+	}
+	previous[0].Policy.PathPrefix = "/a"
+	previous = append(previous, worker.Route{Domain: previous[0].Domain, Service: "web", Port: 80, Policy: &worker.RoutePolicy{PathPrefix: "/b"}})
+	var ambiguous []routeInput
+	if err := json.Unmarshal([]byte(`[{"domain":"app.example.test","service":"web","port":8081,"policy":{"path_prefix":"/new"}}]`), &ambiguous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := retainedRouteAuth(ambiguous, previous); err == nil {
+		t.Fatal("ambiguous partial edit silently selected an ACME policy")
+	}
+}

@@ -36,20 +36,50 @@ func ValidateRoutes(routes []Route, kind string) error {
 		return errors.New("only services can have routes, with at most 32 hostnames")
 	}
 	seen := map[string]bool{}
+	certificates := map[string]string{}
 	for _, route := range routes {
 		key := route.Domain + "/" + route.pathPrefix()
 		if len(route.Domain) > 253 || !strings.Contains(route.Domain, ".") || seen[key] || !serviceIdentifier.MatchString(route.Service) || route.Port < 1 || route.Port > 65535 || (route.Auth != "" && !routeAuth.MatchString(route.Auth)) {
 			return errors.New("invalid or duplicate route hostname, service or port")
 		}
-		for _, label := range strings.Split(route.Domain, ".") {
+		base := strings.TrimPrefix(route.Domain, "*.")
+		if !strings.Contains(base, ".") {
+			return errors.New("route hostnames require a complete DNS name")
+		}
+		for _, label := range strings.Split(base, ".") {
 			if !domainLabel.MatchString(label) {
-				return errors.New("route hostnames must be lowercase DNS names without schemes, paths or wildcards")
+				return errors.New("route hostnames must be lowercase DNS names, optionally beginning with *.")
 			}
+		}
+		if strings.HasPrefix(route.Domain, "*.") && (route.Policy == nil || route.Policy.CertificateSource != "uploaded" || route.Policy.CertificateID == "") {
+			return errors.New("wildcard routes require an assigned wildcard certificate; HTTP-01 cannot issue wildcard certificates")
 		}
 		if err := route.validatePolicy(); err != nil {
 			return err
 		}
+		selection := "acme"
+		if p := route.Policy; p != nil {
+			if p.CertificateSource == "default" {
+				selection = "default"
+			} else if p.CertificateSource == "uploaded" {
+				selection = "uploaded/" + p.CertificateID
+			}
+		}
+		if previous := certificates[route.Domain]; previous != "" && previous != selection {
+			return errors.New("all paths on a hostname must select the same certificate source and version")
+		}
+		certificates[route.Domain] = selection
 		seen[key] = true
+	}
+	for _, wildcard := range routes {
+		if !strings.HasPrefix(wildcard.Domain, "*.") {
+			continue
+		}
+		for _, exact := range routes {
+			if !strings.HasPrefix(exact.Domain, "*.") && RouteDomainsOverlap(wildcard.Domain, exact.Domain) && (exact.Policy == nil || exact.Policy.CertificateSource != "uploaded") {
+				return errors.New("exact hostnames covered by a managed wildcard must also select a stored certificate")
+			}
+		}
 	}
 	return nil
 }
@@ -74,6 +104,13 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 			config.addRoute(workload, route)
 		}
 	}
+	for domain, owner := range owners {
+		if _, base, ok := strings.Cut(domain, "."); ok && !strings.HasPrefix(domain, "*.") {
+			if other := owners["*."+base]; other != "" && other != owner {
+				return "", errors.New("wildcard hostname overlaps another workload")
+			}
+		}
+	}
 	// Traefik rejects empty nested maps as standalone configuration elements.
 	if len(config.HTTP.Routers) == 0 {
 		return "{}", nil
@@ -84,6 +121,7 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 
 type ingressRouter struct {
 	Rule        string            `json:"rule"`
+	Priority    int               `json:"priority,omitempty"`
 	EntryPoints []string          `json:"entryPoints"`
 	Middlewares []string          `json:"middlewares,omitempty"`
 	Service     string            `json:"service"`
@@ -114,6 +152,7 @@ type ingressLoadBalancer struct {
 }
 
 type dynamicIngress struct {
+	TLS  *ingressTLS `json:"tls,omitempty"`
 	HTTP struct {
 		Routers     map[string]ingressRouter     `json:"routers,omitempty"`
 		Services    map[string]ingressService    `json:"services,omitempty"`
@@ -135,7 +174,7 @@ func (c *dynamicIngress) add(domain, upstream, auth string) {
 }
 
 func (c *dynamicIngress) addNamed(domain, upstream, auth, name string) {
-	router := ingressRouter{Rule: "Host(`" + domain + "`)", EntryPoints: []string{"websecure"}, Service: name, TLS: map[string]string{"certResolver": "cove"}}
+	router := ingressRouter{Rule: routeHostRule(domain), Priority: routePriority(Route{Domain: domain}), EntryPoints: []string{"websecure"}, Service: name, TLS: map[string]string{"certResolver": "cove"}}
 	if auth != "" {
 		middleware := ingressMiddleware{}
 		middleware.BasicAuth = &ingressBasicAuth{}
@@ -319,7 +358,7 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 		}
 		for _, list := range routes {
 			for _, route := range list {
-				if route.Domain == panel {
+				if RouteDomainsOverlap(route.Domain, panel) {
 					return errors.New("the dashboard hostname is reserved")
 				}
 			}
@@ -396,16 +435,22 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	if err = json.Unmarshal([]byte(config), &desired); err != nil {
 		return err
 	}
+	var certificateErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		current, readErr := e.output(ctx, "docker", "exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers")
 		if readErr == nil && ingressAccepted(current, desired) {
-			return e.pruneRouteAuxiliary(ctx, desired, out)
+			if certificateErr = e.confirmRouteCertificates(ctx, routes); certificateErr == nil {
+				return e.pruneRouteAuxiliary(ctx, desired, out)
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(time.Second):
 		}
+	}
+	if certificateErr != nil {
+		return certificateErr
 	}
 	return errors.New("ingress did not accept configuration; check ports 80/443 and ingress logs")
 }
@@ -731,6 +776,7 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		Rule        string
 		Service     string
 		Middlewares []string
+		Priority    int
 	}
 	if json.Unmarshal([]byte(data), &routers) != nil {
 		return false
@@ -745,6 +791,9 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		if !ok || router.Status != "enabled" || router.Rule != want.Rule || strings.TrimSuffix(router.Service, "@file") != want.Service || len(router.Middlewares) != len(want.Middlewares) {
 			return false
 		}
+		if want.Priority != 0 && router.Priority != want.Priority {
+			return false
+		}
 		// A protected route counts as applied only once the proxy enforces its authentication.
 		for i, middleware := range want.Middlewares {
 			if strings.TrimSuffix(router.Middlewares[i], "@file") != middleware {
@@ -754,4 +803,47 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		found++
 	}
 	return found == len(desired.HTTP.Routers)
+}
+
+func (e *Engine) recoverIngressDecisions() error {
+	e.mu.Lock()
+	ids := make([]string, 0, len(e.recovering))
+	for id := range e.recovering {
+		ids = append(ids, id)
+	}
+	e.mu.Unlock()
+	e.ingressMu.Lock()
+	defer e.ingressMu.Unlock()
+	routes, err := e.loadIngress()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, id := range ids {
+		journal, err := e.read(id)
+		if err != nil {
+			return err
+		}
+		if journal.RouteChange == nil {
+			continue
+		}
+		desired := journal.Request.Routes
+		if !journal.RouteChange.Committed {
+			desired = journal.RouteChange.Previous
+		}
+		if RoutesEqual(routes[journal.Request.Workload], desired) {
+			continue
+		}
+		if len(desired) == 0 {
+			delete(routes, journal.Request.Workload)
+		} else {
+			routes[journal.Request.Workload] = desired
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	// Decide all interrupted route changes before any startup sync can expose an uncommitted protection removal.
+	return writeJSON(filepath.Join(e.Root, "ingress.json"), routes)
 }

@@ -102,6 +102,9 @@ func validateDatabaseCertificate(in databasePublicInput) (*databasePublicAccess,
 		}
 		remaining = rest
 	}
+	if _, err := worker.ParseTLSCertificate(in.Certificate, in.PrivateKey, time.Now(), true); err != nil {
+		return nil, "", err
+	}
 	pair, err := tls.X509KeyPair([]byte(in.Certificate), []byte(in.PrivateKey))
 	if err != nil || len(pair.Certificate) == 0 {
 		return nil, "", errors.New("provide a matching PEM server certificate and private key")

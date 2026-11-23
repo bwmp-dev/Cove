@@ -65,6 +65,15 @@ func retainedRouteAuth(input []routeInput, previous []worker.Route) ([]worker.Ro
 				return nil, err
 			}
 		}
+		if routes[i].Policy != nil {
+			for _, headers := range []map[string]string{routes[i].Policy.RequestHeaders, routes[i].Policy.ResponseHeaders} {
+				for _, value := range headers {
+					if value == worker.RedactedRouteHeader {
+						return nil, errors.New("replace the hidden header value before adding it to a different route")
+					}
+				}
+			}
+		}
 	}
 	return routes, nil
 }
@@ -79,16 +88,22 @@ func (s *Server) routeConflict(ctx context.Context, tx pgx.Tx, workload string, 
 	for _, route := range routes {
 		wanted[route.Domain] = true
 	}
-	if panel, err := url.Parse(s.PublicURL); err == nil && wanted[strings.ToLower(panel.Hostname())] {
-		return panel.Hostname(), nil
+	if panel, err := url.Parse(s.PublicURL); err == nil {
+		for domain := range wanted {
+			if worker.RouteDomainsOverlap(domain, strings.ToLower(panel.Hostname())) {
+				return panel.Hostname(), nil
+			}
+		}
 	}
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", routeClaimLock); err != nil {
 		return "", err
 	}
 	claimed := func(list []worker.Route) string {
 		for _, route := range list {
-			if wanted[route.Domain] {
-				return route.Domain
+			for domain := range wanted {
+				if worker.RouteDomainsOverlap(domain, route.Domain) {
+					return route.Domain
+				}
 			}
 		}
 		return ""
@@ -141,11 +156,45 @@ func (s *Server) routeConflict(ctx context.Context, tx pgx.Tx, workload string, 
 			return domain, nil
 		}
 	}
-	return "", pending.Err()
+	if err := pending.Err(); err != nil {
+		return "", err
+	}
+	pending.Close()
+	issuers, err := tx.Query(ctx, "SELECT domains FROM route_certificate_issuers WHERE workload_id<>$1", workload)
+	if err != nil {
+		return "", err
+	}
+	defer issuers.Close()
+	for issuers.Next() {
+		var domains []string
+		if err := issuers.Scan(&domains); err != nil {
+			return "", err
+		}
+		for _, name := range domains {
+			for domain := range wanted {
+				if worker.RouteDomainsOverlap(domain, name) {
+					return name, nil
+				}
+			}
+		}
+	}
+	return "", issuers.Err()
 }
 
 // checkRouteClaims writes the HTTP error for an unavailable hostname and reports whether the routes may be saved.
 func (s *Server) checkRouteClaims(w http.ResponseWriter, ctx context.Context, tx pgx.Tx, workload string, routes []worker.Route) bool {
+	if _, err := retainedRouteAuth(portableRouteInput(routes, nil), nil); err != nil {
+		http.Error(w, err.Error(), 400)
+		return false
+	}
+	if err := s.validateRouteCertificates(ctx, tx, workload, routes); err != nil {
+		if errors.Is(err, errInvalidRouteCertificate) {
+			http.Error(w, err.Error(), 400)
+		} else {
+			http.Error(w, "route certificates unavailable", 503)
+		}
+		return false
+	}
 	domain, err := s.routeConflict(ctx, tx, workload, routes)
 	if err != nil {
 		http.Error(w, "could not check route hostnames", 503)

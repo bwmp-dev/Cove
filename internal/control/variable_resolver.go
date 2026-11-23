@@ -45,9 +45,12 @@ func (s *Server) resolveDeploymentVariables(ctx context.Context, request *worker
 		return nil
 	}
 	defaults := map[string]string{worker.CoveFQDN: "", worker.CoveURL: "", worker.CoveCommitSHA: "", worker.CoveBranch: "", worker.CoveEnvironment: environment, worker.CoveProject: project, worker.CoveRelease: request.ID}
-	if len(request.Routes) > 0 {
-		defaults[worker.CoveFQDN] = request.Routes[0].Domain
-		defaults[worker.CoveURL] = "https://" + request.Routes[0].Domain
+	for _, route := range request.Routes {
+		if !strings.HasPrefix(route.Domain, "*.") {
+			defaults[worker.CoveFQDN] = route.Domain
+			defaults[worker.CoveURL] = "https://" + route.Domain
+			break
+		}
 	}
 	if request.Source != nil {
 		defaults[worker.CoveCommitSHA] = request.Source.Revision

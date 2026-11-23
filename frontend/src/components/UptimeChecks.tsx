@@ -5,6 +5,7 @@ import { errorMessage, request } from "../api/client";
 import { uptimeChecksQuery, type UptimeCheck, type UptimeCheckInput } from "../api/outputs";
 import type { Workload } from "../api/types";
 import { useNow, useOnline } from "../lib/hooks";
+import { wildcardCovers } from "../lib/certificates";
 import { formatInterval, formatMs, uptimeCheckFromForm, uptimeDefaults, uptimeState, type UptimeField } from "../lib/outputs";
 import { can } from "../lib/permissions";
 import { describedBy, inputClass } from "../lib/styles";
@@ -32,6 +33,7 @@ function UptimeForm({ workloadId, domains, initial, close }: { workloadId: strin
     },
   });
   const values = initial ?? { ...uptimeDefaults, domain: domains[0] ?? "" };
+  const [domain, setDomain] = useState(values.domain);
   const fieldId = (field: UptimeField) => `${id}-${field}`;
   const message = (field: UptimeField) => (error?.field === field ? error.message : undefined);
   const aria = (field: UptimeField, hint = false) => ({ "aria-invalid": message(field) ? true : undefined, "aria-describedby": describedBy(fieldId(field), message(field), hint) });
@@ -70,10 +72,18 @@ function UptimeForm({ workloadId, domains, initial, close }: { workloadId: strin
               </Field>
             </>
           ) : (
-            <Field id={fieldId("domain")} label="Domain" hint="One check per configured domain." error={message("domain")}>
-              <Select id={fieldId("domain")} name="domain" defaultValue={values.domain} required {...aria("domain", true)}>
-                {domains.map((domain) => <option key={domain} value={domain}>{domain}</option>)}
+            <Field id={fieldId("domain")} label="Domain" hint="One check per configured domain, or per hostname under a wildcard domain." error={message("domain")}>
+              <Select id={fieldId("domain")} name="domain" defaultValue={values.domain} onChange={(event) => setDomain(event.target.value)} required {...aria("domain", true)}>
+                {domains.map((option) => <option key={option} value={option}>{option}</option>)}
               </Select>
+            </Field>
+          )}
+          {!initial && domain.startsWith("*.") && (
+            <Field id={fieldId("host_label")} label="Hostname to check" hint={`One label under ${domain}, such as shop for shop${domain.slice(1)}. The wildcard itself is never requested.`} error={message("host_label")}>
+              <div className="flex min-w-0 items-center gap-2">
+                <input id={fieldId("host_label")} name="host_label" className={`${inputClass} font-mono`} maxLength={63} autoComplete="off" autoCapitalize="none" spellCheck={false} required {...aria("host_label", true)} />
+                <span className="min-w-0 font-mono text-[13px] break-all text-fg-muted">{domain.slice(1)}</span>
+              </div>
             </Field>
           )}
           <Field id={fieldId("path")} label="Path" hint="Starts with /. No query string or fragment." error={message("path")}>
@@ -201,7 +211,10 @@ export function UptimeChecks({ workload }: { workload: Workload }) {
 
   const configured = [...new Set((workload.routes ?? []).map((route) => route.domain))].sort();
   const checked = new Set((checks.data ?? []).map((check) => check.domain));
-  const available = configured.filter((domain) => !checked.has(domain));
+  // A wildcard domain stays available: each check under it names its own hostname.
+  const available = configured.filter((domain) => domain.startsWith("*.") || !checked.has(domain));
+  const covered = (checks.data ?? []).map((check) => check.domain).filter((domain) => configured.some((route) => wildcardCovers(route, domain)));
+  const routed = new Set([...configured, ...covered]);
 
   const unavailable = newCheckBlocker(configured, available);
   const action = editable && checks.isSuccess && editing === null && <NewCheckAction blocker={unavailable} disabled={!online} onClick={() => setEditing(undefined)} />;
@@ -218,7 +231,7 @@ export function UptimeChecks({ workload }: { workload: Workload }) {
         {deletion.isError && <div className="border-b border-line p-4"><Notice tone="error" title="Could not delete the check">{errorMessage(deletion.error)}</Notice></div>}
         <CheckList
           checks={checks.data}
-          routed={new Set(configured)}
+          routed={routed}
           editable={editable}
           busy={!online || deletion.isPending}
           onEdit={setEditing}

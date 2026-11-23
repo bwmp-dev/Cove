@@ -1,5 +1,6 @@
 import type { ForwarderKind, LogForwarderInput, UptimeCheck, UptimeCheckInput } from "../api/outputs";
 import type { Tone } from "./nodes";
+import { wildcardCovers } from "./certificates";
 
 const encoder = new TextEncoder();
 const byteLength = (value: string) => encoder.encode(value).length;
@@ -98,7 +99,7 @@ export function uptimeState(check: UptimeCheck, now: number): { tone: Tone; labe
 
 export const uptimeDefaults: Omit<UptimeCheckInput, "domain"> = { path: "/", enabled: true, interval_seconds: 300, timeout_seconds: 5, expected_min: 200, expected_max: 399, public_label: "" };
 
-export type UptimeField = "domain" | "path" | "interval_seconds" | "timeout_seconds" | "expected_min" | "expected_max" | "public_label";
+export type UptimeField = "domain" | "host_label" | "path" | "interval_seconds" | "timeout_seconds" | "expected_min" | "expected_max" | "public_label";
 
 export function uptimeCheckFromForm(data: FormData): UptimeCheckInput | { field: UptimeField; message: string } {
   const text = (key: string) => {
@@ -106,8 +107,14 @@ export function uptimeCheckFromForm(data: FormData): UptimeCheckInput | { field:
     return typeof value === "string" ? value : "";
   };
   const whole = (key: string) => (/^\d+$/.test(text(key).trim()) ? Number(text(key).trim()) : Number.NaN);
-  const domain = text("domain");
+  let domain = text("domain");
   if (domain === "") return { field: "domain", message: "Select a domain." };
+  // A wildcard domain is checked at one concrete hostname below it; the wildcard itself is never requested.
+  if (domain.startsWith("*.")) {
+    const host = `${text("host_label").trim().toLowerCase()}${domain.slice(1)}`;
+    if (!wildcardCovers(domain, host)) return { field: "host_label", message: `Enter one DNS label, such as shop, to check under ${domain}.` };
+    domain = host;
+  }
   const path = text("path").trim();
   if (!path.startsWith("/") || path.startsWith("//") || /[?#\s]/.test(path) || hasControl(path) || byteLength(path) > 2048) return { field: "path", message: "Enter a path that starts with a single /, without spaces, a query or a fragment, at most 2048 bytes." };
   const interval = whole("interval_seconds");

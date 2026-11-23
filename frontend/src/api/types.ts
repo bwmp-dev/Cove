@@ -27,7 +27,8 @@ export interface Capabilities {
   filesystem_snapshots?: boolean;
   traffic_logs?: boolean;
   route_policies?: boolean;
-  // 2 means the worker applies maintenance pages, custom error pages and forward-auth. Missing, 0 and 1 do not.
+  // 2 means the worker applies maintenance pages, custom error pages and forward-auth; 3 adds stored route
+  // certificates; 4 adds wildcard hostnames and the proxy default certificate choice. Missing, 0 and 1 support none.
   route_protocol?: number;
   // Docker Buildx is present, so the worker can check deployed images and pull before redeploying.
   image_lifecycle?: boolean;
@@ -304,21 +305,74 @@ export interface RouteForwardAuth {
   response_cookies?: string[];
 }
 
-// The API keeps a saved maintenance, error_pages or forward_auth value when the field is omitted; null removes it.
+// The API keeps a saved maintenance, error_pages, forward_auth or header map when the field is omitted; null removes it.
+// Header values come back as the redaction marker (empty values stay empty); sending the marker keeps the saved value.
 export interface RoutePolicy {
   maintenance?: RouteMaintenance | null;
   error_pages?: Record<string, string> | null;
   forward_auth?: RouteForwardAuth | null;
   path_prefix?: string;
-  request_headers?: Record<string, string>;
-  response_headers?: Record<string, string>;
+  request_headers?: Record<string, string> | null;
+  response_headers?: Record<string, string> | null;
   security_headers?: boolean;
   ip_allow_list?: string[];
   redirect_host?: string;
   redirect_permanent?: boolean;
-  certificate_source?: "acme" | "default";
+  certificate_source?: "acme" | "default" | "uploaded";
+  // Set only with certificate_source "uploaded": a certificate stored for this resource, uploaded or issued. Like the extensions above, a
+  // saved selection is kept while both certificate fields are omitted; null, "acme" or "default" clears it.
+  certificate_id?: string | null;
   upstreams?: RouteUpstream[];
   sticky?: boolean;
+}
+
+// Public metadata of a certificate stored for a resource. The certificate chain and private key are never returned.
+export interface RouteCertificate {
+  id: string;
+  name: string;
+  // "uploaded" or "cloudflare_origin". Missing from older panels, which only stored uploads; other values may come later.
+  source?: string;
+  fingerprint: string;
+  common_name?: string;
+  dns_names: string[];
+  ip_addresses?: string[];
+  not_before: string;
+  expires_at: string;
+  created_at: string;
+}
+
+// A team share of a connected Cloudflare zone. domains are the hostname patterns shared with the team; never credentials.
+export interface CertificateZone {
+  zone_id: string;
+  domain: string;
+  domains: string[];
+}
+
+// A managed Cloudflare Origin CA request for a resource. certificate_id is the latest issued version, which routes use
+// only once they select it (or a renewal's route update succeeds); empty strings mean none.
+export interface CertificateIssuer {
+  id: string;
+  name: string;
+  provider: string;
+  zone_id: string;
+  domains: string[];
+  validity_days: number;
+  auto_renew: boolean;
+  phase: string;
+  certificate_id: string;
+  operation_id: string;
+  last_error: string;
+  next_check_at: string | null;
+  created_at: string;
+}
+
+export interface CertificateIssuerInput {
+  name: string;
+  provider: "cloudflare_origin";
+  zone_id: string;
+  domains: string[];
+  validity_days: number;
+  auto_renew: boolean;
 }
 
 export interface Route {

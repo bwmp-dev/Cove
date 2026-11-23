@@ -39,6 +39,7 @@ type Request struct {
 	snapshotCheck          func(context.Context) error
 	volumeMethod           string
 	snapshotFallback       string
+	Certificates           []RouteCertificate       `json:"certificates,omitempty"`
 	Scale                  *CPUScaleOptions         `json:"scale,omitempty"`
 	Idle                   *IdlePolicy              `json:"idle,omitempty"`
 	Suspension             *SuspensionOptions       `json:"suspension,omitempty"`
@@ -236,6 +237,9 @@ func ValidateRequest(r Request) error {
 	}
 	if r.ManagedDatabase && (r.Scale != nil || r.Rollout != nil || r.Idle != nil || r.Build != nil || r.PullLatest || r.ComposeBundle != nil) {
 		return errors.New("managed databases require explicit single-instance deployments")
+	}
+	if err := validateCertificateRequest(r); err != nil {
+		return err
 	}
 	if err := validateCPUScale(r); err != nil {
 		return err
@@ -646,9 +650,16 @@ func (e *Engine) Serve(ctx context.Context) error {
 		return err
 	}
 	defer closeWake()
+	if err := e.recoverIngressDecisions(); err != nil {
+		return err
+	}
+	pendingCertificates, err := e.certificateReloadPending()
+	if err != nil {
+		return err
+	}
 	if routes, err := e.loadIngress(); err != nil {
 		return err
-	} else if len(routes) > 0 && !e.trafficRecoveryPending() {
+	} else if (len(routes) > 0 || pendingCertificates) && !e.trafficRecoveryPending() {
 		if err = e.syncIngress(ctx, routes, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "Ingress recovery failed; worker remains available for repairs:", err)
 		}
@@ -951,6 +962,12 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 	var publicBuiltins map[string]string
 	if len(r.BuiltinDefaults) > 0 {
 		r.Environment, publicBuiltins = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
+	}
+	for _, certificate := range r.Certificates {
+		log.secrets = append(log.secrets, certificate.PrivateKeyPEM)
+		if err := e.saveRouteCertificate(r.Workload, certificate); err != nil {
+			return err
+		}
 	}
 	env := []string{}
 	log.secrets = append(log.secrets, routeSecrets(r.Routes)...)

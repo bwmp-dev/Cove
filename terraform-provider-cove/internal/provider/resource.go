@@ -345,6 +345,24 @@ func (r *managedResource) Read(ctx context.Context, request resource.ReadRequest
 		}
 		for i := range routes {
 			current := &routes[i]
+			if current.Policy != nil {
+				for _, previous := range saved {
+					if previous.Domain != current.Domain || previous.Policy == nil || previous.Policy.PathPrefix != current.Policy.PathPrefix {
+						continue
+					}
+					for _, headers := range []struct{ current, saved map[string]string }{
+						{current.Policy.RequestHeaders, previous.Policy.RequestHeaders},
+						{current.Policy.ResponseHeaders, previous.Policy.ResponseHeaders},
+					} {
+						for name, value := range headers.current {
+							if old, exists := headers.saved[name]; value == worker.RedactedRouteHeader && exists {
+								headers.current[name] = old
+							}
+						}
+					}
+					break
+				}
+			}
 			if current.Policy == nil || current.Policy.ForwardAuth == nil {
 				continue
 			}

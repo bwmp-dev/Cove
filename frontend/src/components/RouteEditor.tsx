@@ -1,10 +1,10 @@
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
 import type { Route } from "../api/types";
-import { cidrList, draftUsesExtensions, emptyPolicy, routeLimits, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
+import { cidrList, draftUsesExtensions, emptyPolicy, isWildcardHostname, routeLimits, routesNeedProtocol4, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
 import { describedBy, inputClass } from "../lib/styles";
+import { CertificateSourceField, UploadedCertificatePicker, type CertificateChoices } from "./RouteCertificatePicker";
 import { RouteExtensionFields } from "./RouteExtensions";
-import { Select } from "./Select";
 import { Button, Field, Notice, SwitchField } from "./ui";
 
 const label = "mb-1 block text-xs font-medium text-fg-muted";
@@ -14,9 +14,12 @@ const noErrors: Record<string, string> = {};
 // policies: whether the target node's worker reports route policy support; undefined while unknown, which hides the
 // advanced controls. Saved policies are always kept, whether or not they can be edited here. extensions: whether it
 // applies maintenance, error pages and forward-auth (route protocol 2); saved ones stay visible and removable when not.
-// saved: the routes the API has, so removing forward-auth from one of their hostnames can be called out.
-export function RouteEditor({ routes, errors = noErrors, policies, extensions, saved = noRoutes, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; saved?: Route[]; onChange: (routes: RouteRow[]) => void }) {
+// saved: the routes the API has, so removing forward-auth from one of their hostnames can be called out. certificates:
+// the resource's stored certificates; omitted where none can exist yet, such as the create form. routeProtocol: the
+// node worker's route protocol, undefined while unknown; 4 adds wildcard hostnames and the proxy default certificate.
+export function RouteEditor({ routes, errors = noErrors, policies, extensions, routeProtocol, saved = noRoutes, certificates, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; routeProtocol?: number; saved?: Route[]; certificates?: CertificateChoices; onChange: (routes: RouteRow[]) => void }) {
   const id = useId();
+  const protocol4 = routeProtocol === undefined ? undefined : routeProtocol >= 4;
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   function update(key: string, patch: Partial<RouteRow>) {
     onChange(routes.map((route) => (route.id === key ? { ...route, ...patch } : route)));
@@ -42,6 +45,11 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, s
         <Notice tone={routesUseExtensions(routes) ? "warn" : "info"} title="Maintenance, error pages and forward-auth need a newer worker">
           The worker on this node cannot apply them. Upgrade it, then verify the node again.
           {routesUseExtensions(routes) && " Saved settings are shown under Advanced routing but cannot be changed, and saving is rejected while any remain. Remove them to save other route changes to this worker."}
+        </Notice>
+      )}
+      {protocol4 === false && routesNeedProtocol4(routes) && (
+        <Notice tone="warn" title="Wildcard hostnames and the proxy default certificate need a newer worker">
+          The worker on this node cannot apply them. They are kept as saved, but saving is rejected while any remain. Upgrade the worker and verify the node again, or change those routes to Let&apos;s Encrypt or a stored certificate for an exact hostname to save other changes.
         </Notice>
       )}
       {routes.length > 0 && (
@@ -115,6 +123,7 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, s
                     {error}
                   </p>
                 )}
+                {isWildcardHostname(route.domain.trim()) && <WildcardHint domain={route.domain.trim()} />}
                 {route.auth && <p className="text-xs text-fg-muted">Requires a password at the proxy. The saved credential is kept.</p>}
                 {policies === true && (
                   <div>
@@ -132,6 +141,8 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, s
                           route={route}
                           policy={route.policy}
                           errors={errors}
+                          certificates={certificates}
+                          protocol4={protocol4}
                           onChange={(patch) => update(route.id, { policy: { ...(route.policy ?? emptyPolicy()), ...patch } })}
                         />
                         {extensions !== undefined && (extensions || draftUsesExtensions(route.policy)) && (
@@ -162,6 +173,15 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, s
   );
 }
 
+function WildcardHint({ domain }: { domain: string }) {
+  const base = domain.slice(2);
+  return (
+    <p className="text-xs break-words text-fg-muted">
+      Matches exactly one label below <span className="font-mono break-all">{base}</span>, such as <span className="font-mono break-all">app.{base}</span>, but not <span className="font-mono break-all">{base}</span> itself or deeper names. An exact hostname on this resource always takes priority, even over a longer wildcard path, and must also select a stored certificate. Needs a stored certificate that names <span className="font-mono break-all">{domain}</span>.
+    </p>
+  );
+}
+
 function policySummary(policy: PolicyDraft) {
   const parts: string[] = [];
   if (policy.maintenance?.enabled) parts.push("maintenance on");
@@ -177,10 +197,11 @@ function policySummary(policy: PolicyDraft) {
   if (policy.upstreams.length > 0) parts.push(policy.upstreams.length === 1 ? "1 extra upstream" : `${policy.upstreams.length} extra upstreams`);
   if (policy.sticky) parts.push("sticky sessions");
   if (policy.certificateSource === "default") parts.push("proxy default certificate");
+  if (policy.certificateSource === "uploaded") parts.push("stored certificate");
   return parts.length > 0 ? parts.join(", ") : "Not configured";
 }
 
-function PolicyFields({ id, route, policy, errors, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; onChange: (patch: Partial<PolicyDraft>) => void }) {
+function PolicyFields({ id, route, policy, errors, certificates, protocol4, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; certificates?: CertificateChoices; protocol4?: boolean; onChange: (patch: Partial<PolicyDraft>) => void }) {
   const pathError = errors[`${route.id}.path`];
   const redirectError = errors[`${route.id}.redirect`];
   const cidrError = errors[`${route.id}.cidr`];
@@ -203,18 +224,9 @@ function PolicyFields({ id, route, policy, errors, onChange }: { id: string; rou
             aria-describedby={describedBy(`${id}-path`, pathError, true)}
           />
         </Field>
-        <Field id={`${id}-certificate`} label="Certificate" hint={policy.certificateSource === "default" ? "Uses the certificate configured in the node's proxy settings, which may be self-signed. Browsers trust it only if you provisioned one." : "Requested from Let's Encrypt automatically."}>
-          <Select
-            id={`${id}-certificate`}
-            value={policy.certificateSource || "acme"}
-            onChange={(event) => onChange({ certificateSource: event.target.value === "default" ? "default" : policy.certificateSource === "acme" ? "acme" : "" })}
-            aria-describedby={`${id}-certificate-hint`}
-          >
-            <option value="acme">Let's Encrypt</option>
-            <option value="default">Proxy default certificate</option>
-          </Select>
-        </Field>
+        <CertificateSourceField id={`${id}-certificate`} policy={policy} choices={certificates} protocol4={protocol4} onChange={onChange} />
       </div>
+      {policy.certificateSource === "uploaded" && <UploadedCertificatePicker id={`${id}-uploaded`} route={route} policy={policy} error={errors[`${route.id}.certificate`]} choices={certificates} onChange={onChange} />}
 
       <div className="space-y-3">
         <Field id={`${id}-redirect`} label="Redirect to hostname" optional error={redirectError} hint="Sends every request to this hostname over HTTPS, keeping the path and query. Its DNS record and route are not created for you.">
@@ -302,6 +314,8 @@ function HeaderRows({ id, title, description, rows, errorKey, errors, onChange }
           {rows.map((row, index) => {
             const error = errors[`${errorKey}.${row.id}`];
             const errorId = error ? `${id}-${index}-error` : undefined;
+            const hintId = row.hidden ? `${id}-${index}-hint` : undefined;
+            const valueId = `${id}-value-${index}`;
             const set = (patch: Partial<HeaderRow>) => onChange(rows.map((item) => (item.id === row.id ? { ...item, ...patch } : item)));
             return (
               <li key={row.id} className="space-y-1">
@@ -313,15 +327,35 @@ function HeaderRows({ id, title, description, rows, errorKey, errors, onChange }
                     <input id={`${id}-name-${index}`} className={`${inputClass} font-mono`} value={row.name} onChange={(event) => set({ name: event.target.value })} placeholder="X-App" maxLength={128} autoComplete="off" autoCapitalize="none" spellCheck={false} aria-invalid={error ? true : undefined} aria-describedby={errorId} />
                   </div>
                   <div>
-                    <label htmlFor={`${id}-value-${index}`} className={label}>
-                      Value
+                    <label htmlFor={valueId} className={label}>
+                      {row.hidden ? "Replacement value" : "Value"}
                     </label>
-                    <input id={`${id}-value-${index}`} className={`${inputClass} font-mono`} value={row.value} onChange={(event) => set({ value: event.target.value })} maxLength={4096} autoComplete="off" autoCapitalize="none" spellCheck={false} aria-invalid={error ? true : undefined} aria-describedby={errorId} />
+                    <input id={valueId} className={`${inputClass} font-mono`} value={row.value} onChange={(event) => set({ value: event.target.value })} placeholder={row.hidden ? "Saved value hidden" : undefined} maxLength={4096} autoComplete="off" autoCapitalize="none" spellCheck={false} aria-invalid={error ? true : undefined} aria-describedby={[hintId, errorId].filter(Boolean).join(" ") || undefined} />
                   </div>
                   <Button variant="ghost" className="px-2" aria-label={`Remove ${singular} ${row.name || index + 1}`} title={`Remove ${singular}`} onClick={() => onChange(rows.filter((item) => item.id !== row.id))}>
                     <Trash2 aria-hidden className="size-4" />
                   </Button>
                 </div>
+                {row.hidden && (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <p id={hintId} className="text-xs text-fg-muted">
+                      The saved value is hidden. Leave this blank to keep it, or enter a new value to replace it.
+                    </p>
+                    {row.value === "" && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Use an empty value for ${row.name || `${singular} ${index + 1}`}`}
+                        onClick={() => {
+                          set({ hidden: false });
+                          requestAnimationFrame(() => document.getElementById(valueId)?.focus());
+                        }}
+                      >
+                        Use an empty value
+                      </Button>
+                    )}
+                  </div>
+                )}
                 {error && (
                   <p id={errorId} className="text-xs text-bad">
                     {error}

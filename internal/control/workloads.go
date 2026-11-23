@@ -638,6 +638,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.scheduleCertificateIssuers(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.scheduleUnhealthyRestarts(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -775,6 +778,11 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if !admitted {
 		return nil
 	}
+	if !cancelRequested {
+		if err := s.prepareRouteCertificates(ctx, &request); err != nil {
+			return s.failOperation(ctx, id, "Selected route certificates are unavailable; check certificate ownership and expiry.")
+		}
+	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
 	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" && !(request.DatabaseMaintenance != nil && request.InfrastructurePrepared) {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
@@ -797,6 +805,12 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if worker.HasRouteExtensions(request.Routes) {
 		method = "submit_routes_v2"
+	}
+	if worker.RouteProtocol(request.Routes) >= 3 {
+		method = "submit_routes_v3"
+	}
+	if worker.RouteProtocol(request.Routes) >= 4 {
+		method = "submit_routes_v4"
 	}
 	if cancelRequested {
 		method = "cancel"

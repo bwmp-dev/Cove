@@ -22,6 +22,19 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "certificate-probe" {
+		file, err := os.Open("/config/probes.json")
+		if err == nil {
+			err = RunRouteCertificateProbe(context.Background(), file)
+			file.Close()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	if len(os.Args) == 2 && os.Args[1] == "route-helper" {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 		defer stop()
@@ -396,7 +409,7 @@ func TestRolloutDocker(t *testing.T) {
 	}
 	startDaemon()
 	restart := Request{ID: "restart-before-switch", Workload: workload, Action: "deploy", Kind: "service", Routes: routes, Compose: compose("restart", 30, true, true), Rollout: options("rolling", 2)}
-	if _, err = call(RPCRequest{Method: "submit", Request: &restart}); err != nil {
+	if _, err = call(RPCRequest{Method: "submit_routes_v4", Request: &restart}); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(15 * time.Second); ; {
@@ -418,7 +431,7 @@ func TestRolloutDocker(t *testing.T) {
 	restart.Compose = compose("committed", 0, true, true)
 	restart.Rollout = options("rolling", 2)
 	restart.Rollout.DrainSeconds = 5
-	if _, err = call(RPCRequest{Method: "submit", Request: &restart}); err != nil {
+	if _, err = call(RPCRequest{Method: "submit_routes_v4", Request: &restart}); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(40 * time.Second); ; {
@@ -442,7 +455,7 @@ func TestRolloutDocker(t *testing.T) {
 		t.Fatal("retired containers survived recovery", ids)
 	}
 	staged := Request{ID: "restart-staged", Workload: workload, Kind: "service", Action: "deploy", Compose: compose("staged", 0, true, true), Routes: routes, Rollout: options("canary", 2)}
-	if _, err := call(RPCRequest{Method: "submit", Request: &staged}); err != nil {
+	if _, err := call(RPCRequest{Method: "submit_routes_v4", Request: &staged}); err != nil {
 		t.Fatal(err)
 	}
 	await(staged.ID, "succeeded")

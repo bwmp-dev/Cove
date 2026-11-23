@@ -21,6 +21,7 @@ type apiScope struct {
 }
 
 var apiScopes = []apiScope{
+	{[]string{"view", "edit_configuration"}, "certificates:write", 3, "Upload certificates and manage issuers using secret-write permission; no key material is returned.", false, false},
 	{[]string{"view", "edit_configuration", "read_secrets"}, "databases:manage", 3, "Manage database credentials, settings, copies and bucket provisioning; cut-over also requires team administration.", false, false},
 	{[]string{"view"}, "projects:read", 1, "Read accessible projects and environments.", false, false},
 	{[]string{"edit_configuration", "view"}, "projects:write", 3, "Create, rename and delete projects and environments.", false, false},

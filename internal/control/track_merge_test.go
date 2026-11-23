@@ -151,7 +151,7 @@ func TestMergedSchemaFreshAndBothUpgradePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, ref := range []string{"", "aef07fd9cd3a905599fccb98bb51d9d8fe6a8e32", "d09be3ce5e1d98e5dfba90a62cf78ee3e79332a0", "1cc37b32636f2ed374ace5b8f5eeffff9a53b21b", "4c30c1ebaef9a09b7b14cfbad92036501e84c08c", "e50327eb96832f9d012a549774c3228305fa6eaf", "c02877174627168a8f8c711bd8b857d63f41b421", "9388a48", "16af262"} {
+	for _, ref := range []string{"", "aef07fd9cd3a905599fccb98bb51d9d8fe6a8e32", "d09be3ce5e1d98e5dfba90a62cf78ee3e79332a0", "1cc37b32636f2ed374ace5b8f5eeffff9a53b21b", "4c30c1ebaef9a09b7b14cfbad92036501e84c08c", "e50327eb96832f9d012a549774c3228305fa6eaf", "c02877174627168a8f8c711bd8b857d63f41b421", "9388a48", "16af262", "fa9b0a9", "54a388d"} {
 		t.Run(ref, func(t *testing.T) {
 			db := openTestDatabase(t, database)
 			if ref != "" {

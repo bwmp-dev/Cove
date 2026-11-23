@@ -282,6 +282,8 @@ def main():
             search = api("GET", "/api/search?q=cove-group19-fixture")
             timezone = api("GET", "/api/preferences/timezone")
             roles = api("GET", "/api/teams/default/roles")
+            if "certificates:write" not in [item["name"] for item in api("GET", "/api/access-tokens/scopes")]:
+                raise RuntimeError("Packaged panel lacks this merge's scoped certificate contract")
             events = api("GET", "/api/notifications/events")
             if not isinstance(search.get("items"), list) or search.get("limit") != 40 or timezone.get("schedule_timezone") != "UTC" or "read_secrets" not in roles.get("permission_catalogue", []):
                 raise RuntimeError("Packaged panel does not expose the merged integration/trust contract")

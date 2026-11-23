@@ -110,7 +110,7 @@ func TestProtectedRouteOperationReplayAfterRestart(t *testing.T) {
 }
 
 func TestRoutePolicyDecoderRejectsUnknownAndBrokenProtection(t *testing.T) {
-	for _, data := range []string{`{"forward_auth":{"url":"https://auth.example.test"},"typo":true}`, `{"certificate_source":"cove-protected-route-v2"}`, `{"cove_route_protocol":2}`, `{"certificate_source":"cove-protected-route-v2","cove_route_protocol":2,"cove_certificate_source":"default"}`} {
+	for _, data := range []string{`{"forward_auth":{"url":"https://auth.example.test"},"typo":true}`, `{"certificate_source":"cove-protected-route-v2"}`, `{"cove_route_protocol":2}`, `{"certificate_source":"cove-protected-route-v2","cove_route_protocol":2,"cove_certificate_source":"acme"}`} {
 		var policy RoutePolicy
 		if err := json.Unmarshal([]byte(data), &policy); err == nil {
 			t.Fatal("invalid policy accepted", data)

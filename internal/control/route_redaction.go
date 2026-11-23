@@ -17,6 +17,21 @@ func routesWithoutSecrets(routes []worker.Route) []worker.Route {
 			continue
 		}
 		policy := *result[i].Policy
+		redact := func(headers map[string]string) map[string]string {
+			if headers == nil {
+				return nil
+			}
+			values := make(map[string]string, len(headers))
+			for name, value := range headers {
+				if value != "" {
+					value = worker.RedactedRouteHeader
+				}
+				values[name] = value
+			}
+			return values
+		}
+		policy.RequestHeaders = redact(policy.RequestHeaders)
+		policy.ResponseHeaders = redact(policy.ResponseHeaders)
 		if policy.ForwardAuth != nil {
 			auth := *policy.ForwardAuth
 			auth.URL, auth.Path = "", ""
@@ -59,6 +74,15 @@ func portableRouteInput(routes []worker.Route, old []worker.Route) []routeInput 
 	inputs := make([]routeInput, len(routes))
 	for i, route := range routes {
 		inputs[i].Route = route
+		if route.Policy != nil {
+			inputs[i].extensionFields = map[string]json.RawMessage{}
+			if route.Policy.RequestHeaders != nil {
+				inputs[i].extensionFields["request_headers"] = json.RawMessage(`{}`)
+			}
+			if route.Policy.ResponseHeaders != nil {
+				inputs[i].extensionFields["response_headers"] = json.RawMessage(`{}`)
+			}
+		}
 		if route.Auth != "" {
 			value := route.Auth
 			inputs[i].Auth = &value

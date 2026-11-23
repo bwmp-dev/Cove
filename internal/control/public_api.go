@@ -61,6 +61,14 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/workloads/{id}/certificates", "workloads:read", "List public certificate metadata without key material", nil, []routeCertificateView{}, 200, s.routeCertificates},
+		{"POST", "/workloads/{id}/certificates", "certificates:write", "Seal an immutable resource certificate version", routeCertificateInput{}, routeCertificateView{}, 201, s.routeCertificates},
+		{"DELETE", "/workloads/{id}/certificates/{certificate}", "certificates:write", "Delete an unused certificate version", nil, map[string]string{}, 200, s.routeCertificates},
+		{"GET", "/workloads/{id}/certificate-zones", "workloads:read", "List the resource team's shared certificate zones", nil, []certificateZone{}, 200, s.certificateZones},
+		{"GET", "/workloads/{id}/certificate-issuers", "workloads:read", "List certificate issuer metadata and reconciliation state", nil, []certificateIssuer{}, 200, s.certificateIssuers},
+		{"POST", "/workloads/{id}/certificate-issuers", "certificates:write", "Checkpoint a sealed Origin CA request for an authorised zone", certificateIssuerInput{}, certificateIssuerAccepted{}, 202, s.certificateIssuers},
+		{"PUT", "/workloads/{id}/certificate-issuers/{issuer}", "certificates:write", "Change renewal or retry a failed issuer", certificateIssuerUpdate{}, apiOK{}, 200, s.updateCertificateIssuer},
+		{"DELETE", "/workloads/{id}/certificate-issuers/{issuer}", "certificates:write", "Remove issuer automation without deleting its certificate", nil, apiOK{}, 200, s.updateCertificateIssuer},
 		{"GET", "/database-engines", "workloads:read", "List managed database engines and pinned templates", nil, map[string]any{}, 200, s.databaseEngineOptions},
 		{"GET", "/workloads/{id}/database", "workloads:read", "Read database metadata and authorised dependent redeploy flags", nil, map[string]any{}, 200, s.databaseDetails},
 		{"GET", "/workloads/{id}/database/credentials", "databases:manage", "Read audited database credentials; edit and secret permissions required", nil, map[string]string{}, 200, s.databaseDetails},
@@ -278,7 +286,7 @@ func apiSchema(t reflect.Type) map[string]any {
 				tag = field.Name
 			}
 			props[tag] = apiSchema(field.Type)
-			if tag == "private_key" {
+			if tag == "private_key" || tag == "private_key_pem" {
 				props[tag].(map[string]any)["writeOnly"] = true
 			}
 		}

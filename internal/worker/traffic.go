@@ -109,10 +109,11 @@ func trafficRoutes(owned map[string][]Route) map[string]TrafficEntry {
 	out := map[string]TrafficEntry{}
 	for workload, routes := range owned {
 		for _, r := range routes {
-			upstream := fmt.Sprintf("http://%s:%d", routeAlias(workload, r.Service), r.Port)
-			sum := sha256.Sum256([]byte(r.Domain + "/" + upstream))
-			name := "cove-route-" + hex.EncodeToString(sum[:16]) + "@file"
-			out[name] = TrafficEntry{Workload: workload, Domain: r.Domain}
+			config := newIngressConfig()
+			config.addRoute(workload, r)
+			for name := range config.HTTP.Routers {
+				out[name+"@file"] = TrafficEntry{Workload: workload, Domain: r.Domain}
+			}
 		}
 	}
 	return out

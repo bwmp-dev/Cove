@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Route } from "../api/types";
-import { emptyForwardAuth, emptyPolicy, extensionSummary, isCIDR, parseDotenv, routeRows, sameRoutes, validateComposePath, validateHostKey, validateRepository, validateRoutes, validateWorkload, withoutAuthSecrets, type PolicyDraft, type RouteRow, type WorkloadFormValues } from "./workload-form";
+import { certificateSwitches, emptyForwardAuth, routesNeedProtocol4, emptyPolicy, extensionSummary, isCIDR, parseDotenv, refreshCertificateErrors, routeRows, sameRoutes, validateComposePath, validateHostKey, validateRepository, validateRoutes, validateWorkload, withoutRouteSecrets, redactedHeader, type HeaderRow, type PolicyDraft, type RouteRow, type WorkloadFormValues } from "./workload-form";
 
 const base: WorkloadFormValues = {
   name: "web",
@@ -148,7 +148,7 @@ describe("route validation", () => {
     expect(validateRoutes([row("a", " App.Example.com ")])).toEqual({ routes: [{ domain: "app.example.com", service: "web", port: 80 }], errors: {} });
     const result = validateRoutes([
       row("scheme", "https://example.com"),
-      row("wildcard", "*.example.com"),
+      row("wildcard", "*.wild.example.com"),
       row("bare", "localhost"),
       row("service", "api.example.com", "bad service"),
       row("port", "port.example.com", "web", 70000),
@@ -280,7 +280,7 @@ describe("route maintenance, error pages and forward-auth", () => {
 
   it("also clears settings when a route is deleted and added again on the same hostname", () => {
     const fresh: RouteRow = { id: "new", domain: "APP.example.com", service: "web", port: 8080 };
-    expect(validateRoutes([fresh], [extended]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { maintenance: null, error_pages: null, forward_auth: null } }]);
+    expect(validateRoutes([fresh], [extended]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { maintenance: null, error_pages: null, forward_auth: null, certificate_id: null } }]);
     // Unrelated hostnames and new resources keep the legacy shape older workers accept.
     expect(validateRoutes([{ ...fresh, domain: "other.example.com" }], [extended]).routes).toEqual([{ domain: "other.example.com", service: "web", port: 8080 }]);
     expect(validateRoutes([fresh]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080 }]);
@@ -310,9 +310,44 @@ describe("route maintenance, error pages and forward-auth", () => {
     expect(validateRoutes([row], [redacted]).routes).toEqual([redacted]);
     const typed = edit(redacted, { forwardAuth: { ...row.policy!.forwardAuth, path: "/verify", url: "https://unused.example.com" } });
     expect(validateRoutes([typed], [redacted]).routes?.[0]?.policy?.forward_auth).toEqual({ service: "auth", port: 9091, path: "/verify" });
-    const [cleared] = withoutAuthSecrets([typed]) as [RouteRow];
+    const [cleared] = withoutRouteSecrets([typed]) as [RouteRow];
     expect(cleared.policy?.forwardAuth).toMatchObject({ mode: "service", service: "auth", url: "", path: "", hidden: true });
-    expect(withoutAuthSecrets([{ id: "plain", domain: "a.example.com", service: "web", port: 80 }])).toEqual([{ id: "plain", domain: "a.example.com", service: "web", port: 80 }]);
+    expect(withoutRouteSecrets([{ id: "plain", domain: "a.example.com", service: "web", port: 80 }])).toEqual([{ id: "plain", domain: "a.example.com", service: "web", port: 80 }]);
+  });
+
+  it("keeps hidden header values by sending the marker back until a value is typed or emptied", () => {
+    const redacted: Route = { domain: "app.example.com", service: "web", port: 80, policy: { request_headers: { "X-Token": redactedHeader, "X-Strip": "" }, response_headers: { "X-Version": redactedHeader } } };
+    const [row] = routeRows([redacted]) as [RouteRow];
+    const token = row.policy!.requestHeaders.find((item) => item.name === "X-Token")!;
+    expect(token).toMatchObject({ value: "", hidden: true });
+    expect(row.policy!.requestHeaders.find((item) => item.name === "X-Strip")).toMatchObject({ value: "" });
+    expect(row.policy!.requestHeaders.find((item) => item.name === "X-Strip")?.hidden).toBeUndefined();
+    expect(sameRoutes([row], [redacted])).toBe(true);
+    // Unchanged, the marker goes back so the API keeps the saved value; an explicit empty value stays empty.
+    expect(validateRoutes([{ ...row, port: 8080 }], [redacted])).toEqual({ routes: [{ ...redacted, port: 8080 }], errors: {} });
+    const headers = (requestHeaders: HeaderRow[]): RouteRow => ({ ...row, policy: { ...row.policy!, requestHeaders } });
+    const others = row.policy!.requestHeaders.filter((item) => item !== token);
+    expect(validateRoutes([headers([{ ...token, value: "new-secret" }, ...others])], [redacted]).routes?.[0]?.policy?.request_headers).toEqual({ "X-Token": "new-secret", "X-Strip": "" });
+    expect(validateRoutes([headers([{ ...token, hidden: false }, ...others])], [redacted]).routes?.[0]?.policy?.request_headers).toEqual({ "X-Token": "", "X-Strip": "" });
+    // The marker is matched to the same header (any case) on the same hostname; anything else needs a new value.
+    expect(validateRoutes([headers([{ ...token, name: "x-token" }, ...others])], [redacted]).errors).toEqual({});
+    expect(validateRoutes([headers([{ ...token, name: "X-Other" }, ...others])], [redacted]).errors[`${row.id}.request.${token.id}`]).toMatch(/Enter a new value/);
+    expect(validateRoutes([{ ...row, domain: "other.example.com" }], [redacted]).errors[`${row.id}.request.${token.id}`]).toMatch(/Enter a new value/);
+    expect(validateRoutes([headers([{ ...token, value: redactedHeader }, ...others])], [redacted]).errors[`${row.id}.request.${token.id}`]).toMatch(/reserved/);
+  });
+
+  it("sends removed header maps as null so the API does not keep them", () => {
+    const redacted: Route = { domain: "app.example.com", service: "web", port: 80, policy: { request_headers: { "X-Token": redactedHeader }, response_headers: { "X-Version": redactedHeader } } };
+    const cleared = edit(redacted, { requestHeaders: [] });
+    expect(validateRoutes([cleared], [redacted]).routes?.[0]?.policy).toEqual({ request_headers: null, response_headers: { "X-Version": redactedHeader } });
+  });
+
+  it("drops typed header values after a save and keeps explicit empty values", () => {
+    const [row] = routeRows([{ domain: "app.example.com", service: "web", port: 80 }]) as [RouteRow];
+    const typed: RouteRow = { ...row, policy: { ...emptyPolicy(), requestHeaders: [{ id: "a", name: "X-Token", value: "secret" }, { id: "b", name: "X-Strip", value: "" }] } };
+    const [after] = withoutRouteSecrets([typed]) as [RouteRow];
+    expect(after.policy?.requestHeaders).toEqual([{ id: "a", name: "X-Token", value: "", hidden: true }, { id: "b", name: "X-Strip", value: "" }]);
+    expect(validateRoutes([after], [{ domain: "app.example.com", service: "web", port: 80, policy: { request_headers: { "X-Token": redactedHeader, "X-Strip": "" } } }]).routes?.[0]?.policy?.request_headers).toEqual({ "X-Token": redactedHeader, "X-Strip": "" });
   });
 
   it("saves only the selected forward-auth mode", () => {
@@ -358,5 +393,171 @@ describe("route maintenance, error pages and forward-auth", () => {
     expect(extensionSummary(extended.policy)).toEqual(["forward-auth", "2 error pages"]);
     expect(extensionSummary({ maintenance: { enabled: true } })).toEqual(["maintenance on"]);
     expect(extensionSummary(undefined)).toEqual([]);
+  });
+});
+
+describe("uploaded route certificates", () => {
+  const id = "a".repeat(32);
+  const other = "b".repeat(32);
+  const uploaded: Route = { domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "uploaded", certificate_id: id } };
+  const metadata = (certificateId: string, dnsNames: string[]) => ({ id: certificateId, name: "Origin", fingerprint: "f".repeat(64), dns_names: dnsNames, not_before: "2026-01-01T00:00:00Z", expires_at: "2027-01-01T00:00:00Z", created_at: "2026-01-01T00:00:00Z" });
+  const withPolicy = (route: Route, patch: Partial<PolicyDraft>): RouteRow => {
+    const [row] = routeRows([route]) as [RouteRow];
+    return { ...row, policy: { ...(row.policy ?? emptyPolicy()), ...patch } };
+  };
+
+  it("round-trips a saved selection, even when the certificate list is unavailable", () => {
+    const rows = routeRows([uploaded]);
+    expect(rows[0]?.policy).toMatchObject({ certificateSource: "uploaded", certificateId: id });
+    expect(sameRoutes(rows, [uploaded])).toBe(true);
+    expect(validateRoutes(rows, [uploaded])).toEqual({ routes: [uploaded], errors: {} });
+    expect(validateRoutes(rows, [uploaded], [metadata(other, ["app.example.com"])])).toEqual({ routes: [uploaded], errors: {} });
+  });
+
+  it("names the new source when switching away so the saved selection is not kept", () => {
+    const acme = withPolicy(uploaded, { certificateSource: "acme", certificateId: "" });
+    expect(validateRoutes([acme], [uploaded]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "acme" } }]);
+    const fallback = withPolicy(uploaded, { certificateSource: "default", certificateId: "" });
+    expect(validateRoutes([fallback], [uploaded]).routes?.[0]?.policy).toEqual({ certificate_source: "default" });
+  });
+
+  it("clears the selection with a null ID when the hostname is added again without a certificate source", () => {
+    const fresh: RouteRow = { id: "new", domain: "app.example.com", service: "web", port: 8080 };
+    expect(validateRoutes([fresh], [uploaded]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_id: null } }]);
+    expect(validateRoutes([{ ...fresh, domain: "new.example.com" }], [uploaded]).routes).toEqual([{ domain: "new.example.com", service: "web", port: 8080 }]);
+  });
+
+  it("requires a chosen certificate and the same certificate on every path of a hostname", () => {
+    const unchosen = withPolicy(uploaded, { certificateId: "" });
+    expect(validateRoutes([unchosen]).errors[`${unchosen.id}.certificate`]).toBe("Choose a certificate version.");
+    const api = withPolicy({ ...uploaded, policy: { path_prefix: "/api" } }, { certificateSource: "acme" });
+    expect(validateRoutes([...routeRows([uploaded]), api]).errors[`${api.id}.certificate`]).toMatch(/same certificate source and version/);
+    const apiSame = withPolicy({ ...uploaded, policy: { path_prefix: "/api" } }, { certificateSource: "uploaded", certificateId: id });
+    expect(validateRoutes([...routeRows([uploaded]), apiSame]).errors).toEqual({});
+  });
+
+  it("lists hostnames that start or stop using an uploaded certificate", () => {
+    expect(certificateSwitches(routeRows([uploaded]), [uploaded])).toEqual([]);
+    expect(certificateSwitches([withPolicy(uploaded, { certificateId: other })], [uploaded])).toEqual([]);
+    expect(certificateSwitches([withPolicy(uploaded, { certificateSource: "acme", certificateId: "" })], [uploaded])).toEqual(["app.example.com"]);
+    expect(certificateSwitches([], [uploaded])).toEqual(["app.example.com"]);
+    expect(certificateSwitches(routeRows([uploaded]), [])).toEqual(["app.example.com"]);
+  });
+
+  it("reports certificates naming hostnames outside the resource's routes", () => {
+    const rows = routeRows([uploaded]);
+    expect(validateRoutes(rows, [], [metadata(id, ["app.example.com", "api.example.com"])]).errors[`${rows[0]?.id}.certificate`]).toMatch(/api\.example\.com/);
+    const both = [...rows, { id: "api", domain: "api.example.com", service: "web", port: 8080 }];
+    expect(validateRoutes(both, [], [metadata(id, ["app.example.com", "api.example.com"])]).errors).toEqual({});
+  });
+
+  it("re-checks shown certificate errors against the current rows and keeps other errors", () => {
+    const certificates = [metadata(id, ["app.example.com", "api.example.com"]), metadata(other, ["app.example.com"])];
+    const row = withPolicy(uploaded, {});
+    const wide = [row];
+    const key = `${row.id}.certificate`;
+    const shown = { ...validateRoutes(wide, [], certificates).errors, [`${row.id}.path`]: "Start with /." };
+    expect(shown[key]).toMatch(/api\.example\.com/);
+    const choose = (patch: Partial<PolicyDraft>): RouteRow[] => [{ ...row, policy: { ...emptyPolicy(), ...row.policy, ...patch } }];
+    expect(refreshCertificateErrors(shown, choose({ certificateId: other }), [], certificates)).toEqual({ [`${row.id}.path`]: "Start with /." });
+    const owned = [...wide, { id: "api", domain: "api.example.com", service: "web", port: 8080 }];
+    expect(refreshCertificateErrors(shown, owned, [], certificates)[key]).toBeUndefined();
+    expect(refreshCertificateErrors(shown, wide, [], certificates)[key]).toBe(shown[key]);
+    expect(refreshCertificateErrors(shown, choose({ certificateId: "" }), [], certificates)[key]).toBe("Choose a certificate version.");
+    expect(refreshCertificateErrors({}, wide, [], certificates)).toEqual({});
+  });
+});
+
+describe("wildcard routes and route protocol 4", () => {
+  const id = "a".repeat(32);
+  const metadata = (certificateId: string, dnsNames: string[]) => ({ id: certificateId, name: "Wildcard", fingerprint: "f".repeat(64), dns_names: dnsNames, not_before: "2026-01-01T00:00:00Z", expires_at: "2027-01-01T00:00:00Z", created_at: "2026-01-01T00:00:00Z" });
+  const wildcard: Route = { domain: "*.example.com", service: "web", port: 8080, policy: { certificate_source: "uploaded", certificate_id: id } };
+  const proxyDefault: Route = { domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "default" } };
+
+  it("accepts a wildcard route that selects a certificate naming the same wildcard", () => {
+    expect(validateRoutes(routeRows([wildcard]), [], [metadata(id, ["*.example.com"])], 4)).toEqual({ routes: [wildcard], errors: {} });
+  });
+
+  it("refuses incomplete wildcards and wildcards without a stored certificate", () => {
+    const [bare] = routeRows([{ domain: "*.com", service: "web", port: 8080 }]) as [RouteRow];
+    expect(validateRoutes([bare], [], [], 4).errors[bare.id]).toMatch(/DNS hostname/);
+    const [plain] = routeRows([{ domain: "*.example.com", service: "web", port: 8080 }]) as [RouteRow];
+    expect(validateRoutes([plain], [], [], 4).errors[plain.id]).toMatch(/stored certificate .*Advanced routing/);
+    const [acme] = routeRows([{ ...wildcard, policy: { certificate_source: "acme" } }]) as [RouteRow];
+    expect(validateRoutes([acme], [], [], 4).errors[`${acme.id}.certificate`]).toMatch(/Let's Encrypt cannot issue one/);
+  });
+
+  it("requires the exact wildcard name, not only names below it", () => {
+    const rows = routeRows([wildcard]);
+    expect(validateRoutes(rows, [], [metadata(id, ["app.example.com"])], 4).errors[`${rows[0]?.id}.certificate`]).toMatch(/names \*\.example\.com itself/);
+  });
+
+  it("refuses new wildcard and proxy default choices on an older worker but keeps saved ones for the server to judge", () => {
+    const apexDefault: Route = { ...proxyDefault, domain: "example.com" };
+    const rows = routeRows([wildcard, apexDefault]);
+    const fresh = validateRoutes(rows, [], [metadata(id, ["*.example.com"])], 3).errors;
+    expect(fresh[rows[0]?.id ?? ""]).toMatch(/newer worker/);
+    expect(fresh[`${rows[1]?.id}.certificate`]).toMatch(/newer worker/);
+    expect(validateRoutes(rows, [wildcard, apexDefault], [metadata(id, ["*.example.com"])], 3).errors).toEqual({});
+    expect(validateRoutes(rows, [], [metadata(id, ["*.example.com"])], undefined).errors).toEqual({});
+    expect(routesNeedProtocol4(rows)).toBe(true);
+    expect(routesNeedProtocol4(routeRows([{ domain: "app.example.com", service: "web", port: 8080 }]))).toBe(false);
+  });
+
+  it("counts switches between Let's Encrypt and the proxy default as proxy restarts, but not stored to default", () => {
+    const stored: Route = { domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "uploaded", certificate_id: id } };
+    const plain: Route = { domain: "app.example.com", service: "web", port: 8080 };
+    expect(certificateSwitches(routeRows([proxyDefault]), [plain])).toEqual(["app.example.com"]);
+    expect(certificateSwitches(routeRows([plain]), [proxyDefault])).toEqual(["app.example.com"]);
+    expect(certificateSwitches(routeRows([proxyDefault]), [stored])).toEqual([]);
+    expect(certificateSwitches(routeRows([stored]), [proxyDefault])).toEqual([]);
+  });
+});
+
+describe("one certificate selection per hostname", () => {
+  const id = "a".repeat(32);
+  const route = (path: string, policy: Route["policy"]): Route => ({ domain: "app.example.com", service: "web", port: 8080, policy: { ...(path ? { path_prefix: path } : {}), ...policy } });
+
+  it("refuses mixing the proxy default with Lets Encrypt, or different stored versions, on one hostname", () => {
+    const mixed = routeRows([route("", { certificate_source: "default" }), route("/api", { certificate_source: "acme" })]);
+    expect(validateRoutes(mixed, [], [], 4).errors[`${mixed[1]?.id}.certificate`]).toMatch(/same certificate source and version/);
+    const omitted = routeRows([route("/api", { certificate_source: "default" }), { domain: "app.example.com", service: "web", port: 8080 }]);
+    expect(validateRoutes(omitted, [], [], 4).errors[omitted[1]?.id ?? ""]).toMatch(/same certificate source and version.*Advanced routing/);
+    const versions = routeRows([route("", { certificate_source: "uploaded", certificate_id: id }), route("/api", { certificate_source: "uploaded", certificate_id: "b".repeat(32) })]);
+    expect(validateRoutes(versions, [], [], 4).errors[`${versions[1]?.id}.certificate`]).toMatch(/same certificate source and version/);
+  });
+
+  it("treats an omitted source as Lets Encrypt and accepts matching selections", () => {
+    expect(validateRoutes(routeRows([route("", {}), route("/api", { certificate_source: "acme" })]), [], [], 4).errors).toEqual({});
+    expect(validateRoutes(routeRows([route("", { certificate_source: "default" }), route("/api", { certificate_source: "default" })]), [], [], 4).errors).toEqual({});
+  });
+
+  it("keeps a saved proxy default explicit and clears it explicitly when the hostname is added again without one", () => {
+    const saved = route("", { certificate_source: "default" });
+    expect(validateRoutes(routeRows([saved]), [saved], [], 4).routes).toEqual([saved]);
+    const fresh: RouteRow = { id: "new", domain: "app.example.com", service: "web", port: 8080 };
+    expect(validateRoutes([fresh], [saved], [], 4).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_id: null } }]);
+  });
+});
+
+describe("exact hostnames below a wildcard route", () => {
+  const wildcardId = "a".repeat(32);
+  const exactId = "b".repeat(32);
+  const wildcard: Route = { domain: "*.example.com", service: "web", port: 8080, policy: { certificate_source: "uploaded", certificate_id: wildcardId } };
+  const exact = (policy?: Route["policy"], domain = "app.example.com"): Route => ({ domain, service: "web", port: 8080, ...(policy ? { policy } : {}) });
+
+  it("requires a stored certificate on a one-label child of a wildcard route", () => {
+    for (const policy of [{ certificate_source: "acme" as const }, { certificate_source: "default" as const }]) {
+      const rows = routeRows([wildcard, exact(policy)]);
+      expect(validateRoutes(rows, [], [], 4).errors[`${rows[1]?.id}.certificate`]).toMatch(/covered by the wildcard route \*\.example\.com/);
+    }
+    const plain = routeRows([wildcard, exact()]);
+    expect(validateRoutes(plain, [], [], 4).errors[plain[1]?.id ?? ""]).toMatch(/covered by the wildcard route.*Advanced routing/);
+  });
+
+  it("accepts the wildcard version or another stored version on the child, and leaves the apex and deeper names alone", () => {
+    expect(validateRoutes(routeRows([wildcard, exact({ certificate_source: "uploaded", certificate_id: wildcardId })]), [], [], 4).errors).toEqual({});
+    expect(validateRoutes(routeRows([wildcard, exact({ certificate_source: "uploaded", certificate_id: exactId })]), [], [], 4).errors).toEqual({});
+    expect(validateRoutes(routeRows([wildcard, exact(undefined, "example.com"), exact({ certificate_source: "acme" }, "a.b.example.com")]), [], [], 4).errors).toEqual({});
   });
 });

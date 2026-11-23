@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -324,5 +325,49 @@ func TestRouteWorkerRestartAtEachBoundary(t *testing.T) {
 				t.Fatalf("recovery touched the application: %+v %v", *web, fresh.lifecycle)
 			}
 		})
+	}
+}
+
+func TestStartupRestoresAllRouteDecisionsBeforeReapplyingIngress(t *testing.T) {
+	e, err := NewEngine(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected := Route{Domain: "protected.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{ForwardAuth: &RouteForwardAuth{URL: "https://auth.example.test/check"}}}
+	unprotected := protected
+	unprotected.Policy = nil
+	committed := Route{Domain: "committed.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{CertificateSource: "uploaded", CertificateID: strings.Repeat("a", 32)}}
+	removed := Route{Domain: "removed.example.test", Service: "app", Port: 8080}
+	state := map[string][]Route{"protected": {unprotected}, "committed": {removed}, "removed": {removed}}
+	if err := writeJSON(filepath.Join(e.Root, "ingress.json"), state); err != nil {
+		t.Fatal(err)
+	}
+	changes := []journal{
+		{Operation: Operation{ID: "restore-protection", State: "running"}, Request: Request{ID: "restore-protection", Workload: "protected", Action: "routes", Routes: []Route{unprotected}}, RouteChange: &routeChange{Previous: []Route{protected}}},
+		{Operation: Operation{ID: "retain-certificate", State: "running"}, Request: Request{ID: "retain-certificate", Workload: "committed", Action: "routes", Routes: []Route{committed}}, RouteChange: &routeChange{Previous: []Route{removed}, Committed: true}},
+		{Operation: Operation{ID: "retain-removal", State: "running"}, Request: Request{ID: "retain-removal", Workload: "removed", Action: "routes"}, RouteChange: &routeChange{Previous: []Route{removed}, Committed: true}},
+	}
+	for _, change := range changes {
+		if err := writeJSON(e.path(change.Request.ID), change); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	touched := false
+	e.Run = func(context.Context, string, []string, []string, io.Writer) error { touched = true; return nil }
+	if err := e.recoverIngressDecisions(); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := e.loadIngress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if touched || !RoutesEqual(actual["protected"], []Route{protected}) || !RoutesEqual(actual["committed"], []Route{committed}) || len(actual["removed"]) != 0 {
+		t.Fatal("startup applied a mixed or uncommitted route snapshot", touched, actual)
+	}
+	if err := e.recoverIngressDecisions(); err != nil {
+		t.Fatal("route decision projection was not replayable", err)
 	}
 }

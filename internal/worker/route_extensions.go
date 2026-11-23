@@ -25,7 +25,7 @@ type RouteForwardAuth struct {
 
 func HasRouteExtensions(routes []Route) bool {
 	for _, route := range routes {
-		if p := route.Policy; p != nil && (p.Maintenance != nil || len(p.ErrorPages) > 0 || p.ForwardAuth != nil) {
+		if p := route.Policy; p != nil && (p.CertificateID != "" || p.CertificateSource == "default" || p.Maintenance != nil || len(p.ErrorPages) > 0 || p.ForwardAuth != nil) {
 			return true
 		}
 	}
@@ -128,7 +128,17 @@ func routeSecrets(routes []Route) []string {
 		if route.Auth != "" {
 			values = append(values, route.Auth)
 		}
-		if route.Policy == nil || route.Policy.ForwardAuth == nil {
+		if route.Policy == nil {
+			continue
+		}
+		for _, headers := range []map[string]string{route.Policy.RequestHeaders, route.Policy.ResponseHeaders} {
+			for _, value := range headers {
+				if value != "" {
+					values = append(values, value)
+				}
+			}
+		}
+		if route.Policy.ForwardAuth == nil {
 			continue
 		}
 		for _, text := range []string{route.Policy.ForwardAuth.URL, route.Policy.ForwardAuth.Path} {

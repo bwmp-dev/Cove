@@ -230,6 +230,10 @@ test("route pages and forward auth: maintenance, error pages and owned-service f
   await pages.getByRole("button", { name: "Add error page" }).click();
   await pages.getByLabel("Status", { exact: true }).fill("502");
   await pages.getByLabel("HTML for status 502").fill("<h1>custom-502-marker</h1>");
+  const responseHeaders = page.getByRole("group", { name: "Response headers" });
+  await responseHeaders.getByRole("button", { name: "Add response header" }).click();
+  await responseHeaders.getByLabel("Name", { exact: true }).fill("X-Route-Secret");
+  await responseHeaders.getByLabel("Value", { exact: true }).fill("e2e-header-secret");
   await capture(page, testInfo, "route-pages-auth-form");
   const authBody = await saveRoutes();
   expect(authBody.routes).toEqual([
@@ -237,7 +241,12 @@ test("route pages and forward auth: maintenance, error pages and owned-service f
       domain: hostname,
       service: "web",
       port: 8080,
-      policy: { certificate_source: "default", error_pages: { "502": "<h1>custom-502-marker</h1>" }, forward_auth: { service: "auth", port: 8081, path: "/cgi-bin/check", response_headers: ["Remote-User"], response_cookies: ["refreshed"] } },
+      policy: {
+        certificate_source: "default",
+        error_pages: { "502": "<h1>custom-502-marker</h1>" },
+        forward_auth: { service: "auth", port: 8081, path: "/cgi-bin/check", response_headers: ["Remote-User"], response_cookies: ["refreshed"] },
+        response_headers: { "X-Route-Secret": "e2e-header-secret" },
+      },
     },
   ]);
   // The API never returns the verification path; it stays sealed with the saved route.
@@ -249,6 +258,9 @@ test("route pages and forward auth: maintenance, error pages and owned-service f
     expect(saved).not.toHaveProperty("url");
   };
   await expectRedactedAuth();
+  // Saved header values are returned only as the reserved marker; the proxy still sends the real value.
+  const hiddenHeaders = { "X-Route-Secret": "[COVE_REDACTED]" };
+  expect((await savedRoutes())[0]?.policy?.response_headers).toEqual(hiddenHeaders);
 
   const denied = await routed(hostname, "/cgi-bin/who", { "Remote-User": "forged-admin" });
   expect(denied.status).toBe(302);
@@ -259,6 +271,7 @@ test("route pages and forward auth: maintenance, error pages and owned-service f
   expect(allowed.status).toBe(200);
   expect(allowed.body).toBe("who:alice\n");
   expect(String(allowed.headers["set-cookie"] ?? "")).toContain("refreshed=fake");
+  expect(allowed.headers["x-route-secret"]).toBe("e2e-header-secret");
   const failing = await routed(hostname, "/cgi-bin/fail", { Cookie: "session=fake" });
   expect(failing.status).toBe(502);
   expect(failing.body).toContain("custom-502-marker");
@@ -321,6 +334,9 @@ test("route pages and forward auth: maintenance, error pages and owned-service f
   expect(maintenanceBody.routes[0]?.policy?.forward_auth).not.toHaveProperty("path");
   expect(maintenanceBody.routes[0]?.policy?.forward_auth).not.toHaveProperty("url");
   expect(maintenanceBody.routes[0]?.policy?.error_pages).toEqual({ "502": "<h1>custom-502-marker</h1>" });
+  // The untouched hidden header value is sent back as the marker, so the API keeps the saved value.
+  await expect(responseHeaders.getByLabel("Replacement value", { exact: true })).toHaveValue("");
+  expect(maintenanceBody.routes[0]?.policy?.response_headers).toEqual(hiddenHeaders);
 
   const maintenanceDenied = await routed(hostname, "/deep/path?q=1");
   // The auth service serves 200 at "/", so this redirect proves the retained /cgi-bin/check path still answers.
@@ -347,12 +363,14 @@ test("route pages and forward auth: maintenance, error pages and owned-service f
   await page.getByRole("option", { name: "Off" }).click();
   await expect(page.getByText("Saving removes forward-auth", { exact: true })).toBeVisible();
   await pages.getByRole("button", { name: "Remove error page 502" }).click();
+  await responseHeaders.getByRole("button", { name: "Remove response header X-Route-Secret" }).click();
   const clearedBody = await saveRoutes();
-  expect(clearedBody.routes).toEqual([{ domain: hostname, service: "web", port: 8080, policy: { certificate_source: "default", maintenance: null, error_pages: null, forward_auth: null } }]);
+  expect(clearedBody.routes).toEqual([{ domain: hostname, service: "web", port: 8080, policy: { certificate_source: "default", maintenance: null, error_pages: null, forward_auth: null, response_headers: null } }]);
   expect(await savedRoutes()).toEqual([{ domain: hostname, service: "web", port: 8080, policy: { certificate_source: "default" } }]);
   const open = await routed(hostname, "/cgi-bin/who");
   expect(open.status).toBe(200);
   expect(open.body).toBe("who:\n");
+  expect(open.headers["x-route-secret"]).toBeUndefined();
   const plainFailure = await routed(hostname, "/cgi-bin/fail");
   expect(plainFailure.status).toBe(502);
   expect(plainFailure.body).toContain("application-502");

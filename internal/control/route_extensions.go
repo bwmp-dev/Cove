@@ -12,19 +12,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var errRouteProtocolUnsupported = errors.New("upgrade and verify the worker before using maintenance pages, error pages or forward-auth")
+var errRouteProtocolUnsupported = errors.New("upgrade and verify the worker before using these route features")
 
 func checkRouteProtocol(ctx context.Context, db interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workload string, routes []worker.Route) error {
-	if !worker.HasRouteExtensions(routes) {
+	if worker.RouteProtocol(routes) < 2 {
 		return nil
 	}
 	var version int
 	if err := db.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'route_protocol')::integer,0) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, workload).Scan(&version); err != nil {
 		return err
 	}
-	if version < 2 {
+	if version < worker.RouteProtocol(routes) {
 		return errRouteProtocolUnsupported
 	}
 	return nil
@@ -65,6 +65,45 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 	var incoming worker.RoutePolicy
 	if input.Policy != nil {
 		incoming = *input.Policy
+	}
+	for _, headers := range []struct {
+		next  *map[string]string
+		old   map[string]string
+		input map[string]string
+	}{
+		{&policy.RequestHeaders, previous.RequestHeaders, incoming.RequestHeaders},
+		{&policy.ResponseHeaders, previous.ResponseHeaders, incoming.ResponseHeaders},
+	} {
+		values := make(map[string]string, len(*headers.next))
+		for name, value := range *headers.next {
+			if headers.input[name] == worker.RedactedRouteHeader {
+				var found bool
+				for key, saved := range headers.old {
+					if strings.EqualFold(name, key) {
+						value, found = saved, true
+						break
+					}
+				}
+				if !found {
+					return errors.New("replace the hidden header value before adding it to a different route")
+				}
+				if ambiguous && (*headers.next)[name] != worker.RedactedRouteHeader && (*headers.next)[name] != value {
+					return errors.New("set headers explicitly when changing a path with different header values")
+				}
+			}
+			values[name] = value
+		}
+		if *headers.next != nil {
+			*headers.next = values
+		}
+	}
+	if !provided("certificate_source", incoming.CertificateSource != "") && !provided("certificate_id", incoming.CertificateID != "") {
+		if ambiguous && (policy.CertificateID != previous.CertificateID || (policy.CertificateSource == "default") != (previous.CertificateSource == "default")) {
+			return errors.New("set the certificate explicitly when changing a path with different certificate settings")
+		}
+		if previous.CertificateID != "" || previous.CertificateSource == "default" {
+			policy.CertificateID, policy.CertificateSource = previous.CertificateID, previous.CertificateSource
+		}
 	}
 	if !provided("forward_auth", incoming.ForwardAuth != nil) {
 		if ambiguous && !reflect.DeepEqual(policy.ForwardAuth, previous.ForwardAuth) {
@@ -122,7 +161,7 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 		return err
 	}
 	for name, value := range oldFields {
-		if name == "forward_auth" || name == "maintenance" || name == "error_pages" {
+		if name == "forward_auth" || name == "maintenance" || name == "error_pages" || name == "certificate_source" || name == "certificate_id" {
 			continue
 		}
 		if _, nonempty := incomingFields[name]; provided(name, nonempty) {
