@@ -106,7 +106,7 @@ func (s *Server) nodeProviders(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(in.Token) < 16 {
-			http.Error(w, "an API token of 16â€“4096 characters is required", 400)
+			http.Error(w, "an API token of 16–4096 characters is required", 400)
 			return
 		}
 		secret, err := seal(s.Key, []byte(in.Token))

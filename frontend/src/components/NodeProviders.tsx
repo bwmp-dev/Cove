@@ -194,7 +194,7 @@ export function ProviderTokens() {
                   <div className="min-w-0 flex-1 basis-48">
                     <p className="text-[13px] font-medium break-words text-fg">{provider.name}</p>
                     <p className="text-xs text-fg-muted">
-                      {providerLabel(provider.kind)} Â· {provider.has_token ? "Token saved" : "No token saved"}
+                      {providerLabel(provider.kind)} · {provider.has_token ? "Token saved" : "No token saved"}
                     </p>
                   </div>
                   <div className="flex gap-1">
@@ -366,7 +366,7 @@ function CatalogChoices({ id, data, choice, onChange }: { id: string; data: Prov
               <option value="">Choose a plan</option>
               {plans.map((option) => (
                 <option key={option.id} value={option.id}>
-                  {`${option.name} Â· ${planSummary(option)}`}
+                  {`${option.name} · ${planSummary(option)}`}
                 </option>
               ))}
             </Select>
@@ -468,7 +468,7 @@ function CreateServerForm({ providers, onClose }: { providers: NodeProvider[]; o
       provider,
       input: { provider_id: provider.id, name: name.trim(), region: region.id, plan: plan.id, image: image.id, ...(cost ? { cost } : {}) },
       region: region.name,
-      plan: `${plan.name} Â· ${planSummary(plan)}`,
+      plan: `${plan.name} · ${planSummary(plan)}`,
       planPrice: catalogPrice(plan) ?? "Unknown; check the provider console",
       image: optionLabel(image),
     });
@@ -619,7 +619,7 @@ function ProvisionRow({ job, online, onReconcile, onAbandon }: { job: Provision;
       <div className="min-w-0 flex-1 basis-64 space-y-0.5">
         <p className="font-mono text-[13px] font-medium break-all text-fg">{job.server_name}</p>
         <p className="text-xs break-words text-fg-muted">
-          {providerLabel(job.provider_kind)} Â· {job.provider_id ? job.provider_name : `${job.provider_name || "Deleted token"} (token removed)`}
+          {providerLabel(job.provider_kind)} · {job.provider_id ? job.provider_name : `${job.provider_name || "Deleted token"} (token removed)`}
         </p>
         {job.server_id && (
           <p className="text-xs text-fg-muted">
@@ -631,12 +631,12 @@ function ProvisionRow({ job, online, onReconcile, onAbandon }: { job: Provision;
           {active ? (
             <>
               {" "}
-              Â· Deadline <RelativeTime value={job.deadline} />
+              · Deadline <RelativeTime value={job.deadline} />
             </>
           ) : (
             <>
               {" "}
-              Â· Updated <RelativeTime value={job.updated_at} />
+              · Updated <RelativeTime value={job.updated_at} />
             </>
           )}
         </p>

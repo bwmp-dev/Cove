@@ -13,7 +13,7 @@ it("validates provider tokens without requiring a replacement on edit", () => {
 it("shows absent catalogue prices as unknown, never free", () => {
   expect(catalogPrice({})).toBeUndefined();
   expect(catalogPrice({ monthly: "4.5100", currency: "EUR" })).toMatch(/^EUR\s4\.51 per month$/);
-  expect(planSummary({ id: "cx22", name: "CX22", cpus: 2, memory_mb: 4096, architecture: "x86" })).toBe("2 vCPU Â· 4 GB Â· x86 Â· Price unknown");
+  expect(planSummary({ id: "cx22", name: "CX22", cpus: 2, memory_mb: 4096, architecture: "x86" })).toBe("2 vCPU · 4 GB · x86 · Price unknown");
 });
 
 it("only suggests a node price that fits the currency's minor unit exactly", () => {

@@ -103,7 +103,7 @@ async function fillServer() {
   fireEvent.click(screen.getByRole("button", { name: "Load catalogue" }));
   await choose("Region", "Ashburn");
   expect(screen.queryByRole("option", { name: /CX22/ })).not.toBeInTheDocument();
-  await choose("Plan", /^CPX11 Â· 2 vCPU Â· 2 GB Â· x86 Â· USD\s4\.99 per month$/);
+  await choose("Plan", /^CPX11 · 2 vCPU · 2 GB · x86 · USD\s4\.99 per month$/);
   await choose("Image", "Debian 12 (x86)");
   fireEvent.click(screen.getByRole("button", { name: "Review paid server" }));
   return screen.getByRole("dialog", { name: "Create a paid server?" });

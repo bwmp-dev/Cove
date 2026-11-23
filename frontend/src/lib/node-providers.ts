@@ -79,7 +79,7 @@ export function planSummary(plan: CatalogOption) {
   if (plan.memory_mb !== undefined) parts.push(memory(plan.memory_mb));
   if (plan.architecture) parts.push(plan.architecture);
   parts.push(catalogPrice(plan) ?? "Price unknown");
-  return parts.join(" Â· ");
+  return parts.join(" · ");
 }
 
 export function optionLabel(option: CatalogOption) {
