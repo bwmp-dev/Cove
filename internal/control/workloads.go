@@ -123,7 +123,7 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	respond(w, 201, map[string]string{"id": id})
 }
 func (s *Server) listWorkloads(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), "SELECT w.id,w.name,w.node_id,n.name,w.kind,COALESCE(e.id,''),COALESCE(e.name,''),COALESCE(p.name,''),w.project_id,CASE WHEN $3 THEN 3 ELSE cove_access($1,w.team_id,COALESCE(p.id,''),COALESCE(e.id,'')) END FROM workloads w JOIN nodes n ON n.id=w.node_id LEFT JOIN environments e ON e.id=w.environment_id JOIN projects p ON p.id=w.project_id WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,COALESCE(p.id,''),COALESCE(e.id,''))>0) ORDER BY w.created_at", actor(r).ID, actor(r).Team, actor(r).Admin)
+	rows, err := s.DB.Query(r.Context(), "SELECT w.id,w.name,w.node_id,n.name,w.kind,COALESCE(e.id,''),COALESCE(e.name,''),COALESCE(p.name,''),w.project_id,cove_permission_names($1,w.team_id,COALESCE(p.id,''),COALESCE(e.id,''),$3,$4) FROM workloads w JOIN nodes n ON n.id=w.node_id LEFT JOIN environments e ON e.id=w.environment_id JOIN projects p ON p.id=w.project_id WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,COALESCE(p.id,''),COALESCE(e.id,''))>0) ORDER BY w.created_at", actor(r).ID, actor(r).Team, actor(r).Admin, permissionCatalogue)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -144,12 +144,12 @@ func (s *Server) listWorkloads(w http.ResponseWriter, r *http.Request) {
 	out := []item{}
 	for rows.Next() {
 		var v item
-		var level int
-		if err = rows.Scan(&v.ID, &v.Name, &v.NodeID, &v.Node, &v.Kind, &v.EnvironmentID, &v.Environment, &v.Project, &v.ProjectID, &level); err != nil {
+		var names []string
+		if err = rows.Scan(&v.ID, &v.Name, &v.NodeID, &v.Node, &v.Kind, &v.EnvironmentID, &v.Environment, &v.Project, &v.ProjectID, &names); err != nil {
 			http.Error(w, "could not read workloads", 500)
 			return
 		}
-		v.Permissions = permissions(level)
+		v.Permissions = permissionMetadata(r, names)
 		out = append(out, v)
 	}
 	if rows.Err() != nil {
@@ -163,8 +163,17 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		Action   string `json:"action"`
 		Release  string `json:"release"`
 		BackupID string `json:"backup_id"`
+		Reason   string `json:"reason"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if !validOperationReason(in.Reason) {
+		http.Error(w, "reason must be at most 1000 bytes without NUL", 400)
+		return
+	}
+	if in.Reason != "" && in.Action != "deploy" && in.Action != "rollback" {
+		http.Error(w, "reasons apply to deploy and rollback operations", 400)
 		return
 	}
 	switch in.Action {
@@ -266,6 +275,10 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not queue operation", 500)
 		return
 	}
+	if err = saveOperationReason(r.Context(), tx, id, in.Reason, actor(r).ID); err != nil {
+		http.Error(w, "could not record deployment reason", 503)
+		return
+	}
 	if in.Action == "stop" || in.Action == "start" || in.Action == "restart" || in.Action == "deploy" || in.Action == "rollback" {
 		if _, err = tx.Exec(r.Context(), "UPDATE workloads SET manually_stopped=$2 WHERE id=$1", request.Workload, in.Action == "stop"); err != nil {
 			http.Error(w, "could not save workload intent", 500)
@@ -285,13 +298,14 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	respond(w, 202, map[string]string{"id": id, "state": "queued"})
 }
 func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), "SELECT o.id,o.workload_id,o.action,o.state,o.result,o.created_at FROM operations o JOIN workloads w ON w.id=o.workload_id LEFT JOIN environments e ON e.id=w.environment_id WHERE ($1='' OR o.workload_id=$1) AND w.team_id=$3 AND ($4 OR cove_access($2,w.team_id,w.project_id,COALESCE(e.id,''))>0) ORDER BY o.created_at DESC LIMIT 100", r.URL.Query().Get("workload_id"), actor(r).ID, actor(r).Team, actor(r).Admin)
+	rows, err := s.DB.Query(r.Context(), "SELECT o.id,o.workload_id,o.action,o.state,o.result,o.created_at,o.reason FROM operations o JOIN workloads w ON w.id=o.workload_id LEFT JOIN environments e ON e.id=w.environment_id WHERE ($1='' OR o.workload_id=$1) AND w.team_id=$3 AND ($4 OR cove_access($2,w.team_id,w.project_id,COALESCE(e.id,''))>0) ORDER BY o.created_at DESC LIMIT 100", r.URL.Query().Get("workload_id"), actor(r).ID, actor(r).Team, actor(r).Admin)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	defer rows.Close()
 	type item struct {
+		Reason   string          `json:"reason"`
 		ID       string          `json:"id"`
 		Workload string          `json:"workload_id"`
 		Action   string          `json:"action"`
@@ -302,7 +316,7 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 	out := []item{}
 	for rows.Next() {
 		var v item
-		if rows.Scan(&v.ID, &v.Workload, &v.Action, &v.State, &v.Result, &v.Created) != nil {
+		if rows.Scan(&v.ID, &v.Workload, &v.Action, &v.State, &v.Result, &v.Created, &v.Reason) != nil {
 			http.Error(w, "could not read operations", 500)
 			return
 		}
@@ -315,16 +329,30 @@ func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, out)
 }
 func (s *Server) nodeRPC(ctx context.Context, nodeID string, request worker.RPCRequest) (worker.RPCResponse, error) {
+	proxy, proxyErr := s.outboundConfig(ctx)
+	if proxyErr != nil {
+		return worker.RPCResponse{}, proxyErr
+	}
+	if s.propagateOutbound(proxy) {
+		request.Proxy = &proxy
+	}
 	if s.workerRPC != nil {
 		return s.workerRPC(ctx, nodeID, request)
 	}
+	var proxySupported bool
 	var address, mode string
 	var host *string
 	var port int
 	var encrypted []byte
-	err := s.DB.QueryRow(ctx, "SELECT address,port,host_key,private_key,mode FROM nodes WHERE id=$1", nodeID).Scan(&address, &port, &host, &encrypted, &mode)
+	err := s.DB.QueryRow(ctx, "SELECT address,port,host_key,private_key,mode,COALESCE((capabilities->>'outbound_proxy')::boolean,false) FROM nodes WHERE id=$1", nodeID).Scan(&address, &port, &host, &encrypted, &mode, &proxySupported)
 	if err != nil {
 		return worker.RPCResponse{}, err
+	}
+	if !proxySupported {
+		if request.Proxy != nil && (request.Request != nil || request.Method == "registry_test" || request.Method == "export_release") {
+			return worker.RPCResponse{}, errOutboundWorkerUnsupported
+		}
+		request.Proxy = nil
 	}
 	if mode == "local" {
 		return s.localRPC(ctx, request)
@@ -394,11 +422,19 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		gitOpsDone <- s.runProjectGitOps(gitOpsContext)
 	}()
 	defer func() { stopGitOps(); <-gitOpsDone }()
+	auditCtx, stopAudit := context.WithCancel(ctx)
+	auditDone := make(chan struct{})
+	go func() { defer close(auditDone); s.runAuditExport(auditCtx) }()
+	defer func() { stopAudit(); <-auditDone }()
+	templateCtx, stopTemplates := context.WithCancel(ctx)
+	templateDone := make(chan struct{})
+	go func() { defer close(templateDone); s.runTemplateRepositories(templateCtx) }()
+	defer func() { stopTemplates(); <-templateDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {
 		if time.Now().After(nextAuthCleanup) {
-			if _, err := s.DB.Exec(ctx, "DELETE FROM terminal_sessions WHERE expires_at<now(); DELETE FROM oauth_states WHERE expires_at<now(); DELETE FROM account_actions WHERE expires_at<now(); DELETE FROM sessions WHERE expires_at<now(); DELETE FROM login_attempts WHERE window_start<now()-interval '1 day'"); err != nil {
+			if _, err := s.DB.Exec(ctx, "DELETE FROM audit_events WHERE created_at<now()-make_interval(days=>COALESCE((SELECT retention_days FROM audit_export_settings WHERE id=1),365)) AND NOT EXISTS(SELECT 1 FROM audit_deliveries WHERE event_id=audit_events.id); DELETE FROM login_events WHERE created_at<now()-interval '90 days'; DELETE FROM account_devices WHERE last_seen<now()-interval '90 days'; DELETE FROM authentication_failures WHERE window_start<now()-interval '1 day' AND locked_until<now(); DELETE FROM account_totp WHERE NOT confirmed AND expires_at<now(); DELETE FROM webauthn_challenges WHERE expires_at<now(); DELETE FROM oidc_states WHERE expires_at<now(); DELETE FROM terminal_sessions WHERE expires_at<now(); DELETE FROM oauth_states WHERE expires_at<now(); DELETE FROM account_actions WHERE expires_at<now(); DELETE FROM sessions WHERE expires_at<now(); DELETE FROM login_attempts WHERE window_start<now()-interval '1 day'"); err != nil {
 				return err
 			}
 			nextAuthCleanup = time.Now().Add(time.Hour)

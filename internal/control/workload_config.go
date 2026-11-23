@@ -92,11 +92,19 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	if pendingAdoption != "" {
 		level = 1
 	}
+	names, err := s.permissionNames(r, "workload", r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "authorization unavailable", 503)
+		return
+	}
+	if previewSource != "" || pendingAdoption != "" {
+		names = permissions(level)
+	}
 	// Protected preview routes keep their password hash on the server.
 	for i := range configuration.Routes {
 		configuration.Routes[i].Auth = ""
 	}
-	respond(w, 200, workloadView{PendingAdoptionID: pendingAdoption, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: configuration.Kind, JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: permissions(level), ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
+	respond(w, 200, workloadView{PendingAdoptionID: pendingAdoption, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: configuration.Kind, JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: names, ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
 }
 func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 	var in workloadInput

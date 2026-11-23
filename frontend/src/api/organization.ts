@@ -1,6 +1,7 @@
 import { keepPreviousData, queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { keys } from "./queries";
+import { withReason } from "../lib/operations";
 import type { Permission } from "./types";
 
 export interface BrowserResource {
@@ -142,7 +143,9 @@ export function useSetTags() {
 export function useBulkAction() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ ids, action }: { ids: string[]; action: BulkAction }) => request<{ items: BulkResult[] }>("POST", "/api/bulk-actions", { ids, action, acknowledge: true }),
+    // The reason is recorded on every operation the request queues.
+    mutationFn: ({ ids, action, reason = "" }: { ids: string[]; action: BulkAction; reason?: string }) =>
+      request<{ items: BulkResult[] }>("POST", "/api/bulk-actions", withReason({ ids, action, acknowledge: true }, reason)),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: organizationKeys.activity })]),
   });
 }

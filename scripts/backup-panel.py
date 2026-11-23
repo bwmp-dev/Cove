@@ -61,6 +61,8 @@ def backup(installation, repository, password):
         if not snapshot:
             raise RuntimeError('Backup did not return a snapshot identity')
         restic(repository, password, 'check', '--read-data')
+        run(['docker', 'exec', containers['database'], 'psql', '-U', 'cove', '-d', 'cove', '-v', 'ON_ERROR_STOP=1', '-c',
+             "BEGIN; UPDATE control_settings SET panel_backup_at=now() WHERE id=1; INSERT INTO audit_events(actor,action,subject,status) VALUES('host backup','panel backup verified','control-plane',200); COMMIT;"], stdout=subprocess.PIPE)
         return snapshot
 
 

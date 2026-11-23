@@ -26,10 +26,10 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
 };
 
 const scopes: ApiScope[] = [
-  { name: "workloads:read", level: 1, description: "Read accessible resources, runtime and release metadata.", instance_admin: false, personal_only: false },
-  { name: "workloads:operate", level: 2, description: "Deploy, restart, stop, start, roll back and back up resources.", instance_admin: false, personal_only: false },
-  { name: "exec:run", level: 3, description: "Run a bounded one-off command in a resource container.", instance_admin: false, personal_only: false },
-  { name: "migration:adopt", level: 3, description: "Instance administrators only: inspect and adopt unmanaged Compose projects; personal tokens only.", instance_admin: true, personal_only: true },
+  { name: "workloads:read", level: 1, description: "Read accessible resources, runtime and release metadata.", permissions: ["view"], instance_admin: false, personal_only: false },
+  { name: "workloads:operate", level: 2, description: "Deploy, restart, stop, start, roll back and back up resources.", permissions: ["operate", "manage_backups", "view"], instance_admin: false, personal_only: false },
+  { name: "exec:run", level: 3, description: "Run a bounded one-off command in a resource container.", permissions: ["edit_configuration", "read_secrets", "view"], instance_admin: false, personal_only: false },
+  { name: "migration:adopt", level: 3, description: "Instance administrators only: inspect and adopt unmanaged Compose projects; personal tokens only.", permissions: ["edit_configuration", "view"], instance_admin: true, personal_only: true },
 ];
 
 function wrap(children: ReactNode) {
@@ -67,6 +67,18 @@ it("offers restricted scopes only on an instance administrator's personal key", 
   await user.type(screen.getByLabelText("Name"), "Fleet bot");
   await user.click(screen.getByRole("button", { name: "Create API key" }));
   await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/access-tokens", { name: "Fleet bot", scope: "team", scopes: ["workloads:read"], days: 30 }));
+});
+
+it("names each scope's catalogue requirements without disabling it for the creator's team-wide permissions", async () => {
+  // Grants can be per project, so a member without team-wide read_secrets may still use exec:run where they hold it.
+  session.value = memberOf("member");
+  mockApi(() => Promise.reject(new Error("unexpected")));
+  wrap(<CreateApiKey />);
+  const exec = await screen.findByRole("checkbox", { name: /exec:run/ });
+  expect(exec).toBeEnabled();
+  expect(exec).toHaveAccessibleDescription(expect.stringContaining("Requires Edit configuration and Read secrets."));
+  expect(screen.getByRole("checkbox", { name: /workloads:operate/ })).toHaveAccessibleDescription(expect.stringContaining("Requires Operate and Manage backups."));
+  expect(screen.getByRole("checkbox", { name: /workloads:read/ })).toHaveAccessibleDescription("Read accessible resources, runtime and release metadata.");
 });
 
 it("disables instance administrator scopes for other accounts", async () => {

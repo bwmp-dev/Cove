@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"cove/internal/outbound"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +29,7 @@ type Request struct {
 	RecordDrift            bool                     `json:"record_drift,omitempty"`
 	ComposeBundle          *ComposeBundle           `json:"compose_bundle,omitempty"`
 	BuiltinDefaults        map[string]string        `json:"builtin_defaults,omitempty"`
+	OutboundProxy          *outbound.Config         `json:"outbound_proxy,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
@@ -102,6 +104,7 @@ type Engine struct {
 	adoptionMu      sync.RWMutex
 	adoptedProjects map[string]adoptedProject
 	execRunning     int
+	comparisonMu    sync.Mutex
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -150,7 +153,7 @@ func NewEngine(root string) (*Engine, error) {
 	if err := os.MkdirAll(filepath.Join(root, "workloads"), 0700); err != nil {
 		return nil, err
 	}
-	e := &Engine{Root: root, Run: RunCommand, active: map[string]bool{}, cancels: map[string]context.CancelFunc{}, recovering: map[string]routeRecovery{}, fatal: make(chan error, 1), linkKick: make(chan struct{}, 1)}
+	e := &Engine{Root: root, Run: configuredRunner(root), active: map[string]bool{}, cancels: map[string]context.CancelFunc{}, recovering: map[string]routeRecovery{}, fatal: make(chan error, 1), linkKick: make(chan struct{}, 1)}
 	if err := e.loadAdoptedProjects(); err != nil {
 		return nil, err
 	}
@@ -178,6 +181,11 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.OutboundProxy != nil {
+		if err := r.OutboundProxy.Validate(); err != nil {
+			return err
+		}
+	}
 	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
 		return errors.New("preview deployment must use a pinned revision and isolated configuration")
 	}
@@ -726,6 +734,10 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		r.Environment, publicBuiltins = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
 	}
 	env := []string{}
+	if r.OutboundProxy != nil {
+		env = append(env, r.OutboundProxy.Env()...)
+		log.secrets = append(log.secrets, r.OutboundProxy.Secrets()...)
+	}
 	if r.Private != nil {
 		log.secrets = append(log.secrets, r.Private.AuthKey)
 	}

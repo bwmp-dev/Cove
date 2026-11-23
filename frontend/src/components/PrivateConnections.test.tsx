@@ -19,7 +19,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
 
 const resource = (id: string, name: string, environment = "e1", node = "One"): GraphResource => ({
   id, name, kind: "service", project_id: "p", project: "Shop", environment_id: environment, environment: environment === "e1" ? "production" : "staging",
-  node_id: node, node, node_state: "ready", manually_stopped: false, last_action: "deploy", last_state: "succeeded", services: ["app"], permissions: ["read", "operate", "edit"], private_links: true,
+  node_id: node, node, node_state: "ready", manually_stopped: false, last_action: "deploy", last_state: "succeeded", services: ["app"], permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], private_links: true,
 });
 
 const connection = (id: string, source: string, target: string, overrides: Partial<PrivateConnection> = {}): PrivateConnection => ({
@@ -43,8 +43,8 @@ function renderGraph() {
   function respond(method: string, path: string): unknown {
     if (path.startsWith("/api/projects/p/connections")) return graph;
     if (path === "/api/workloads") return [
-      { id: "a", name: "A", kind: "service", permissions: ["read", "operate", "edit"], project_id: "p", environment_id: "e1", node_id: "One", node: "One" },
-      { id: "db", name: "DB", kind: "service", permissions: ["read", "operate", "edit"], project_id: "p", environment_id: "e1", node_id: "Two", node: "Two" },
+      { id: "a", name: "A", kind: "service", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], project_id: "p", environment_id: "e1", node_id: "One", node: "One" },
+      { id: "db", name: "DB", kind: "service", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], project_id: "p", environment_id: "e1", node_id: "Two", node: "Two" },
     ];
     if (path === "/api/operations") return [];
     if (method === "POST") return { id: "new" };

@@ -7,6 +7,10 @@ inputs:
   token:
     description: Deploy-hook token stored in a GitHub Actions secret.
     required: true
+  reason:
+    description: Optional audited deployment reason.
+    required: false
+    default: ''
   revision:
     description: Immutable Git commit SHA; omit for non-Git workloads.
     required: false
@@ -31,6 +35,7 @@ runs:
       env:
         COVE_DEPLOY_HOOK_URL: ${{ inputs.hook-url }}
         COVE_DEPLOY_HOOK_TOKEN: ${{ inputs.token }}
+        COVE_DEPLOY_REASON: ${{ inputs.reason }}
         COVE_DEPLOY_REVISION: ${{ inputs.revision }}
         COVE_DEPLOY_DELIVERY: ${{ inputs.delivery-id }}
         COVE_DEPLOY_TIMEOUT: ${{ inputs.timeout-seconds }}

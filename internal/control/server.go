@@ -28,6 +28,7 @@ var assets embed.FS
 
 type Server struct {
 	requestGuardSlots     chan struct{}
+	outboundState         *outboundProxyState
 	CloudflareTransport   http.RoundTripper
 	NotificationTransport http.RoundTripper
 	DB                    *pgxpool.Pool
@@ -45,10 +46,12 @@ type Server struct {
 	dummyPasswordHash     []byte
 	// workerRPC replaces node transports in tests that simulate several workers.
 	workerRPC     func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
+	templateFetch func(context.Context, string, string, string) ([]byte, string, error)
 	secretCommand secretCommandFunc
 }
 
 func (s *Server) Init(ctx context.Context) error {
+	s.outboundState = &outboundProxyState{}
 	_, err := panelurl.Parse(s.PublicURL)
 	if err != nil {
 		return err
@@ -87,6 +90,9 @@ func (s *Server) Init(ctx context.Context) error {
 	if err = s.importIntegrationSettings(ctx); err != nil {
 		return err
 	}
+	if _, err = s.outboundConfig(ctx); err != nil {
+		return err
+	}
 	s.dummyPasswordHash, err = bcrypt.GenerateFromPassword([]byte(randomToken()), 12)
 	return err
 }
@@ -123,6 +129,70 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.accessTokens)))
 	}
 	mux.Handle("POST /api/workloads/{id}/exec", s.admin(http.HandlerFunc(s.workloadExec)))
+	mux.Handle("GET /api/templates", s.admin(http.HandlerFunc(s.templates)))
+	mux.Handle("POST /api/templates/draft", s.admin(http.HandlerFunc(s.templates)))
+	mux.Handle("POST /api/workloads/{id}/template", s.admin(http.HandlerFunc(s.saveWorkloadTemplate)))
+	mux.Handle("DELETE /api/teams/{id}/templates/{template}", s.admin(http.HandlerFunc(s.deleteTeamTemplate)))
+	for _, prefix := range []string{"/api/settings/template-repositories", "/api/teams/{id}/template-repositories"} {
+		mux.Handle("GET "+prefix, s.admin(http.HandlerFunc(s.templateRepositories)))
+		mux.Handle("POST "+prefix, s.admin(http.HandlerFunc(s.templateRepositories)))
+		mux.Handle("DELETE "+prefix+"/{repository}", s.admin(http.HandlerFunc(s.templateRepositories)))
+		mux.Handle("POST "+prefix+"/{repository}/refresh", s.admin(http.HandlerFunc(s.templateRepositories)))
+	}
+	mux.Handle("GET /api/workloads/{id}/release-diff", s.admin(http.HandlerFunc(s.releaseDiff)))
+	for _, method := range []string{"GET", "PUT"} {
+		mux.Handle(method+" /api/teams/{id}/deployment-policy", s.admin(http.HandlerFunc(s.deploymentPolicy)))
+	}
+	mux.Handle("POST /api/operations/{id}/emergency-override", s.admin(http.HandlerFunc(s.emergencyOverride)))
+	mux.Handle("POST /api/settings/update-status", s.admin(http.HandlerFunc(s.reportUpdateStatus)))
+	mux.Handle("GET /api/settings/outbound-proxy/environment", s.admin(http.HandlerFunc(s.hostProxyEnvironment)))
+	for _, method := range []string{"GET", "PUT"} {
+		mux.Handle(method+" /api/settings/outbound-proxy", s.admin(http.HandlerFunc(s.outboundProxy)))
+	}
+	mux.Handle("GET /api/settings/security-posture", s.admin(http.HandlerFunc(s.securityPosture)))
+	mux.Handle("POST /api/workloads/{id}/port-bindings", s.admin(http.HandlerFunc(s.portBindings)))
+	mux.Handle("GET /api/settings/panel-access", s.admin(http.HandlerFunc(s.panelAccess)))
+	mux.Handle("PUT /api/settings/panel-access", s.admin(http.HandlerFunc(s.panelAccess)))
+	for _, method := range []string{"GET", "POST"} {
+		mux.Handle(method+" /api/teams/{id}/roles", s.admin(http.HandlerFunc(s.customRoles)))
+	}
+	for _, method := range []string{"PUT", "DELETE"} {
+		mux.Handle(method+" /api/teams/{id}/roles/{role}", s.admin(http.HandlerFunc(s.customRoles)))
+	}
+	mux.Handle("GET /api/settings/audit-export", s.admin(http.HandlerFunc(s.auditExportSettings)))
+	mux.Handle("PUT /api/settings/audit-export", s.admin(http.HandlerFunc(s.auditExportSettings)))
+	mux.HandleFunc("GET /auth/sign-in-methods", s.publicSignInMethods)
+	mux.Handle("GET /api/account/login-history", s.admin(http.HandlerFunc(s.loginHistory)))
+	mux.Handle("GET /api/users/{id}/login-history", s.admin(http.HandlerFunc(s.loginHistory)))
+	mux.Handle("GET /api/settings/oidc/providers", s.admin(http.HandlerFunc(s.oidcProviders)))
+	mux.Handle("POST /api/settings/oidc/providers", s.admin(http.HandlerFunc(s.oidcProviders)))
+	mux.Handle("PUT /api/settings/oidc/providers/{provider}", s.admin(http.HandlerFunc(s.oidcProviders)))
+	mux.Handle("DELETE /api/settings/oidc/providers/{provider}", s.admin(http.HandlerFunc(s.oidcProviders)))
+	mux.Handle("GET /api/settings/sign-in", s.admin(http.HandlerFunc(s.signInPolicy)))
+	mux.Handle("PUT /api/settings/sign-in", s.admin(http.HandlerFunc(s.signInPolicy)))
+	mux.HandleFunc("POST /auth/oidc/{provider}/start", s.publicAccount(s.oidcStart))
+	mux.HandleFunc("GET /auth/oidc/{provider}/callback", s.oidcCallback)
+	mux.Handle("GET /api/account/passkeys", s.admin(http.HandlerFunc(s.accountPasskeys)))
+	mux.Handle("PATCH /api/account/passkeys/{key}", s.admin(http.HandlerFunc(s.accountPasskeys)))
+	mux.Handle("DELETE /api/account/passkeys/{key}", s.admin(http.HandlerFunc(s.accountPasskeys)))
+	mux.Handle("POST /api/account/passkeys/begin", s.admin(http.HandlerFunc(s.passkeyBegin)))
+	mux.Handle("POST /api/account/passkeys/finish", s.admin(http.HandlerFunc(s.passkeyFinish)))
+	mux.HandleFunc("POST /auth/passkeys/begin", s.publicAccount(s.passkeyBegin))
+	mux.HandleFunc("POST /auth/passkeys/finish", s.publicAccount(s.passkeyFinish))
+	mux.Handle("GET /api/account/sign-in-methods", s.admin(http.HandlerFunc(s.secondFactorStatus)))
+	mux.Handle("POST /api/account/recovery-codes", s.admin(http.HandlerFunc(s.regenerateRecoveryCodes)))
+	mux.Handle("DELETE /api/account/totp", s.admin(http.HandlerFunc(s.removeTOTP)))
+	mux.Handle("GET /api/account/identities", s.admin(http.HandlerFunc(s.accountIdentities)))
+	mux.Handle("DELETE /api/account/identities/{provider}", s.admin(http.HandlerFunc(s.unlinkIdentity)))
+	mux.Handle("POST /api/account/totp", s.admin(http.HandlerFunc(s.beginTOTP)))
+	mux.Handle("POST /api/account/totp/confirm", s.admin(http.HandlerFunc(s.confirmTOTP)))
+	mux.HandleFunc("POST /auth/second-factor", s.publicAccount(s.secondFactorChallenge))
+	mux.Handle("DELETE /api/users/{id}/second-factor", s.admin(http.HandlerFunc(s.resetSecondFactor)))
+	for _, method := range []string{"GET", "PUT"} {
+		mux.Handle(method+" /api/settings/second-factor", s.admin(http.HandlerFunc(s.secondFactorPolicy)))
+		mux.Handle(method+" /api/teams/{id}/second-factor", s.admin(http.HandlerFunc(s.secondFactorPolicy)))
+	}
+
 	for _, pattern := range []string{"GET /api/cloudflare/connections", "POST /api/cloudflare/connections", "PUT /api/cloudflare/connections/{connection}/credentials"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.cloudflareAccounts)))
 	}
@@ -283,7 +353,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/operations/{id}/logs", s.admin(http.HandlerFunc(s.operationLogs)))
 	mux.Handle("POST /api/operations/{id}/cancel", s.admin(http.HandlerFunc(s.cancelOperation)))
 	mux.HandleFunc("POST /auth/login", func(w http.ResponseWriter, r *http.Request) {
-		s.authenticated(http.HandlerFunc(s.login), w, r, "browser authentication")
+		s.authenticated(http.HandlerFunc(s.loginAttempt(s.login)), w, r, "browser authentication")
 	})
 	mux.HandleFunc("POST /auth/logout", func(w http.ResponseWriter, r *http.Request) {
 		s.authenticated(http.HandlerFunc(s.logout), w, r, "browser session")
@@ -365,6 +435,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/terminal/{id}", s.admin(http.HandlerFunc(s.terminalSession)))
 	mux.HandleFunc("GET /install.sh", s.install)
 	mux.HandleFunc("GET /releases/worker/{arch}", s.workerRelease)
+	mux.HandleFunc("GET /releases/worker/{arch}/{checksum}/signature", s.workerSignature)
 	mux.HandleFunc("GET /releases/worker/install.sh", s.workerUpdateInstaller)
 	mux.HandleFunc("GET /releases/worker/{arch}/{checksum}", s.workerRelease)
 	mux.HandleFunc("GET /bootstrap/worker/{arch}", s.binary)
@@ -372,7 +443,7 @@ func (s *Server) Handler() http.Handler {
 		s.authenticated(http.HandlerFunc(s.register), w, r, "node enrollment")
 	})
 	mux.HandleFunc("GET /", s.frontend)
-	mounted := s.mountPanel(mux)
+	mounted := s.mountPanel(s.restrictPanel(mux))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

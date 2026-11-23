@@ -40,7 +40,7 @@ it("replaces the environment sections instead of accumulating them when switchin
     if (path === "/api/projects") return Promise.resolve([project]);
     if (path === "/api/workloads") return Promise.resolve([workload("web", "e1"), workload("db", "e1"), workload("api", "e2"), workload("cache", "e2")]);
     if (path === "/api/operations") return Promise.resolve([]);
-    if (path === "/api/session") return Promise.resolve({ teams: [], is_admin: false });
+    if (path === "/api/session") return Promise.resolve({ teams: [], is_admin: false, permissions: [] });
     if (path.startsWith("/api/projects/p/connections")) return Promise.resolve({ resources: [], connections: [], shared_networks: [] });
     return Promise.reject(new Error(`unexpected ${path}`));
   });

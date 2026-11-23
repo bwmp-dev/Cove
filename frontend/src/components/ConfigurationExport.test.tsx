@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, requestFile } from "../api/client";
 import type { Project } from "../api/projects";
+import { editorAccess, editWithoutSecrets, secretsWithoutEdit, viewerAccess } from "../test/permissions";
 import { ConfigurationExport } from "./ConfigurationExport";
 
 vi.mock("../api/client", async (original) => ({ ...(await original<typeof import("../api/client")>()), requestFile: vi.fn() }));
@@ -31,14 +32,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const permissions: Project["permissions"] = ["read", "operate", "edit"];
-const project: Project = { id: "p", name: "Shop", permissions, environments: [{ id: "e1", name: "Production", permissions }, { id: "e2", name: "Staging", permissions: ["read"] }] };
+// Staging is editable without read_secrets, so it is not exportable even though its editor can change it.
+const project: Project = { id: "p", name: "Shop", permissions: editorAccess, environments: [{ id: "e1", name: "Production", permissions: editorAccess }, { id: "e2", name: "Staging", permissions: editWithoutSecrets }] };
 
-function setup() {
+function setup(scoped = project) {
   const client = new QueryClient();
   render(
     <QueryClientProvider client={client}>
-      <ConfigurationExport project={project} environments={project.environments} online />
+      <ConfigurationExport project={scoped} online />
     </QueryClientProvider>,
   );
   return client;
@@ -87,4 +88,20 @@ it("shows export failures and resets the acknowledgement when reopened", async (
   await user.click(screen.getByRole("button", { name: "Export ZIP" }));
   expect(screen.getByRole("checkbox", { name: /contains decrypted secrets/ })).not.toBeChecked();
   expect(screen.queryByText("Shared variable DATABASE_URL could not be resolved.")).not.toBeInTheDocument();
+});
+
+it("offers only environment exports when read_secrets is granted on an environment but not the project", async () => {
+  const user = userEvent.setup();
+  vi.mocked(requestFile).mockResolvedValue({ blob: new Blob(["PK"]), filename: null });
+  setup({ ...project, permissions: viewerAccess, environments: [{ id: "e1", name: "Production", permissions: viewerAccess }, { id: "e2", name: "Staging", permissions: secretsWithoutEdit }] });
+  await user.click(screen.getByRole("combobox", { name: "What to export" }));
+  expect(screen.queryByRole("option", { name: "Whole project" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "Production environment" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("option", { name: "Staging environment" }));
+  await user.click(screen.getByRole("button", { name: "Export ZIP" }));
+  const dialog = screen.getByRole("dialog", { name: "Export Staging?" });
+  await user.click(within(dialog).getByRole("checkbox", { name: /contains decrypted secrets/ }));
+  await user.click(within(dialog).getByRole("button", { name: "Export" }));
+  expect(await screen.findByText("Export saved")).toBeInTheDocument();
+  expect(requestFile).toHaveBeenCalledWith("POST", "/api/projects/p/configuration/export", { environment_id: "e2" });
 });

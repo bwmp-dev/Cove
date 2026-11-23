@@ -8,7 +8,7 @@ import type { Workload } from "../api/types";
 import { GitConnections } from "./GitConnections";
 import { GitProviderSource } from "./GitProviderSource";
 
-const session = vi.hoisted(() => ({ is_admin: false, team_id: "team", teams: [{ id: "team", name: "Team", role: "member", grants: [{ scope: "team", role: "editor" }] }] }));
+const session = vi.hoisted(() => ({ is_admin: false, team_id: "team", teams: [{ id: "team", name: "Team", role: "member", grants: [{ scope: "team", role: "editor" }] }], permissions: ["view", "operate", "read_secrets", "edit_configuration", "manage_backups"] }));
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)) }));
 vi.mock("../lib/session", () => ({ useSession: () => session }));
 vi.mock("@tanstack/react-router", () => ({ useBlocker: () => ({ status: "idle" }), Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a> }));
@@ -32,7 +32,7 @@ function wrap(children: ReactNode) {
 }
 
 function workload(overrides: Partial<Workload> = {}): Workload {
-  return { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit"], manually_stopped: false, deployed: false, compose: "", environment_keys: [], source: { repository: "https://gitlab.com/acme/app.git", branch: "main", compose_path: "compose.yaml" }, has_source_token: false, ...overrides };
+  return { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], manually_stopped: false, deployed: false, compose: "", environment_keys: [], source: { repository: "https://gitlab.com/acme/app.git", branch: "main", compose_path: "compose.yaml" }, has_source_token: false, ...overrides };
 }
 
 it("creates a connection and shows its signing token only until dismissed", async () => {

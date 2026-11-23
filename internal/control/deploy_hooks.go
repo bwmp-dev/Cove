@@ -101,7 +101,7 @@ func (s *Server) inboundDeployHook(w http.ResponseWriter, r *http.Request) {
 	var workload string
 	var configuration []byte
 	var stopped bool
-	err = tx.QueryRow(r.Context(), `SELECT w.id,w.configuration,w.manually_stopped FROM deploy_hooks h JOIN workloads w ON w.id=h.workload_id JOIN users u ON u.id=h.creator_id WHERE h.id=$1 AND h.token_hash=$2 AND h.expires_at>now() AND NOT u.disabled AND (u.is_admin OR cove_access(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''))>=2) FOR UPDATE OF h,w`, hook, tokenHash(bearer(r))).Scan(&workload, &configuration, &stopped)
+	err = tx.QueryRow(r.Context(), `SELECT w.id,w.configuration,w.manually_stopped FROM deploy_hooks h JOIN workloads w ON w.id=h.workload_id JOIN users u ON u.id=h.creator_id WHERE h.id=$1 AND h.token_hash=$2 AND h.expires_at>now() AND u.email_verified AND NOT u.disabled AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now()) AND (u.is_admin OR cove_permission(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate')) AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR (SELECT require_second_factor FROM teams WHERE id=w.team_id)) OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)) FOR UPDATE OF h,w`, hook, tokenHash(bearer(r))).Scan(&workload, &configuration, &stopped)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.hookAudit(r.Context(), hook, "rejected authentication", 401)
 		http.Error(w, "unauthorized", 401)
@@ -133,11 +133,12 @@ func (s *Server) inboundDeployHook(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	var in struct {
 		Delivery string `json:"delivery"`
+		Reason   string `json:"reason,omitempty"`
 		Revision string `json:"revision,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&in) != nil || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`).MatchString(in.Delivery) || (in.Revision != "" && (!gitCommit.MatchString(in.Revision) || in.Revision == strings.Repeat("0", 40))) {
+	if decoder.Decode(&in) != nil || !validOperationReason(in.Reason) || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`).MatchString(in.Delivery) || (in.Revision != "" && (!gitCommit.MatchString(in.Revision) || in.Revision == strings.Repeat("0", 40))) {
 		http.Error(w, "delivery ID and optional immutable commit SHA required", 400)
 		return
 	}
@@ -195,7 +196,7 @@ func (s *Server) inboundDeployHook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not queue deployment", 503)
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO deploy_hook_receipts(hook_id,delivery,request_id,queue_delivery) VALUES($1,$2,$3,$4)`, hook, in.Delivery, request.ID, queueDelivery); err != nil {
+	if _, err = tx.Exec(r.Context(), `INSERT INTO deploy_hook_receipts(hook_id,delivery,request_id,queue_delivery,reason) VALUES($1,$2,$3,$4,$5)`, hook, in.Delivery, request.ID, queueDelivery, in.Reason); err != nil {
 		http.Error(w, "could not save delivery receipt", 503)
 		return
 	}

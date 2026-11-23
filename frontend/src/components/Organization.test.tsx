@@ -140,6 +140,30 @@ it("confirms a bulk deploy, reports each result honestly and clears the selectio
   expect(screen.queryByText(/selected$/)).not.toBeInTheDocument();
 });
 
+it("sends an optional reason with a bulk deploy and refuses an invalid one", async () => {
+  vi.mocked(request).mockImplementation((method: string, path: string) => {
+    if (path.startsWith("/api/resource-browser")) return Promise.resolve({ items: [resource("web", ["read", "operate", "edit"])], page: 1, page_size: 25, total: 1, has_more: false });
+    if (path === "/api/projects" || path === "/api/nodes") return Promise.resolve([]);
+    if (path === "/api/pins") return Promise.resolve({ items: [] });
+    if (method === "POST" && path === "/api/bulk-actions") return Promise.resolve({ items: [{ id: "web", status: 202, operation_id: "op1" }] });
+    return Promise.reject(new Error(`unexpected ${method} ${path}`));
+  });
+  renderWithClient(<ResourceBrowserPage />);
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Select web" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review deploy" }));
+  const dialog = screen.getByRole("dialog", { name: "Deploy 1 resource?" });
+  const reason = within(dialog).getByLabelText(/Reason/);
+  fireEvent.change(reason, { target: { value: "bad reason" } });
+  expect(reason).toHaveAttribute("aria-invalid", "true");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Deploy 1 resource" }));
+  expect(request).not.toHaveBeenCalledWith("POST", "/api/bulk-actions", expect.anything());
+
+  fireEvent.change(reason, { target: { value: "  Weekly patch rollout  " } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Deploy 1 resource" }));
+  await screen.findByRole("list", { name: "Bulk action results" });
+  expect(request).toHaveBeenCalledWith("POST", "/api/bulk-actions", { ids: ["web"], action: "deploy", acknowledge: true, reason: "Weekly patch rollout" });
+});
+
 it("drops the selection when a filter changes", async () => {
   vi.mocked(request).mockImplementation((_method: string, path: string) => {
     if (path.startsWith("/api/resource-browser")) return Promise.resolve({ items: [resource("web", ["read", "operate", "edit"])], page: 1, page_size: 25, total: 1, has_more: false });

@@ -11,12 +11,13 @@ import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { FilterSelect, FilterToolbar, NoMatches } from "../components/FilterToolbar";
 import { PaginationControls } from "../components/ListPagination";
 import { PinButton } from "../components/PinButton";
+import { ReasonField } from "../components/ReasonField";
 import { Select } from "../components/Select";
 import { Breadcrumbs, Button, EmptyState, Field, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { maxBulkSelection, parseTags, summarizeBulk } from "../lib/organization";
-import { actionLabels } from "../lib/operations";
+import { actionLabels, reasonError } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { inputClass, linkClass, listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
 
@@ -195,13 +196,15 @@ interface BulkConfirmProps {
   open: boolean;
   action: BulkAction;
   items: BrowserResource[];
+  reason: string;
   pending: boolean;
   error: unknown;
+  onReason: (reason: string) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
-function BulkConfirm({ open, action, items, pending, error, onConfirm, onCancel }: BulkConfirmProps) {
+function BulkConfirm({ open, action, items, reason, pending, error, onReason, onConfirm, onCancel }: BulkConfirmProps) {
   const jobs = action === "restart" ? items.filter((item) => item.kind === "job").length : 0;
   const subject = `${actionLabels[action]} ${countLabel(items.length, "resource")}`;
   return (
@@ -214,6 +217,7 @@ function BulkConfirm({ open, action, items, pending, error, onConfirm, onCancel 
         )}
         {jobs > 0 && <Notice tone="warn">{countLabel(jobs, "selected job")} cannot restart and will be refused.</Notice>}
         <p>Each resource is queued separately with its own permission check and audit entry. Some can be refused while others are queued; nothing is rolled back or retried.</p>
+        {action === "deploy" && <ReasonField id="bulk-deploy-reason" value={reason} onChange={onReason} disabled={pending} hint="Recorded with every deployment this queues and in the audit log. Visible to anyone who can read these resources; do not include secrets." />}
         <ul aria-label="Selected resources" className="max-h-48 divide-y divide-line overflow-y-auto rounded-md border border-line">
           {items.map((item) => (
             <li key={item.id} className="px-2.5 py-1.5 text-[13px] break-words text-fg">
@@ -429,6 +433,7 @@ export function ResourceBrowserPage() {
   const [tagText, setTagText] = useState("");
   const [action, setAction] = useState<BulkAction>("deploy");
   const [confirming, setConfirming] = useState(false);
+  const [reason, setReason] = useState("");
   const [editing, setEditing] = useState<BrowserResource | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const online = useOnline();
@@ -472,15 +477,17 @@ export function ResourceBrowserPage() {
   const summary = browser.data ? (filtering ? countLabel(total, "match", "matches") : countLabel(total, "resource")) : "";
 
   function run() {
-    const names = new Map(selectedItems.map((item) => [item.id, item.name]));
     const chosen = action;
+    if (chosen === "deploy" && reasonError(reason)) return;
+    const names = new Map(selectedItems.map((item) => [item.id, item.name]));
     bulk.mutate(
-      { ids: selectedItems.map((item) => item.id), action: chosen },
+      { ids: selectedItems.map((item) => item.id), action: chosen, reason: chosen === "deploy" ? reason : "" },
       {
         onSuccess: (response) => {
           setOutcome({ action: chosen, names, results: response.items });
           clearSelection();
           setConfirming(false);
+          setReason("");
         },
       },
     );
@@ -546,11 +553,14 @@ export function ResourceBrowserPage() {
         open={confirming}
         action={action}
         items={selectedItems}
+        reason={reason}
         pending={bulk.isPending}
         error={bulk.error}
+        onReason={setReason}
         onConfirm={run}
         onCancel={() => {
           setConfirming(false);
+          setReason("");
           bulk.reset();
         }}
       />

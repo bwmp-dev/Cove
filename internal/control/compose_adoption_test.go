@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,7 +96,7 @@ func TestComposeAdoptionBulkRecoveryAndPendingIsolation(t *testing.T) {
 	}
 	for _, resource := range resources {
 		var view workloadView
-		if json.Unmarshal(f.call("root", "default", "GET", "/api/workloads/"+resource, nil, 200).Body.Bytes(), &view) != nil || view.PendingAdoptionID != "" || !view.Deployed || len(view.Permissions) != 3 {
+		if json.Unmarshal(f.call("root", "default", "GET", "/api/workloads/"+resource, nil, 200).Body.Bytes(), &view) != nil || view.PendingAdoptionID != "" || !view.Deployed || !slices.Contains(view.Permissions, "read") || !slices.Contains(view.Permissions, "operate") || !slices.Contains(view.Permissions, "edit") || !slices.Contains(view.Permissions, "read_secrets") {
 			t.Fatal("adopted runtime not recognized")
 		}
 	}

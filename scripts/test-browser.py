@@ -121,8 +121,9 @@ def main():
 
             search = api("GET", "/api/search?q=cove-group19-fixture")
             timezone = api("GET", "/api/preferences/timezone")
-            if not isinstance(search.get("items"), list) or search.get("limit") != 40 or timezone.get("schedule_timezone") != "UTC":
-                raise RuntimeError("Packaged panel does not expose the Group 19 contract")
+            roles = api("GET", "/api/teams/default/roles")
+            if not isinstance(search.get("items"), list) or search.get("limit") != 40 or timezone.get("schedule_timezone") != "UTC" or "read_secrets" not in roles.get("permission_catalogue", []):
+                raise RuntimeError("Packaged panel does not expose the merged integration/trust contract")
             run("go", "build", "-o", "bin/cove-worker-linux-amd64", "./cmd/cove-worker", env=env | {"GOOS": "linux", "GOARCH": "amd64"})
             run("docker", "build", "-f", "test/worker/Dockerfile", "-t", worker_image, ".", stdout=subprocess.DEVNULL)
             for resource in ("container", "volume"):

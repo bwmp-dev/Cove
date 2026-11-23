@@ -10,8 +10,8 @@ import { CommandCenter, SearchButton } from "./CommandCenter";
 
 const session = vi.hoisted(() => {
   const listeners = new Set<() => void>();
-  type TestSession = { team_id: string; is_admin: boolean; teams: never[] };
-  let value: TestSession = { team_id: "team-a", is_admin: true, teams: [] };
+  type TestSession = { team_id: string; is_admin: boolean; teams: never[]; permissions: string[] };
+  let value: TestSession = { team_id: "team-a", is_admin: true, teams: [], permissions: [] };
   return {
     get: () => value,
     set: (next: TestSession) => {
@@ -41,7 +41,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
 Element.prototype.scrollIntoView = function () {};
 
 beforeEach(() => {
-  session.set({ team_id: "team-a", is_admin: true, teams: [] });
+  session.set({ team_id: "team-a", is_admin: true, teams: [], permissions: [] });
   setShortcutsEnabled(true);
   vi.mocked(request).mockImplementation((_method, path) => {
     const query = new URL(path, "http://cove.test").searchParams.get("q") ?? "";
@@ -214,10 +214,10 @@ it("refreshes the view and opens New resource only with r r and n r, without que
   expect(invalidate).toHaveBeenCalledWith({ type: "active" });
   expect(await screen.findByText("Current view refreshed.")).toBeInTheDocument();
 
-  act(() => session.set({ team_id: "team-a", is_admin: false, teams: [] }));
+  act(() => session.set({ team_id: "team-a", is_admin: false, teams: [], permissions: [] }));
   await user.keyboard("nr");
   expect(router.state.location.pathname).toBe("/dashboard");
-  act(() => session.set({ team_id: "team-a", is_admin: true, teams: [] }));
+  act(() => session.set({ team_id: "team-a", is_admin: true, teams: [], permissions: [] }));
   await user.keyboard("nr");
   expect(await screen.findByRole("heading", { name: "New resource page" })).toBeInTheDocument();
   expect(request).not.toHaveBeenCalledWith("POST", expect.anything(), expect.anything());
@@ -231,7 +231,7 @@ it("discards an open palette when the team changes and keys results by team", as
   await screen.findByRole("option", { name: /shop-api/ });
   expect(client.getQueryCache().find({ queryKey: ["search", "team-a", "shop"] })).toBeDefined();
 
-  act(() => session.set({ team_id: "team-b", is_admin: true, teams: [] }));
+  act(() => session.set({ team_id: "team-b", is_admin: true, teams: [], permissions: [] }));
   await waitFor(() => expect(screen.queryByRole("combobox")).not.toBeInTheDocument());
   await user.click(screen.getByRole("button", { name: /Search/ }));
   expect(screen.getByRole("combobox")).toHaveValue("");

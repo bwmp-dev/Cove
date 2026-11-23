@@ -1,5 +1,6 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import type { ReactNode } from "react";
 import { workloadConfigurationDiffQuery, type WorkloadConfigurationDiff } from "../api/project-configuration";
 import { errorMessage } from "../api/client";
 import { shortRevision } from "../lib/project-configuration";
@@ -12,19 +13,24 @@ interface Props {
   confirmLabel: string;
   onCancel: () => void;
   onConfirm: () => void;
+  // Extra inputs for the deploy request, such as a reason, shown between the review and the actions.
+  children?: ReactNode;
+  pending?: boolean;
+  confirmDisabled?: boolean;
 }
 
 // Render inside an open Dialog: the diff is read when the review opens and dropped when it closes.
-export function DeployReview({ workloadId, confirmLabel, onCancel, onConfirm }: Props) {
+export function DeployReview({ workloadId, confirmLabel, onCancel, onConfirm, children, pending = false, confirmDisabled = false }: Props) {
   const diff = useQuery(workloadConfigurationDiffQuery(workloadId));
   return (
     <div className="space-y-4">
       <ReviewBody diff={diff} />
+      {children}
       <div className="flex flex-wrap justify-end gap-2 border-t border-line pt-3">
-        <Button variant="ghost" onClick={onCancel}>
+        <Button variant="ghost" onClick={onCancel} disabled={pending}>
           Cancel
         </Button>
-        <Button variant="primary" onClick={onConfirm} disabled={diff.isPending}>
+        <Button variant="primary" onClick={onConfirm} disabled={diff.isPending || confirmDisabled} pending={pending}>
           {confirmLabel}
         </Button>
       </div>

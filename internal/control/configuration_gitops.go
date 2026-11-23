@@ -274,7 +274,9 @@ func (s *Server) reconcileProjectGitOps(ctx context.Context) error {
 		capture := &apiCapture{headers: http.Header{}}
 		if authErr == nil && person.Email != "" {
 			request = request.WithContext(context.WithValue(request.Context(), identityKey{}, person))
-			s.syncProjectGitOps(capture, request)
+			if s.authorize(capture, request) {
+				s.syncProjectGitOps(capture, request)
+			}
 		}
 		lastError := ""
 		if authErr != nil || person == nil || person.Email == "" || capture.status != 200 || capture.failed {

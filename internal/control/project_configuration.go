@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.yaml.in/yaml/v3"
@@ -102,10 +101,7 @@ func validateProjectConfiguration(manifest projectConfiguration) error {
 		if policy == nil {
 			return nil
 		}
-		if !validDeploymentWindow(policy.WindowStart, policy.WindowEnd) || (policy.FreezeFrom == nil) != (policy.FreezeUntil == nil) || policy.FreezeFrom != nil && (!policy.FreezeUntil.After(*policy.FreezeFrom) || policy.FreezeUntil.Sub(*policy.FreezeFrom) > 366*24*time.Hour) {
-			return errors.New("invalid deployment policy window or freeze dates")
-		}
-		return nil
+		return validateSchedule(policy)
 	}
 	if err := validateVariables(manifest.Variables); err != nil {
 		return err
@@ -291,14 +287,14 @@ func (s *Server) readProjectConfiguration(ctx context.Context, tx pgx.Tx, team, 
 	if err != nil {
 		return manifest, err
 	}
-	rows, err = tx.Query(ctx, `SELECT COALESCE(environment_id,''),approval,freeze_from,freeze_until,window_start,window_end FROM deployment_policies WHERE team_id=$1 AND (project_id=$2 OR environment_id IN (SELECT id FROM environments WHERE project_id=$2))`, team, project)
+	rows, err = tx.Query(ctx, `SELECT COALESCE(environment_id,''),approval,freeze_from,freeze_until,window_start,window_end,timezone,recurring_windows,freezes,outside_window FROM deployment_policies WHERE team_id=$1 AND (project_id=$2 OR environment_id IN (SELECT id FROM environments WHERE project_id=$2))`, team, project)
 	if err != nil {
 		return manifest, err
 	}
 	for rows.Next() {
 		var environment string
 		policy := &deploymentPolicy{}
-		if err = rows.Scan(&environment, &policy.Approval, &policy.FreezeFrom, &policy.FreezeUntil, &policy.WindowStart, &policy.WindowEnd); err != nil {
+		if err = rows.Scan(&environment, &policy.Approval, &policy.FreezeFrom, &policy.FreezeUntil, &policy.WindowStart, &policy.WindowEnd, &policy.Timezone, &policy.Windows, &policy.Freezes, &policy.OutsideWindow); err != nil {
 			break
 		}
 		if environment == "" {

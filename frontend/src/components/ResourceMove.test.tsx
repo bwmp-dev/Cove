@@ -22,7 +22,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
   this.open = false;
 };
 
-const workload = { id: "w1", name: "web", project_id: "p1", environment_id: "e1", permissions: ["read", "operate", "edit"] } as Workload;
+const workload = { id: "w1", name: "web", project_id: "p1", environment_id: "e1", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"] } as Workload;
 const edit = ["read", "operate", "edit"];
 const projectsByTeam: Record<string, unknown[]> = {
   a: [{ id: "p1", name: "Shop", permissions: edit, environments: [{ id: "e1", name: "production", permissions: edit }, { id: "e2", name: "staging", permissions: edit }] }],

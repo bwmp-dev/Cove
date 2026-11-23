@@ -14,6 +14,7 @@ import (
 
 type Container struct {
 	Service            string            `json:"service"`
+	ExposedPorts       bool              `json:"exposed_ports"`
 	ExpectedCompleted  bool              `json:"expected_completed,omitempty"`
 	Metrics            *ContainerMetrics `json:"metrics,omitempty"`
 	MetricsUnavailable bool              `json:"metrics_unavailable,omitempty"`
@@ -63,7 +64,7 @@ func (e *Engine) Containers(ctx context.Context, id string) ([]Container, error)
 				service = value
 			}
 		}
-		containers = append(containers, Container{ID: docker.ID, Name: docker.Names, Image: docker.Image, State: docker.State, Status: docker.Status, Ports: docker.Ports, Service: service})
+		containers = append(containers, Container{ID: docker.ID, Name: docker.Names, Image: docker.Image, State: docker.State, Status: docker.Status, Ports: docker.Ports, ExposedPorts: strings.Contains(docker.Ports, "0.0.0.0:") || strings.Contains(docker.Ports, "[::]:") || strings.Contains(docker.Ports, ":::"), Service: service})
 	}
 
 	return containers, nil

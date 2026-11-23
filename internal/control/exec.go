@@ -7,6 +7,9 @@ import (
 )
 
 func (s *Server) workloadExec(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, "workload", r.PathValue("id"), "read_secrets") {
+		return
+	}
 	id := r.PathValue("id")
 	if !s.requireAccess(w, r, "workload", id, 3) {
 		return

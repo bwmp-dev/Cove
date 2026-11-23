@@ -18,6 +18,9 @@ def deploy(environment, opener=None, clock=time.monotonic, pause=time.sleep):
     token = environment.get("COVE_DEPLOY_HOOK_TOKEN", "")
     delivery = environment.get("COVE_DEPLOY_DELIVERY", "")
     revision = environment.get("COVE_DEPLOY_REVISION", "")
+    reason = environment.get("COVE_DEPLOY_REASON", "")
+    if len(reason.encode("utf-8")) > 1000 or "\0" in reason:
+        raise ValueError("reason must be at most 1000 bytes without NUL")
     parsed = urllib.parse.urlsplit(url)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username
             or parsed.query or parsed.fragment
@@ -64,7 +67,10 @@ def deploy(environment, opener=None, clock=time.monotonic, pause=time.sleep):
                 pass
             pause(min(delay, max(0, deadline - clock())))
 
-    result = request("POST", url, {"delivery": delivery, "revision": revision})
+    payload = {"delivery": delivery, "revision": revision}
+    if reason:
+        payload["reason"] = reason
+    result = request("POST", url, payload)
     operation = result.get("operation_id", "")
     if not re.fullmatch(r"[a-f0-9]{32}", operation):
         raise ValueError("Cove returned an invalid operation ID")

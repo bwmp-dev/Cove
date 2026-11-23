@@ -133,13 +133,14 @@ func (b *bulkResponse) Write(data []byte) (int, error) {
 func (s *Server) bulkResourceAction(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		IDs         []string `json:"ids"`
+		Reason      string   `json:"reason,omitempty"`
 		Action      string   `json:"action"`
 		Acknowledge bool     `json:"acknowledge"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	if !in.Acknowledge || len(in.IDs) < 1 || len(in.IDs) > 50 || !slices.Contains([]string{"deploy", "restart", "stop"}, in.Action) {
+	if !validOperationReason(in.Reason) || !in.Acknowledge || len(in.IDs) < 1 || len(in.IDs) > 50 || !slices.Contains([]string{"deploy", "restart", "stop"}, in.Action) {
 		http.Error(w, "acknowledge 1-50 resources and choose deploy, restart or stop", 400)
 		return
 	}
@@ -163,7 +164,7 @@ func (s *Server) bulkResourceAction(w http.ResponseWriter, r *http.Request) {
 		sub.URL.Path = "/api/workloads/" + id + "/operations"
 		sub.Pattern = "POST /api/workloads/{id}/operations"
 		sub.SetPathValue("id", id)
-		payload, _ := json.Marshal(map[string]string{"action": in.Action})
+		payload, _ := json.Marshal(map[string]string{"action": in.Action, "reason": in.Reason})
 		sub.Body = io.NopCloser(bytes.NewReader(payload))
 		sub.ContentLength = int64(len(payload))
 		capture := &bulkResponse{header: make(http.Header)}
@@ -217,14 +218,14 @@ func (s *Server) browseResources(w http.ResponseWriter, r *http.Request) {
 	var total int
 	err := s.DB.QueryRow(r.Context(), `WITH visible AS (
  SELECT w.id,w.name,w.node_id,n.name AS node,w.kind,w.project_id,p.name AS project,COALESCE(w.environment_id,'') AS environment_id,COALESCE(e.name,'') AS environment,
- CASE WHEN $3 THEN 3 ELSE cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,'')) END AS level,
+ cove_permission_names($1,w.team_id,w.project_id,COALESCE(w.environment_id,''),$3,$12) AS permissions,
  COALESCE(t.tags,ARRAY[]::text[]) AS tags,EXISTS(SELECT 1 FROM user_pins u WHERE u.user_id=$1 AND u.team_id=$2 AND u.kind='workload' AND u.resource_id=w.id) AS pinned
  FROM workloads w JOIN nodes n ON n.id=w.node_id JOIN projects p ON p.id=w.project_id LEFT JOIN environments e ON e.id=w.environment_id LEFT JOIN workload_tags t ON t.workload_id=w.id
  WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0)
  AND strpos(lower(w.name),lower($4))>0 AND ($5='' OR $5=ANY(COALESCE(t.tags,ARRAY[]::text[])))
  AND ($6='' OR w.project_id=$6) AND ($7='' OR w.node_id=$7) AND ($8='' OR w.environment_id=$8)
 ) SELECT COALESCE(jsonb_agg(page),'[]'::jsonb),(SELECT count(*) FROM visible WHERE NOT $9 OR pinned)
- FROM (SELECT * FROM visible WHERE NOT $9 OR pinned ORDER BY pinned DESC,lower(name),id LIMIT $10 OFFSET $11)page`, p.ID, p.Team, p.Admin, r.URL.Query().Get("q"), r.URL.Query().Get("tag"), r.URL.Query().Get("project_id"), r.URL.Query().Get("node_id"), r.URL.Query().Get("environment_id"), r.URL.Query().Get("pinned") == "true", size, (page-1)*size).Scan(&raw, &total)
+ FROM (SELECT * FROM visible WHERE NOT $9 OR pinned ORDER BY pinned DESC,lower(name),id LIMIT $10 OFFSET $11)page`, p.ID, p.Team, p.Admin, r.URL.Query().Get("q"), r.URL.Query().Get("tag"), r.URL.Query().Get("project_id"), r.URL.Query().Get("node_id"), r.URL.Query().Get("environment_id"), r.URL.Query().Get("pinned") == "true", size, (page-1)*size, permissionCatalogue).Scan(&raw, &total)
 	if err != nil {
 		http.Error(w, "resources unavailable", 503)
 		return
@@ -235,13 +236,13 @@ func (s *Server) browseResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, item := range items {
-		level, ok := item["level"].(float64)
-		if !ok {
+		raw, err := json.Marshal(item["permissions"])
+		var names []string
+		if err != nil || json.Unmarshal(raw, &names) != nil {
 			http.Error(w, "resources unavailable", 503)
 			return
 		}
-		item["permissions"] = permissions(int(level))
-		delete(item, "level")
+		item["permissions"] = permissionMetadata(r, names)
 	}
 	respond(w, 200, map[string]any{"items": items, "page": page, "page_size": size, "total": total, "has_more": len(items) == size && page*size < total})
 }

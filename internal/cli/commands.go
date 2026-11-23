@@ -29,6 +29,7 @@ func execute(ctx context.Context, api *client.Client, args []string, o options) 
 	case "deploy":
 		flags := commandFlags("deploy", o)
 		wait := flags.Bool("wait", true, "wait for terminal deployment state")
+		reason := flags.String("reason", "", "optional audited deployment reason")
 		timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
@@ -37,7 +38,7 @@ func execute(ctx context.Context, api *client.Client, args []string, o options) 
 			return usage("deploy [--wait=false] [--timeout 10m] RESOURCE")
 		}
 		var operation map[string]any
-		if err := api.Do(ctx, "POST", "/workloads/"+pathID(flags.Arg(0))+"/operations", map[string]string{"action": "deploy"}, &operation); err != nil {
+		if err := api.Do(ctx, "POST", "/workloads/"+pathID(flags.Arg(0))+"/operations", map[string]string{"action": "deploy", "reason": *reason}, &operation); err != nil {
 			return err
 		}
 		if *wait {

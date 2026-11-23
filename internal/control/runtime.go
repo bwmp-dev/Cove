@@ -50,6 +50,10 @@ func (s *Server) readRuntime(w http.ResponseWriter, r *http.Request, method stri
 		return
 	}
 	if method == "containers" {
+		if err := s.observePorts(r.Context(), r.PathValue("id"), response.Containers); err != nil {
+			http.Error(w, "runtime security observation unavailable", 503)
+			return
+		}
 		if response.Containers == nil {
 			response.Containers = []worker.Container{}
 		}

@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { RotateCw } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { AlertTriangle, RotateCw } from "lucide-react";
 import { errorMessage, isStatus } from "../api/client";
 import { workloadLogsQuery, workloadRuntimeQuery } from "../api/queries";
 import type { Container } from "../api/types";
@@ -8,9 +9,18 @@ import { useNow } from "../lib/hooks";
 import { LogPanel } from "./LogViewer";
 import { Button, MetaList, Notice, Spinner } from "./ui";
 import { containerTone, type ContainerTone as Tone } from "../lib/containers";
-import { tableHeadClass, tableRowClass } from "../lib/styles";
+import { linkClass, tableHeadClass, tableRowClass } from "../lib/styles";
 
 const toneClass: Record<Tone, string> = { ok: "bg-ok", warn: "bg-warn", bad: "bg-bad", neutral: "bg-fg-subtle" };
+
+function ExposureWarning({ className = "" }: { className?: string }) {
+  return (
+    <span className={`items-start gap-1.5 font-sans text-xs text-warn ${className}`}>
+      <AlertTriangle aria-hidden className="mt-px size-3.5 shrink-0" />
+      <span>Published on all interfaces</span>
+    </span>
+  );
+}
 
 function ContainerRow({ container, kind }: { container: Container; kind: "service" | "job" }) {
   const tone = containerTone(container, kind);
@@ -29,6 +39,7 @@ function ContainerRow({ container, kind }: { container: Container; kind: "servic
           )}
         </div>
         <div className="mt-0.5 truncate font-mono text-xs text-fg-subtle md:hidden">{container.image}</div>
+        {container.exposed_ports && <ExposureWarning className="mt-1 flex lg:hidden" />}
       </td>
       <td className="hidden max-w-0 truncate py-2.5 pr-4 font-mono text-xs text-fg-muted md:table-cell" title={container.image}>
         {container.image}
@@ -44,6 +55,7 @@ function ContainerRow({ container, kind }: { container: Container; kind: "servic
       </td>
       <td className="hidden py-2.5 pr-4 font-mono text-xs text-fg-muted lg:table-cell">
         {container.ports ? <span className="break-words">{container.ports}</span> : <span className="font-sans whitespace-nowrap text-fg-subtle">None published</span>}
+        {container.exposed_ports && <ExposureWarning className="mt-1 flex" />}
       </td>
     </tr>
   );
@@ -87,9 +99,21 @@ export function RuntimeContainers({ workloadId, kind, operationActive }: { workl
     );
   }
   const containers = runtime.data.containers;
+  const exposed = containers.filter((container) => container.exposed_ports).length;
   return (
     <>
       {header}
+      {exposed > 0 && (
+        <div className="border-b border-line p-3">
+          <Notice tone="warn" title={exposed === 1 ? "A container publishes ports on every interface" : `${exposed} containers publish ports on every interface`}>
+            Docker accepts connections to these ports from any network the node is on. Unless public access is intended, bind them to a specific address from{" "}
+            <Link to="/resources/$resourceId/networking" params={{ resourceId: workloadId }} className={linkClass}>
+              Networking
+            </Link>
+            .
+          </Notice>
+        </div>
+      )}
       {containers.length === 0 ? (
         <p className="px-4 py-3 text-[13px] text-fg-muted">
           {kind === "job"

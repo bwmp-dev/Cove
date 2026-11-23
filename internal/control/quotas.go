@@ -182,7 +182,7 @@ func (s *Server) admitDeployment(ctx context.Context, id string) (bool, error) {
 	if maximum > 0 && used >= maximum {
 		return holdDeployment(ctx, tx, id, "Waiting for a team deployment slot.")
 	}
-	if _, err = tx.Exec(ctx, `UPDATE operations SET admitted_at=now() WHERE id=$1 AND admitted_at IS NULL`, id); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE operations SET admitted_at=now(),result=NULL WHERE id=$1 AND admitted_at IS NULL`, id); err != nil {
 		return false, err
 	}
 	if err = tx.Commit(ctx); err != nil {

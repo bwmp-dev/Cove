@@ -41,8 +41,10 @@ func literalCompose(value any) any {
 }
 
 type Release struct {
-	ID      string    `json:"id"`
-	Created time.Time `json:"created_at"`
+	State    string    `json:"state,omitempty"`
+	Revision string    `json:"revision,omitempty"`
+	ID       string    `json:"id"`
+	Created  time.Time `json:"created_at"`
 }
 
 func (e *Engine) Releases(workload string) ([]Release, error) {
@@ -70,7 +72,15 @@ func (e *Engine) Releases(workload string) ([]Release, error) {
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, Release{ID: id, Created: info.ModTime()})
+		release := Release{ID: id, Created: info.ModTime()}
+		journal, readErr := e.read(id)
+		if readErr == nil {
+			release.State = journal.Operation.State
+			release.Revision = journal.Operation.Revision
+		} else if !os.IsNotExist(readErr) {
+			return nil, errors.New("retained release journal unavailable")
+		}
+		items = append(items, release)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Created.After(items[j].Created) })
 	return items, nil

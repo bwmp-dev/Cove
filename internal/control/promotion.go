@@ -12,11 +12,16 @@ import (
 func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(3 * time.Minute))
 	var in struct {
+		Reason     string `json:"reason"`
 		Source     string `json:"source_id"`
 		Release    string `json:"release"`
 		Repository string `json:"registry_repository"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if !validOperationReason(in.Reason) {
+		http.Error(w, "reason must be at most 1000 bytes without NUL", 400)
 		return
 	}
 	target := r.PathValue("id")
@@ -142,6 +147,10 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		http.Error(w, "could not queue promotion", 503)
+		return
+	}
+	if err = saveOperationReason(r.Context(), tx, request.ID, in.Reason, actor(r).ID); err != nil {
+		http.Error(w, "could not record promotion reason", 503)
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `UPDATE workloads SET manually_stopped=false WHERE id=$1`, target); err != nil {

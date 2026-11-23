@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"cove/internal/outbound"
 	"cove/internal/worker"
 )
 
@@ -291,9 +292,11 @@ func TestInfisicalHiddenAndConnectMissingFieldsFail(t *testing.T) {
 		{"infisical", "/PASSWORD", `{"secret":{"secretValue":null,"secretValueHidden":false}}`},
 		{"onepassword-connect", "vault/item/password", `{"fields":[{"id":"other","label":"password","value":"wrong-field"}]}`},
 	} {
-		s := &Server{OAuthClient: &http.Client{Transport: oauthTransport(func(*http.Request) (*http.Response, error) {
+		s := &Server{outboundState: &outboundProxyState{}, OAuthClient: &http.Client{Transport: oauthTransport(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(test.body))}, nil
 		})}}
+		proxy := outbound.Config{}
+		s.outboundState.value.Store(&proxy)
 		source := httpVariableSource{server: s, config: secretProviderConfig{Kind: test.kind, URL: "https://provider.example", Token: "fixture-token"}}
 		if _, err := source.Resolve(context.Background(), test.ref); err == nil {
 			t.Fatal("hidden or absent field accepted")

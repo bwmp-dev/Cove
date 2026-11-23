@@ -13,8 +13,13 @@ import (
 func (s *Server) queueDeploymentPlan(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Workloads []string `json:"workload_ids"`
+		Reason    string   `json:"reason"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if !validOperationReason(in.Reason) {
+		http.Error(w, "reason must be at most 1000 bytes without NUL", 400)
 		return
 	}
 	if len(in.Workloads) < 2 || len(in.Workloads) > 32 {
@@ -94,6 +99,10 @@ func (s *Server) queueDeploymentPlan(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err = tx.Exec(r.Context(), "INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,'deploy',$3)", op, id, encrypted); err != nil {
 			http.Error(w, "could not queue deployment plan", 409)
+			return
+		}
+		if err = saveOperationReason(r.Context(), tx, op, in.Reason, actor(r).ID); err != nil {
+			http.Error(w, "could not record deployment reason", 503)
 			return
 		}
 		if previous != "" {

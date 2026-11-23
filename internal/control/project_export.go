@@ -19,13 +19,17 @@ import (
 
 func (s *Server) exportProjectConfiguration(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("id")
-	if !s.requireAccess(w, r, "project", project, 3) {
-		return
-	}
 	var in struct {
 		EnvironmentID string `json:"environment_id"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if in.EnvironmentID == "" {
+		if !s.requirePermission(w, r, "project", project, "read_secrets") {
+			return
+		}
+	} else if !s.requirePermission(w, r, "environment", in.EnvironmentID, "read_secrets") {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

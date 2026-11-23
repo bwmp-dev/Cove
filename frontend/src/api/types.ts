@@ -47,14 +47,19 @@ export interface VerifyResult {
   capabilities: Capabilities | null;
 }
 
-export type Permission = "read" | "operate" | "edit";
+// The fixed custom-role catalogue; GET /api/session reports which of these apply team-wide in the active team.
+export type TeamPermission = "view" | "read_secrets" | "operate" | "edit_configuration" | "manage_backups" | "manage_members";
+// Project, environment and resource permissions: legacy read/operate/edit plus the exact catalogue names. Preview
+// details report the legacy names only. Edit never implies read_secrets.
+export type Permission = "read" | "operate" | "edit" | TeamPermission;
 export type TeamRole = "owner" | "admin" | "member";
 export type GrantRole = "viewer" | "operator" | "editor";
 
 export interface Grant {
   scope: "team" | "project" | "environment";
   scope_id: string;
-  role: GrantRole;
+  // A built-in GrantRole or the ID of one of the team's custom roles.
+  role: string;
 }
 
 export interface TeamMembership {
@@ -185,16 +190,30 @@ export interface WorkerOperation {
   revision?: string;
 }
 
+// Written by the control plane instead of a worker report: a policy, approval or quota hold (hold_reason, with
+// error repeated for older clients) or a failure recorded before any worker accepted the operation.
+export interface ControlPlaneResult {
+  error: string;
+  hold_reason?: string;
+}
+
 export interface Operation {
   approval_required?: boolean;
   approved_at?: string | null;
   can_approve?: boolean;
   cancel_requested?: boolean;
+  // Optional free text given when a deploy, rollback, promotion or sequence was queued.
+  reason?: string;
+  // Present on the detail endpoint only.
+  emergency_override_by?: string | null;
+  emergency_override_reason?: string;
+  emergency_override_at?: string | null;
+  can_override?: boolean;
   id: string;
   workload_id: string;
   action: OperationAction;
   state: OperationState;
-  result: WorkerOperation | null;
+  result: WorkerOperation | ControlPlaneResult | null;
   created_at: string;
 }
 
@@ -220,6 +239,8 @@ export interface Container {
   status: string;
   ports: string;
   service?: string;
+  // True when Docker publishes at least one port on every interface (0.0.0.0 or ::).
+  exposed_ports?: boolean;
 }
 
 export interface ExecRequest { service: string; container?: string; command: string[]; timeout_seconds: number }

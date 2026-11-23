@@ -4,7 +4,9 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
-import type { WorkloadInput } from "../api/types";
+import type { Project } from "../api/projects";
+import type { ResourceDraft } from "../api/templates";
+import type { Node, WorkloadInput } from "../api/types";
 import { WorkloadForm, type ProviderLink } from "./WorkloadForm";
 
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: String }));
@@ -28,7 +30,7 @@ it("creates a Git resource from a provider repository and hands back the connect
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <WorkloadForm
         nodes={[{ id: "n1", name: "node", address: "10.0.0.1", port: 22, state: "ready", capabilities: null, mode: "ssh", last_checked_at: null }]}
-        projects={[{ id: "p1", name: "Site", permissions: ["read", "operate", "edit"], environments: [] }]}
+        projects={[{ id: "p1", name: "Site", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], environments: [] }]}
         initialProjectId="p1"
         initialEnvironmentId=""
         pending={false}
@@ -66,4 +68,30 @@ it("creates a Git resource from a provider repository and hands back the connect
   expect(input?.source).toMatchObject({ repository: "https://codeberg.org/acme/site.git", branch: "trunk", compose_path: "compose.yaml" });
   expect(input?.source).not.toHaveProperty("token");
   expect(provider).toEqual({ connection_id: 3, repository_id: 9, automatic: false, reporting: false });
+});
+
+const node: Node = { id: "n1", name: "worker", address: "10.0.0.2", port: 22, state: "ready", capabilities: null, mode: "ssh", last_checked_at: null };
+const project: Project = { id: "p1", name: "Apps", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], environments: [] };
+const draft: ResourceDraft = {
+  name: "garage",
+  compose: "services:\n  garage:\n    image: dxflrs/garage:v2.5.0\n",
+  environment: { RPC_SECRET: "a".repeat(64) },
+  routes: [],
+  file_secrets: [{ name: "rpc", variable: "RPC_SECRET", services: ["garage"], build_services: [] }],
+};
+
+it("keeps template file secrets in the create request", async () => {
+  const user = userEvent.setup();
+  const onSubmit = vi.fn();
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <WorkloadForm draft={draft} nodes={[node]} projects={[project]} initialProjectId="p1" initialEnvironmentId="" pending={false} serverError={null} submitLabel="Create resource" cancel={null} onSubmit={onSubmit} />
+    </QueryClientProvider>,
+  );
+  expect(screen.getByText(/mounts these variables as files/)).toBeInTheDocument();
+  await user.click(screen.getByRole("combobox", { name: "Node" }));
+  await user.click(screen.getByRole("option", { name: "worker" }));
+  await user.click(screen.getByRole("button", { name: "Create resource" }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({ name: "garage", node_id: "n1", project_id: "p1", file_secrets: draft.file_secrets, environment: draft.environment });
 });

@@ -18,7 +18,7 @@ import { PlacementRow } from "../components/EnvironmentList";
 import { Notes } from "../components/Notes";
 import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, EmptyState, Field, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section, SectionGrid, TabNav } from "../components/ui";
-import { canCompareEnvironments, countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
+import { canCompareEnvironments, canExportConfiguration, countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can, canCreateProjects } from "../lib/permissions";
 import { useSession } from "../lib/session";
@@ -332,7 +332,7 @@ function ProjectTabs({ project, resources, inPreview }: { project: Project; reso
         Previews
         {previews.length > 0 && <span className="text-xs font-normal text-fg-subtle tabular-nums">{previews.length}</span>}
       </Link>
-      {(can(project.permissions, "read") || canCompareEnvironments(project)) && (
+      {(can(project.permissions, "read") || canCompareEnvironments(project) || canExportConfiguration(project)) && (
         <Link to="/projects/$projectId/configuration" params={{ projectId: project.id }} className={tabLinkClass}>
           <FileCog aria-hidden className="size-3.5" />
           Configuration

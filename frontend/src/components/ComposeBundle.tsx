@@ -17,13 +17,15 @@ const savedStatus = "Saved. Changes apply on the next deploy.";
 interface Props {
   workload: Workload;
   editable: boolean;
+  // Loading saved file contents is an audited secret read; editors without it can still start over.
+  readable: boolean;
   // PR previews and environment previews deploy one allowlisted file; the server refuses bundles for them.
   temporary: boolean;
   blocked: boolean;
   blockers: ReactNode;
 }
 
-export function ComposeBundleSection({ workload, editable, temporary, blocked, blockers }: Props) {
+export function ComposeBundleSection({ workload, editable, readable, temporary, blocked, blockers }: Props) {
   if (temporary) {
     return (
       <Section width="form" title={title}>
@@ -31,12 +33,12 @@ export function ComposeBundleSection({ workload, editable, temporary, blocked, b
       </Section>
     );
   }
-  return <ComposeBundlePanel workload={workload} editable={editable} blocked={blocked} blockers={blockers} />;
+  return <ComposeBundlePanel workload={workload} editable={editable} readable={readable} blocked={blocked} blockers={blockers} />;
 }
 
 type Editing = { draft: BundleDraft; replacing: boolean };
 
-function ComposeBundlePanel({ workload, editable, blocked, blockers }: Omit<Props, "temporary">) {
+function ComposeBundlePanel({ workload, editable, readable, blocked, blockers }: Omit<Props, "temporary">) {
   const client = useQueryClient();
   const summary = useQuery(composeBundleQuery(workload.id));
   const mode = bundleMode(workload);
@@ -124,9 +126,10 @@ function ComposeBundlePanel({ workload, editable, blocked, blockers }: Omit<Prop
           </div>
         )}
       </div>
-      <Dialog open={dialog === "load"} title="Load saved Compose files?" onClose={() => setDialog(null)}>
+      <Dialog open={dialog === "load"} title={readable ? "Load saved Compose files?" : "Replace saved Compose files?"} onClose={() => setDialog(null)}>
         <LoadSaved
           workload={workload}
+          readable={readable}
           onClose={() => setDialog(null)}
           onLoaded={(draft) => {
             setDialog(null);
@@ -189,13 +192,24 @@ function BundleSummary({ saved, mode, primary }: { saved: ComposeBundleSummary; 
 }
 
 // Rendered only while its dialog is open, so closing it any way unmounts the gcTime 0 export and its result.
-function LoadSaved({ workload, onClose, onLoaded, onReplace }: { workload: Workload; onClose: () => void; onLoaded: (draft: BundleDraft) => void; onReplace: () => void }) {
+function LoadSaved({ workload, readable, onClose, onLoaded, onReplace }: { workload: Workload; readable: boolean; onClose: () => void; onLoaded: (draft: BundleDraft) => void; onReplace: () => void }) {
   const exported = useMutation({
     gcTime: 0,
     mutationFn: () => exportComposeBundle(workload.id),
     onSuccess: (result) => onLoaded(draftFromBundle(result.bundle)),
     networkMode: "always",
   });
+  if (!readable) {
+    return (
+      <div className="space-y-4">
+        <p>Saved override and ancillary files can contain secrets, and your access does not include reading them. You can start over: saving then replaces every saved override and ancillary file with what you enter. Profiles are kept.</p>
+        <div className="flex flex-wrap justify-end gap-2 border-t border-line pt-3">
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={onReplace}>Start over</Button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="space-y-4">
       <Notice tone="warn" title="Saved files can contain secrets">

@@ -6,6 +6,7 @@ import { errorMessage, request } from "../api/client";
 import { keys } from "../api/queries";
 import { builtinVariablesQuery, referenceFormats, secretProviderLabels, secretProvidersQuery, secretReference, validateReference } from "../api/secret-providers";
 import type { Workload } from "../api/types";
+import { can } from "../lib/permissions";
 import { describedBy, inputClass, linkClass } from "../lib/styles";
 import { byteLength, validateEnvironmentKey } from "../lib/workload-form";
 import { Dialog } from "./ConfirmDialog";
@@ -165,12 +166,23 @@ function ExportContent({ workload, onClose }: { workload: Workload; onClose: () 
   );
 }
 
+const fileActionCopy = {
+  both: { title: "Import and export", description: "Move saved variables in and out as a .env file." },
+  import: { title: "Import", description: "Add saved variables from a .env file." },
+  export: { title: "Export", description: "Download saved variables as a .env file." },
+};
+
 export function EnvironmentFileActions({ workload, temporary, blocked }: { workload: Workload; temporary: boolean; blocked: boolean }) {
   const [dialog, setDialog] = useState<"import" | "export" | null>(null);
   const [imported, setImported] = useState<string[] | null>(null);
   const saved = workload.environment_keys.length;
+  // Importing writes configuration and exporting reads plaintext secrets; a custom role can hold either one alone.
+  const importable = can(workload.permissions, "edit");
+  const exportable = can(workload.permissions, "read_secrets");
+  if (!importable && !exportable) return null;
+  const { title, description } = fileActionCopy[importable ? (exportable ? "both" : "import") : "export"];
   return (
-    <Section width="form" title="Import and export" description="Move saved variables in and out as a .env file.">
+    <Section width="form" title={title} description={description}>
       <div className="space-y-3">
         {temporary && <Notice>Preview resources cannot import or export saved variables. Use the resource the preview was created from.</Notice>}
         {imported && (
@@ -179,15 +191,21 @@ export function EnvironmentFileActions({ workload, temporary, blocked }: { workl
           </Notice>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          <Button disabled={temporary || blocked} onClick={() => { setImported(null); setDialog("import"); }}>
-            <FileUp aria-hidden className="size-3.5" />
-            Import .env
-          </Button>
-          <Button disabled={temporary || saved === 0} onClick={() => setDialog("export")}>
-            <FileDown aria-hidden className="size-3.5" />
-            Export .env
-          </Button>
-          {!temporary && saved === 0 && <span className="text-xs text-fg-muted">No variables to export.</span>}
+          {importable && (
+            <Button disabled={temporary || blocked} onClick={() => { setImported(null); setDialog("import"); }}>
+              <FileUp aria-hidden className="size-3.5" />
+              Import .env
+            </Button>
+          )}
+          {exportable && (
+            <Button disabled={temporary || saved === 0} onClick={() => setDialog("export")}>
+              <FileDown aria-hidden className="size-3.5" />
+              Export .env
+            </Button>
+          )}
+          {exportable && !temporary && saved === 0 && <span className="text-xs text-fg-muted">No variables to export.</span>}
+          {!exportable && <span className="text-xs text-fg-muted">Exporting needs permission to read secrets.</span>}
+          {!importable && <span className="text-xs text-fg-muted">Importing needs edit access.</span>}
         </div>
       </div>
       <Dialog open={dialog === "import"} title="Import a .env file" onClose={() => setDialog(null)}>

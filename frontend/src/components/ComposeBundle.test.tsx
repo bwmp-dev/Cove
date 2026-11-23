@@ -5,6 +5,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
 import type { ComposeBundleSummary } from "../api/compose-bundle";
 import type { Workload } from "../api/types";
+import { can } from "../lib/permissions";
+import { editorAccess, editWithoutSecrets } from "../test/permissions";
 import { ComposeBundleSection } from "./ComposeBundle";
 
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)) }));
@@ -18,7 +20,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
 };
 
 const secret = "DATABASE_PASSWORD=hunter2\n";
-const inline: Workload = { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit"], manually_stopped: false, deployed: false, compose: "services: {}", environment_keys: [], source: null, has_source_token: false };
+const inline: Workload = { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: editorAccess, manually_stopped: false, deployed: false, compose: "services: {}", environment_keys: [], source: null, has_source_token: false };
 const git: Workload = { ...inline, source: { repository: "https://github.com/acme/app.git", branch: "main", compose_path: "deploy/compose.yml" } };
 const savedInline: ComposeBundleSummary = { enabled: true, available: true, files: ["production.yaml", "metrics.yaml"], assets: ["base.env"], paths: [], profiles: ["worker"] };
 const exported = { bundle: { files: [{ path: "production.yaml", content: "services:\n  web: {}\n" }, { path: "metrics.yaml", content: "services:\n  metrics: {}\n" }], assets: { "base.env": secret }, profiles: ["worker"] } };
@@ -37,7 +39,7 @@ function setup(workload: Workload, summary: ComposeBundleSummary, options: { edi
   });
   const view = render(
     <QueryClientProvider client={client}>
-      <ComposeBundleSection workload={workload} editable={options.editable ?? true} temporary={options.temporary ?? false} blocked={options.blocked ?? false} blockers={null} />
+      <ComposeBundleSection workload={workload} editable={options.editable ?? true} readable={can(workload.permissions, "read_secrets")} temporary={options.temporary ?? false} blocked={options.blocked ?? false} blockers={null} />
     </QueryClientProvider>,
   );
   return { client, ...view };
@@ -132,6 +134,19 @@ it("replaces saved files without reading them only with a warning", async () => 
   await user.click(screen.getByRole("button", { name: "Save files and profiles" }));
   await waitFor(() => expect(request).toHaveBeenCalledWith("PUT", "/api/workloads/w1/compose-bundle", { bundle: { files: [{ path: "prod.yaml", content: "services: {}" }], assets: {}, paths: [], profiles: ["worker"] } }));
   expect(request).not.toHaveBeenCalledWith("POST", expect.anything());
+});
+
+it("lets an editor without read_secrets start over but never load saved contents", async () => {
+  const user = userEvent.setup();
+  const { client } = setup({ ...inline, permissions: editWithoutSecrets }, savedInline);
+  await user.click(await screen.findByRole("button", { name: "Edit files and profiles" }));
+  const dialog = screen.getByRole("dialog", { name: "Replace saved Compose files?" });
+  expect(within(dialog).queryByRole("button", { name: "Load saved files" })).not.toBeInTheDocument();
+  expect(within(dialog).getByText(/your access does not include reading them/)).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "Start over" }));
+  expect(screen.getByText("Saved files were not loaded")).toBeInTheDocument();
+  expect(request).not.toHaveBeenCalledWith("POST", "/api/workloads/w1/compose-bundle/export");
+  expect(cacheText(client)).not.toContain("hunter2");
 });
 
 it("keeps unsaved edits and shows the server reason when saving is refused", async () => {

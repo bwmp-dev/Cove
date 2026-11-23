@@ -14,29 +14,72 @@ spec.loader.exec_module(updater)
 
 
 class UpdateTests(unittest.TestCase):
+    def test_downgrade_requires_confirmation_and_matching_schema(self):
+        current = {"org.opencontainers.image.version": "v2.0.0", "io.cove.schema-sha256": "a" * 64}
+        target = {"org.opencontainers.image.version": "v1.0.0", "io.cove.schema-sha256": "a" * 64}
+        with self.assertRaises(RuntimeError):
+            updater.enforce_update_order(current, target, "v1.0.0", False)
+        updater.enforce_update_order(current, target, "v1.0.0", True)
+        target["io.cove.schema-sha256"] = "b" * 64
+        with self.assertRaises(RuntimeError):
+            updater.enforce_update_order(current, target, "v1.0.0", True)
+
+    def test_beta_order_uses_signed_source_lineage(self):
+        current = {"org.opencontainers.image.version": "beta-" + "a" * 40,
+                   "io.cove.source-root": "c" * 40, "io.cove.source-generation": "20"}
+        target = {"org.opencontainers.image.version": "v1.0.0",
+                  "io.cove.source-root": "c" * 40, "io.cove.source-generation": "19"}
+        self.assertTrue(updater.is_downgrade(current, target))
+        target["io.cove.source-root"] = "d" * 40
+        with self.assertRaises(RuntimeError):
+            updater.is_downgrade(current, target)
+
+    def test_offline_update_uses_verified_local_ids_without_pull(self):
+        self.exercise_update(offline=True)
+
+    def test_failed_schema_change_never_starts_older_panel(self):
+        self.exercise_update(failure=True, schema_changed=True)
+
+    def test_signature_verification_requires_expected_repository_digest(self):
+        with patch.object(updater, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps(["ghcr.io/attacker/cove@sha256:" + "a" * 64]))
+            with self.assertRaises(RuntimeError):
+                updater.verify_image("ghcr.io/bwmp-dev/cove:v1.2.3")
+            self.assertEqual(run.call_count, 1)
+
+    def test_signature_failure_is_propagated(self):
+        with patch.object(updater, "run") as run:
+            run.side_effect = [subprocess.CompletedProcess([], 0, stdout=json.dumps(["ghcr.io/bwmp-dev/cove@sha256:" + "a" * 64])), subprocess.CalledProcessError(1, ["cosign"])]
+            with self.assertRaises(subprocess.CalledProcessError):
+                updater.verify_image("ghcr.io/bwmp-dev/cove:v1.2.3")
+
+    def verified_latest(self, channel="release"):
+        with patch.object(updater, "verify_image"):
+            return updater.latest_release(channel)
+
     @patch.object(updater, "run")
     def test_latest_accepts_only_stable_release_label(self, run):
         for version in ["main", "v1.2.3-beta.1", "", "1.2.3"]:
             run.return_value = subprocess.CompletedProcess([], 0, stdout=version)
             with self.assertRaises(ValueError):
-                updater.latest_release()
+                self.verified_latest()
         run.return_value = subprocess.CompletedProcess([], 0, stdout="v1.2.3\n")
-        self.assertEqual(updater.latest_release(), "v1.2.3")
+        self.assertEqual(self.verified_latest(), "v1.2.3")
 
     @patch.object(updater, "run")
     def test_beta_channel_resolves_immutable_version(self, run):
         version = "beta-" + "a" * 40
         run.return_value = subprocess.CompletedProcess([], 0, stdout=version)
-        self.assertEqual(updater.latest_release("beta"), version)
+        self.assertEqual(self.verified_latest("beta"), version)
         self.assertEqual(updater.release_images(version)["cove"], "ghcr.io/bwmp-dev/cove:" + version)
         run.return_value = subprocess.CompletedProcess([], 0, stdout="v1.2.3")
         with self.assertRaises(ValueError):
-            updater.latest_release("beta")
+            self.verified_latest("beta")
         run.return_value = subprocess.CompletedProcess([], 0, stdout=version)
         with self.assertRaises(ValueError):
-            updater.latest_release("release")
+            self.verified_latest("release")
 
-    def exercise_update(self, failure=False, local=False, unchanged=False):
+    def exercise_update(self, failure=False, local=False, unchanged=False, offline=False, schema_changed=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / ".env").write_text("COVE_DOMAIN=panel.example.com\nCOVE_VERSION=v1.0.0\n")
@@ -48,7 +91,9 @@ class UpdateTests(unittest.TestCase):
 
             def run(args, **kwargs):
                 calls.append(args)
-                if "config" in args:
+                if "inspect" in args and "{{json .Config.Labels}}" in args:
+                    output = json.dumps({"org.opencontainers.image.version": "v1.0.0" if args[-1] == "sha256:old" and not unchanged else "v1.2.3", "io.cove.schema-sha256": ("b" if schema_changed and args[-1] != "sha256:old" else "a") * 64})
+                elif "config" in args:
                     output = json.dumps({"name": "cove", "services": services})
                 elif "ps" in args:
                     output = "container-id"
@@ -68,12 +113,12 @@ class UpdateTests(unittest.TestCase):
 
             previous = Path.cwd()
             try:
-                with patch.object(updater, "run", side_effect=run), patch.dict("sys.modules", {"fcntl": types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
+                with patch.object(updater, "verify_image"), patch.object(updater, "run", side_effect=run), patch.dict("sys.modules", {"fcntl": types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
                     if failure:
                         with self.assertRaises(subprocess.CalledProcessError):
-                            updater.update(root, "v1.2.3")
+                            updater.update(root, "v1.2.3", {name: "sha256:" + "b" * 64 for name in ("cove", "worker")} if offline else None)
                     else:
-                        updater.update(root, "v1.2.3")
+                        updater.update(root, "v1.2.3", {name: "sha256:" + "b" * 64 for name in ("cove", "worker")} if offline else None)
             finally:
                 os.chdir(previous)
             if unchanged:
@@ -81,10 +126,15 @@ class UpdateTests(unittest.TestCase):
                 self.assertFalse(any("up" in call for call in calls))
                 self.assertEqual(methods, [])
                 return
+            if offline:
+                self.assertFalse(any("pull" in call for call in calls))
+            if failure and schema_changed:
+                self.assertTrue(any("stop" in call and "cove" in call for call in calls))
+                self.assertFalse(any(any("rollback.json" in str(arg) for arg in call) for call in calls if "up" in call))
             self.assertIn("COVE_VERSION=" + ("v1.0.0" if failure else "v1.2.3"), (root / ".env").read_text())
             ups = [call for call in calls if "up" in call]
-            self.assertEqual(len(ups), 2 if failure else 1)
-            if failure:
+            self.assertEqual(len(ups), 2 if failure and not schema_changed else 1)
+            if failure and not schema_changed:
                 self.assertTrue(any("rollback.json" in str(arg) for arg in ups[-1]))
             self.assertTrue(all("--no-deps" in call and "--no-build" in call for call in ups))
             self.assertEqual(next((root / ".cove-updates").glob("*/database.dump")).read_bytes(), b"database backup")

@@ -2,8 +2,10 @@ import { useMutation } from "@tanstack/react-query";
 import { Download } from "lucide-react";
 import { useId, useState } from "react";
 import { errorMessage } from "../api/client";
-import type { Environment, Project } from "../api/projects";
+import type { Project } from "../api/projects";
 import { exportProjectConfiguration } from "../api/project-configuration";
+import { exportableEnvironments } from "../lib/hierarchy";
+import { can } from "../lib/permissions";
 import { exportFilename } from "../lib/project-configuration";
 import { formatBytes } from "../lib/format";
 import { Checkbox } from "./Checkbox";
@@ -26,10 +28,11 @@ function saveFile(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export function ConfigurationExport({ project, environments, online }: { project: Project; environments: readonly Environment[]; online: boolean }) {
+export function ConfigurationExport({ project, online }: { project: Project; online: boolean }) {
   const id = useId();
-  const exportable = environments.filter((environment) => environment.permissions.includes("edit"));
-  const [scope, setScope] = useState("");
+  const wholeProject = can(project.permissions, "read_secrets");
+  const exportable = exportableEnvironments(project);
+  const [scope, setScope] = useState(() => (wholeProject ? "" : (exportable[0]?.id ?? "")));
   const [open, setOpen] = useState(false);
   const [saved, setSaved] = useState<{ filename: string; size: number } | null>(null);
   const environment = exportable.find((item) => item.id === scope);
@@ -37,9 +40,9 @@ export function ConfigurationExport({ project, environments, online }: { project
   return (
     <Section title="Export with secrets" description="Download a ZIP with cove.yaml, each resource's Compose files and its .env. Exports are recorded in the audit log and do not start or stop anything.">
       <div className="space-y-4">
-        <Field id={`${id}-scope`} label="What to export" hint="Choose the whole project or one environment.">
+        <Field id={`${id}-scope`} label="What to export" hint={wholeProject ? "Choose the whole project or one environment." : "Choose an environment. Exporting the whole project needs permission to read its secrets."}>
           <Select id={`${id}-scope`} value={scope} onChange={(event) => setScope(event.target.value)} aria-describedby={`${id}-scope-hint`}>
-            <option value="">Whole project</option>
+            {wholeProject && <option value="">Whole project</option>}
             {exportable.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name} environment
@@ -58,7 +61,7 @@ export function ConfigurationExport({ project, environments, online }: { project
               setSaved(null);
               setOpen(true);
             }}
-            disabled={!online}
+            disabled={!online || (!wholeProject && !environment)}
             title={online ? undefined : offline}
           >
             <Download aria-hidden className="size-3.5" />

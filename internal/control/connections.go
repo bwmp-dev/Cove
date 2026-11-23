@@ -360,6 +360,15 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		return err
 	}
 	if !driftPrepared {
+		if !r.InfrastructurePrepared && r.OutboundProxy == nil {
+			c, err := s.outboundConfig(ctx)
+			if err != nil {
+				return err
+			}
+			if s.propagateOutbound(c) {
+				r.OutboundProxy = &c
+			}
+		}
 		// Previously prepared requests may already exist on a worker with a recorded digest.
 		if !r.InfrastructurePrepared && r.Action == "deploy" {
 			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'drift')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&r.RecordDrift); err != nil {

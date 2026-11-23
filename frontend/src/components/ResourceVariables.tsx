@@ -24,7 +24,7 @@ export function ResourceVariables({ workloadId }: { workloadId: string }) {
   const values = new FormData(event.currentTarget);
   save.mutate({ method: "PUT", binding: { name: formText(values, "name"), source_id: source, source_key: formText(values, "key") } });
  }
- return <Section width="form" title="Resource variable bindings" description="Share a saved variable with this resource. Creating a binding needs edit access to both resources. People who can deploy or edit this resource can use the bound value. Changes apply on the next deploy.">
+ return <Section width="form" title="Resource variable bindings" description="Share a saved variable with this resource. Creating a binding needs permission to read secrets on the source resource and edit access to this one. People who can deploy or edit this resource can use the bound value. Changes apply on the next deploy.">
   <div className="space-y-4">
    {bindings.isError && <Notice tone="error">{errorMessage(bindings.error)}</Notice>}
    {bindings.data?.length === 0 && <p className="text-sm text-fg-muted">No resource bindings.</p>}
@@ -32,7 +32,7 @@ export function ResourceVariables({ workloadId }: { workloadId: string }) {
    <form className="space-y-3" onSubmit={submit}>
     <div className="grid gap-3 md:grid-cols-3">
      <Field id="binding-name" label="Binding name"><input className={inputClass} id="binding-name" name="name" required maxLength={128} pattern="[A-Za-z_][A-Za-z0-9_]*" /></Field>
-     <Field id="binding-source" label="Source resource"><Select className={inputClass} id="binding-source" value={source} onChange={event => setSource(event.target.value)} required><option value="">Select resource</option>{resources.data?.filter(item => item.id !== workloadId && can(item.permissions, "edit")).map(item => <option key={item.id} value={item.id}>{item.project} / {item.name}</option>)}</Select></Field>
+     <Field id="binding-source" label="Source resource"><Select className={inputClass} id="binding-source" value={source} onChange={event => setSource(event.target.value)} required><option value="">Select resource</option>{resources.data?.filter(item => item.id !== workloadId && can(item.permissions, "read_secrets")).map(item => <option key={item.id} value={item.id}>{item.project} / {item.name}</option>)}</Select></Field>
      <Field id="binding-key" label="Source variable"><Select key={source} className={inputClass} id="binding-key" name="key" required disabled={!detail.data}><option value="">Select variable</option>{detail.data?.environment_keys.map(key => <option key={key} value={key}>{key}</option>)}</Select></Field>
     </div>
     {(resources.isError || detail.isError) && <Notice tone="error">{errorMessage(resources.error ?? detail.error)}</Notice>}

@@ -36,7 +36,7 @@ it("reports no drift only with a baseline, a completed inspection and no changes
 
 it("offers only editable persistent Git resources of the project as GitOps sources", () => {
   const project: Project = { id: "p", name: "Shop", permissions: ["read", "edit"], environments: [{ id: "e1", name: "Production", permissions: [] }, { id: "pr", name: "pr-4", preview_id: "x", permissions: [] }] };
-  const summary = (id: string, extra: Partial<WorkloadSummary>): WorkloadSummary => ({ id, name: id, project_id: "p", node_id: "n", node: "One", kind: "service", permissions: ["read", "operate", "edit"], ...extra });
+  const summary = (id: string, extra: Partial<WorkloadSummary>): WorkloadSummary => ({ id, name: id, project_id: "p", node_id: "n", node: "One", kind: "service", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], ...extra });
   const git = { repository: "r" };
   const resources = [
     summary("w-web", { name: "web", environment_id: "e1", environment: "Production" }),

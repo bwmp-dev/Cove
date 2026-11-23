@@ -22,6 +22,7 @@ type apiNameInput struct {
 	Name string `json:"name"`
 }
 type apiOperationInput struct {
+	Reason   string `json:"reason,omitempty"`
 	Action   string `json:"action"`
 	Release  string `json:"release,omitempty"`
 	BackupID string `json:"backup_id,omitempty"`

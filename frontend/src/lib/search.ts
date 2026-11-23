@@ -4,7 +4,7 @@ export function searchBytes(text: string) {
   return new TextEncoder().encode(text).length;
 }
 
-const pages = new Set(["/dashboard", "/projects", "/resources", "/operations", "/nodes", "/integrations", "/registries", "/storage", "/team", "/tokens", "/account", "/notifications", "/audit", "/admin", "/terminal", "/users"]);
+const pages = new Set(["/dashboard", "/projects", "/resources", "/operations", "/nodes", "/integrations", "/registries", "/storage", "/team", "/tokens", "/account", "/notifications", "/audit", "/admin", "/terminal", "/users", "/api-docs"]);
 const segment = "[A-Za-z0-9_-]{1,128}";
 const entityPaths = [
   new RegExp(`^/projects/${segment}$`),

@@ -60,5 +60,5 @@ func (s *Server) refreshNodes(ctx context.Context) error {
 	for err := range failures {
 		return err
 	}
-	return nil
+	return s.refreshPortExposure(ctx)
 }

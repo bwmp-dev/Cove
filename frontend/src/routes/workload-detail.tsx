@@ -1,5 +1,6 @@
 import { ResourceMove } from "../components/ResourceMove";
 import { Clone } from "../components/Clone";
+import { SaveAsTemplate } from "../components/SaveAsTemplate";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
@@ -40,8 +41,10 @@ import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { DeployReview } from "../components/DeployReview";
+import { ReasonField } from "../components/ReasonField";
 import { DeleteResource } from "../components/DeleteResource";
 import { LogViewer } from "../components/LogViewer";
+import { OperationResultNotice } from "../components/OperationResultNotice";
 import { OperationsTable } from "../components/OperationsTable";
 import { Notes } from "../components/Notes";
 import { RelativeTime } from "../components/RelativeTime";
@@ -51,9 +54,9 @@ import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
-import { can } from "../lib/permissions";
+import { can, currentTeam, managesTeam } from "../lib/permissions";
 import { useSession } from "../lib/session";
-import { actionLabels, activeOperation, allowedActions, isActive, stateLabels, workloadKind } from "../lib/operations";
+import { actionLabels, activeOperation, allowedActions, isActive, reasonError, stateLabels, workerResult, workloadKind } from "../lib/operations";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -81,7 +84,7 @@ function outcome(operation: Operation, kind: "service" | "job") {
 
 function LatestOperation({ operation, kind }: { operation: Operation; kind: "service" | "job" }) {
   const message = outcome(operation, kind);
-  const error = operation.result?.error;
+  const revision = workerResult(operation)?.revision;
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px]">
@@ -90,18 +93,14 @@ function LatestOperation({ operation, kind }: { operation: Operation; kind: "ser
         </Link>
         <OperationStateLabel state={operation.state} />
         <RelativeTime value={operation.created_at} className="text-fg-muted" />
-        {operation.result?.revision && (
-          <span className="font-mono text-xs text-fg-muted" title={operation.result.revision}>
-            {operation.result.revision.slice(0, 7)}
+        {revision && (
+          <span className="font-mono text-xs text-fg-muted" title={revision}>
+            {revision.slice(0, 7)}
           </span>
         )}
       </div>
       {message && <p className="text-[13px] text-fg-muted">{message}</p>}
-      {error && (
-        <Notice tone="error" title="Worker error">
-          <span className="font-mono text-xs break-words">{error}</span>
-        </Notice>
-      )}
+      <OperationResultNotice operation={operation} />
       <LogViewer operationId={operation.id} active={isActive(operation.state)} />
     </div>
   );
@@ -166,16 +165,42 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
   );
 }
 
+function DeployDialog({ open, label, name, workloadId, pending, onCancel, onDeploy }: { open: boolean; label: string; name: string; workloadId: string; pending: boolean; onCancel: () => void; onDeploy: (reason: string) => void }) {
+  const [reason, setReason] = useState("");
+  const invalid = Boolean(reasonError(reason));
+  return (
+    <Dialog open={open} title={`${label} ${name}?`} onClose={onCancel}>
+      <DeployReview
+        workloadId={workloadId}
+        confirmLabel={label}
+        pending={pending}
+        confirmDisabled={invalid}
+        onCancel={onCancel}
+        onConfirm={() => {
+          if (invalid) return;
+          onDeploy(reason);
+          setReason("");
+        }}
+      >
+        <p>Cove queues the deployment with the saved configuration. Deployment policies, approvals and windows still apply.</p>
+        <ReasonField id="deploy-reason" value={reason} onChange={setReason} />
+      </DeployReview>
+    </Dialog>
+  );
+}
+
 function useResourceActions(workload: Workload) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
   const [confirmStop, setConfirmStop] = useState(false);
-  const [reviewDeploy, setReviewDeploy] = useState(false);
+  const [confirmDeploy, setConfirmDeploy] = useState(false);
   const kind = workloadKind(workload.kind);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const blocked = !online || Boolean(active) || queue.isPending || operations.isPending;
   const statusId = useId();
+  const deployLabel = kind === "job" ? "Deploy and run" : actionLabels.deploy;
+  const queuedAction = queue.variables?.action;
 
   return {
     buttons: (
@@ -183,8 +208,8 @@ function useResourceActions(workload: Workload) {
         <div className="flex flex-wrap items-center gap-2">
           {allowedActions(kind).filter(action => !workload.preview_source_id || action === "stop").map((action) => {
             const Icon = actionIcons[action];
-            const pending = queue.isPending && queue.variables === action;
-            const label = kind === "job" && action === "deploy" ? "Deploy and run" : actionLabels[action];
+            const pending = queue.isPending && queuedAction === action;
+            const label = action === "deploy" ? deployLabel : actionLabels[action];
             return (
               <Button
                 key={action}
@@ -192,7 +217,7 @@ function useResourceActions(workload: Workload) {
                 disabled={blocked}
                 aria-describedby={active ? statusId : undefined}
                 pending={pending}
-                onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? setReviewDeploy(true) : queue.mutate(action))}
+                onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? setConfirmDeploy(true) : queue.mutate({ action }))}
               >
                 {!pending && <Icon aria-hidden className="size-3.5" />}
                 {label}
@@ -205,17 +230,15 @@ function useResourceActions(workload: Workload) {
     ),
     feedback: (
       <>
-        <Dialog open={reviewDeploy} title={kind === "job" ? `Deploy and run ${workload.name}?` : `Deploy ${workload.name}?`} onClose={() => setReviewDeploy(false)}>
-          <DeployReview
-            workloadId={workload.id}
-            confirmLabel={kind === "job" ? "Deploy and run" : "Deploy"}
-            onCancel={() => setReviewDeploy(false)}
-            onConfirm={() => {
-              setReviewDeploy(false);
-              queue.mutate("deploy");
-            }}
-          />
-        </Dialog>
+        <DeployDialog
+          open={confirmDeploy}
+          label={deployLabel}
+          name={workload.name}
+          workloadId={workload.id}
+          pending={queue.isPending}
+          onCancel={() => setConfirmDeploy(false)}
+          onDeploy={(reason) => queue.mutate({ action: "deploy", reason }, { onSettled: () => setConfirmDeploy(false) })}
+        />
         <ConfirmDialog
           open={confirmStop}
           title={`Stop ${workload.name}?`}
@@ -224,17 +247,17 @@ function useResourceActions(workload: Workload) {
           onCancel={() => setConfirmStop(false)}
           onConfirm={() => {
             setConfirmStop(false);
-            queue.mutate("stop");
+            queue.mutate({ action: "stop" });
           }}
         >
           {kind === "job"
             ? "The job's containers on the node will be stopped. Deploy runs the job again."
             : "The resource's containers on the node will be stopped and stay down until you start or deploy it again."}
         </ConfirmDialog>
-        {queue.isSuccess && (
+        {queue.isSuccess && queuedAction && (
           <Notice
             tone="success"
-            title={`${actionLabels[queue.variables]} queued`}
+            title={`${actionLabels[queuedAction]} queued`}
             action={
               <Link to="/operations/$operationId" params={{ operationId: queue.data.id }} className={buttonClass("ghost")}>
                 View operation
@@ -242,8 +265,8 @@ function useResourceActions(workload: Workload) {
             }
           />
         )}
-        {queue.isError && (
-          <Notice tone={isStatus(queue.error, 409) ? "warn" : "error"} title={`Could not queue ${actionLabels[queue.variables].toLowerCase()}`}>
+        {queue.isError && queuedAction && (
+          <Notice tone={isStatus(queue.error, 409) ? "warn" : "error"} title={`Could not queue ${actionLabels[queuedAction].toLowerCase()}`}>
             {isStatus(queue.error, 409) ? "Another operation is already active for this resource. Wait for it to finish." : errorMessage(queue.error)}
           </Notice>
         )}
@@ -662,11 +685,11 @@ export function ResourceLogs() {
       <Section title="Container logs" description="Recent output from the resource's containers on the node.">
         <ContainerLogs workloadId={workload.id} />
       </Section>
-      <Section title="Run a command" width="form" description="Run one bounded command in a running container of this resource, for example a migration or a status check. Only editors can run commands.">
-        {can(workload.permissions, "edit") ? (
+      <Section title="Run a command" width="form" description="Run one bounded command in a running container of this resource, for example a migration or a status check. Only editors who can read secrets can run commands.">
+        {can(workload.permissions, "edit") && can(workload.permissions, "read_secrets") ? (
           <ResourceExec key={workload.id} workload={workload} operationActive={Boolean(active)} />
         ) : (
-          <p className="text-[13px] text-fg-muted">Your access to this resource does not include running commands. Ask a team administrator for editor access.</p>
+          <p className="text-[13px] text-fg-muted">Your access to this resource does not include running commands. Ask a team administrator for editor access that includes reading secrets.</p>
         )}
       </Section>
     </>
@@ -710,6 +733,8 @@ export function ResourceBackups() {
 
 export function ResourceSettings() {
   const workload = useResource();
+  const session = useSession();
+  const publishesTemplates = Boolean(session?.is_admin) || managesTeam(currentTeam(session));
   if (!can(workload.permissions, "edit")) {
     return (
       <EmptyState title="Settings need editor access">
@@ -722,6 +747,7 @@ export function ResourceSettings() {
     <>
       <ResourceMove workload={workload} />
       <Clone kind="resource" id={workload.id} name={workload.name} />
+      {publishesTemplates && !workload.preview_source_id && <SaveAsTemplate workloadId={workload.id} workloadName={workload.name} />}
       <Section width="form" title="Danger zone" tone="danger">
         <DeleteResource kind="workload" id={workload.id} />
       </Section>

@@ -223,7 +223,7 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 	var enabled bool
 	var configuration []byte
-	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM deploy_hooks h JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE h.workload_id=$1 AND h.expires_at>now() AND NOT u.disabled AND (u.is_admin OR cove_access(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''))>=2))),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
+	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM deploy_hooks h JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE h.workload_id=$1 AND h.expires_at>now() AND u.email_verified AND NOT u.disabled AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now()) AND (u.is_admin OR cove_permission(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate')) AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR (SELECT require_second_factor FROM teams WHERE id=w.team_id)) OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
 		return err
 	}
 	if !enabled {
@@ -250,7 +250,7 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	}
 	if strings.HasPrefix(delivery, "hook-") {
 		var allowed bool
-		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deploy_hook_receipts receipt JOIN deploy_hooks h ON h.id=receipt.hook_id JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE receipt.queue_delivery=$2 AND h.workload_id=$1 AND NOT receipt.cancelled AND h.expires_at>now() AND NOT u.disabled AND (u.is_admin OR cove_access(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''))>=2))`, id, delivery).Scan(&allowed); err != nil {
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deploy_hook_receipts receipt JOIN deploy_hooks h ON h.id=receipt.hook_id JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE receipt.queue_delivery=$2 AND h.workload_id=$1 AND NOT receipt.cancelled AND h.expires_at>now() AND u.email_verified AND NOT u.disabled AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now()) AND (u.is_admin OR cove_permission(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate')) AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR (SELECT require_second_factor FROM teams WHERE id=w.team_id)) OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))`, id, delivery).Scan(&allowed); err != nil {
 			return err
 		}
 		if !allowed {
@@ -311,6 +311,15 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	}
 	if _, err = tx.Exec(ctx, "INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,'deploy',$3)", request.ID, id, encrypted); err != nil {
 		return err
+	}
+	if strings.HasPrefix(delivery, "hook-") {
+		var reason string
+		if err = tx.QueryRow(ctx, "SELECT reason FROM deploy_hook_receipts WHERE queue_delivery=$1", delivery).Scan(&reason); err != nil {
+			return err
+		}
+		if err = saveOperationReason(ctx, tx, request.ID, reason, "deploy hook"); err != nil {
+			return err
+		}
 	}
 	if prerequisite != "" {
 		if _, err = tx.Exec(ctx, "INSERT INTO operation_dependencies(operation_id,prerequisite_id) VALUES($1,$2)", request.ID, prerequisite); err != nil {

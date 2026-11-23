@@ -47,6 +47,7 @@ func validOnePasswordServiceToken(token string) bool {
 
 type secretCommandFunc func(context.Context, string, []string, []string) ([]byte, error)
 type cliVariableSource struct {
+	server  *Server
 	config  secretProviderConfig
 	command secretCommandFunc
 }
@@ -98,6 +99,13 @@ func (p cliVariableSource) Resolve(ctx context.Context, ref string) (value strin
 			continue
 		}
 		environment = append(environment, entry)
+	}
+	if p.server != nil {
+		proxy, e := p.server.outboundConfig(ctx)
+		if e != nil {
+			return "", errSecretUnavailable
+		}
+		environment = append(environment, proxy.Env()...)
 	}
 	var name string
 	var args []string

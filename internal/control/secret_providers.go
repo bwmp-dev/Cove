@@ -222,7 +222,11 @@ func (p httpVariableSource) read(ctx context.Context, path string, query url.Val
 	} else {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	transport := publicWebhookTransport()
+	config, err := p.server.outboundConfig(ctx)
+	if err != nil {
+		return errSecretUnavailable
+	}
+	transport := publicWebhookTransport(config)
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 20 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if p.server.OAuthClient != nil && p.server.OAuthClient.Transport != nil {
@@ -389,7 +393,7 @@ func (s *Server) resolveExternalVariables(ctx context.Context, workload string, 
 					return ""
 				}
 				if c.Kind == "bitwarden" || c.Kind == "onepassword-service" {
-					source = cliVariableSource{config: c, command: s.secretCommand}
+					source = cliVariableSource{server: s, config: c, command: s.secretCommand}
 				} else {
 					source = httpVariableSource{server: s, config: c}
 				}

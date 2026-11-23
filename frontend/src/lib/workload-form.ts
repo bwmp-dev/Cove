@@ -1,5 +1,5 @@
 import type { GitSourceInput, Route, Workload, WorkloadInput, WorkloadKind } from "../api/types";
-import type { ResourceDraft } from "./templates";
+import type { ResourceDraft } from "../api/templates";
 
 export interface EnvRow {
   id: string;

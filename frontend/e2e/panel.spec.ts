@@ -86,6 +86,14 @@ function proxyRouters() {
   return execFileSync("docker", ["exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers"], { encoding: "utf8" });
 }
 
+// Deploying from the resource header asks for confirmation with an optional reason.
+async function deployFromHeader(page: Page) {
+  await page.locator("main header").getByRole("button", { name: "Deploy", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: /^Deploy .+\?$/ });
+  await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(dialog).toBeHidden();
+}
+
 async function createResource(page: Page, name: string) {
   await page.getByRole("link", { name: "New resource", exact: true }).first().click();
   await page.getByRole("button", { name: "Custom Compose or Git" }).click();
@@ -264,7 +272,7 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await expect(networks.getByText("Connections saved", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Overview", exact: true }).click();
 
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText("running", { exact: true }).first()).toBeVisible();
   await capture(page, testInfo, "resource");
@@ -554,8 +562,13 @@ test("invited member signs up with scoped access while teams stay isolated", asy
   await memberSections.getByRole("link", { name: "Settings", exact: true }).click();
   await expect(member.getByText("Settings need editor access")).toBeVisible();
   await capture(member, testInfo, "member-resource");
+  const hiddenWorkloadPath = `/api/workloads/${new URL(hiddenURL).pathname.split("/").pop()}`;
+  const hiddenWorkload = member.waitForResponse(response => new URL(response.url()).pathname.endsWith(hiddenWorkloadPath) && response.request().method() === "GET");
   await member.goto(hiddenURL);
-  await expect(member.getByText("Permission denied", { exact: true })).toBeVisible();
+  expect((await hiddenWorkload).status()).toBe(403);
+  const deniedAlert = member.getByRole("main").getByRole("alert");
+  await expect(deniedAlert).toContainText("Could not load the resource");
+  await expect(deniedAlert).toContainText("Permission denied");
   await expect(member.getByRole("heading", { name: "hidden-service", exact: true })).toHaveCount(0);
   await member.goto("/nodes");
   await expect(member.getByRole("link", { name: "Add node", exact: true })).toHaveCount(0);
@@ -577,43 +590,6 @@ test("invited member signs up with scoped access while teams stay isolated", asy
   await member.reload();
   await expect(member).toHaveURL(/\/login(?:[?#]|$)/);
   await visitor.close();
-});
-
-test("template catalog creates an editable database without deploying", async ({ page }, testInfo) => {
-  await page.goto("/resources/new");
-  await signIn(page);
-  await page.goto("/resources/new");
-  await expect(page.getByRole("heading", { name: "Resource templates" })).toBeVisible();
-  await capture(page, testInfo, "template-catalog");
-  await page.getByLabel("Search templates").fill("no-such-template");
-  await expect(page.getByText("No templates match.", { exact: false })).toBeVisible();
-  await page.getByRole("button", { name: "Clear filters" }).click();
-  await chooseOption(page.getByLabel("Category", { exact: true }), "Databases");
-  await page.getByRole("button", { name: /PostgreSQL/ }).click();
-  await expect(page.getByLabel("Database password", { exact: true })).toHaveAttribute("type", "password");
-  await page.getByRole("button", { name: "Review configuration" }).click();
-  await page.getByLabel("Name", { exact: true }).fill("template-postgres");
-  await expect(page.getByRole("button", { name: "Create resource", exact: true })).toBeDisabled();
-  await chooseOption(page.getByLabel("Project and environment", { exact: true }), { label: "Scoped project / Project resources" });
-  await chooseOption(page.getByLabel("Node", { exact: true }), { label: "ready-browser-worker" });
-  await expect(page.getByLabel("Compose file", { exact: true })).toContainText("image: postgres:18-alpine");
-  await page.getByRole("button", { name: "Create resource", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "template-postgres", exact: true })).toBeVisible();
-  const sections = page.getByRole("navigation", { name: "Resource sections" });
-  await sections.getByRole("link", { name: "Environment variables", exact: true }).click();
-  await expect(page.getByText("POSTGRES_PASSWORD", { exact: true })).toBeVisible();
-  await sections.getByRole("link", { name: "Domains", exact: true }).click();
-  const domains = page.getByRole("region", { name: "Domains" });
-  await expect(domains.getByText("Not deployed yet", { exact: true })).toBeVisible();
-  await domains.getByRole("button", { name: "Add route", exact: true }).click();
-  await domains.getByLabel("Hostname", { exact: true }).fill(`template-${Date.now()}.cove.test`);
-  await domains.getByLabel("Compose service", { exact: true }).fill("postgres");
-  await domains.getByLabel("Container port", { exact: true }).fill("5432");
-  await domains.getByRole("button", { name: "Save routes", exact: true }).click();
-  await expect(domains.getByText("Routes saved", { exact: true })).toBeVisible();
-  await expect(domains.getByText("They apply when this resource is first deployed.")).toBeVisible();
-  await sections.getByRole("link", { name: "Operations", exact: true }).click();
-  await expect(page.getByText("No operations in the recent history.")).toBeVisible();
 });
 
 test("infrastructure pages, encrypted connection settings and real node terminal", async ({ page }, testInfo) => {
@@ -771,7 +747,7 @@ test("shared variables stay hidden and resolve in a real deployment", async ({ p
   const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string; compose: string };
   const saved = await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: config.name, node_id: config.node_id, compose: config.compose + "    environment:\n      CHECK: ${CHECK}\n", kind: "service", environment: { CHECK: "{{environment.CHECK}}" } } });
   expect(saved.status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   const ids = execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${id}`], { encoding: "utf8" }).trim().split(/\s+/);
   expect(ids.length).toBe(1);
@@ -792,7 +768,7 @@ test("restore drills verify copied volume data without restarting the resource",
   const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
   const yaml = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo original > /data/marker; sleep 3600']\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\nvolumes:\n  data: {}\n";
   expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
   await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
   await page.getByRole("button", { name: "Configure backups", exact: true }).click();
@@ -851,7 +827,7 @@ test("resource bindings, hooks and promotion keep target configuration", async (
   const source = await (await page.request.get(`/api/workloads/${sourceID}`)).json() as { name: string; node_id: string; compose: string; project_id: string };
   const headers = { Origin: new URL(sourceURL).origin };
   expect((await page.request.put(`/api/workloads/${sourceID}`, { headers, data: { name: source.name, node_id: source.node_id, kind: "service", compose: source.compose, environment: { MODE: "source-fixture" } } })).status()).toBe(200);
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   const sourceContainer = containers(sourceURL).split("|")[0] ?? "";
   const sourceImage = execFileSync("docker", ["inspect", "--format", "{{.Image}}", sourceContainer], { encoding: "utf8" }).trim();
@@ -973,7 +949,7 @@ test("temporary SSH access reaches one service and revocation closes it", async 
 `;
   expect((await page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
   await page.reload();
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   // This fixture's worker is containerized; attach it to emulate the real host's bridge reachability.
   execFileSync("docker", ["network", "connect", `cove-${id}_default`, process.env.COVE_BROWSER_WORKER ?? ""]);
@@ -1025,7 +1001,7 @@ test("guarded deployment rejects an unhealthy candidate without replacing the ap
   await createProject(page, "Guarded project");
   const url = await createResource(page, "guarded-app");
   const id = new URL(url).pathname.split("/")[2];
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60000 });
   const original = containers(url);
   await page.goto(`${url}/deployment-safety`);

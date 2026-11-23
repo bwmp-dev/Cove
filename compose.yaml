@@ -20,6 +20,10 @@ services:
       DATABASE_URL: postgres://cove:${POSTGRES_PASSWORD}@database:5432/cove?sslmode=disable
       COVE_ENCRYPTION_KEY: ${COVE_ENCRYPTION_KEY:?Run scripts/configure.sh first}
       COVE_ADMIN_TOKEN: ${COVE_ADMIN_TOKEN:?Run scripts/configure.sh first}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      COVE_TRUSTED_PROXIES: ${COVE_TRUSTED_PROXIES:-}
       COVE_PUBLIC_URL: https://${COVE_DOMAIN:?Set COVE_DOMAIN}${COVE_BASE_PATH:-}
     depends_on:
       database:
@@ -52,8 +56,8 @@ services:
     environment:
       COVE_DOMAIN: ${COVE_DOMAIN:?Set COVE_DOMAIN}
     ports:
-      - 80:80
-      - 443:443
+      - "${COVE_BIND_ADDRESS:-0.0.0.0}:80:80"
+      - "${COVE_BIND_ADDRESS:-0.0.0.0}:443:443"
     volumes:
       - ./deploy/traefik.yaml:/etc/traefik/traefik.yaml:ro
       - ./deploy/traefik-panel.yaml:/etc/traefik/panel.yaml:ro

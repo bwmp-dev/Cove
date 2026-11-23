@@ -3,6 +3,7 @@ package control
 import (
 	"bytes"
 	"context"
+	"cove/internal/outbound"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +32,7 @@ func publicWebhookIP(ip net.IP) bool {
 	return address.Is4() || netip.MustParsePrefix("2000::/3").Contains(address)
 }
 
-func publicWebhookTransport() *http.Transport {
+func publicWebhookTransport(config ...outbound.Config) *http.Transport {
 	return &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
@@ -49,7 +50,15 @@ func publicWebhookTransport() *http.Transport {
 				return nil, errors.New("webhook must resolve to a public address")
 			}
 		}
-		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		c := outbound.Environment()
+		if len(config) > 0 {
+			c = config[0]
+		}
+		proxy, err := c.For("https", address)
+		if err != nil {
+			return nil, err
+		}
+		return outbound.Tunnel(ctx, proxy, network, net.JoinHostPort(ips[0].IP.String(), port))
 	}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second}
 }
 
@@ -73,7 +82,11 @@ func (s *Server) sendNotification(ctx context.Context, c *notificationConfig, ev
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Cove")
 	req.Header.Set("X-Cove-Delivery", event["delivery_id"])
-	transport := publicWebhookTransport()
+	config, err := s.outboundConfig(ctx)
+	if err != nil {
+		return errors.New("outbound configuration unavailable")
+	}
+	transport := publicWebhookTransport(config)
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if s.NotificationTransport != nil {

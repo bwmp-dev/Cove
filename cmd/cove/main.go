@@ -59,6 +59,7 @@ func main() {
 	if err = s.Init(ctx); err != nil {
 		log.Fatal(err)
 	}
+	http.DefaultTransport = s.OutboundTransport(http.DefaultTransport.(*http.Transport))
 	if err = s.InitAdministrator(ctx, os.Getenv("COVE_ADMIN_PASSWORD")); err != nil {
 		log.Fatal(err)
 	}

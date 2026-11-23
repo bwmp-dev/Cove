@@ -84,44 +84,10 @@ func (e *Engine) checkout(ctx context.Context, r Request, root string, out io.Wr
 	if err := os.MkdirAll(filepath.Dir(directory), 0700); err != nil {
 		return "", "", err
 	}
-	environment := []string{"GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
-	if strings.HasPrefix(r.Source.Repository, "ssh://") {
-		if r.Source.SSHPrivateKey == "" {
-			return "", "", errors.New("SSH deploy key is unavailable")
-		}
-		credentialDir, err := os.MkdirTemp(root, ".cove-git-ssh-")
-		if err != nil {
-			return "", "", err
-		}
-		defer func() {
-			if err := os.RemoveAll(credentialDir); err != nil {
-				slog.Error("could not remove temporary Git credentials")
-			}
-		}()
-		identity := filepath.Join(credentialDir, "identity")
-		knownHosts := filepath.Join(credentialDir, "known_hosts")
-		if err = os.WriteFile(identity, []byte(r.Source.SSHPrivateKey), 0600); err != nil {
-			return "", "", err
-		}
-		if err = os.WriteFile(knownHosts, []byte("cove-git "+strings.TrimSpace(r.Source.SSHHostKey)+"\n"), 0600); err != nil {
-			return "", "", err
-		}
-		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
-		command := "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=cove-git -o UserKnownHostsFile=" + quote(knownHosts) + " -i " + quote(identity)
-		environment = append(environment, "GIT_SSH_COMMAND="+command, "GIT_SSH_VARIANT=ssh")
-	}
-	args := []string{"git"}
-	if r.Source.Token != "" {
-		username := r.Source.Username
-		if username == "" {
-			username = "x-access-token"
-		}
-		parsed, err := url.Parse(r.Source.Repository)
-		if err != nil {
-			return "", "", err
-		}
-		environment = append(environment, "COVE_GIT_TOKEN="+r.Source.Token, "COVE_GIT_USERNAME="+username, "COVE_GIT_HOST="+parsed.Host)
-		args = append(args, "-c", `credential.helper=!f() { [ "$1" = get ] || return 0; protocol=; host=; while IFS= read -r line; do case "$line" in protocol=*) protocol=${line#protocol=} ;; host=*) host=${line#host=} ;; esac; done; [ "$protocol" = https ] && [ "$host" = "$COVE_GIT_HOST" ] || return 0; printf 'username=%s\npassword=%s\n' "$COVE_GIT_USERNAME" "$COVE_GIT_TOKEN"; }; f`)
+	environment, args, cleanup, err := gitAccess(r, root)
+	defer cleanup()
+	if err != nil {
+		return "", "", err
 	}
 	clone := append(append([]string{}, args...), "clone", "--depth", "1", "--single-branch", "--branch", r.Source.Branch, "--", r.Source.Repository, directory)
 	if err := e.Run(ctx, root, clone, environment, out); err != nil {
@@ -202,4 +168,51 @@ func prepareCheckoutPermissions(directory string) error {
 		}
 		return os.Chmod(path, mode)
 	})
+}
+
+func gitAccess(r Request, root string) ([]string, []string, func(), error) {
+	cleanup := func() {}
+	environment := []string{"GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	if r.OutboundProxy != nil {
+		environment = append(environment, r.OutboundProxy.Env()...)
+	}
+	args := []string{"git"}
+	if strings.HasPrefix(r.Source.Repository, "ssh://") {
+		if r.Source.SSHPrivateKey == "" {
+			return nil, nil, cleanup, errors.New("SSH deploy key is unavailable")
+		}
+		credentialDir, err := os.MkdirTemp(root, ".cove-git-ssh-")
+		if err != nil {
+			return nil, nil, cleanup, err
+		}
+		cleanup = func() {
+			if err := os.RemoveAll(credentialDir); err != nil {
+				slog.Error("could not remove temporary Git credentials")
+			}
+		}
+		identity := filepath.Join(credentialDir, "identity")
+		knownHosts := filepath.Join(credentialDir, "known_hosts")
+		if err = os.WriteFile(identity, []byte(r.Source.SSHPrivateKey), 0600); err != nil {
+			return nil, nil, cleanup, err
+		}
+		if err = os.WriteFile(knownHosts, []byte("cove-git "+strings.TrimSpace(r.Source.SSHHostKey)+"\n"), 0600); err != nil {
+			return nil, nil, cleanup, err
+		}
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+		command := "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=cove-git -o UserKnownHostsFile=" + quote(knownHosts) + " -i " + quote(identity)
+		environment = append(environment, "GIT_SSH_COMMAND="+command, "GIT_SSH_VARIANT=ssh")
+	}
+	if r.Source.Token != "" {
+		username := r.Source.Username
+		if username == "" {
+			username = "x-access-token"
+		}
+		parsed, err := url.Parse(r.Source.Repository)
+		if err != nil {
+			return nil, nil, cleanup, err
+		}
+		environment = append(environment, "COVE_GIT_TOKEN="+r.Source.Token, "COVE_GIT_USERNAME="+username, "COVE_GIT_HOST="+parsed.Host)
+		args = append(args, "-c", `credential.helper=!f() { [ "$1" = get ] || return 0; protocol=; host=; while IFS= read -r line; do case "$line" in protocol=*) protocol=${line#protocol=} ;; host=*) host=${line#host=} ;; esac; done; [ "$protocol" = https ] && [ "$host" = "$COVE_GIT_HOST" ] || return 0; printf 'username=%s\npassword=%s\n' "$COVE_GIT_USERNAME" "$COVE_GIT_TOKEN"; }; f`)
+	}
+	return environment, args, cleanup, nil
 }

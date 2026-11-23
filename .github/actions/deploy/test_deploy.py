@@ -58,6 +58,14 @@ class DeployActionTests(unittest.TestCase):
             self.assertNotIn("fixture-secret-token", request.full_url)
         self.assertNotIn("fixture-secret-token", captured.getvalue())
 
+    def test_optional_reason_is_forwarded_without_logging_it(self):
+        self.environment["COVE_DEPLOY_REASON"] = "Reviewed release for issue 123"
+        panel = FakePanel(["succeeded"])
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            self.run_deploy(panel)
+        self.assertEqual(json.loads(panel.requests[0].data)["reason"], self.environment["COVE_DEPLOY_REASON"])
+        self.assertNotIn(self.environment["COVE_DEPLOY_REASON"], captured.getvalue())
+
     def test_lost_trigger_reply_reuses_delivery(self):
         class AmbiguousPanel(FakePanel):
             def open(self, request, timeout):

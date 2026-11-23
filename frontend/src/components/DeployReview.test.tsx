@@ -50,3 +50,28 @@ it("keeps the deploy available but visible when the review fails", async () => {
   expect(await screen.findByText(/Configuration storage is unavailable\./)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Deploy" })).toBeEnabled();
 });
+
+it("shows request inputs such as a reason between the review and the actions and honours their validity", async () => {
+  vi.mocked(request).mockResolvedValue({ has_baseline: true, operation_id: "op1", revision: "", fields: [], diffs: null });
+  const onConfirm = vi.fn();
+  const { rerender } = render(
+    <QueryClientProvider client={new QueryClient()}>
+      <DeployReview workloadId="w1" confirmLabel="Deploy" onCancel={() => undefined} onConfirm={onConfirm} confirmDisabled>
+        <label htmlFor="reason">Reason</label>
+        <textarea id="reason" />
+      </DeployReview>
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByText(/No configuration changes/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Reason")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Deploy" })).toBeDisabled();
+  rerender(
+    <QueryClientProvider client={new QueryClient()}>
+      <DeployReview workloadId="w1" confirmLabel="Deploy" onCancel={() => undefined} onConfirm={onConfirm} pending>
+        <label htmlFor="reason">Reason</label>
+        <textarea id="reason" />
+      </DeployReview>
+    </QueryClientProvider>,
+  );
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+});

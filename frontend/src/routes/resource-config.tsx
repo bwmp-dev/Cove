@@ -21,6 +21,7 @@ import { projectsQuery } from "../api/projects";
 import { findPlacement } from "../lib/hierarchy";
 import { providerSourceQuery } from "../api/git-providers";
 import { Networks } from "../components/Networks";
+import { PortBindings } from "../components/PortBindings";
 import { PrivateNetwork } from "../components/PrivateNetwork";
 import { ResourceRegistry } from "../components/ResourceRegistry";
 import { RouteEditor } from "../components/RouteEditor";
@@ -257,7 +258,7 @@ export function ResourceSource() {
   return (
     <>
       {editable ? <SourceForm workload={workload} /> : <SourceSummary workload={workload} />}
-      {(projects.data !== undefined || temporary) && <ComposeBundleSection workload={workload} editable={editable} temporary={temporary} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
+      {(projects.data !== undefined || temporary) && <ComposeBundleSection workload={workload} editable={editable} readable={can(workload.permissions, "read_secrets")} temporary={temporary} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
       {editable && !workload.preview_source_id && <GitDeployKey workload={workload} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
       {editable && workload.source && provider.data === null && (
         <Section width="form" title="Automatic deployments">
@@ -396,6 +397,7 @@ export function ResourceEnvironment() {
             </ul>
           )}
         </Section>
+        <EnvironmentFileActions workload={workload} temporary={temporary} blocked={blocked} />
         <BuiltinVariables workloadId={workload.id} />
       </div>
     );
@@ -666,7 +668,8 @@ function DomainsForm({ workload }: { workload: Workload }) {
 
 export function ResourceNetworking() {
   const workload = useResource();
-  return <div className="space-y-6"><Networks workload={workload} /><PrivateNetwork id={workload.id} canEdit={can(workload.permissions, "edit")} />{can(workload.permissions,"edit") && <DatabaseAccess id={workload.id} />}</div>;
+  const active = useActiveOperation(workload.id);
+  return <div className="space-y-6"><Networks workload={workload} /><PrivateNetwork id={workload.id} canEdit={can(workload.permissions, "edit")} />{can(workload.permissions, "edit") && <PortBindings workload={workload} busy={Boolean(active)} />}{can(workload.permissions,"edit") && <DatabaseAccess id={workload.id} />}</div>;
 }
 
 export function ResourceRegistryPage() {

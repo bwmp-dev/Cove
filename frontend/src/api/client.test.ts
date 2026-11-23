@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rememberTeam } from "../lib/team";
-import { ApiError, request, requestFile, requestForTeam, requestPublic } from "./client";
+import { ApiError, enrolmentRequiredMessage, request, requestFile, requestForTeam, requestPublic } from "./client";
 
 function respond(status: number, body: string, type: string, headers: Record<string, string> = {}) {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(body, { status, headers: { "content-type": type, ...headers } }))));
@@ -48,6 +48,11 @@ describe("request", () => {
   it("explains authorization refusals without a server message", async () => {
     respond(403, "", "text/plain");
     await expect(request("GET", "/api/audit")).rejects.toMatchObject({ status: 403, message: "Access denied. Your account does not have permission for this action." });
+  });
+
+  it("explains the second-factor enrolment refusal", async () => {
+    respond(403, '{"error":"second_factor_enrolment_required"}', "application/json");
+    await expect(request("GET", "/api/projects")).rejects.toMatchObject({ status: 403, message: enrolmentRequiredMessage });
   });
 
   it("uses short plain-text server errors", async () => {

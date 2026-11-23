@@ -2,8 +2,11 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -18,6 +21,9 @@ type Probe struct {
 	ComposeBundles      bool         `json:"compose_bundles"`
 	Exec                bool         `json:"exec"`
 	BuiltinVariables    bool         `json:"builtin_variables"`
+	OutboundProxy       bool         `json:"outbound_proxy"`
+	ReleaseDiff         bool         `json:"release_diff"`
+	BinarySHA256        string       `json:"binary_sha256"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
 	GuardedHooks        bool         `json:"guarded_hooks"`
 	Previews            bool         `json:"previews"`
@@ -51,6 +57,13 @@ func Inspect(ctx context.Context) Probe {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	p := Probe{Drift: true, SourceFiles: true, ComposeBundles: true, Exec: true, BuiltinVariables: true, GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
+	if exe, err := os.Executable(); err == nil {
+		if data, err := os.ReadFile(exe); err == nil {
+			p.BinarySHA256 = fmt.Sprintf("%x", sha256.Sum256(data))
+		}
+	}
+	p.OutboundProxy = true
+	p.ReleaseDiff = true
 	p.Previews = true
 	p.Imports = true
 	p.Adoption = true

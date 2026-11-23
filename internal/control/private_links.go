@@ -480,7 +480,6 @@ func (s *Server) projectConnections(w http.ResponseWriter, r *http.Request) {
 		if level < 1 {
 			continue
 		}
-		g.Permissions = permissions(level)
 		var config workloadInput
 		if data, unsealErr := unseal(s.Key, encrypted); unsealErr == nil && json.Unmarshal(data, &config) == nil {
 			g.Services = composeServices(config)
@@ -499,6 +498,11 @@ func (s *Server) projectConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range resources {
+		resources[i].Permissions, err = s.permissionNames(r, "workload", resources[i].ID)
+		if err != nil {
+			http.Error(w, "authorization unavailable", 503)
+			return
+		}
 		visible[resources[i].ID] = &resources[i]
 	}
 	ids := make([]string, 0, len(connections))

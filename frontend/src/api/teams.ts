@@ -141,3 +141,35 @@ export function useUpdateAccount() {
     onSettled: () => client.invalidateQueries({ queryKey: keys.session }),
   });
 }
+
+export interface CustomRole {
+  id: string;
+  name: string;
+  permissions: string[];
+}
+
+export interface TeamRoles {
+  roles: CustomRole[];
+  permission_catalogue: string[];
+  built_in: Record<"viewer" | "operator" | "editor", string[]>;
+}
+
+export const rolesQuery = (teamId: string) =>
+  queryOptions({ queryKey: ["teams", teamId, "roles"] as const, queryFn: ({ signal }) => request<TeamRoles>("GET", `${team(teamId)}/roles`, undefined, signal) });
+
+export function useSaveRole(teamId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...input }: { id?: string; name: string; permissions: string[] }) =>
+      request<{ id: string }>(id ? "PUT" : "POST", id ? `${team(teamId)}/roles/${encodeURIComponent(id)}` : `${team(teamId)}/roles`, input),
+    onSettled: () => client.invalidateQueries({ queryKey: rolesQuery(teamId).queryKey }),
+  });
+}
+
+export function useDeleteRole(teamId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => request<{ id: string }>("DELETE", `${team(teamId)}/roles/${encodeURIComponent(id)}`),
+    onSettled: () => client.invalidateQueries({ queryKey: rolesQuery(teamId).queryKey }),
+  });
+}

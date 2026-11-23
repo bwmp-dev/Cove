@@ -96,6 +96,9 @@ export function ComposeEditor({ id, labelId, value, onChange, placeholder, inval
       parent: containerRef.current!,
       state: EditorState.create({
         extensions: [
+          // CodeMirror injects its base styles (including white-space: pre) as a <style> element, which the
+          // panel's CSP blocks without the document nonce; typed indentation would then become non-breaking spaces.
+          EditorView.cspNonce.of(document.querySelector<HTMLMetaElement>('meta[name="cove-style-nonce"]')?.content ?? ""),
           lineNumbers(),
           highlightActiveLineGutter(),
           highlightSpecialChars(),

@@ -131,7 +131,7 @@ func (s *Server) projectConfigurationHandler(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) configurationDrafts(w http.ResponseWriter, r *http.Request) {
 	project, id := r.PathValue("id"), r.PathValue("draft")
-	if !s.requireAccess(w, r, "project", project, 3) {
+	if !s.requirePermission(w, r, "project", project, "edit_configuration") {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -235,7 +235,7 @@ func (s *Server) configurationDrafts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) applyConfigurationDraft(w http.ResponseWriter, r *http.Request) {
 	project, id := r.PathValue("id"), r.PathValue("draft")
-	if !s.requireAccess(w, r, "project", project, 3) {
+	if !s.requirePermission(w, r, "project", project, "edit_configuration") {
 		return
 	}
 	tx, err := s.DB.Begin(r.Context())
@@ -534,7 +534,7 @@ func (s *Server) applyManifestScope(ctx context.Context, tx pgx.Tx, team, projec
 	if environment != "" {
 		policyProject = ""
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO deployment_policies(team_id,project_id,environment_id,approval,freeze_from,freeze_until,window_start,window_end) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8) ON CONFLICT(team_id,project_id,environment_id) DO UPDATE SET approval=$4,freeze_from=$5,freeze_until=$6,window_start=$7,window_end=$8`, team, policyProject, environment, policy.Approval, policy.FreezeFrom, policy.FreezeUntil, policy.WindowStart, policy.WindowEnd); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO deployment_policies(team_id,project_id,environment_id,approval,freeze_from,freeze_until,window_start,window_end,timezone,recurring_windows,freezes,outside_window) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(team_id,project_id,environment_id) DO UPDATE SET approval=$4,freeze_from=$5,freeze_until=$6,window_start=$7,window_end=$8,timezone=$9,recurring_windows=$10,freezes=$11,outside_window=$12`, team, policyProject, environment, policy.Approval, policy.FreezeFrom, policy.FreezeUntil, policy.WindowStart, policy.WindowEnd, policy.Timezone, policy.Windows, policy.Freezes, policy.OutsideWindow); err != nil {
 		return errors.New("could not save deployment policy")
 	}
 	return nil

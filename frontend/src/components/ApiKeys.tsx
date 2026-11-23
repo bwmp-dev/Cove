@@ -4,7 +4,7 @@ import { accessTokenScopesQuery, accessTokensQuery, useCreateAccessToken, useRev
 import { errorMessage } from "../api/client";
 import { formatAbsolute } from "../lib/format";
 import { useNow, useOnline } from "../lib/hooks";
-import { currentTeam, managesTeam } from "../lib/permissions";
+import { currentTeam, managesTeam, permissionLabel } from "../lib/permissions";
 import { useSession } from "../lib/session";
 import { choiceClass, inputClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { Checkbox } from "./Checkbox";
@@ -17,7 +17,7 @@ import { ChoiceGroup } from "./WorkloadForm";
 const levelLabels: Record<ApiScopeLevel, { title: string; description: string }> = {
   1: { title: "Read", description: "Needs viewer access." },
   2: { title: "Operate", description: "Needs operator access." },
-  3: { title: "Change", description: "Needs editor access." },
+  3: { title: "Change", description: "Needs the access listed on each permission." },
 };
 
 const scopeLabels: Record<AccessToken["scope"], string> = { user: "Personal", team: "Team" };
@@ -32,6 +32,13 @@ function unavailableReason(scope: ApiScope, admin: boolean, owner: AccessToken["
   if (scope.instance_admin && !admin) return "Only instance administrators can grant this permission.";
   if (scope.personal_only && owner !== "user") return "Available on personal keys only.";
   return undefined;
+}
+
+// View is part of every role, so only the permissions that narrow access are named.
+function requirement(scope: ApiScope) {
+  const needed = scope.permissions.filter((permission) => permission !== "view").map(permissionLabel);
+  if (needed.length === 0) return "";
+  return `Requires ${needed.length === 1 ? needed[0] : `${needed.slice(0, -1).join(", ")} and ${needed.at(-1)}`}.`;
 }
 
 function availableSelection(selected: ReadonlySet<string>, scopes: ApiScope[] | undefined, admin: boolean, owner: AccessToken["scope"]) {
@@ -77,6 +84,7 @@ function ScopeChoices({ scopes, selected, onToggle, unavailable }: ScopeChoicesP
                       {scope.name}
                       <span id={`scope-${scope.name}-description`} className="block font-sans text-fg-muted">
                         {scope.description}
+                        {requirement(scope) && ` ${requirement(scope)}`}
                       </span>
                       {reason && (
                         <span id={`scope-${scope.name}-reason`} className="block font-sans text-fg-muted">

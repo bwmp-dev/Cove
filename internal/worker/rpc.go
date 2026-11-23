@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"cove/internal/outbound"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,20 +16,23 @@ import (
 )
 
 type RPCRequest struct {
-	Adoption  *AdoptionRequest      `json:"adoption,omitempty"`
-	Exec      *ExecRequest          `json:"exec,omitempty"`
-	Links     *LinkConfig           `json:"links,omitempty"`
-	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
-	Tunnel    *TunnelRequest        `json:"tunnel,omitempty"`
-	Promotion *PromotionExport      `json:"promotion,omitempty"`
-	Registry  *Registry             `json:"registry,omitempty"`
-	Storage   *StorageLocation      `json:"storage,omitempty"`
-	Terminal  *TerminalRequest      `json:"terminal,omitempty"`
-	Method    string                `json:"method"`
-	Request   *Request              `json:"request,omitempty"`
-	ID        string                `json:"id,omitempty"`
+	Diff      *ReleaseComparisonRequest `json:"release_comparison,omitempty"`
+	Proxy     *outbound.Config          `json:"outbound_proxy,omitempty"`
+	Adoption  *AdoptionRequest          `json:"adoption,omitempty"`
+	Exec      *ExecRequest              `json:"exec,omitempty"`
+	Links     *LinkConfig               `json:"links,omitempty"`
+	Ingress   *IngressConfigRequest     `json:"ingress,omitempty"`
+	Tunnel    *TunnelRequest            `json:"tunnel,omitempty"`
+	Promotion *PromotionExport          `json:"promotion,omitempty"`
+	Registry  *Registry                 `json:"registry,omitempty"`
+	Storage   *StorageLocation          `json:"storage,omitempty"`
+	Terminal  *TerminalRequest          `json:"terminal,omitempty"`
+	Method    string                    `json:"method"`
+	Request   *Request                  `json:"request,omitempty"`
+	ID        string                    `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Comparison      *ReleaseComparison   `json:"release_comparison,omitempty"`
 	Adopted         *AdoptionRequest     `json:"adopted,omitempty"`
 	ComposeProjects []ComposeProject     `json:"compose_projects,omitempty"`
 	Adoption        *AdoptionPlan        `json:"adoption,omitempty"`
@@ -57,6 +61,14 @@ type RPCResponse struct {
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
+	if r.Proxy != nil {
+		if r.Proxy.Validate() != nil {
+			return RPCResponse{Error: "invalid outbound proxy configuration"}
+		}
+		if err := writeJSON(filepath.Join(e.Root, "outbound-proxy.json"), r.Proxy); err != nil {
+			return RPCResponse{Error: "could not save outbound proxy configuration"}
+		}
+	}
 	switch r.Method {
 	case "compose_adoption_status":
 		if !workloadIdentifier.MatchString(r.ID) {
@@ -126,6 +138,15 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 		return RPCResponse{Exec: &result}
 
+	case "release_comparison":
+		if r.Diff == nil {
+			return RPCResponse{Error: "release comparison required"}
+		}
+		comparison, err := e.CompareReleases(ctx, *r.Diff, r.Proxy)
+		if err != nil {
+			return RPCResponse{Error: "retained release comparison unavailable: " + err.Error()}
+		}
+		return RPCResponse{Comparison: comparison}
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()
 		if err != nil {
@@ -388,6 +409,9 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // RPCTimeout bounds one worker call. Custom proxy configuration changes include validation in a
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
+	if method == "release_comparison" {
+		return 40 * time.Second
+	}
 	switch method {
 	case "ingress_config_change":
 		return 5 * time.Minute

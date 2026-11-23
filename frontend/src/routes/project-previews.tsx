@@ -238,7 +238,7 @@ export function PreviewStatus({ previewId }: { previewId: string }) {
                         </li>
                       ))}
                     </ul>
-                    {data.access === "private" ? can(data.permissions, "edit") ? <Credentials previewId={data.id} /> : <p className="text-xs text-fg-muted">Password protected. Ask a project editor for the credentials.</p> : <p className="text-xs text-warn">Public: anyone with the address can open it.</p>}
+                    {data.access === "private" ? can(data.permissions, "read_secrets") ? <Credentials previewId={data.id} /> : <p className="text-xs text-fg-muted">Password protected. Ask someone who can read secrets in the base environment for the credentials.</p> : <p className="text-xs text-warn">Public: anyone with the address can open it.</p>}
                   </div>
                 ),
               },

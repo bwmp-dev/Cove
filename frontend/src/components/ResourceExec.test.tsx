@@ -19,7 +19,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
   this.open = false;
 };
 
-const workload = { id: "w".repeat(32), name: "shop", node_id: "n1", compose: "services:\n  web:\n    image: nginx\n  worker:\n    image: app\n", permissions: ["read", "operate", "edit"] } as Workload;
+const workload = { id: "w".repeat(32), name: "shop", node_id: "n1", compose: "services:\n  web:\n    image: nginx\n  worker:\n    image: app\n", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"] } as Workload;
 const container = { id: "abcdef123456", name: "cove-w-web-1", image: "nginx", state: "running", status: "Up", ports: "" };
 
 function mockApi(exec: boolean | undefined, run: () => Promise<unknown>, containers: unknown[] = [container]) {

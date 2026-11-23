@@ -21,7 +21,7 @@ const publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakePublicKeyForTestsOnl
 const sshRepository = "ssh://git@github.com/acme/app.git";
 
 function workload(source: Workload["source"], hasToken = false): Workload {
-  return { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit"], manually_stopped: false, deployed: false, compose: "", environment_keys: [], source, has_source_token: hasToken };
+  return { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], manually_stopped: false, deployed: false, compose: "", environment_keys: [], source, has_source_token: hasToken };
 }
 
 function mockApi(initial: unknown, github: unknown = null, provider: unknown = null) {

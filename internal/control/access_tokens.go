@@ -12,27 +12,28 @@ import (
 )
 
 type apiScope struct {
-	Name          string `json:"name"`
-	Level         int    `json:"level"`
-	Description   string `json:"description"`
-	InstanceAdmin bool   `json:"instance_admin"`
-	PersonalOnly  bool   `json:"personal_only"`
+	Permissions   []string `json:"permissions"`
+	Name          string   `json:"name"`
+	Level         int      `json:"level"`
+	Description   string   `json:"description"`
+	InstanceAdmin bool     `json:"instance_admin"`
+	PersonalOnly  bool     `json:"personal_only"`
 }
 
 var apiScopes = []apiScope{
-	{"projects:read", 1, "Read accessible projects and environments.", false, false},
-	{"projects:write", 3, "Create, rename and delete projects and environments.", false, false},
-	{"configuration:write", 3, "Save and apply project declarations, imports and resource moves; policies and ownership transfers also require team administration.", false, false},
-	{"migration:adopt", 3, "Instance administrators only: inspect and adopt unmanaged Compose projects; personal tokens only.", true, true},
-	{"workloads:read", 1, "Read accessible resources, runtime and release metadata.", false, false},
-	{"workloads:write", 3, "Create, configure and delete resources and routes.", false, false},
-	{"workloads:operate", 2, "Deploy, restart, stop, start, roll back and back up resources.", false, false},
-	{"workloads:restore", 3, "Restore resource data.", false, false},
-	{"logs:read", 1, "Read operation and container logs.", false, false},
-	{"secrets:read", 3, "Read audited variable and configuration-file exports.", false, false},
-	{"secrets:write", 3, "Update resource variables.", false, false},
-	{"exec:run", 3, "Run a bounded one-off command in a resource container.", false, false},
-	{"tunnels:write", 3, "Create and revoke temporary service tunnel leases.", false, false},
+	{[]string{"view"}, "projects:read", 1, "Read accessible projects and environments.", false, false},
+	{[]string{"edit_configuration", "view"}, "projects:write", 3, "Create, rename and delete projects and environments.", false, false},
+	{[]string{"edit_configuration", "view"}, "configuration:write", 3, "Save and apply project declarations, imports and resource moves; policies and ownership transfers also require team administration.", false, false},
+	{[]string{"edit_configuration", "view"}, "migration:adopt", 3, "Instance administrators only: inspect and adopt unmanaged Compose projects; personal tokens only.", true, true},
+	{[]string{"view"}, "workloads:read", 1, "Read accessible resources, runtime and release metadata.", false, false},
+	{[]string{"edit_configuration", "view"}, "workloads:write", 3, "Create, configure and delete resources and routes.", false, false},
+	{[]string{"operate", "manage_backups", "view"}, "workloads:operate", 2, "Deploy, restart, stop, start, roll back and back up resources.", false, false},
+	{[]string{"edit_configuration", "manage_backups", "view"}, "workloads:restore", 3, "Restore resource data.", false, false},
+	{[]string{"view"}, "logs:read", 1, "Read operation and container logs.", false, false},
+	{[]string{"read_secrets", "view"}, "secrets:read", 3, "Read audited variable and configuration-file exports.", false, false},
+	{[]string{"edit_configuration", "view"}, "secrets:write", 3, "Update resource variables.", false, false},
+	{[]string{"edit_configuration", "read_secrets", "view"}, "exec:run", 3, "Run a bounded one-off command in a resource container.", false, false},
+	{[]string{"edit_configuration", "read_secrets", "view"}, "tunnels:write", 3, "Create and revoke temporary service tunnel leases.", false, false},
 }
 
 func apiScopeLevel(name string) int {
@@ -156,7 +157,6 @@ func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name, user/team scope, explicit permissions and expiry of 1-365 days required", 400)
 		return
 	}
-	required := 0
 	seen := map[string]bool{}
 	for _, scope := range in.Scopes {
 		level := apiScopeLevel(scope)
@@ -171,15 +171,26 @@ func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		required = max(required, level)
+
+		var required string
+		for _, item := range apiScopes {
+			if item.Name == scope {
+				required = item.Permissions[0]
+				break
+			}
+		}
+		var available bool
+		err = s.DB.QueryRow(r.Context(), `SELECT $3 OR cove_permission($1,$2,'','',$4) OR EXISTS(SELECT 1 FROM projects p LEFT JOIN environments e ON e.project_id=p.id WHERE p.team_id=$2 AND cove_permission($1,p.team_id,p.id,COALESCE(e.id,''),$4))`, p.ID, p.Team, p.Admin, required).Scan(&available)
+		if err != nil {
+			http.Error(w, "authorization unavailable", 503)
+			return
+		}
+		if !available {
+			http.Error(w, "permission denied", 403)
+			return
+		}
 	}
-	var available int
-	err = s.DB.QueryRow(r.Context(), `SELECT CASE WHEN $3 THEN 3 ELSE GREATEST(cove_access($1,$2,'',''),COALESCE((SELECT max(cove_access($1,p.team_id,p.id,COALESCE(e.id,''))) FROM projects p LEFT JOIN environments e ON e.project_id=p.id WHERE p.team_id=$2),0)) END`, p.ID, p.Team, p.Admin).Scan(&available)
-	if err != nil {
-		http.Error(w, "authorization unavailable", 503)
-		return
-	}
-	if available < required || (in.Scope == "team" && !s.teamAdmin(r, p.Team)) {
+	if in.Scope == "team" && !s.teamAdmin(r, p.Team) {
 		http.Error(w, "permission denied", 403)
 		return
 	}
@@ -194,4 +205,18 @@ func (s *Server) accessTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, 201, map[string]any{"id": id, "token": token, "expires_at": expiry})
+}
+
+// Scope capability is an upper bound; the creator's current permission is checked separately for every target.
+func tokenPermitsPermission(r *http.Request, permission string) bool {
+	credential, ok := r.Context().Value(apiCredentialKey{}).(apiCredential)
+	if !ok {
+		return true
+	}
+	for _, scope := range apiScopes {
+		if slices.Contains(credential.Scopes, scope.Name) && slices.Contains(scope.Permissions, permission) {
+			return true
+		}
+	}
+	return false
 }

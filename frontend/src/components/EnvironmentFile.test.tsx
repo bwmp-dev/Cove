@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
 import type { Workload } from "../api/types";
+import { editorAccess, editWithoutSecrets, secretsWithoutEdit, viewerAccess } from "../test/permissions";
 import { BuiltinVariables, EnvironmentFileActions, SecretReferenceBuilder } from "./EnvironmentFile";
 
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)) }));
@@ -21,7 +22,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
   this.open = false;
 };
 
-const workload: Workload = { id: "w1", name: "web app", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit"], manually_stopped: false, deployed: false, compose: "", environment_keys: ["API_KEY"], source: null, has_source_token: false };
+const workload: Workload = { id: "w1", name: "web app", node_id: "n1", project_id: "p1", permissions: editorAccess, manually_stopped: false, deployed: false, compose: "", environment_keys: ["API_KEY"], source: null, has_source_token: false };
 
 function mutationState(client: QueryClient) {
   return JSON.stringify(client.getMutationCache().getAll().map((mutation) => ({ variables: mutation.state.variables, data: mutation.state.data })));
@@ -99,6 +100,35 @@ it("disables export when nothing is saved", () => {
   expect(screen.getByRole("button", { name: "Import .env" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Export .env" })).toBeDisabled();
   expect(screen.getByText("No variables to export.")).toBeInTheDocument();
+});
+
+it("offers import but never export to a custom role that can edit without reading secrets", () => {
+  wrap(<EnvironmentFileActions workload={{ ...workload, permissions: editWithoutSecrets }} temporary={false} blocked={false} />);
+  expect(screen.getByRole("heading", { name: "Import" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Import .env" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Export .env" })).not.toBeInTheDocument();
+  expect(screen.getByText("Exporting needs permission to read secrets.")).toBeInTheDocument();
+});
+
+it("offers an audited export but no import to a custom role that reads secrets without editing", async () => {
+  const user = userEvent.setup();
+  vi.mocked(request).mockResolvedValue({ dotenv: 'API_KEY="s3cret"\n' });
+  const { client } = wrap(<EnvironmentFileActions workload={{ ...workload, permissions: secretsWithoutEdit }} temporary={false} blocked={false} />);
+  expect(screen.queryByRole("button", { name: "Import .env" })).not.toBeInTheDocument();
+  expect(screen.getByText("Importing needs edit access.")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Export .env" }));
+  const dialog = screen.getByRole("dialog");
+  await user.click(within(dialog).getByRole("button", { name: "Export variables" }));
+  expect(request).toHaveBeenCalledWith("POST", "/api/workloads/w1/variables/export");
+  expect(await within(dialog).findByText(/1 variable is ready/)).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "Done" }));
+  await waitFor(() => expect(mutationState(client)).not.toContain("s3cret"));
+  expect(client.getQueryCache().getAll()).toHaveLength(0);
+});
+
+it("renders nothing for a viewer", () => {
+  const { container } = wrap(<EnvironmentFileActions workload={{ ...workload, permissions: viewerAccess }} temporary={false} blocked={false} />);
+  expect(container).toBeEmptyDOMElement();
 });
 
 it("lists built-in variables and explains when the node does not support them", async () => {

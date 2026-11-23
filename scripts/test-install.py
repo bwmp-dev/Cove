@@ -21,6 +21,8 @@ with (root / "calls").open("a") as log:
     log.write(json.dumps([name] + args) + "\n")
 if name == "id":
     print("0")
+elif name == "cosign":
+    if os.environ.get("BAD_SIGNATURE"): sys.exit(1)
 elif name == "systemctl":
     if "docker" in args:
         (root / "docker-running").touch()
@@ -42,7 +44,7 @@ elif name == "curl":
         assert url.startswith(prefix), url
         relative = url.removeprefix(prefix)
         assert relative in ["compose.yaml", "deploy/traefik.yaml", "deploy/traefik-panel.yaml", "scripts/configure.sh", "scripts/update-panel.py", "scripts/install-auto-update.sh"]
-        content = (pathlib.Path(os.environ["SOURCE"]) / relative).read_bytes().decode()
+        content = (pathlib.Path(os.environ["SOURCE"]) / relative).read_text()
         content = content.replace("/usr/local/lib/cove", str(root / "lib"))
         content = content.replace("/etc/systemd/system", str(root / "units"))
         target.write_text(content)
@@ -50,8 +52,15 @@ elif name == "docker":
     if args[0] == "info" and not (root / "docker-running").exists():
         sys.exit(1)
     if args[:2] == ["image", "inspect"]:
-        print("a" * 40 if "revision" in args[3] else "beta-" + "a" * 40)
+        if "{{json .Config.Labels}}" in args:
+            print(json.dumps({"org.opencontainers.image.version": "beta-" + "a" * 40, "org.opencontainers.image.revision": "a" * 40, "io.cove.schema-sha256": "b" * 64, "io.cove.revision-time": "2026-11-22T12:00:00Z", "io.cove.source-root": "c" * 40, "io.cove.source-generation": "123"}))
+        else:
+            print("ghcr.io/bwmp-dev/cove@sha256:" + "a" * 64 if "RepoDigests" in args[3] else "a" * 40 if "revision" in args[3] else "beta-" + "a" * 40)
 elif name == "python3":
+    if args[0] == "-c":
+        sys.argv = ["-c", *args[2:]]
+        exec(args[1])
+        sys.exit(0)
     class Response:
         status = 200
         def __enter__(self): return self
@@ -60,11 +69,16 @@ elif name == "python3":
         if isinstance(request, urllib.request.Request):
             env = dict(line.split("=", 1) for line in (root / "installation/.env").read_text().splitlines())
             assert request.get_header("Authorization") == "Bearer " + env["COVE_ADMIN_TOKEN"]
-            assert request.method == "PUT"
-            assert json.loads(request.data) == {"channel": "beta"}
-            (root / "channel-set").touch()
+            if request.full_url.endswith("/api/settings/update-status"):
+                assert request.method == "POST"
+                assert json.loads(request.data)["channel"] == "beta"
+            else:
+                assert request.method == "PUT"
+                assert json.loads(request.data) == {"channel": "beta"}
+                (root / "channel-set").touch()
         else:
-            assert request == "https://cove.example.com/healthz"
+            env = dict(line.split("=", 1) for line in (root / "installation/.env").read_text().splitlines())
+            assert request == "https://cove.example.com" + env.get("COVE_BASE_PATH", "") + "/healthz"
         return Response()
     urllib.request.urlopen = urlopen
     sys.argv = args
@@ -87,24 +101,30 @@ class InstallerTests(unittest.TestCase):
         helper = "#!" + sys.executable + "\n" + HELPER
         (self.root / "helper").write_text(helper)
         (self.root / "helper").chmod(0o700)
-        for command in ["id", "apt-get", "systemctl", "dpkg", "ss", "curl", "python3"]:
+        for command in ["id", "apt-get", "cosign", "systemctl", "dpkg", "ss", "curl", "python3"]:
             shutil.copy(self.root / "helper", self.bin / command)
         for command in ["sh", "uname", "install", "chmod", "grep", "openssl", "dirname", "mktemp", "ln", "rm", "cat", "mkdir"]:
             executable = shutil.which(command)
             self.assertIsNotNone(executable, command)
             (self.bin / command).symlink_to(executable)
-        script = (ROOT / "scripts/install.sh").read_bytes().decode()
+        script = (ROOT / "scripts/install.sh").read_text()
         for old, new in [("/run/systemd/system", "systemd"), ("/etc/os-release", "os-release"), ("/etc/apt", "apt")]:
             script = script.replace(old, str(self.root / new))
         self.script = self.root / "install.sh"
         self.script.write_text(script)
         self.env = {**os.environ, "PATH": str(self.bin), "FIXTURE": str(self.root), "SOURCE": str(ROOT)}
 
-    def run_installer(self, domain="cove.example.com"):
-        return subprocess.run([str(self.bin / "sh"), str(self.script), domain, "beta", str(self.root / "installation")], env=self.env, capture_output=True, text=True, timeout=30)
+    def run_installer(self, domain="cove.example.com", base_path="", bind_address="0.0.0.0"):
+        return subprocess.run([str(self.bin / "sh"), str(self.script), domain, "beta", str(self.root / "installation"), base_path, bind_address], env=self.env, capture_output=True, text=True, timeout=30)
 
     def calls(self):
         return [json.loads(line) for line in (self.root / "calls").read_text().splitlines()]
+
+    def test_bad_signature_refuses_installation(self):
+        self.env["BAD_SIGNATURE"] = "1"
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "installation").exists())
 
     def test_fresh_host_generates_credentials_installs_services_and_updates(self):
         result = self.run_installer()
@@ -152,6 +172,15 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("already in use", result.stderr)
         self.assertFalse((self.root / "installation").exists())
         self.assertFalse(any(call[:2] == ["docker", "pull"] for call in self.calls()))
+
+    def test_path_and_private_bind_preserve_signed_installation(self):
+        result = self.run_installer(base_path="/control/cove", bind_address="100.100.100.10")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        env = dict(line.split("=", 1) for line in (self.root / "installation/.env").read_text().splitlines())
+        self.assertEqual(env["COVE_BASE_PATH"], "/control/cove")
+        self.assertEqual(env["COVE_BIND_ADDRESS"], "100.100.100.10")
+        self.assertTrue(any(call[0] == "cosign" for call in self.calls()))
+        self.assertIn("https://cove.example.com/control/cove/register", result.stdout)
 
     def test_rejects_invalid_hostname(self):
         result = self.run_installer("https://cove.example.com")

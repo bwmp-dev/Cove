@@ -85,7 +85,6 @@ func (s *Server) previewViews(r *http.Request, project, id string) ([]previewVie
 			expires := v.LastActivity.Add(time.Duration(snapshot.Recipe.TTLHours) * time.Hour)
 			v.ExpiresAt = &expires
 		}
-		v.Permissions = permissions(level)
 		v.Branches = []previewBranchView{}
 		views = append(views, v)
 	}
@@ -94,6 +93,10 @@ func (s *Server) previewViews(r *http.Request, project, id string) ([]previewVie
 		return nil, err
 	}
 	for i := range views {
+		views[i].Permissions, err = s.permissionNames(r, "environment", views[i].BaseID)
+		if err != nil {
+			return nil, err
+		}
 		branches, err := s.DB.Query(r.Context(), `SELECT repository_id,repository,branch,head,checked_at FROM environment_preview_branches WHERE preview_id=$1 ORDER BY repository`, views[i].ID)
 		if err != nil {
 			return nil, err

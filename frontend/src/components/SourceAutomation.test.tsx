@@ -18,7 +18,7 @@ HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
   this.open = false;
 };
 
-const resource: Workload = { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit"], manually_stopped: false, deployed: false, compose: "", environment_keys: [], source: { repository: "https://bitbucket.org/acme/app.git", branch: "main", compose_path: "compose.yaml" }, has_source_token: false };
+const resource: Workload = { id: "w1", name: "web", node_id: "n1", project_id: "p1", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], manually_stopped: false, deployed: false, compose: "", environment_keys: [], source: { repository: "https://bitbucket.org/acme/app.git", branch: "main", compose_path: "compose.yaml" }, has_source_token: false };
 const future = new Date(Date.now() + 90 * 86_400_000).toISOString();
 
 function wrap(children: ReactNode) {

@@ -36,10 +36,21 @@ function fallbackMessage(status: number) {
   return fallbackMessages[status] ?? `Request failed (HTTP ${status}).`;
 }
 
-// The control plane reports errors as short plain-text sentences. Anything else
-// (HTML from a proxy, oversized bodies) is replaced by a generic message.
+export const enrolmentRequiredMessage = "Set up two-step verification from your account page to use this team's resources.";
+
+// The control plane reports errors as short plain-text sentences, except the JSON refusal for accounts that
+// must enrol a second factor first. Anything else (HTML from a proxy, oversized bodies) gets a generic message.
 export async function readErrorMessage(response: Response): Promise<string> {
   const type = response.headers.get("content-type") ?? "";
+  if (response.status === 403 && type.startsWith("application/json")) {
+    try {
+      const body = (await response.json()) as { error?: unknown };
+      if (body.error === "second_factor_enrolment_required") return enrolmentRequiredMessage;
+    } catch {
+      return fallbackMessage(response.status);
+    }
+    return fallbackMessage(response.status);
+  }
   if (!type.startsWith("text/plain")) {
     return fallbackMessage(response.status);
   }

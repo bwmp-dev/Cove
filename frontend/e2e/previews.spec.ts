@@ -89,7 +89,7 @@ test("environment previews: recipe from a real deployment, preview states and co
   const now = Date.now();
   const iso = (offset: number) => new Date(now + offset).toISOString();
   const branch = (repository: string, head: string) => ({ repository_id: repository === "acme/web" ? 1 : 2, repository, branch: "staging/checkout-redesign", head, checked_at: iso(-60_000) });
-  const preview = (previewId: string, slug: string, state: string, stage: string, extra = {}) => ({ id: previewId, project_id: projectId, environment_id: `${previewId}-env`, base_environment_id: "prod", suffix: slug, slug, state, stage, detail: "", pinned: false, access: "private", delete_reason: "", last_activity_at: iso(-3_600_000), expires_at: iso(68 * 3_600_000), created_at: iso(-7_200_000), branches: [branch("acme/web", "4f1c2e9a7b0d3c5e6f8091a2b3c4d5e6f7081920"), branch("acme/api", "")], permissions: ["read", "operate", "edit"], ...extra });
+  const preview = (previewId: string, slug: string, state: string, stage: string, extra = {}) => ({ id: previewId, project_id: projectId, environment_id: `${previewId}-env`, base_environment_id: "prod", suffix: slug, slug, state, stage, detail: "", pinned: false, access: "private", delete_reason: "", last_activity_at: iso(-3_600_000), expires_at: iso(68 * 3_600_000), created_at: iso(-7_200_000), branches: [branch("acme/web", "4f1c2e9a7b0d3c5e6f8091a2b3c4d5e6f7081920"), branch("acme/api", "")], permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], ...extra });
   const previews = [
     preview("p-awaiting", "invoice-export", "awaiting_approval", "approval", { environment_id: "" }),
     preview("p-ready", "checkout-redesign", "ready", "ready", { pinned: true, expires_at: null }),
@@ -136,7 +136,7 @@ test("environment previews: recipe from a real deployment, preview states and co
   await page.route("**/api/projects", async (route) => {
     const response = await route.fetch();
     const projects = (await response.json()) as { id: string; environments: unknown[] }[];
-    for (const project of projects) if (project.id === projectId) project.environments.push({ id: "p-ready-env", name: "Preview checkout-redesign", preview_id: "p-ready", permissions: ["read", "operate", "edit"] });
+    for (const project of projects) if (project.id === projectId) project.environments.push({ id: "p-ready-env", name: "Preview checkout-redesign", preview_id: "p-ready", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"] });
     await route.fulfill({ response, json: projects });
   });
   await page.goto(`/projects/${projectId}/environments/p-ready-env`);

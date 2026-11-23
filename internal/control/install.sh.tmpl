@@ -2,6 +2,7 @@
 set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run this installer as root.' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Linux is required.' >&2; exit 1; }
+command -v cosign >/dev/null || { echo 'Install a trusted Cosign v3+ before enrollment.' >&2; exit 1; }
 command -v systemctl >/dev/null || { echo 'systemd is required.' >&2; exit 1; }
 command -v flock >/dev/null || { echo 'Install util-linux (flock) before retrying.' >&2; exit 1; }
 exec 9>/run/cove-worker-update.lock
@@ -19,6 +20,7 @@ if [ -f /etc/cove/node-id ] && [ "$(cat /etc/cove/node-id)" != '{{.ID}}' ]; then
 fi
 echo 'Preparing Cove worker: Docker/Compose, dedicated SSH account, and worker executable.'
 if ! command -v jq >/dev/null || ! command -v git >/dev/null || ! command -v sshd >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+ [ "${COVE_OFFLINE:-0}" != 1 ] || { echo 'Offline enrollment requires preinstalled Docker/Compose, Buildx, OpenSSH, Git, jq, curl and Cosign.' >&2; exit 1; }
  command -v apt-get >/dev/null || { echo 'Install Docker Compose v2, Docker Buildx, OpenSSH, curl, and jq before retrying on this distribution.' >&2; exit 1; }
  apt-get update
  apt-get install -y --no-upgrade ca-certificates curl jq openssh-server git
@@ -82,6 +84,10 @@ trap 'exit 130' INT
 trap 'exit 143' HUP TERM
 curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=https' -H 'Authorization: Bearer {{.Token}}' '{{.URL}}/bootstrap/worker/'"$arch" -o "$scratch/worker"
 printf '%s  %s\n' "$checksum" "$scratch/worker" | sha256sum -c -
+curl --fail --silent --show-error --connect-timeout 10 --max-time 120 --proto '=https' '{{.URL}}/releases/worker/'"$arch/$checksum/signature" -o "$scratch/worker.sigstore.json"
+set --
+if [ -f /etc/cove/sigstore-trusted-root.json ]; then set -- --trusted-root /etc/cove/sigstore-trusted-root.json --offline; fi
+cosign verify-blob "$@" --bundle "$scratch/worker.sigstore.json" --certificate-identity 'https://github.com/bwmp-dev/Cove/.github/workflows/images.yml@refs/heads/main' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$scratch/worker" >/dev/null
 if [ -f /usr/local/bin/cove-worker ]; then cp /usr/local/bin/cove-worker "$scratch/previous-worker"; fi
 if [ -f /etc/systemd/system/cove-worker.service ]; then cp /etc/systemd/system/cove-worker.service "$scratch/previous-service"; fi
 if systemctl is-active --quiet cove-worker; then

@@ -62,7 +62,7 @@ func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	original := r.Clone(r.Context())
 	original.Pattern = r.Method + " /mcp"
-	original.URL.Path = "/api/session"
+	original.URL.Path = "/api/search"
 	s.authenticatePublicToken(http.HandlerFunc(func(w http.ResponseWriter, authorized *http.Request) {
 		authorized.URL.Path = "/mcp"
 		authorized.Pattern = r.Method + " /mcp"
@@ -72,6 +72,7 @@ func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type mcpWorkloadInput struct {
+	Reason   string `json:"reason,omitempty" jsonschema:"Optional audited deployment reason"`
 	Workload string `json:"workload" jsonschema:"The Cove resource ID"`
 }
 
@@ -120,7 +121,7 @@ func (s *Server) mcpServer(r *http.Request) *mcp.Server {
 			}
 			var body any
 			if tool.action != "" {
-				body = apiOperationInput{Action: tool.action}
+				body = apiOperationInput{Action: tool.action, Reason: input.Reason}
 			}
 			raw, err := s.invokePublic(ctx, r, tool.method, tool.path, map[string]string{"id": input.Workload}, body)
 			if err != nil {

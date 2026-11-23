@@ -5,6 +5,8 @@ import { useState } from "react";
 import { useGitHubStart } from "../api/auth";
 import { errorMessage, request } from "../api/client";
 import { authConfigQuery } from "../api/queries";
+import { Passkeys, SignInIdentities, TwoStepVerification } from "../components/AccountSecurity";
+import { LoginHistory, loginHistoryDescription } from "../components/LoginHistory";
 import { useUpdateAccount } from "../api/teams";
 import { AccountTimezone } from "../components/TimezoneSettings";
 import { Button, Field, LoadingRows, Notice, PageHeader, Section, SettingRows } from "../components/ui";
@@ -253,11 +255,17 @@ export function AccountPage() {
       <Profile />
       <ChangePassword />
       <AccountTimezone />
+      <TwoStepVerification />
+      <Passkeys />
       <Section title="Active sessions" description="Revoking another session signs that browser out on its next request. Use Sign out for this browser." width="form" flush>
         <Sessions />
       </Section>
       <Section title="GitHub" width="form">
         <LinkGitHub />
+      </Section>
+      <SignInIdentities />
+      <Section title="Sign-in history" description={loginHistoryDescription} flush>
+        <LoginHistory userId={null} />
       </Section>
     </>
   );

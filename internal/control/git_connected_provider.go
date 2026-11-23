@@ -55,7 +55,13 @@ func (p connectedGitProvider) api(ctx context.Context, method, path string, inpu
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "Cove")
 	request.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second, Transport: publicWebhookTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	config, err := p.server.outboundConfig(ctx)
+	if err != nil {
+		return errors.New("Git provider outbound settings unavailable")
+	}
+	transport := publicWebhookTransport(config)
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: 15 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if p.server.OAuthClient != nil && p.server.OAuthClient.Transport != nil {
 		client.Transport = p.server.OAuthClient.Transport
 	}

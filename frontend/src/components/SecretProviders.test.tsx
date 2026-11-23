@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
 import { SecretProviders } from "./SecretProviders";
 
-const session = vi.hoisted(() => ({ value: { is_admin: false, team_id: "team", teams: [{ id: "team", name: "Team", role: "member", grants: [{ scope: "team", role: "editor" }] }] } }));
+const session = vi.hoisted(() => ({ value: { is_admin: false, team_id: "team", teams: [{ id: "team", name: "Team", role: "member", grants: [{ scope: "team", role: "editor" }] }], permissions: ["view", "operate", "read_secrets", "edit_configuration", "manage_backups"] } }));
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)) }));
 vi.mock("../lib/session", () => ({ useSession: () => session.value }));
 beforeEach(() => vi.stubGlobal("ResizeObserver", class { observe = vi.fn(); disconnect = vi.fn(); }));
@@ -121,7 +121,7 @@ it("warns that deleting a provider breaks deployments that reference it", async 
 });
 
 it("hides management controls from team members without team-wide edit access", async () => {
-  session.value = { ...session.value, teams: [{ id: "team", name: "Team", role: "member", grants: [] }] };
+  session.value = { ...session.value, teams: [{ id: "team", name: "Team", role: "member", grants: [] }], permissions: [] };
   vi.mocked(request).mockResolvedValue([vault]);
   wrap(<SecretProviders />);
   expect(await screen.findByText("Team Vault")).toBeInTheDocument();

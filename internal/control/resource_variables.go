@@ -59,7 +59,7 @@ func (s *Server) resourceVariables(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid source", 400)
 		return
 	}
-	if !s.requireAccess(w, r, "workload", in.SourceID, 3) {
+	if !s.requirePermission(w, r, "workload", in.SourceID, "read_secrets") {
 		return
 	}
 	if !s.requirePersistentResource(w, r, in.SourceID) {
