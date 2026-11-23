@@ -536,6 +536,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.scheduleCertificateIssuers(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.scheduleUnhealthyRestarts(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -677,6 +680,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if worker.RouteProtocol(request.Routes) >= 3 {
 		method = "submit_routes_v3"
+	}
+	if worker.RouteProtocol(request.Routes) >= 4 {
+		method = "submit_routes_v4"
 	}
 	if cancelRequested {
 		method = "cancel"

@@ -26,6 +26,11 @@ type routeCertificateProbe struct {
 
 func RouteProtocol(routes []Route) int {
 	for _, route := range routes {
+		if strings.HasPrefix(route.Domain, "*.") || route.Policy != nil && route.Policy.CertificateSource == "default" {
+			return 4
+		}
+	}
+	for _, route := range routes {
 		if route.Policy != nil && route.Policy.CertificateID != "" {
 			return 3
 		}
@@ -70,6 +75,12 @@ func (e *Engine) selectedRouteCertificates(routes map[string][]Route) (map[strin
 	probes := []routeCertificateProbe{}
 	hosts := map[string]string{}
 	probed := map[string]bool{}
+	domains := map[string]bool{}
+	for _, list := range routes {
+		for _, route := range list {
+			domains[route.Domain] = true
+		}
+	}
 	for workload, list := range routes {
 		for _, route := range list {
 			if route.Policy == nil || route.Policy.CertificateID == "" {
@@ -102,8 +113,12 @@ func (e *Engine) selectedRouteCertificates(routes map[string][]Route) (map[strin
 				verifiedAt = leaf.NotAfter.Add(-time.Second)
 			}
 			if !probed[route.Domain] {
+				hostname := routeProbeHostname(route.Domain, domains)
+				if hostname == "" {
+					return nil, nil, errors.New("no unambiguous hostname is available to verify this wildcard certificate")
+				}
 				publicLeaf := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}))
-				probes = append(probes, routeCertificateProbe{Hostname: route.Domain, CertificatePEM: publicLeaf, VerifiedAt: verifiedAt})
+				probes = append(probes, routeCertificateProbe{Hostname: hostname, CertificatePEM: publicLeaf, VerifiedAt: verifiedAt})
 				probed[route.Domain] = true
 			}
 		}

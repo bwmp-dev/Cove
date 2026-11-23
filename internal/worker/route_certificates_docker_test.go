@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -100,13 +101,13 @@ func TestRouteCertificatesDocker(t *testing.T) {
 			t.Fatal(op, err, logs)
 		}
 	}
-	route := Route{Domain: "app.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{CertificateSource: "default"}}
+	route := Route{Domain: "app.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{CertificateSource: "acme"}}
 	run(Request{ID: "cert-initial", Workload: "cert-app", Action: "deploy", Kind: "service", Compose: compose, Routes: []Route{route}}, "succeeded")
 	if err := CheckRouteCertificateTLS(ctx, "127.0.0.1:443", route.Domain, string(oldCert)); err != nil {
 		t.Fatal("cached ACME certificate not served before migration", oldInfo.Fingerprint, err)
 	}
 
-	oldVictimRoute := Route{Domain: "victim.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{CertificateSource: "default"}}
+	oldVictimRoute := Route{Domain: "victim.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{CertificateSource: "acme"}}
 	run(Request{ID: "victim-cached-initial", Workload: "cert-victim", Action: "deploy", Kind: "service", Compose: compose, Routes: []Route{oldVictimRoute}}, "succeeded")
 	if err := CheckRouteCertificateTLS(ctx, "127.0.0.1:443", oldVictimRoute.Domain, string(oldVictim)); err != nil {
 		t.Fatal("unrelated cached certificate was not loaded", err)
@@ -223,7 +224,7 @@ func TestRouteCertificatesDocker(t *testing.T) {
 		t.Fatal("HTTP TLS fingerprint changed")
 	}
 	route.Policy.CertificateID = ""
-	route.Policy.CertificateSource = "default"
+	route.Policy.CertificateSource = "acme"
 	run(Request{ID: "cert-return-acme", Workload: "cert-app", Action: "routes", Kind: "service", Routes: []Route{route}}, "succeeded")
 	if err := CheckRouteCertificateTLS(ctx, "127.0.0.1:443", route.Domain, string(oldCert)); err != nil {
 		t.Fatal("switching back lost cached ACME certificate", err)
@@ -253,6 +254,83 @@ func TestRouteCertificatesDocker(t *testing.T) {
 	}
 	if err := CheckRouteCertificateTLS(ctx, "127.0.0.1:443", victimRoute.Domain, victim.CertificatePEM); err != nil {
 		t.Fatal("reload recovery changed unrelated TLS", err)
+	}
+	defaultCertificate, defaultKey := selfSignedCertificate(t, route.Domain)
+	for name, value := range map[string][]byte{"fixture-default.crt": defaultCertificate, "fixture-default.key": defaultKey} {
+		local := filepath.Join(e.Root, name)
+		if err := os.WriteFile(local, value, 0600); err != nil {
+			t.Fatal(err)
+		}
+		command("docker", "cp", local, "cove-ingress:/data/"+name)
+	}
+	defaultConfig := filepath.Join(e.Root, "fixture-default.yaml")
+	if err := writeJSON(defaultConfig, map[string]any{"tls": map[string]any{"stores": map[string]any{"default": map[string]any{"defaultCertificate": map[string]string{"certFile": "/data/fixture-default.crt", "keyFile": "/data/fixture-default.key"}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	command("docker", "cp", defaultConfig, "cove-ingress:/data/dynamic/fixture-default.yaml")
+	route.Policy.CertificateSource = "default"
+	run(Request{ID: "cert-disable-acme", Workload: "cert-app", Action: "routes", Kind: "service", Routes: []Route{route}}, "succeeded")
+	if err := CheckRouteCertificateTLS(ctx, "127.0.0.1:443", route.Domain, string(defaultCertificate)); err != nil {
+		t.Fatal("disabling ACME did not remove the cached provider certificate", err)
+	}
+	cache, err := e.readACMEFile(ctx, "traefik-acme.json")
+	if err != nil || bytes.Contains(cache, []byte(base64.StdEncoding.EncodeToString(oldCert))) {
+		t.Fatal("disabled certificate remains eligible for cached ACME renewal", err)
+	}
+	defaultTransport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: routeTestPool(string(defaultCertificate)), ServerName: route.Domain, MinVersion: tls.VersionTLS12}, DisableKeepAlives: true}
+	defer defaultTransport.CloseIdleConnections()
+	defaultClient := &http.Client{Transport: defaultTransport, Timeout: 5 * time.Second}
+	legacyPriority := filepath.Join(e.Root, "fixture-priority.yaml")
+	if err := writeJSON(legacyPriority, map[string]any{"http": map[string]any{"routers": map[string]any{"fixture-priority": map[string]any{"rule": "HostRegexp(`^" + regexp.QuoteMeta(route.Domain) + "$`)", "priority": 1000, "entryPoints": []string{"websecure"}, "service": "noop@internal", "tls": map[string]any{}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	command("docker", "cp", legacyPriority, "cove-ingress:/data/dynamic/fixture-priority.yaml")
+	waitStatus := func(expected int) {
+		t.Helper()
+		lastStatus := 0
+		var lastError error
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
+			request, _ := http.NewRequestWithContext(ctx, "GET", "https://127.0.0.1/index.html", nil)
+			request.Host = route.Domain
+			response, err := defaultClient.Do(request)
+			lastError = err
+			if err == nil {
+				response.Body.Close()
+				lastStatus = response.StatusCode
+				if response.StatusCode == expected {
+					return
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("existing custom router ordering was not preserved: expected status %d, received %d: %v", expected, lastStatus, lastError)
+	}
+	// Existing positive-priority custom rules keep their precedence over an exact-host route.
+	waitStatus(http.StatusTeapot)
+	command("docker", "exec", "cove-ingress", "rm", "/data/dynamic/fixture-priority.yaml")
+	waitStatus(http.StatusOK)
+	wildcardPEM, wildcardKey := selfSignedCertificate(t, "*.wild.example.test")
+	wildcardCertificate := RouteCertificate{ID: strings.Repeat("e", 32), CertificatePEM: string(wildcardPEM), PrivateKeyPEM: string(wildcardKey)}
+	wildcardRoute := Route{Domain: "*.wild.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{CertificateSource: "uploaded", CertificateID: wildcardCertificate.ID, PathPrefix: "/index", ResponseHeaders: map[string]string{"X-Route": "wildcard"}}}
+	exactRoute := Route{Domain: "a.wild.example.test", Service: "app", Port: 8080, Policy: &RoutePolicy{CertificateSource: "uploaded", CertificateID: wildcardCertificate.ID, ResponseHeaders: map[string]string{"X-Route": "exact"}}}
+	run(Request{ID: "cert-wildcard", Workload: "cert-app", Action: "routes", Kind: "service", Routes: []Route{route, wildcardRoute, exactRoute}, Certificates: []RouteCertificate{wildcardCertificate}}, "succeeded")
+	if err := CheckRouteCertificateTLS(ctx, "127.0.0.1:443", "b.wild.example.test", string(wildcardPEM)); err != nil {
+		t.Fatal("wildcard SNI certificate was not served", err)
+	}
+	for _, check := range []struct {
+		host, header string
+		status       int
+	}{{"a.wild.example.test", "exact", 200}, {"b.wild.example.test", "wildcard", 200}, {"B.WILD.EXAMPLE.TEST", "wildcard", 200}, {"wild.example.test", "", 404}, {"a.b.wild.example.test", "", 404}} {
+		request, _ := http.NewRequestWithContext(ctx, "GET", "https://127.0.0.1/index.html", nil)
+		request.Host = check.host
+		response, err := defaultClient.Do(request)
+		if err != nil {
+			t.Fatal(check.host, err)
+		}
+		response.Body.Close()
+		if response.StatusCode != check.status || response.Header.Get("X-Route") != check.header {
+			t.Fatal("wildcard scope/priority", check.host, response.StatusCode, response.Header.Get("X-Route"))
+		}
 	}
 
 	if bytes, err := json.Marshal(Operation{}); err != nil || strings.Contains(string(bytes), "private_key_pem") {

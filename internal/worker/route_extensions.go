@@ -25,7 +25,7 @@ type RouteForwardAuth struct {
 
 func HasRouteExtensions(routes []Route) bool {
 	for _, route := range routes {
-		if p := route.Policy; p != nil && (p.CertificateID != "" || p.Maintenance != nil || len(p.ErrorPages) > 0 || p.ForwardAuth != nil) {
+		if p := route.Policy; p != nil && (p.CertificateID != "" || p.CertificateSource == "default" || p.Maintenance != nil || len(p.ErrorPages) > 0 || p.ForwardAuth != nil) {
 			return true
 		}
 	}

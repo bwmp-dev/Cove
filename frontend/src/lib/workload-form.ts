@@ -1,5 +1,5 @@
 import type { GitSourceInput, Route, RouteCertificate, RouteForwardAuth, RoutePolicy, Workload, WorkloadInput, WorkloadKind } from "../api/types";
-import { ownershipProblem } from "./certificates";
+import { ownershipProblem, wildcardCovers } from "./certificates";
 import type { ResourceDraft } from "./templates";
 
 export interface EnvRow {
@@ -392,13 +392,13 @@ export function routesUseExtensions(rows: RouteRow[]) {
 const extensionFields = ["maintenance", "error_pages", "forward_auth"] as const;
 
 // The API keeps a saved extension when its field is omitted on the same hostname, so a removed one, or one on a route
-// that was deleted and added again, must be sent as null. It also keeps a saved uploaded certificate while both
-// certificate_source and certificate_id are omitted, so that selection is cleared with a null certificate_id. Routes on
-// hostnames without saved extensions or uploaded certificates keep the shape older workers accept.
+// that was deleted and added again, must be sent as null. It also keeps a saved stored certificate or proxy default
+// choice while both certificate_source and certificate_id are omitted, so that selection is cleared with a null
+// certificate_id. Routes on hostnames without saved extensions or certificate choices keep the shape older workers accept.
 function withRemovals(route: Route, saved: Route[]): Route {
   const matches = saved.filter((item) => item.domain === route.domain);
   const removed = extensionFields.filter((field) => route.policy?.[field] === undefined && matches.some((item) => item.policy?.[field] != null));
-  const certificateRemoved = route.policy?.certificate_source === undefined && matches.some((item) => item.policy?.certificate_id);
+  const certificateRemoved = route.policy?.certificate_source === undefined && matches.some((item) => item.policy?.certificate_id || item.policy?.certificate_source === "default");
   if (removed.length === 0 && !certificateRemoved) return route;
   const policy: RoutePolicy = { ...route.policy };
   for (const field of removed) policy[field] = null;
@@ -432,6 +432,15 @@ const presetHeaders = new Set(["strict-transport-security", "x-content-type-opti
 
 function isHostname(value: string) {
   return value.length <= 253 && value.includes(".") && value.split(".").every((label) => domainLabel.test(label));
+}
+
+export function isWildcardHostname(value: string) {
+  return value.startsWith("*.");
+}
+
+// A route hostname may begin with "*." when the rest is a complete DNS name: *.example.com, not *.com.
+function isRouteHostname(value: string) {
+  return isWildcardHostname(value) ? value.length <= 253 && isHostname(value.slice(2)) : isHostname(value);
 }
 
 function isPrefixLength(bits: string, max: number) {
@@ -592,7 +601,7 @@ function policyErrors(row: RouteRow, domain: string, service: string, errors: Re
   if (!draft) return;
   pageErrors(row, draft, errors);
   forwardAuthErrors(row, draft.forwardAuth, errors);
-  if (draft.certificateSource === "uploaded" && draft.certificateId === "") errors[`${row.id}.certificate`] = "Choose an uploaded certificate.";
+  if (draft.certificateSource === "uploaded" && draft.certificateId === "") errors[`${row.id}.certificate`] = "Choose a certificate version.";
   const path = draft.pathPrefix.trim();
   if (path && (path.length > 1024 || !routePath.test(path))) errors[`${row.id}.path`] = "Start with / and use a URL path without a query string, spaces or wildcards.";
   const redirect = draft.redirectHost.trim().toLowerCase();
@@ -617,36 +626,87 @@ function policyErrors(row: RouteRow, domain: string, service: string, errors: Re
   }
 }
 
-// Uploaded certificates are registered in the proxy's shared certificate store, so every path on a hostname must use the
-// same one and each certificate may name only hostnames this resource routes. Certificates missing from the list are
-// left to the control plane.
+// The certificate a route selects as the worker compares them: an omitted source is Let's Encrypt.
+function certificateSelection(route: Route) {
+  const source = route.policy?.certificate_source;
+  if (source === "default") return "default";
+  if (source === "uploaded") return `uploaded/${route.policy?.certificate_id ?? ""}`;
+  return "acme";
+}
+
+// TLS is chosen before the request path is known, so every path on a hostname must select the same certificate source
+// and version, the first path setting it. Stored certificates are registered in the proxy's shared certificate store,
+// so each may name only hostnames this resource routes. Certificates missing from the list are left to the control plane.
 function certificateErrors(rows: RouteRow[], routes: Route[], certificates: RouteCertificate[], errors: Record<string, string>) {
   const hostnames = routes.map((route) => route.domain);
   const selected = new Map<string, string>();
-  routes.forEach((route) => {
-    const id = route.policy?.certificate_id;
-    if (id && !selected.has(route.domain)) selected.set(route.domain, id);
-  });
   rows.forEach((row, index) => {
     const route = routes[index];
-    if (!route || errors[`${row.id}.certificate`]) return;
+    if (!route) return;
+    const selection = certificateSelection(route);
     const expected = selected.get(route.domain);
-    const id = route.policy?.certificate_id;
-    if (expected && id !== expected) {
-      errors[`${row.id}.certificate`] = `Every path on ${route.domain} must use the same uploaded certificate.`;
+    if (expected === undefined) selected.set(route.domain, selection);
+    if (errors[`${row.id}.certificate`]) return;
+    if (expected !== undefined && selection !== expected) {
+      const message = `Every path on ${route.domain} must use the same certificate source and version.`;
+      if (row.policy) errors[`${row.id}.certificate`] = message;
+      else errors[row.id] ??= `${message} Set it under Advanced routing.`;
       return;
     }
+    const id = route.policy?.certificate_id;
     const certificate = id ? certificates.find((item) => item.id === id) : undefined;
+    if (certificate && isWildcardHostname(route.domain) && !certificate.dns_names.some((name) => name.toLowerCase() === route.domain)) {
+      errors[`${row.id}.certificate`] = `Choose a certificate that names ${route.domain} itself. Certificates for individual hostnames below it do not cover the wildcard route.`;
+      return;
+    }
     const problem = certificate && ownershipProblem(certificate, hostnames);
     if (problem) errors[`${row.id}.certificate`] = problem;
   });
+}
+
+// Wildcard hostnames and the proxy default certificate need route protocol 4. Saved uses on an older worker are kept
+// and left for the control plane to reject; only new ones are reported here. routeProtocol is undefined while unknown.
+function protocolErrors(rows: RouteRow[], routes: Route[], saved: Route[], routeProtocol: number | undefined, errors: Record<string, string>) {
+  if (routeProtocol === undefined || routeProtocol >= 4) return;
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route || errors[row.id]) return;
+    const before = saved.filter((item) => item.domain === route.domain);
+    if (isWildcardHostname(route.domain) && before.length === 0) errors[row.id] = "Wildcard hostnames need a newer worker on this node. Upgrade it and verify the node again.";
+    else if (route.policy?.certificate_source === "default" && !before.some((item) => item.policy?.certificate_source === "default") && !errors[`${row.id}.certificate`]) {
+      errors[`${row.id}.certificate`] = "The proxy default certificate needs a newer worker on this node. Upgrade it and verify the node again, or choose another certificate.";
+    }
+  });
+}
+
+// Wildcard routes are matched against a certificate naming the same wildcard; HTTP-01 cannot issue one. An exact
+// hostname one label below a wildcard route of this resource must also select a stored certificate, or a Let's Encrypt
+// or proxy default certificate could shadow the wildcard's TLS identity.
+function wildcardErrors(rows: RouteRow[], routes: Route[], errors: Record<string, string>) {
+  const wildcards = routes.filter((route) => isWildcardHostname(route.domain)).map((route) => route.domain);
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route || errors[row.id] || route.policy?.certificate_source === "uploaded") return;
+    const covering = wildcards.find((pattern) => wildcardCovers(pattern, route.domain));
+    let message: string;
+    if (isWildcardHostname(route.domain)) message = `A wildcard hostname needs a stored certificate that names ${route.domain}. Let's Encrypt cannot issue one here.`;
+    else if (covering) message = `${route.domain} is covered by the wildcard route ${covering}, so it must also select a stored certificate: the wildcard version or one for ${route.domain}.`;
+    else return;
+    if (row.policy) errors[`${row.id}.certificate`] ??= `${message} Choose Stored certificate.`;
+    else errors[row.id] = `${message} Choose one under Advanced routing.`;
+  });
+}
+
+// Whether the routes use anything that needs route protocol 4: a wildcard hostname or the proxy default certificate.
+export function routesNeedProtocol4(rows: RouteRow[]) {
+  return rows.some((row) => isWildcardHostname(row.domain.trim()) || row.policy?.certificateSource === "default");
 }
 
 // Mirrors the worker's route validation so mistakes are reported next to the field before saving. Hostname, service
 // and port errors are keyed by the row id; policy errors by "<row id>.<field>". Pass the saved routes when editing so
 // removed maintenance, error page and forward-auth settings are sent as explicit nulls, and the resource's uploaded
 // certificates so their hostname rules are checked.
-export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = []): { routes?: Route[]; errors: Record<string, string> } {
+export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number): { routes?: Route[]; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   const seen = new Set<string>();
   const routes = rows.map((row) => {
@@ -655,7 +715,7 @@ export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificat
     const path = route.policy?.path_prefix ?? "";
     const claim = `${domain} ${path}`;
     if (domain === "") errors[row.id] = "Enter a hostname.";
-    else if (!isHostname(domain)) errors[row.id] = "Use a DNS hostname such as app.example.com, without a scheme, port, path or wildcard.";
+    else if (!isRouteHostname(domain)) errors[row.id] = "Use a DNS hostname such as app.example.com or *.example.com, without a scheme, port or path.";
     else if (seen.has(claim)) errors[row.id] = path ? "Each hostname and path prefix can be routed once." : "Each hostname can be routed once.";
     else if (!composeService.test(service)) errors[row.id] = "Enter the Compose service name.";
     else if (!Number.isInteger(row.port) || row.port < 1 || row.port > 65535) errors[row.id] = "Use a container port from 1 to 65535.";
@@ -664,16 +724,18 @@ export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificat
     return route;
   });
   certificateErrors(rows, routes, certificates, errors);
+  protocolErrors(rows, routes, saved, routeProtocol, errors);
+  wildcardErrors(rows, routes, errors);
   return Object.keys(errors).length > 0 ? { errors } : { routes: routes.map((route) => withRemovals(route, saved)), errors };
 }
 
 // Certificate errors shown after a save attempt depend on the selected certificate and on every route's hostname, so
 // they are re-checked against the edited rows: an error for a choice that was replaced is cleared or updated. Other
 // errors stay until the next save, and no certificate error appears on a row that had none.
-export function refreshCertificateErrors(errors: Record<string, string>, rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = []) {
+export function refreshCertificateErrors(errors: Record<string, string>, rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number) {
   const shown = Object.keys(errors).filter((key) => key.endsWith(".certificate"));
   if (shown.length === 0) return errors;
-  const current = validateRoutes(rows, saved, certificates).errors;
+  const current = validateRoutes(rows, saved, certificates, routeProtocol).errors;
   const next = { ...errors };
   for (const key of shown) {
     if (current[key]) next[key] = current[key];
@@ -694,11 +756,15 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
-// Hostnames that start or stop using an uploaded certificate compared with the saved routes, including removed ones.
-// The worker may have to restart the node's shared proxy to take a cached Let's Encrypt certificate out or back in.
+// Hostnames that start or stop bypassing Let's Encrypt (a stored certificate or the proxy default) compared with the
+// saved routes, including removed ones. The worker may have to restart the node's shared proxy to take a cached Let's
+// Encrypt certificate out or put it back. Changing between stored versions, or between a stored version and the proxy
+// default, keeps the cached certificate out and is not listed.
+const bypassesAcme = (source: string | undefined) => source === "uploaded" || source === "default";
+
 export function certificateSwitches(rows: RouteRow[], saved: Route[] = []) {
-  const before = new Set(saved.filter((route) => route.policy?.certificate_source === "uploaded").map((route) => route.domain));
-  const after = new Set(rows.filter((row) => row.policy?.certificateSource === "uploaded").map((row) => row.domain.trim().toLowerCase()));
+  const before = new Set(saved.filter((route) => bypassesAcme(route.policy?.certificate_source)).map((route) => route.domain));
+  const after = new Set(rows.filter((row) => bypassesAcme(row.policy?.certificateSource)).map((row) => row.domain.trim().toLowerCase()));
   return [...new Set([...before, ...after])].filter((domain) => before.has(domain) !== after.has(domain));
 }
 

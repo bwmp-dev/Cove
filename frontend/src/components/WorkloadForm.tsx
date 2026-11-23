@@ -10,7 +10,7 @@ import { byteLength, composeLimit, formValues, routeRows, validateRoutes, valida
 import { ComposeEditor } from "./ComposeEditor";
 import { EnvironmentEditor } from "./EnvironmentEditor";
 import { RouteEditor } from "./RouteEditor";
-import { nodeStates } from "../lib/nodes";
+import { nodeStates, routeProtocolOf } from "../lib/nodes";
 import { Button, Field, Notice } from "./ui";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 
@@ -234,7 +234,7 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const result = validateWorkload(values, "create");
-    const checkedRoutes = values.kind === "job" ? { routes: [], errors: {} } : validateRoutes(routes);
+    const checkedRoutes = values.kind === "job" ? { routes: [], errors: {} } : validateRoutes(routes, [], [], routeProtocolOf(selectedNode));
     setErrors(result.errors);
     setRouteErrors(checkedRoutes.errors);
     if (result.input && checkedRoutes.routes && resourcePlacement) {
@@ -316,6 +316,7 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
               errors={routeErrors}
               policies={selectedNode ? Boolean(selectedNode.capabilities?.route_policies) : undefined}
               extensions={selectedNode ? (selectedNode.capabilities?.route_protocol ?? 0) >= 2 : undefined}
+              routeProtocol={routeProtocolOf(selectedNode)}
               onChange={setRoutes}
             />
           </FormSection>

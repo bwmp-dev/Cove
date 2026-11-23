@@ -25,10 +25,13 @@ func (p *RoutePolicy) UnmarshalJSON(data []byte) error {
 		return errors.New("invalid route policy JSON")
 	}
 	if wire.CertificateSource == protectedRouteSource {
-		if wire.Protocol != 2 || wire.Source == nil || !HasRouteExtensions([]Route{{Policy: (*RoutePolicy)(&wire.policy)}}) {
+		if wire.Protocol != 2 || wire.Source == nil {
 			return errors.New("invalid protected route policy")
 		}
 		wire.CertificateSource = *wire.Source
+		if !HasRouteExtensions([]Route{{Policy: (*RoutePolicy)(&wire.policy)}}) {
+			return errors.New("invalid protected route policy")
+		}
 	} else if wire.Protocol != 0 || wire.Source != nil {
 		return errors.New("unexpected protected route metadata")
 	}
@@ -70,7 +73,7 @@ func protectPersistedRoutes(value any) bool {
 			_, service := node["service"].(string)
 			_, port := node["port"].(json.Number)
 			policy, ok := node["policy"].(map[string]any)
-			if service && port && ok && (policy["certificate_id"] != nil || policy["maintenance"] != nil || policy["forward_auth"] != nil || policy["error_pages"] != nil) {
+			if service && port && ok && (policy["certificate_source"] == "default" || policy["certificate_id"] != nil || policy["maintenance"] != nil || policy["forward_auth"] != nil || policy["error_pages"] != nil) {
 				source, _ := policy["certificate_source"].(string)
 				// Older binaries reject this certificate source instead of silently dropping an auth gate.
 				policy["certificate_source"] = protectedRouteSource

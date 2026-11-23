@@ -33,11 +33,16 @@ func validDNSName(name string) bool {
 }
 
 func cloudflareDomainAllowed(patterns []string, domain string) bool {
-	if !validDNSName(domain) {
+	wildcard := strings.HasPrefix(domain, "*.")
+	base := strings.TrimPrefix(domain, "*.")
+	if !validDNSName(base) {
 		return false
 	}
 	for _, pattern := range patterns {
-		if pattern == domain || strings.HasPrefix(pattern, "*.") && strings.HasSuffix(domain, pattern[1:]) {
+		if !wildcard && pattern == domain {
+			return true
+		}
+		if strings.HasPrefix(pattern, "*.") && (wildcard && base == pattern[2:] || strings.HasSuffix(base, pattern[1:])) {
 			return true
 		}
 	}

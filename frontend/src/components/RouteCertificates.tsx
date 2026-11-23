@@ -2,8 +2,8 @@ import { FileUp, Trash2, Upload } from "lucide-react";
 import { useId, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { errorMessage, isStatus } from "../api/client";
 import { useDeleteCertificate, useUploadCertificate } from "../api/certificates";
-import type { Route, RouteCertificate } from "../api/types";
-import { certificateLimits, certificateStatus, certificateStatuses, validateCertificateDraft, type CertificateDraft, type CertificateDraftErrors } from "../lib/certificates";
+import type { CertificateIssuer, Route, RouteCertificate } from "../api/types";
+import { certificateLimits, certificateSource, certificateStatus, certificateStatuses, validateCertificateDraft, type CertificateDraft, type CertificateDraftErrors } from "../lib/certificates";
 import { formatAbsolute } from "../lib/format";
 import { useNow, useOnline } from "../lib/hooks";
 import { describedBy, inputClass } from "../lib/styles";
@@ -63,28 +63,42 @@ interface CertificateListState {
   refetch: () => unknown;
 }
 
-// Uploading and deleting certificates for one resource. Uploads are stored for the resource only; routes use one after
-// it is selected in the Domains form and saved. busy: an operation is queued or running for the resource.
-export function RouteCertificates({ workloadId, certificates, routes, editable, busy }: { workloadId: string; certificates: CertificateListState; routes: Route[]; editable: boolean; busy: boolean }) {
-  const [deleting, setDeleting] = useState<RouteCertificate | null>(null);
-  const online = useOnline();
-  const list = certificates.data;
+// Hostnames of saved routes by the certificate ID they select.
+function certificateUsage(routes: Route[]) {
   const usage = new Map<string, string[]>();
   for (const route of routes) {
     const id = route.policy?.certificate_id;
     if (id) usage.set(id, [...new Set([...(usage.get(id) ?? []), route.domain])]);
   }
+  return usage;
+}
+
+// Issuer names by the ID of their latest issued version.
+function latestVersions(issuers: CertificateIssuer[] = []) {
+  return new Map(issuers.filter((issuer) => issuer.certificate_id).map((issuer) => [issuer.certificate_id, issuer.name]));
+}
+
+// Uploading and deleting certificate versions for one resource, including versions Origin CA issuers created. They are
+// stored for the resource only; routes use one after it is selected in the Domains form and saved. busy: an operation is
+// queued or running for the resource. issuers: undefined while unknown, in which case the panel still refuses deleting
+// an issuer's latest version.
+export function RouteCertificates({ workloadId, certificates, routes, issuers, editable, busy }: { workloadId: string; certificates: CertificateListState; routes: Route[]; issuers?: CertificateIssuer[]; editable: boolean; busy: boolean }) {
+  const [deleting, setDeleting] = useState<RouteCertificate | null>(null);
+  const online = useOnline();
+  const list = certificates.data;
+  const usage = certificateUsage(routes);
+  const latest = latestVersions(issuers);
   const blocked = busy ? "Wait for the active operation to finish" : !online ? "You are offline" : undefined;
   return (
     <Section
       width="form"
       title="Certificates"
-      description="Certificates you provide for this resource's hostnames, such as a Cloudflare Origin CA certificate or one from your own certificate authority. Select one on a route above to serve it."
+      description="Certificate versions stored for this resource: ones you upload, such as a certificate from your own certificate authority, and ones issued by Cloudflare Origin CA below. Select a version on a route above and save to serve it."
       flush
     >
       <div className="divide-y divide-line">
         <div>
-          <CertificateList certificates={certificates} usage={usage} blocked={blocked} onDelete={editable ? setDeleting : undefined} />
+          <CertificateList certificates={certificates} usage={usage} latest={latest} blocked={blocked} onDelete={editable ? setDeleting : undefined} />
           {certificates.error != null && list && (
             <div className="px-4 pb-3">
               <QueryError error={certificates.error} what="the latest certificates" onRetry={() => void certificates.refetch()} retrying={certificates.isFetching} />
@@ -99,7 +113,8 @@ export function RouteCertificates({ workloadId, certificates, routes, editable, 
 }
 
 // onDelete is omitted for viewers. blocked: why no certificate can be deleted right now, if anything prevents it.
-function CertificateList({ certificates, usage, blocked, onDelete }: { certificates: CertificateListState; usage: Map<string, string[]>; blocked?: string; onDelete?: (certificate: RouteCertificate) => void }) {
+// latest: certificate IDs that are an issuer's latest version, by issuer name.
+function CertificateList({ certificates, usage, latest, blocked, onDelete }: { certificates: CertificateListState; usage: Map<string, string[]>; latest: Map<string, string>; blocked?: string; onDelete?: (certificate: RouteCertificate) => void }) {
   const list = certificates.data;
   if (certificates.isPending) return <LoadingRows label="Loading certificates" rows={2} />;
   if (!list) {
@@ -109,23 +124,34 @@ function CertificateList({ certificates, usage, blocked, onDelete }: { certifica
       </div>
     );
   }
-  if (list.length === 0) return <p className="px-4 py-3 text-[13px] text-fg-muted">No certificates are uploaded to this resource.</p>;
+  if (list.length === 0) return <p className="px-4 py-3 text-[13px] text-fg-muted">No certificates are stored for this resource.</p>;
   return (
-    <ul aria-label="Uploaded certificates" className="divide-y divide-line">
+    <ul aria-label="Stored certificates" className="divide-y divide-line">
       {list.map((certificate) => {
         const used = usage.get(certificate.id) ?? [];
-        return <CertificateRow key={certificate.id} certificate={certificate} used={used} reason={used.length > 0 ? "Used by saved routes" : blocked} onDelete={onDelete} />;
+        const issuer = latest.get(certificate.id);
+        const reason = used.length > 0 ? "Used by saved routes" : issuer !== undefined ? "Latest version of an issuer. Remove the issuer first" : blocked;
+        return <CertificateRow key={certificate.id} certificate={certificate} used={used} issuer={issuer} reason={reason} onDelete={onDelete} />;
       })}
     </ul>
   );
 }
 
-function CertificateRow({ certificate, used, reason, onDelete }: { certificate: RouteCertificate; used: string[]; reason?: string; onDelete?: (certificate: RouteCertificate) => void }) {
+function CertificateRow({ certificate, used, issuer, reason, onDelete }: { certificate: RouteCertificate; used: string[]; issuer?: string; reason?: string; onDelete?: (certificate: RouteCertificate) => void }) {
   const reasonId = `${certificate.id}-delete-reason`;
+  const source = certificateSource(certificate.source);
   return (
     <li className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 py-3">
       <div className="min-w-0 flex-1 basis-64 space-y-1">
         <p className="text-[13px] font-medium break-words text-fg">{certificate.name}</p>
+        <p className="text-xs break-words text-fg-muted" title={source.trust}>
+          {source.label}
+          {issuer !== undefined && (
+            <>
+              <span className="text-fg-subtle"> · </span>Latest version from issuer {issuer}
+            </>
+          )}
+        </p>
         <CertificateValidity certificate={certificate} />
         <p>
           <CertificateNames certificate={certificate} />
@@ -361,7 +387,7 @@ function DeleteCertificate({ workloadId, certificate, onClose }: { workloadId: s
         });
       }}
     >
-      <p>It can no longer be selected for routes. A certificate that saved routes use, or any certificate while an operation is active, cannot be deleted.</p>
+      <p>It can no longer be selected for routes. A certificate that saved routes use, an issuer&apos;s latest version, or any certificate while an operation is active, cannot be deleted.</p>
       <p className="mt-2">Deleting does not revoke the certificate, and it does not erase the recovery copies the worker keeps for routes that used it.</p>
       {failure && (
         <div className="mt-3">

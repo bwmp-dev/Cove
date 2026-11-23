@@ -1,4 +1,4 @@
-import type { RouteCertificate } from "../api/types";
+import type { CertificateZone, RouteCertificate } from "../api/types";
 import type { Tone } from "./nodes";
 
 export const certificateLimits = { name: 80, chainBytes: 65_536, keyBytes: 16_384, perResource: 32 } as const;
@@ -41,6 +41,13 @@ function isIPAddress(name: string) {
   return /^[0-9.]+$/.test(name) || name.includes(":");
 }
 
+// Whether a wildcard route hostname such as *.example.com matches name: exactly one more label, never the apex, deeper
+// names or another wildcard.
+export function wildcardCovers(pattern: string, name: string) {
+  if (!pattern.startsWith("*.") || name.startsWith("*.") || !name.endsWith(pattern.slice(1))) return false;
+  return dnsLabel.test(name.slice(0, -(pattern.length - 1)));
+}
+
 // Names the shared proxy certificate store would register for this certificate, mirroring the control plane: every
 // DNS subject alternative name, plus the common name when it is a DNS name or an IP address.
 function registeredNames(certificate: Pick<RouteCertificate, "common_name" | "dns_names">) {
@@ -49,13 +56,13 @@ function registeredNames(certificate: Pick<RouteCertificate, "common_name" | "dn
   return names.map((name) => name.toLowerCase().replace(/\.+$/, ""));
 }
 
-// Returns why a certificate cannot be selected for routes on these hostnames, or null when the rule is met. The
-// control plane makes the final decision; this only reports a mistake before saving.
+// Returns why a certificate cannot be selected for routes on these hostnames, or null when the rule is met. A wildcard
+// route owns names one label below it; a wildcard name in the certificate needs the same wildcard route. The control
+// plane makes the final decision; this only reports a mistake before saving.
 export function ownershipProblem(certificate: Pick<RouteCertificate, "common_name" | "dns_names" | "ip_addresses">, hostnames: string[]): string | null {
   const names = registeredNames(certificate);
   if ((certificate.ip_addresses?.length ?? 0) > 0 || names.some(isIPAddress)) return "This certificate names an IP address, which routes cannot use.";
-  const owned = new Set(hostnames);
-  const outside = names.filter((name) => isDNSName(name) && !owned.has(name));
+  const outside = names.filter((name) => isDNSName(name) && !hostnames.some((host) => host === name || wildcardCovers(host, name)));
   if (outside.length === 0) return null;
   const unique = [...new Set(outside)];
   return `This certificate also names ${unique.join(", ")}, which ${unique.length === 1 ? "is" : "are"} not a hostname of this resource's routes. Add ${unique.length === 1 ? "a route for it" : "routes for them"} or use a certificate without ${unique.length === 1 ? "it" : "them"}.`;
@@ -91,5 +98,104 @@ export function validateCertificateDraft(draft: CertificateDraft): CertificateDr
   else if (byteLength(draft.key) > certificateLimits.keyBytes) errors.key = "Keep the private key within 16 KiB.";
   else if (draft.key.includes("ENCRYPTED")) errors.key = "Use an unencrypted private key. Remove its passphrase first.";
   else if (!/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/.test(draft.key)) errors.key = "Use a PEM private key. Its first line names a private key.";
+  return errors;
+}
+
+export interface CertificateSourceInfo {
+  label: string;
+  trust: string;
+}
+
+// The provenance of a stored version. It says nothing about whether routes currently serve it.
+export function certificateSource(source: string | undefined): CertificateSourceInfo {
+  if (source === undefined || source === "uploaded") return { label: "Uploaded", trust: "Trusted by whichever clients trust the certificate authority that signed it." };
+  if (source === "cloudflare_origin") return { label: "Cloudflare Origin CA", trust: "Trusted by Cloudflare's edge only. Browsers do not trust Origin CA certificates." };
+  return { label: "Other source", trust: "Cove does not recognise how this version was created." };
+}
+
+export const issuerLimits = { perResource: 8, nameBytes: 60, hostnames: 32 } as const;
+
+// Validity periods Cloudflare Origin CA offers, in days.
+export const originValidityDays = [7, 30, 90, 365, 730, 1095, 5475] as const;
+
+export function validityLabel(days: number) {
+  if (days % 365 === 0) return days === 365 ? "1 year" : `${days / 365} years`;
+  return days === 1 ? "1 day" : `${days} days`;
+}
+
+const issuerPhases: Record<string, { tone: Tone; label: string }> = {
+  requesting: { tone: "info", label: "Requesting" },
+  reconciling: { tone: "warn", label: "Confirming the request" },
+  applying: { tone: "info", label: "Updating routes" },
+  issued: { tone: "ok", label: "Issued" },
+  failed: { tone: "bad", label: "Failed" },
+};
+
+// Unknown phases from a newer panel are shown as they are, never as complete.
+export function issuerPhase(phase: string) {
+  return issuerPhases[phase] ?? { tone: "neutral" as Tone, label: phase ? `Unknown state (${phase})` : "Unknown state" };
+}
+
+export function issuerWorking(phase: string) {
+  return phase === "requesting" || phase === "reconciling" || phase === "applying";
+}
+
+export function issuerRetryable(phase: string) {
+  return phase === "failed" || phase === "reconciling";
+}
+
+export interface IssuerDraft {
+  name: string;
+  zoneId: string;
+  hostnames: string;
+  validityDays: number;
+  autoRenew: boolean;
+}
+
+export type IssuerDraftErrors = Partial<Record<"name" | "zoneId" | "hostnames", string>>;
+
+export function hostnameList(text: string) {
+  return text
+    .split(/[\s,]+/)
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isCompleteName(name: string) {
+  return name.length <= 253 && name.includes(".") && name.split(".").every((label) => dnsLabel.test(label));
+}
+
+// Mirrors the panel's zone-share check: an exact entry or a "*.zone" pattern covers a hostname, but a wildcard share
+// never covers its own apex, and a wildcard request needs a wildcard share.
+export function shareAllows(patterns: string[], name: string) {
+  if (!name.startsWith("*.")) return patterns.some((pattern) => pattern === name || (pattern.startsWith("*.") && name.endsWith(pattern.slice(1))));
+  const base = name.slice(2);
+  return patterns.some((pattern) => pattern.startsWith("*.") && (base === pattern.slice(2) || base.endsWith(pattern.slice(1))));
+}
+
+// Catches mistakes before sending. The panel checks the current zone state and grants again on every request.
+export function validateIssuerDraft(draft: IssuerDraft, zone: CertificateZone | undefined): IssuerDraftErrors {
+  const errors: IssuerDraftErrors = {};
+  const name = draft.name.trim();
+  if (name === "") errors.name = "Enter a name.";
+  else if (byteLength(name) > issuerLimits.nameBytes) errors.name = `Use at most ${issuerLimits.nameBytes} bytes. Accented letters and symbols count as more than one.`;
+  else if (hasControlCharacter(name)) errors.name = "Remove line breaks and other control characters.";
+  if (!zone) errors.zoneId = "Choose a Cloudflare zone.";
+  const hostnames = hostnameList(draft.hostnames);
+  const invalid = hostnames.find((host) => !isCompleteName(host.startsWith("*.") ? host.slice(2) : host));
+  const duplicate = hostnames.find((host, index) => hostnames.indexOf(host) !== index);
+  if (hostnames.length === 0) errors.hostnames = "Enter at least one hostname.";
+  else if (hostnames.length > issuerLimits.hostnames) errors.hostnames = `Use at most ${issuerLimits.hostnames} hostnames.`;
+  else if (invalid) errors.hostnames = `${invalid} is not a complete DNS hostname. Use names such as app.example.com or *.example.com.`;
+  else if (duplicate) errors.hostnames = `${duplicate} is listed more than once.`;
+  else if (zone) {
+    const outside = hostnames.find((host) => {
+      const base = host.startsWith("*.") ? host.slice(2) : host;
+      return base !== zone.domain && !base.endsWith(`.${zone.domain}`);
+    });
+    const unshared = hostnames.find((host) => !shareAllows(zone.domains, host));
+    if (outside) errors.hostnames = `${outside} is not in the ${zone.domain} zone.`;
+    else if (unshared) errors.hostnames = `${unshared} is not shared with this team. Ask the owner of the Cloudflare connection to share it.`;
+  }
   return errors;
 }

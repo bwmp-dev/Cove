@@ -26,6 +26,14 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var active bool
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM route_certificate_issuers WHERE workload_id=$1)`, r.PathValue("id")).Scan(&active); err != nil {
+		http.Error(w, "certificate issuers unavailable", 503)
+		return
+	}
+	if active {
+		http.Error(w, "remove this resource's certificate issuers before deleting", 409)
+		return
+	}
 	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM previews WHERE source_id=$1)`, r.PathValue("id")).Scan(&active); err != nil {
 		http.Error(w, "previews unavailable", 503)
 		return

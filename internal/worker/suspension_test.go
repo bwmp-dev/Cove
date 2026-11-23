@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -99,7 +101,11 @@ func TestSuspensionRoutesPreserveProtectionWithoutContainers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.Run = func(context.Context, string, []string, []string, io.Writer) error {
+	e.Run = func(_ context.Context, _ string, args, _ []string, out io.Writer) error {
+		if len(args) == 4 && args[0] == "docker" && args[1] == "cp" && strings.HasPrefix(args[2], "cove-ingress:/data/") {
+			fmt.Fprintln(out, "Could not find the file")
+			return errors.New("no cached certificate")
+		}
 		t.Fatal("a paused route inspected live containers")
 		return nil
 	}

@@ -7,7 +7,8 @@ import { errorMessage } from "../api/client";
 import { useUpdateRoutes, useUpdateWorkload } from "../api/mutations";
 import { keys, nodesQuery, operationQuery, workloadOperationsQuery } from "../api/queries";
 import type { Route, RouteCertificate, Workload, WorkloadInput, DeploymentHooks, FileSecret } from "../api/types";
-import { certificatesQuery } from "../api/certificates";
+import { certificateIssuersQuery, certificatesQuery, certificateZonesQuery } from "../api/certificates";
+import { CertificateIssuers } from "../components/CertificateIssuers";
 import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
 import { DatabaseAccess } from "../components/DatabaseAccess";
@@ -23,6 +24,7 @@ import { RouteEditor } from "../components/RouteEditor";
 import { RouteCertificates } from "../components/RouteCertificates";
 import type { CertificateChoices } from "../components/RouteCertificatePicker";
 import { isManagedPreview } from "../lib/previews";
+import { routeProtocolOf } from "../lib/nodes";
 import { shortId } from "../lib/format";
 import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
 import { Webhook } from "../components/Webhook";
@@ -583,7 +585,7 @@ export function ResourceDomains() {
   return <DomainsPanel workload={workload} />;
 }
 
-// Managed previews cannot hold uploaded certificates: their hostnames are generated and the API rejects their uploads.
+// Managed previews cannot hold stored certificates or issuers: their hostnames are generated and the API rejects them.
 function DomainsPanel({ workload }: { workload: Workload }) {
   const nodes = useQuery(nodesQuery);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
@@ -591,6 +593,8 @@ function DomainsPanel({ workload }: { workload: Workload }) {
   const editable = can(workload.permissions, "edit");
   const uploads = !isManagedPreview(workload);
   const certificates = useQuery({ ...certificatesQuery(workload.id), enabled: uploads });
+  const issuers = useQuery({ ...certificateIssuersQuery(workload.id), enabled: uploads });
+  const zones = useQuery({ ...certificateZonesQuery(workload.id), enabled: uploads });
   const busy = Boolean(useActiveOperation(workload.id));
   const choices: CertificateChoices | undefined = uploads
     ? { supported: node ? (node.capabilities?.route_protocol ?? 0) >= 3 : undefined, list: certificates.data, error: certificates.error, retry: () => void certificates.refetch(), retrying: certificates.isFetching }
@@ -600,7 +604,7 @@ function DomainsPanel({ workload }: { workload: Workload }) {
       <Section
         width="form"
         title="Domains"
-        description={`HTTPS hostnames served by the managed Traefik proxy on ${nodeName}. Point each hostname's DNS at that node and keep ports 80 and 443 reachable; certificates are issued automatically unless a route uses the proxy default or an uploaded certificate.`}
+        description={`HTTPS hostnames served by the managed Traefik proxy on ${nodeName}. Point each hostname's DNS at that node and keep ports 80 and 443 reachable; certificates are issued automatically unless a route uses the proxy default or a stored certificate.`}
       >
         {editable ? (
           <DomainsForm workload={workload} certificates={choices} />
@@ -611,7 +615,8 @@ function DomainsPanel({ workload }: { workload: Workload }) {
           </div>
         )}
       </Section>
-      {uploads && <RouteCertificates workloadId={workload.id} certificates={certificates} routes={workload.routes ?? []} editable={editable} busy={busy} />}
+      {uploads && <RouteCertificates workloadId={workload.id} certificates={certificates} routes={workload.routes ?? []} issuers={issuers.data} editable={editable} busy={busy} />}
+      {uploads && <CertificateIssuers workloadId={workload.id} issuers={issuers} zones={zones} certificates={certificates.data} routes={workload.routes ?? []} editable={editable} />}
     </>
   );
 }
@@ -623,12 +628,17 @@ function RouteList({ workload, certificates }: { workload: Workload; certificate
       {workload.routes.map((route) => {
         const extensions = extensionSummary(route.policy);
         const certificateId = route.policy?.certificate_id;
-        if (certificateId) extensions.push(`uploaded certificate ${certificates?.find((item) => item.id === certificateId)?.name ?? shortId(certificateId)}`);
+        if (certificateId) extensions.push(`stored certificate ${certificates?.find((item) => item.id === certificateId)?.name ?? shortId(certificateId)}`);
+        else if (route.policy?.certificate_source === "default") extensions.push("proxy default certificate");
         return (
           <li key={route.domain} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-2 text-[13px]">
-            <a className="break-all underline underline-offset-4" href={`https://${route.domain}`} target="_blank" rel="noreferrer">
-              {route.domain}
-            </a>
+            {route.domain.startsWith("*.") ? (
+              <span className="font-mono break-all">{route.domain}</span>
+            ) : (
+              <a className="break-all underline underline-offset-4" href={`https://${route.domain}`} target="_blank" rel="noreferrer">
+                {route.domain}
+              </a>
+            )}
             <span className="font-mono text-xs text-fg-muted">
               {route.service}:{route.port}
             </span>
@@ -641,16 +651,20 @@ function RouteList({ workload, certificates }: { workload: Workload; certificate
 }
 
 // Taking a cached Let's Encrypt certificate out of the shared proxy, or putting it back, can require restarting the proxy.
+// Both a stored certificate and the proxy default take it out.
 function ProxyRestartNotice({ rows, saved, nodeName = "this node" }: { rows: RouteRow[]; saved?: Route[]; nodeName?: string }) {
   const switches = certificateSwitches(rows, saved);
   if (switches.length === 0) return null;
   const one = switches.length === 1;
   return (
     <Notice tone="warn" title="Saving may briefly restart the shared proxy">
-      <span className="font-mono break-all">{switches.join(", ")}</span> {one ? "changes" : "change"} to or from an uploaded certificate. If the proxy holds a cached Let&apos;s Encrypt certificate for {one ? "this hostname" : "these hostnames"}, applying restarts it, interrupting connections to every resource on {nodeName} for a moment.
+      <span className="font-mono break-all">{switches.join(", ")}</span> {one ? "switches" : "switch"} between Let&apos;s Encrypt and a stored or proxy default certificate. If the proxy holds a cached Let&apos;s Encrypt certificate for {one ? "this hostname" : "these hostnames"}, applying takes it out or puts it back and restarts the proxy, interrupting connections to every resource on {nodeName}, not just this one, for a moment.
     </Notice>
   );
 }
+
+// The API sends null for a resource with no saved routes.
+const noRoutes: Route[] = [];
 
 function DomainsForm({ workload, certificates }: { workload: Workload; certificates?: CertificateChoices }) {
   const client = useQueryClient();
@@ -661,13 +675,15 @@ function DomainsForm({ workload, certificates }: { workload: Workload; certifica
   const blocked = useSaveBlocked(workload.id);
   const nodes = useQuery(nodesQuery);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
-  const [rows, setRows] = useState(() => routeRows(workload.routes));
+  const routeProtocol = routeProtocolOf(node);
+  const saved = workload.routes ?? noRoutes;
+  const [rows, setRows] = useState(() => routeRows(saved));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [applying, setApplying] = useState<string | null>(null);
   const operation = useQuery({ ...operationQuery(applying ?? ""), enabled: applying !== null });
   const applyState = applying ? operation.data?.state : undefined;
   const inProgress = save.isPending || (applying !== null && (applyState === undefined || isActive(applyState)));
-  const dirty = !sameRoutes(rows, workload.routes);
+  const dirty = !sameRoutes(rows, saved);
 
   // Saved routes change only after the worker applies them, so reload the resource once it reports a result.
   useEffect(() => {
@@ -676,7 +692,7 @@ function DomainsForm({ workload, certificates }: { workload: Workload; certifica
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = validateRoutes(rows, workload.routes, certificates?.list);
+    const result = validateRoutes(rows, saved, certificates?.list, routeProtocol);
     setErrors(result.errors);
     if (!result.routes) {
       focusFirstInvalid(event.currentTarget);
@@ -750,17 +766,18 @@ function DomainsForm({ workload, certificates }: { workload: Workload; certifica
           errors={errors}
           policies={node ? Boolean(node.capabilities?.route_policies) : undefined}
           extensions={node ? (node.capabilities?.route_protocol ?? 0) >= 2 : undefined}
-          saved={workload.routes}
+          routeProtocol={routeProtocol}
+          saved={saved}
           certificates={certificates}
           onChange={(next) => {
             save.reset();
             setApplying(null);
             setRows(next);
-            setErrors((current) => refreshCertificateErrors(current, next, workload.routes, certificates?.list));
+            setErrors((current) => refreshCertificateErrors(current, next, saved, certificates?.list, routeProtocol));
           }}
         />
       </fieldset>
-      <ProxyRestartNotice rows={rows} saved={workload.routes} nodeName={node?.name} />
+      <ProxyRestartNotice rows={rows} saved={saved} nodeName={node?.name} />
       {status}
       <div className="border-t border-line pt-4">
       <SaveBar
@@ -769,7 +786,7 @@ function DomainsForm({ workload, certificates }: { workload: Workload; certifica
         blocked={blocked}
         label={deployed ? "Save and apply" : "Save routes"}
         onDiscard={() => {
-          setRows(routeRows(workload.routes));
+          setRows(routeRows(saved));
           setErrors({});
           save.reset();
           setApplying(null);

@@ -71,7 +71,7 @@ func (r Route) validatePolicy() error {
 		return errors.New("uploaded certificate source requires a certificate ID; other sources cannot select one")
 	}
 	if p.RedirectHost != "" {
-		if p.RedirectHost == r.Domain || ValidateRoutes([]Route{{Domain: p.RedirectHost, Service: r.Service, Port: r.Port}}, "service") != nil {
+		if strings.ContainsRune(p.RedirectHost, '*') || p.RedirectHost == r.Domain || ValidateRoutes([]Route{{Domain: p.RedirectHost, Service: r.Service, Port: r.Port}}, "service") != nil {
 			return errors.New("redirect target must be a different lowercase DNS hostname")
 		}
 	} else if p.RedirectPermanent {
@@ -146,6 +146,7 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 	next := "cove-route-" + hex.EncodeToString(sum[:16])
 	c.addNamed(r.Domain, upstream, r.Auth, next)
 	router, service := c.HTTP.Routers[next], c.HTTP.Services[next]
+	router.Priority = routePriority(r)
 	p := r.Policy
 	if p.PathPrefix != "" {
 		router.Rule += " && PathPrefix(`" + p.PathPrefix + "`)"

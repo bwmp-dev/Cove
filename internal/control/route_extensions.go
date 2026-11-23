@@ -16,7 +16,7 @@ var errRouteProtocolUnsupported = errors.New("upgrade and verify the worker befo
 func checkRouteProtocol(ctx context.Context, db interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workload string, routes []worker.Route) error {
-	if !worker.HasRouteExtensions(routes) {
+	if worker.RouteProtocol(routes) < 2 {
 		return nil
 	}
 	var version int
@@ -66,10 +66,10 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 		incoming = *input.Policy
 	}
 	if !provided("certificate_source", incoming.CertificateSource != "") && !provided("certificate_id", incoming.CertificateID != "") {
-		if ambiguous && policy.CertificateID != previous.CertificateID {
+		if ambiguous && (policy.CertificateID != previous.CertificateID || (policy.CertificateSource == "default") != (previous.CertificateSource == "default")) {
 			return errors.New("set the certificate explicitly when changing a path with different certificate settings")
 		}
-		if previous.CertificateID != "" {
+		if previous.CertificateID != "" || previous.CertificateSource == "default" {
 			policy.CertificateID, policy.CertificateSource = previous.CertificateID, previous.CertificateSource
 		}
 	}
@@ -91,7 +91,7 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 		}
 		policy.ErrorPages = previous.ErrorPages
 	}
-	if target.Policy != nil || policy.CertificateID != "" || policy.ForwardAuth != nil || policy.Maintenance != nil || policy.ErrorPages != nil {
+	if target.Policy != nil || policy.CertificateSource == "default" || policy.CertificateID != "" || policy.ForwardAuth != nil || policy.Maintenance != nil || policy.ErrorPages != nil {
 		target.Policy = &policy
 	}
 	return nil

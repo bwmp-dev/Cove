@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 )
@@ -101,7 +102,9 @@ func projectACMECertificates(data []byte, retained []json.RawMessage, uploaded [
 			seen[id] = true
 			collision := false
 			for _, route := range uploaded {
-				if certificate.VerifyHostname(route.Domain) == nil {
+				if slices.ContainsFunc(append(append([]string{}, certificate.DNSNames...), certificate.Subject.CommonName), func(name string) bool {
+					return RouteDomainsOverlap(strings.TrimRight(strings.ToLower(name), "."), route.Domain)
+				}) {
 					collision = true
 					break
 				}
@@ -120,7 +123,7 @@ func projectACMECertificates(data []byte, retained []json.RawMessage, uploaded [
 				continue
 			}
 			if err := CertificateOwnedByRoutes(RouteCertificate{CertificatePEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw}))}, uploaded); err != nil {
-				return result, errors.New("a cached ACME certificate also serves names without uploaded replacements; assign replacements for all its names before switching")
+				return result, errors.New("a cached ACME certificate also serves names without uploaded replacements or disabled ACME; change all its names before switching")
 			}
 			if !fingerprints[resolver+"/"+id] {
 				encoded, _ := json.Marshal(resolver)
@@ -180,7 +183,7 @@ func (e *Engine) projectRouteCertificateACME(ctx context.Context, routes map[str
 	uploaded := []Route{}
 	for _, list := range routes {
 		for _, route := range list {
-			if route.Policy != nil && route.Policy.CertificateID != "" {
+			if route.Policy != nil && (route.Policy.CertificateID != "" || route.Policy.CertificateSource == "default") {
 				uploaded = append(uploaded, route)
 			}
 		}

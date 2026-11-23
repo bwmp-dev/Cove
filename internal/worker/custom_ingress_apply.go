@@ -903,9 +903,9 @@ func (e *Engine) customHostConflict(previous, desired []Route) error {
 		}
 		for _, name := range names {
 			record := state.Managed[name]
-			claimed := slices.Contains(record.Hosts, route.Domain)
+			claimed := slices.ContainsFunc(record.Hosts, func(host string) bool { return RouteDomainsOverlap(host, route.Domain) })
 			for _, pattern := range record.HostPatterns {
-				if expression, err := regexp.Compile(pattern); err == nil && expression.MatchString(route.Domain) {
+				if expression, err := regexp.Compile(pattern); err == nil && (strings.HasPrefix(route.Domain, "*.") || expression.MatchString(route.Domain)) {
 					claimed = true
 				}
 			}

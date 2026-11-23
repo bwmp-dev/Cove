@@ -40,7 +40,7 @@ function certificate(id: string, name: string, patch: Partial<RouteCertificate> 
 const uploadedRoute: Route = { domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "uploaded", certificate_id: origin } };
 const plainRoute: Route = { domain: "app.example.com", service: "web", port: 8080 };
 
-function workload(routes: Route[], permissions = ["read", "operate", "edit"]): Workload {
+function workload(routes: Route[] | null, permissions = ["read", "operate", "edit"]): Workload {
   return { id: "w1", name: "web", node_id: "n1", kind: "service", compose: "services:\n  web:\n    image: nginx\n", source: null, environment_keys: [], has_source_token: false, permissions, manually_stopped: false, deployed: true, project_id: "p1", guarded_deploy: false, routes } as Workload;
 }
 
@@ -50,7 +50,7 @@ function node(routeProtocol: number): Node {
 
 type Handler = (method: string, path: string, body: unknown) => Promise<unknown> | undefined;
 
-function renderPage({ routes = [uploadedRoute], protocol = 3, certificates = () => Promise.resolve([certificate(origin, "Origin CA 2026")]), permissions, handle }: { routes?: Route[]; protocol?: number; certificates?: () => Promise<unknown>; permissions?: string[]; handle?: Handler } = {}) {
+function renderPage({ routes = [uploadedRoute], protocol = 3, certificates = () => Promise.resolve([certificate(origin, "Origin CA 2026")]), permissions, handle }: { routes?: Route[] | null; protocol?: number; certificates?: () => Promise<unknown>; permissions?: string[]; handle?: Handler } = {}) {
   resource = workload(routes, permissions);
   vi.mocked(request).mockImplementation((method: string, path: string, body?: unknown) => {
     const handled = handle?.(method, path, body);
@@ -58,6 +58,7 @@ function renderPage({ routes = [uploadedRoute], protocol = 3, certificates = () 
     if (path === "/api/nodes") return Promise.resolve([node(protocol)] as never);
     if (path.startsWith("/api/operations")) return Promise.resolve([] as never);
     if (method === "GET" && path === "/api/workloads/w1/certificates") return certificates();
+    if (method === "GET" && (path === "/api/workloads/w1/certificate-issuers" || path === "/api/workloads/w1/certificate-zones")) return Promise.resolve([] as never);
     if (method === "PUT" && path === "/api/workloads/w1/routes") return Promise.resolve({ state: "saved" } as never);
     return Promise.reject(new Error(`unexpected ${method} ${path}`));
   });
@@ -86,7 +87,7 @@ describe("route certificate selection", () => {
   it("shows the saved certificate with its metadata and saves other changes with the selection unchanged", async () => {
     renderPage();
     await openAdvanced();
-    expect(await screen.findByRole("combobox", { name: "Uploaded certificate" })).toHaveTextContent("Origin CA 2026");
+    expect(await screen.findByRole("combobox", { name: "Certificate version" })).toHaveTextContent(/^Origin CA 2026/);
     expect(screen.getAllByText("app.example.com", { selector: "span" }).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("switch", { name: "Sticky sessions" }));
     expect(screen.queryByText("Saving may briefly restart the shared proxy")).not.toBeInTheDocument();
@@ -99,34 +100,48 @@ describe("route certificate selection", () => {
     let fail = true;
     renderPage({ certificates: () => (fail ? Promise.reject(new ApiError(503, "Certificates unavailable")) : Promise.resolve([certificate(origin, "Origin CA 2026")])) });
     await openAdvanced();
-    const picker = await screen.findByRole("combobox", { name: "Uploaded certificate" });
+    const picker = await screen.findByRole("combobox", { name: "Certificate version" });
     expect(picker).toHaveTextContent(`Saved certificate ${origin.slice(0, 8)}`);
     expect(picker).toBeDisabled();
-    expect((await screen.findAllByText("Could not load uploaded certificates")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Could not load stored certificates")).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("switch", { name: "Sticky sessions" }));
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     await waitFor(() => expect(routePuts()).toHaveLength(1));
     expect(routePuts()[0]?.[2]).toEqual({ routes: [{ ...uploadedRoute, policy: { ...uploadedRoute.policy, sticky: true } }] });
     fail = false;
-    await userEvent.click(within(screen.getByText("Could not load uploaded certificates").closest("div[class*=border]") as HTMLElement).getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Uploaded certificate" })).toHaveTextContent("Origin CA 2026"));
+    await userEvent.click(within(screen.getByText("Could not load stored certificates").closest("div[class*=border]") as HTMLElement).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Certificate version" })).toHaveTextContent("Origin CA 2026"));
   });
 
   it("names a saved ID that is no longer listed instead of dropping it", async () => {
     renderPage({ certificates: () => Promise.resolve([certificate(spare, "Spare")]) });
     await openAdvanced();
-    expect(await screen.findByRole("combobox", { name: "Uploaded certificate" })).toHaveTextContent(`Unknown certificate ${origin.slice(0, 8)}`);
-    expect(screen.getByText(/is not among this resource's uploaded certificates/)).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "Certificate version" })).toHaveTextContent(`Unknown certificate ${origin.slice(0, 8)}`);
+    expect(screen.getByText(/is not among this resource's stored certificates/)).toBeInTheDocument();
+  });
+
+  it("opens a resource with no saved routes, sent as null by the API, and saves its first route", async () => {
+    renderPage({ routes: null, certificates: () => Promise.resolve([]) });
+    expect(await screen.findByText("No certificates are stored for this resource.")).toBeInTheDocument();
+    expect(screen.queryByText("Saving may briefly restart the shared proxy")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Add route" }));
+    await userEvent.type(screen.getByLabelText("Hostname"), "app.example.com");
+    await userEvent.type(screen.getByLabelText("Compose service"), "web");
+    await userEvent.clear(screen.getByLabelText("Container port"));
+    await userEvent.type(screen.getByLabelText("Container port"), "8080");
+    await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
+    await waitFor(() => expect(routePuts()).toHaveLength(1));
+    expect(routePuts()[0]?.[2]).toEqual({ routes: [plainRoute] });
   });
 
   it("selects an uploaded certificate for a route and switches away by naming the new source", async () => {
     renderPage({ routes: [plainRoute], certificates: () => Promise.resolve([certificate(origin, "Origin CA 2026")]) });
     await openAdvanced();
-    await chooseOption(screen.getByRole("combobox", { name: "Certificate" }), "Uploaded certificate");
+    await chooseOption(screen.getByRole("combobox", { name: "Certificate" }), "Stored certificate");
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
-    expect(await screen.findByText("Choose an uploaded certificate.")).toBeInTheDocument();
+    expect(await screen.findByText("Choose a certificate version.")).toBeInTheDocument();
     expect(routePuts()).toHaveLength(0);
-    await chooseOption(screen.getByRole("combobox", { name: "Uploaded certificate" }), "Origin CA 2026");
+    await chooseOption(screen.getByRole("combobox", { name: "Certificate version" }), /^Origin CA 2026/);
     expect(screen.getByText("Saving may briefly restart the shared proxy")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     await waitFor(() => expect(routePuts()).toHaveLength(1));
@@ -137,7 +152,7 @@ describe("route certificate selection", () => {
     renderPage();
     await openAdvanced();
     await chooseOption(await screen.findByRole("combobox", { name: "Certificate" }), "Let's Encrypt");
-    expect(screen.queryByRole("combobox", { name: "Uploaded certificate" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Certificate version" })).not.toBeInTheDocument();
     expect(screen.getByText("Saving may briefly restart the shared proxy")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     await waitFor(() => expect(routePuts()).toHaveLength(1));
@@ -147,7 +162,7 @@ describe("route certificate selection", () => {
   it("reports a certificate naming hostnames outside the resource's routes before saving", async () => {
     renderPage({ certificates: () => Promise.resolve([certificate(origin, "Wide", { dns_names: ["app.example.com", "api.example.com"] })]) });
     await openAdvanced();
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Uploaded certificate" })).toHaveTextContent("Wide"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Certificate version" })).toHaveTextContent("Wide"));
     await userEvent.click(screen.getByRole("switch", { name: "Sticky sessions" }));
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     expect(await screen.findByText(/also names api\.example\.com/)).toBeInTheDocument();
@@ -157,18 +172,18 @@ describe("route certificate selection", () => {
   it("re-checks a reported certificate error against the current choice and still refuses an invalid one", async () => {
     renderPage({ certificates: () => Promise.resolve([certificate(origin, "Wide", { dns_names: ["app.example.com", "api.example.com"] }), certificate(spare, "Narrow")]) });
     await openAdvanced();
-    const picker = await screen.findByRole("combobox", { name: "Uploaded certificate" });
+    const picker = await screen.findByRole("combobox", { name: "Certificate version" });
     await waitFor(() => expect(picker).toHaveTextContent("Wide"));
     await userEvent.click(screen.getByRole("switch", { name: "Sticky sessions" }));
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     expect(await screen.findByText(/also names api\.example\.com/)).toBeInTheDocument();
     expect(picker).toHaveAttribute("aria-invalid", "true");
 
-    await chooseOption(picker, "Narrow");
+    await chooseOption(picker, /^Narrow/);
     expect(screen.queryByText(/also names api\.example\.com/)).not.toBeInTheDocument();
     expect(picker).not.toHaveAttribute("aria-invalid");
 
-    await chooseOption(picker, "Wide");
+    await chooseOption(picker, /^Wide/);
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     expect(await screen.findByText(/also names api\.example\.com/)).toBeInTheDocument();
     expect(picker).toHaveAttribute("aria-invalid", "true");
@@ -178,19 +193,21 @@ describe("route certificate selection", () => {
   it("keeps a saved selection visible on an older worker and lets it be switched away explicitly", async () => {
     renderPage({ protocol: 2 });
     await openAdvanced();
-    expect(await screen.findByText("Uploaded certificates need a newer worker")).toBeInTheDocument();
-    expect(await screen.findByRole("combobox", { name: "Uploaded certificate" })).toBeDisabled();
-    await chooseOption(screen.getByRole("combobox", { name: "Certificate" }), "Proxy default certificate");
+    expect(await screen.findByText("Stored certificates need a newer worker")).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "Certificate version" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("combobox", { name: "Certificate" }));
+    expect(await screen.findByRole("option", { name: "Proxy default certificate" })).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(screen.getByRole("option", { name: "Let's Encrypt" }));
     await userEvent.click(screen.getByRole("button", { name: "Save and apply" }));
     await waitFor(() => expect(routePuts()).toHaveLength(1));
-    expect(routePuts()[0]?.[2]).toEqual({ routes: [{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "default" } }] });
+    expect(routePuts()[0]?.[2]).toEqual({ routes: [{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "acme" } }] });
   });
 
   it("does not offer a new uploaded selection on an older worker", async () => {
     renderPage({ routes: [plainRoute], protocol: 2 });
     await openAdvanced();
     await userEvent.click(screen.getByRole("combobox", { name: "Certificate" }));
-    expect(await screen.findByRole("option", { name: "Uploaded certificate" })).toHaveAttribute("aria-disabled", "true");
+    expect(await screen.findByRole("option", { name: "Stored certificate" })).toHaveAttribute("aria-disabled", "true");
   });
 });
 
@@ -206,7 +223,7 @@ describe("certificate upload and deletion", () => {
         return Promise.resolve(stored[0]);
       },
     });
-    expect(await screen.findByText("No certificates are uploaded to this resource.")).toBeInTheDocument();
+    expect(await screen.findByText("No certificates are stored for this resource.")).toBeInTheDocument();
     const form = screen.getByRole("form", { name: "Upload a certificate" });
     await userEvent.type(within(form).getByLabelText("Name"), "Origin CA 2026");
     await userEvent.click(within(form).getByLabelText("Certificate chain"));
@@ -219,7 +236,7 @@ describe("certificate upload and deletion", () => {
     expect(await screen.findByText("Certificate uploaded")).toBeInTheDocument();
     expect(within(form).getByLabelText("Certificate chain")).toHaveValue("");
     expect(within(form).getByLabelText("Private key")).toHaveValue("");
-    expect(within(screen.getByRole("list", { name: "Uploaded certificates" })).getByText("Origin CA 2026")).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Stored certificates" })).getByText("Origin CA 2026")).toBeInTheDocument();
     await waitFor(() => expect(client.getMutationCache().getAll()).toHaveLength(0));
     const cached = JSON.stringify(client.getQueryCache().getAll().map((query) => query.state.data));
     expect(cached).not.toContain("PRIVATE KEY");
@@ -256,7 +273,7 @@ describe("certificate upload and deletion", () => {
       certificates: () => Promise.resolve([certificate(origin, "Origin CA 2026"), certificate(spare, "Spare")]),
       handle: (method, path) => (method === "DELETE" && path === `/api/workloads/w1/certificates/${spare}` ? Promise.resolve({ state: "deleted" }) : undefined),
     });
-    const list = await screen.findByRole("list", { name: "Uploaded certificates" });
+    const list = await screen.findByRole("list", { name: "Stored certificates" });
     expect(within(list).getByRole("button", { name: "Delete certificate Origin CA 2026" })).toBeDisabled();
     expect(within(list).getByText("Used by saved routes")).toBeInTheDocument();
     await userEvent.click(within(list).getByRole("button", { name: "Delete certificate Spare" }));
@@ -271,7 +288,7 @@ describe("certificate upload and deletion", () => {
       routes: [plainRoute],
       handle: (method, path) => (method === "DELETE" && path === `/api/workloads/w1/certificates/${origin}` ? Promise.reject(new ApiError(409, "Remove this certificate from all routes before deleting it")) : undefined),
     });
-    const list = await screen.findByRole("list", { name: "Uploaded certificates" });
+    const list = await screen.findByRole("list", { name: "Stored certificates" });
     await userEvent.click(within(list).getByRole("button", { name: "Delete certificate Origin CA 2026" }));
     const dialog = await screen.findByRole("dialog", { name: "Delete certificate Origin CA 2026?" });
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete certificate" }));
@@ -280,9 +297,9 @@ describe("certificate upload and deletion", () => {
 
   it("shows viewers metadata and the selection without upload or delete controls", async () => {
     renderPage({ permissions: ["read"], certificates: () => Promise.resolve([certificate(origin, "Origin CA 2026", { expires_at: "2026-01-01T00:00:00Z", not_before: "2025-01-01T00:00:00Z" })]) });
-    const list = await screen.findByRole("list", { name: "Uploaded certificates" });
+    const list = await screen.findByRole("list", { name: "Stored certificates" });
     expect(within(list).getAllByText("Expired").length).toBeGreaterThan(0);
-    expect(await screen.findByText("uploaded certificate Origin CA 2026")).toBeInTheDocument();
+    expect(await screen.findByText("stored certificate Origin CA 2026")).toBeInTheDocument();
     expect(screen.queryByRole("form", { name: "Upload a certificate" })).not.toBeInTheDocument();
     expect(within(list).queryByRole("button")).not.toBeInTheDocument();
   });

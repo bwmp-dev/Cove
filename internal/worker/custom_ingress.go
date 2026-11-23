@@ -396,7 +396,7 @@ func customIngressIssues(config customIngress, c customIngressContext) ([]ingres
 					issues = append(issues, ingressIssue{"catchall", fmt.Sprintf("TCP router %q matches every connection on Cove's shared entry points and would intercept Cove-managed hostnames. Give it a dedicated entry point.", router.Name)})
 					continue
 				}
-				if slices.Contains(c.Domains, value) {
+				if slices.ContainsFunc(c.Domains, func(domain string) bool { return RouteDomainsOverlap(domain, value) }) {
 					issues = append(issues, ingressIssue{"host/" + value, fmt.Sprintf("%s router %q claims %s, which Cove routes to a resource or the dashboard.", strings.ToUpper(router.Section), router.Name, value)})
 				}
 			case "HostRegexp", "HostSNIRegexp":
@@ -405,7 +405,10 @@ func customIngressIssues(config customIngress, c customIngressContext) ([]ingres
 					continue
 				}
 				for _, domain := range c.Domains {
-					if pattern.MatchString(domain) {
+					if strings.HasPrefix(domain, "*.") {
+						// Sampling hosts cannot prove an arbitrary custom regexp disjoint from a wildcard.
+						issues = append(issues, ingressIssue{"host/" + domain, fmt.Sprintf("%s router %q uses a shared-entry-point regular expression alongside managed wildcard %s. Use exact Host rules or a dedicated entry point.", strings.ToUpper(router.Section), router.Name, domain)})
+					} else if pattern.MatchString(domain) {
 						issues = append(issues, ingressIssue{"host/" + domain, fmt.Sprintf("%s router %q matches %s, which Cove routes to a resource or the dashboard.", strings.ToUpper(router.Section), router.Name, domain)})
 					}
 				}

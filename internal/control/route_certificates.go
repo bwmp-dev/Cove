@@ -16,8 +16,9 @@ import (
 var errInvalidRouteCertificate = errors.New("selected certificate is invalid")
 
 type routeCertificateView struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Source string `json:"source"`
 	worker.RouteCertificateInfo
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -25,7 +26,7 @@ type routeCertificateView struct {
 func (s *Server) routeCertificates(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if r.Method == "GET" {
-		rows, err := s.DB.Query(r.Context(), "SELECT id,name,metadata,created_at FROM route_certificates WHERE workload_id=$1 ORDER BY created_at DESC,id", id)
+		rows, err := s.DB.Query(r.Context(), "SELECT id,name,source,metadata,created_at FROM route_certificates WHERE workload_id=$1 ORDER BY created_at DESC,id", id)
 		if err != nil {
 			http.Error(w, "certificates unavailable", 503)
 			return
@@ -35,7 +36,7 @@ func (s *Server) routeCertificates(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var item routeCertificateView
 			var metadata []byte
-			if rows.Scan(&item.ID, &item.Name, &metadata, &item.CreatedAt) != nil || json.Unmarshal(metadata, &item.RouteCertificateInfo) != nil {
+			if rows.Scan(&item.ID, &item.Name, &item.Source, &metadata, &item.CreatedAt) != nil || json.Unmarshal(metadata, &item.RouteCertificateInfo) != nil {
 				http.Error(w, "certificates unavailable", 503)
 				return
 			}
@@ -70,6 +71,14 @@ func (s *Server) routeCertificates(w http.ResponseWriter, r *http.Request) {
 		}
 		if active {
 			http.Error(w, "wait for the active operation before removing a certificate", 409)
+			return
+		}
+		if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM route_certificate_issuers WHERE certificate_id=$1 AND workload_id=$2)", r.PathValue("certificate"), id).Scan(&active); err != nil {
+			http.Error(w, "certificate issuers unavailable", 503)
+			return
+		}
+		if active {
+			http.Error(w, "remove the certificate issuer before deleting its latest version", 409)
 			return
 		}
 		raw, err := unseal(s.Key, encrypted)
@@ -151,7 +160,7 @@ func (s *Server) routeCertificates(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not save certificate", 500)
 		return
 	}
-	respond(w, 201, routeCertificateView{ID: certificate.ID, Name: input.Name, RouteCertificateInfo: info, CreatedAt: now})
+	respond(w, 201, routeCertificateView{ID: certificate.ID, Name: input.Name, Source: "uploaded", RouteCertificateInfo: info, CreatedAt: now})
 }
 
 func (s *Server) routeCertificate(ctx context.Context, db interface {
