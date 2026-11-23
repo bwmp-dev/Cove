@@ -911,3 +911,68 @@ CREATE TABLE IF NOT EXISTS object_buckets (
  configuration bytea NOT NULL, state text NOT NULL DEFAULT 'pending',
  created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(workload_id)
 );
+
+CREATE TABLE IF NOT EXISTS identity_group_mappings (
+ source_kind text NOT NULL CHECK(source_kind IN ('github','scim','ldap')),
+ source_id text NOT NULL, group_id text NOT NULL,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE, role text NOT NULL,
+ PRIMARY KEY(source_kind,source_id,group_id,team_id)
+);
+CREATE TABLE IF NOT EXISTS identity_membership_bases (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ role text CHECK(role IN ('owner','admin','member')), grants jsonb NOT NULL DEFAULT '[]',
+ PRIMARY KEY(team_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS identity_membership_claims (
+ source_kind text NOT NULL CHECK(source_kind IN ('github','scim','ldap')),
+ source_id text NOT NULL, group_id text NOT NULL,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ role text NOT NULL CHECK(role IN ('owner','admin','member')), grants jsonb NOT NULL DEFAULT '[]',
+ PRIMARY KEY(source_kind,source_id,group_id,team_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS github_team_sync_sources (
+ id text PRIMARY KEY, configuration bytea NOT NULL, enabled boolean NOT NULL DEFAULT false,
+ version bigint NOT NULL DEFAULT 1, checked_at timestamptz, applied_at timestamptz,
+ next_check_at timestamptz NOT NULL DEFAULT now(), refresh_until timestamptz NOT NULL DEFAULT now(),
+ last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS scim_settings (
+ id integer PRIMARY KEY CHECK(id=1), enabled boolean NOT NULL DEFAULT false,
+ configuration bytea NOT NULL, rotated_at timestamptz, version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS scim_users (
+ id text PRIMARY KEY REFERENCES users(id), external_id text NOT NULL DEFAULT '',
+ user_name text NOT NULL UNIQUE, document jsonb NOT NULL,
+ oidc_provider_id text REFERENCES oidc_providers(id) ON DELETE SET NULL,
+ version bigint NOT NULL DEFAULT 1,
+ disabled_by_scim boolean NOT NULL DEFAULT false, deleted_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(), modified_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scim_users_external ON scim_users(external_id) WHERE external_id<>'';
+CREATE TABLE IF NOT EXISTS scim_groups (
+ id text PRIMARY KEY, external_id text NOT NULL DEFAULT '', name text NOT NULL UNIQUE,
+ version bigint NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(),
+ modified_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scim_groups_external ON scim_groups(external_id) WHERE external_id<>'';
+CREATE UNIQUE INDEX IF NOT EXISTS scim_groups_name ON scim_groups(lower(name));
+CREATE TABLE IF NOT EXISTS scim_group_members (
+ group_id text NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES scim_users(id) ON DELETE CASCADE,
+ PRIMARY KEY(group_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS ldap_providers (
+ id text PRIMARY KEY, configuration bytea NOT NULL, enabled boolean NOT NULL DEFAULT true,
+ version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS ldap_identities (
+ provider_id text NOT NULL REFERENCES ldap_providers(id) ON DELETE CASCADE,
+ subject text NOT NULL, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ username text NOT NULL,
+ PRIMARY KEY(provider_id,subject), UNIQUE(provider_id,user_id)
+);
+
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS directory_sync boolean NOT NULL DEFAULT false;
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS link_session_hash bytea;

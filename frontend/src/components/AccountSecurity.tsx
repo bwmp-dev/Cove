@@ -20,6 +20,8 @@ import {
   type LinkedIdentity,
   type Passkey,
 } from "../api/security";
+import { publicLdapProvidersQuery, useLinkLdapIdentity, type PublicLdapProvider } from "../api/directory";
+import { ldapProviderId, ldapSignInErrorMessage } from "../lib/directory";
 import { useOnline } from "../lib/hooks";
 import { reauthErrorMessage, reauthLabels, reauthMethods, reauthProof, type ReauthFactors, type ReauthMethod, type ReauthProof } from "../lib/reauth";
 import { useSession } from "../lib/session";
@@ -169,7 +171,7 @@ function TotpSetup({ onFinished }: { onFinished: () => void }) {
   );
 }
 
-function useReauth(factors: ReauthFactors) {
+export function useReauth(factors: ReauthFactors) {
   const session = useSession();
   const methods = reauthMethods(session?.has_password ?? true, factors);
   const [chosen, setChosen] = useState<ReauthMethod>();
@@ -201,9 +203,9 @@ function useReauth(factors: ReauthFactors) {
   };
 }
 
-type Reauth = ReturnType<typeof useReauth>;
+export type Reauth = ReturnType<typeof useReauth>;
 
-function ReauthFields({ id, reauth }: { id: string; reauth: Reauth }) {
+export function ReauthFields({ id, reauth }: { id: string; reauth: Reauth }) {
   const recent = (
     <p className="text-[13px] text-fg-muted">
       Works within ten minutes of signing in with a passkey or finishing two-step verification in this browser. There is nothing to enter.
@@ -636,7 +638,20 @@ export function Passkeys() {
 }
 
 const identityRefusal =
-  "This is your last way to sign in. Add a passkey or link another identity first. A password only counts while password sign-in is turned on for this instance.";
+  "This is your last way to sign in. Add a passkey or link another identity first. A password only counts while password sign-in is turned on for this instance, and a directory only while it is enabled.";
+
+const provisioningRefusal = "Your organization's SCIM provisioning manages this sign-in identity. Ask an instance administrator to detach provisioning for your account first.";
+
+function unlinkRefusal(error: unknown) {
+  return errorMessage(error).toLowerCase().includes("scim") ? provisioningRefusal : identityRefusal;
+}
+
+function identityDetail(identity: LinkedIdentity) {
+  if (identity.provider_id === "github") return <>Account ID <span className="font-mono">{identity.subject}</span></>;
+  // The directory subject is an opaque immutable ID; showing it would only invite people to treat it as a credential.
+  if (ldapProviderId(identity.provider_id) !== null) return "Directory account";
+  return <>Subject <span className="font-mono">{identity.subject}</span></>;
+}
 
 function IdentityRow({ identity, name, factors }: { identity: LinkedIdentity; name: string; factors: AccountSignInMethods }) {
   const id = useId();
@@ -650,9 +665,7 @@ function IdentityRow({ identity, name, factors }: { identity: LinkedIdentity; na
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium break-words text-fg">{name}</p>
-          <p className="text-xs break-all text-fg-muted">
-            {identity.provider_id === "github" ? "Account ID" : "Subject"} <span className="font-mono">{identity.subject}</span>
-          </p>
+          <p className="text-xs break-all text-fg-muted">{identityDetail(identity)}</p>
         </div>
         {!open && (
           <Button variant="ghost" size="sm" disabled={!online} onClick={() => setOpen(true)}>
@@ -674,7 +687,7 @@ function IdentityRow({ identity, name, factors }: { identity: LinkedIdentity; na
           <ReauthFields id={id} reauth={reauth} />
           {unlink.isError && (
             <Notice tone="error" title={refused ? "This sign-in method is still needed" : `Could not unlink ${name}`}>
-              {refused ? identityRefusal : reauthErrorMessage(unlink.error, reauth.method)}
+              {refused ? unlinkRefusal(unlink.error) : reauthErrorMessage(unlink.error, reauth.method)}
             </Notice>
           )}
           <div className="flex flex-wrap justify-end gap-2">
@@ -691,7 +704,14 @@ function IdentityRow({ identity, name, factors }: { identity: LinkedIdentity; na
   );
 }
 
-function LinkedIdentities({ providers }: { providers: readonly SignInProvider[] }) {
+function identityName(identity: LinkedIdentity, providers: readonly SignInProvider[], directories: readonly PublicLdapProvider[]) {
+  if (identity.provider_id === "github") return "GitHub";
+  const directory = ldapProviderId(identity.provider_id);
+  if (directory !== null) return directories.find((item) => item.id === directory)?.display_name ?? "LDAP directory (turned off)";
+  return providers.find((provider) => provider.id === identity.provider_id)?.display_name ?? identity.provider_id;
+}
+
+function LinkedIdentities({ providers, directories }: { providers: readonly SignInProvider[]; directories: readonly PublicLdapProvider[] }) {
   const identities = useQuery(identitiesQuery);
   const factors = useQuery(accountSignInMethodsQuery);
   if (identities.isPending || factors.isPending) return <LoadingRows label="Loading linked identities" rows={1} />;
@@ -703,14 +723,14 @@ function LinkedIdentities({ providers }: { providers: readonly SignInProvider[] 
       </div>
     );
   }
-  if (identities.data.length === 0) return <p className="px-4 py-3 text-[13px] text-fg-muted">No identity provider or GitHub accounts are linked.</p>;
+  if (identities.data.length === 0) return <p className="px-4 py-3 text-[13px] text-fg-muted">No identity provider, directory or GitHub accounts are linked.</p>;
   return (
     <ul className="divide-y divide-line">
       {identities.data.map((identity) => (
         <IdentityRow
           key={`${identity.provider_id}:${identity.subject}`}
           identity={identity}
-          name={identity.provider_id === "github" ? "GitHub" : (providers.find((provider) => provider.id === identity.provider_id)?.display_name ?? identity.provider_id)}
+          name={identityName(identity, providers, directories)}
           factors={factors.data}
         />
       ))}
@@ -775,17 +795,107 @@ function LinkProvider({ providers }: { providers: readonly SignInProvider[] }) {
   );
 }
 
+function LinkDirectory({ directories }: { directories: readonly PublicLdapProvider[] }) {
+  const id = useId();
+  const online = useOnline();
+  const session = useSession();
+  const factors = useQuery(accountSignInMethodsQuery);
+  const link = useLinkLdapIdentity();
+  const reauth = useReauth(factors.data ?? { totp_enrolled: false, recovery_codes_remaining: 0 });
+  const [provider, setProvider] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string>();
+  const first = directories.at(0);
+  if (!first) return null;
+  const selected = directories.find((item) => item.id === provider) ?? first;
+  const linkError = link.isError ? (isStatus(link.error, 403) || isStatus(link.error, 429) ? reauthErrorMessage(link.error, reauth.method) : ldapSignInErrorMessage(link.error, errorMessage)) : null;
+  return (
+    <form
+      className="min-w-0 space-y-4 border-t border-line p-4"
+      noValidate
+      onSubmit={(event) => {
+        event.preventDefault();
+        const missing = username.trim() === "" || password === "";
+        setError(missing ? "Enter your directory username and password." : undefined);
+        const proof = reauth.proof();
+        if (missing || !proof) return;
+        link.mutate(
+          { provider: selected.id, username: username.trim(), password, proof },
+          {
+            onSuccess: () => setUsername(""),
+            onSettled: () => {
+              setPassword("");
+              reauth.clear();
+            },
+          },
+        );
+      }}
+    >
+      <div>
+        <h3 className="text-[13px] font-semibold text-fg">Link a directory account</h3>
+        <p className="mt-0.5 text-xs text-fg-muted">
+          The directory account's email must match this account's email{session?.email ? ` (${session.email})` : ""}. Team access from directory groups is applied when you link it and each time you sign in with it.
+        </p>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {directories.length > 1 ? (
+          <Field id={`${id}-directory`} label="Directory">
+            <Select id={`${id}-directory`} className={inputClass} value={selected.id} onChange={(event) => setProvider(event.target.value)}>
+              {directories.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.display_name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        ) : (
+          <div className="space-y-1.5 sm:col-span-2">
+            <p className="text-[13px] font-medium text-fg">Directory</p>
+            <p className="text-[13px] text-fg-muted">{first.display_name}</p>
+          </div>
+        )}
+        <Field id={`${id}-username`} label="Directory username">
+          <input id={`${id}-username`} className={inputClass} autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={254} value={username} onChange={(event) => setUsername(event.target.value)} />
+        </Field>
+        <Field id={`${id}-password`} label="Directory password" error={error}>
+          <input
+            id={`${id}-password`}
+            className={inputClass}
+            type="password"
+            autoComplete="off"
+            maxLength={4096}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={describedBy(`${id}-password`, error)}
+          />
+        </Field>
+      </div>
+      <ReauthFields id={`${id}-proof`} reauth={reauth} />
+      {linkError && <Notice tone="error" title="Could not link the directory account">{linkError}</Notice>}
+      {link.isSuccess && <Notice tone="success" title="Directory account linked">You can now sign in with your directory username and password.</Notice>}
+      <div className="flex justify-end">
+        <Button type="submit" disabled={!online} pending={link.isPending}>
+          Link directory account
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 export function SignInIdentities() {
   const methods = useQuery(signInMethodsQuery);
+  const directories = useQuery(publicLdapProvidersQuery);
   const providers = methods.data?.oidc_providers ?? [];
   return (
     <Section
       title="Sign-in identities"
-      description="Identity provider and GitHub accounts you can sign in with. Accounts are never linked automatically by email address."
+      description="Identity provider, directory and GitHub accounts you can sign in with. Accounts are never linked automatically by email address."
       width="form"
       flush
     >
-      <LinkedIdentities providers={providers} />
+      <LinkedIdentities providers={providers} directories={directories.data ?? []} />
       {methods.isError ? (
         <div className="border-t border-line p-3">
           <QueryError what="single sign-on providers" error={methods.error} onRetry={() => void methods.refetch()} retrying={methods.isFetching} />
@@ -793,6 +903,7 @@ export function SignInIdentities() {
       ) : (
         <LinkProvider providers={providers} />
       )}
+      <LinkDirectory directories={directories.data ?? []} />
     </Section>
   );
 }

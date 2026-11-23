@@ -274,7 +274,7 @@ func (s *Server) secondFactorChallenge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication unavailable", 503)
 		return
 	}
-	setSession(w, token, expiry)
+	s.completeSignIn(w, r, user, token, expiry)
 	respond(w, 200, map[string]bool{"ok": true})
 }
 

@@ -70,7 +70,7 @@ func (s *Server) customRoles(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("role")
 	if r.Method == "DELETE" {
 		var used bool
-		err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM team_members m CROSS JOIN LATERAL jsonb_array_elements(m.grants) g WHERE m.team_id=$1 AND g->>'role'=$2) OR EXISTS(SELECT 1 FROM invitations i CROSS JOIN LATERAL jsonb_array_elements(i.grants) g WHERE i.team_id=$1 AND g->>'role'=$2 AND i.consumed_at IS NULL AND i.expires_at>now())`, team, id).Scan(&used)
+		err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM team_members m CROSS JOIN LATERAL jsonb_array_elements(m.grants) g WHERE m.team_id=$1 AND g->>'role'=$2) OR EXISTS(SELECT 1 FROM invitations i CROSS JOIN LATERAL jsonb_array_elements(i.grants) g WHERE i.team_id=$1 AND g->>'role'=$2 AND i.consumed_at IS NULL AND i.expires_at>now()) OR EXISTS(SELECT 1 FROM identity_group_mappings WHERE team_id=$1 AND role=$2)`, team, id).Scan(&used)
 		if err != nil {
 			http.Error(w, "roles unavailable", 503)
 			return

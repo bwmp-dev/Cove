@@ -1,0 +1,10 @@
+{
+  "source": "https://developer.okta.com/docs/api/openapi/okta-scim/guides/scim-20/",
+  "evidence": "Synthetic identities in the documented Okta create, lookup, full-replace and deactivate request shapes; not a live tenant capture.",
+  "requests": [
+    {"method":"POST","path":"/Users","status":201,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"okta@example.invalid","externalId":"okta-fixture","active":true,"displayName":"Okta fixture","password":"documented-ignored-placeholder","emails":[{"value":"okta@example.invalid","primary":true,"type":"work"}]}},
+    {"method":"GET","path":"/Users?filter=userName%20eq%20%22okta%40example.invalid%22&startIndex=1&count=100","status":200},
+    {"method":"PUT","path":"/Users/$user","status":200,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"okta@example.invalid","externalId":"okta-fixture","active":true,"name":{"givenName":"Okta","familyName":"Fixture"},"emails":[{"value":"okta@example.invalid","primary":true,"type":"work"}]}},
+    {"method":"PATCH","path":"/Users/$user","status":200,"body":{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","value":{"active":false}}]}}
+  ]
+}

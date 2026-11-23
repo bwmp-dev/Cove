@@ -3,12 +3,21 @@ import { request } from "./client";
 import { keys } from "./queries";
 import type { Grant, TeamRole } from "./types";
 
+export interface MembershipSource {
+  source_kind: "github" | "scim" | "ldap";
+  source_id: string;
+  // Only returned to instance administrators.
+  display_name?: string;
+}
+
 export interface Member {
   user_id: string;
   email: string;
   name: string;
   role: TeamRole;
   grants: Grant[];
+  // Directory sources that grant this membership. Empty for memberships managed only by hand.
+  managed_by?: MembershipSource[] | null;
 }
 
 export interface Invitation {

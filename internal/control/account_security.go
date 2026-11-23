@@ -3,6 +3,7 @@ package control
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -159,7 +160,7 @@ func (s *Server) invalidateSecurityFlows(r *http.Request, tx pgx.Tx) error {
 }
 
 func (s *Server) accountIdentities(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), `SELECT provider_id,subject FROM oidc_identities WHERE user_id=$1 UNION ALL SELECT 'github',github_id FROM users WHERE id=$1 AND github_id IS NOT NULL ORDER BY 1,2`, actor(r).ID)
+	rows, err := s.DB.Query(r.Context(), `SELECT provider_id,subject FROM oidc_identities WHERE user_id=$1 UNION ALL SELECT 'github',github_id FROM users WHERE id=$1 AND github_id IS NOT NULL UNION ALL SELECT 'ldap:'||provider_id,subject FROM ldap_identities WHERE user_id=$1 ORDER BY 1,2`, actor(r).ID)
 	if err != nil {
 		http.Error(w, "identities unavailable", 503)
 		return
@@ -182,7 +183,7 @@ func (s *Server) accountIdentities(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unlinkIdentity(w http.ResponseWriter, r *http.Request) {
-	tx, err := s.DB.Begin(r.Context())
+	tx, err := s.identityTransaction(r.Context())
 	if err != nil {
 		http.Error(w, "identities unavailable", 503)
 		return
@@ -195,7 +196,18 @@ func (s *Server) unlinkIdentity(w http.ResponseWriter, r *http.Request) {
 	var subject string
 	if provider == "github" {
 		err = tx.QueryRow(r.Context(), "UPDATE users SET github_id=NULL WHERE id=$1 AND github_id IS NOT NULL RETURNING id", actor(r).ID).Scan(&subject)
+	} else if strings.HasPrefix(provider, "ldap:") {
+		err = tx.QueryRow(r.Context(), "DELETE FROM ldap_identities WHERE user_id=$1 AND provider_id=$2 RETURNING subject", actor(r).ID, strings.TrimPrefix(provider, "ldap:")).Scan(&subject)
 	} else {
+		var provisioned bool
+		if tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM scim_users WHERE id=$1 AND oidc_provider_id=$2)", actor(r).ID, provider).Scan(&provisioned) != nil {
+			http.Error(w, "identities unavailable", 503)
+			return
+		}
+		if provisioned {
+			http.Error(w, "ask an administrator to detach SCIM provisioning before unlinking its sign-in identity", 409)
+			return
+		}
 		err = tx.QueryRow(r.Context(), "DELETE FROM oidc_identities WHERE user_id=$1 AND provider_id=$2 RETURNING subject", actor(r).ID, provider).Scan(&subject)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -210,11 +222,41 @@ func (s *Server) unlinkIdentity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		githubEnabled := config.Github.ClientID != "" && config.Github.ClientSecret != ""
-		err = tx.QueryRow(r.Context(), `SELECT (u.password_hash IS NOT NULL AND NOT c.password_login_disabled) OR (u.github_id IS NOT NULL AND $2) OR EXISTS(SELECT 1 FROM oidc_identities WHERE user_id=u.id) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id) FROM users u CROSS JOIN control_settings c WHERE u.id=$1 AND c.id=1 FOR SHARE OF c`, actor(r).ID, githubEnabled).Scan(&usable)
+		err = tx.QueryRow(r.Context(), `SELECT (u.password_hash IS NOT NULL AND NOT c.password_login_disabled) OR (u.github_id IS NOT NULL AND $2) OR EXISTS(SELECT 1 FROM oidc_identities WHERE user_id=u.id) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id) OR EXISTS(SELECT 1 FROM ldap_identities i JOIN ldap_providers p ON p.id=i.provider_id WHERE i.user_id=u.id AND p.enabled) FROM users u CROSS JOIN control_settings c WHERE u.id=$1 AND c.id=1 FOR SHARE OF c`, actor(r).ID, githubEnabled).Scan(&usable)
 	}
 	if err == nil && !usable {
 		http.Error(w, "last usable sign-in method", 409)
 		return
+	}
+	if err == nil && (provider == "github" || strings.HasPrefix(provider, "ldap:")) {
+		kind, source := "github", ""
+		if provider != "github" {
+			kind, source = "ldap", strings.TrimPrefix(provider, "ldap:")
+		}
+		rows, e := tx.Query(r.Context(), "SELECT DISTINCT source_id FROM identity_membership_claims WHERE source_kind=$1 AND user_id=$2 AND ($3='' OR source_id=$3)", kind, actor(r).ID, source)
+		if e != nil {
+			err = e
+		} else {
+			sources := []string{}
+			for rows.Next() {
+				var id string
+				if e = rows.Scan(&id); e != nil {
+					break
+				}
+				sources = append(sources, id)
+			}
+			rows.Close()
+			if e == nil {
+				e = rows.Err()
+			}
+			err = e
+			for _, id := range sources {
+				if err != nil {
+					break
+				}
+				_, err = syncDirectoryMemberships(r.Context(), tx, kind, id, actor(r).ID, nil, actor(r).ID)
+			}
+		}
 	}
 	if err == nil {
 		err = s.invalidateSecurityFlows(r, tx)

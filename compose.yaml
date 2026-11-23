@@ -24,6 +24,7 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
       COVE_TRUSTED_PROXIES: ${COVE_TRUSTED_PROXIES:-}
+      COVE_LDAP_ALLOWED_CIDRS: ${COVE_LDAP_ALLOWED_CIDRS:-}
       COVE_PUBLIC_URL: https://${COVE_DOMAIN:?Set COVE_DOMAIN}
     depends_on:
       database:

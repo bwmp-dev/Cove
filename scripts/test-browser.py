@@ -2,6 +2,7 @@
 import base64
 from contextlib import contextmanager
 import errno
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -127,6 +128,8 @@ def main():
     panel_image = name + "-panel:acceptance"
     worker_image = name + "-worker:acceptance"
     containers = []
+    identity_images = []
+    identity = None
     network_created = False
     ingress = []
     worker_state_owned = False
@@ -174,9 +177,15 @@ def main():
                 port = listener.getsockname()[1]
             origin = f"https://localhost:{port}"
             env.update(DATABASE_URL=f"postgres://postgres:{env['POSTGRES_PASSWORD']}@db:5432/cove?sslmode=disable", COVE_PUBLIC_URL=origin)
+            identity_options = []
+            if "e2e/directory.spec.ts" in sys.argv[1:] or sys.argv[1:] == ["--identity"]:
+                identity_spec = importlib.util.spec_from_file_location("cove_browser_identity", ROOT / "scripts/browser-identity.py")
+                identity = importlib.util.module_from_spec(identity_spec)
+                identity_spec.loader.exec_module(identity)
+                identity_options = identity.start(name, fixture, env, containers, identity_images, openssl)
             options = [item for key in ("DATABASE_URL", "COVE_PUBLIC_URL", "COVE_ADMIN_PASSWORD", "COVE_ADMIN_TOKEN", "COVE_ENCRYPTION_KEY") for item in ("-e", key)]
             run("docker", "run", "-d", "--name", name + "-panel", "--network", name,
-                "--network-alias", "panel", *options, panel_image, env=env, stdout=subprocess.DEVNULL)
+                "--network-alias", "panel", *options, *identity_options, panel_image, env=env, stdout=subprocess.DEVNULL)
             containers.append(name + "-panel")
             run("docker", "run", "-d", "--name", name + "-tls", "--network", name,
                 "-p", f"127.0.0.1:{port}:443", "--mount", f"type=bind,source={fixture},target=/fixture,readonly",
@@ -192,6 +201,8 @@ def main():
                     time.sleep(1)
             else:
                 raise RuntimeError("Disposable panel did not start")
+            if identity is not None:
+                identity.seed(name + "-db", env)
             run("go", "build", "-o", "bin/cove-worker-linux-amd64", "./cmd/cove-worker", env=env | {"GOOS": "linux", "GOARCH": "amd64"})
             run("docker", "build", "-f", "test/worker/Dockerfile", "-t", worker_image, ".", stdout=subprocess.DEVNULL)
             for resource in ("container", "network", "volume"):
@@ -248,18 +259,23 @@ def main():
                 api("POST", "/api/nodes/"+enrollment["id"]+"/verify")
                 time.sleep(1)
             else: raise RuntimeError("Browser worker did not become ready")
-            if sys.argv[1:] == ["--managed-data"] or "e2e/databases.spec.ts" in sys.argv[1:]:
+            if sys.argv[1:] == ["--managed-data"] or "e2e/databases.spec.ts" in sys.argv[1:] or identity is not None:
                 ready = next(item for item in api("GET", "/api/nodes") if item["id"] == enrollment["id"])
                 if not ready.get("capabilities", {}).get("managed_databases") or len(api("GET", "/api/database-engines")["engines"]) != 7:
                     raise RuntimeError("Managed-data acceptance requires this branch's panel and worker capabilities")
+            if identity is not None:
+                methods = api("GET", "/auth/sign-in-methods")
+                if "ldap_providers" not in methods or not api("GET", "/api/settings/directory/teams").get("teams"):
+                    raise RuntimeError("Directory acceptance requires this branch's identity APIs")
             client_binary=fixture / ("cove.exe" if os.name == "nt" else "cove")
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
             ssh_port=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
-            if sys.argv[1:] == ["--managed-data"]:
+            if sys.argv[1:] in (["--managed-data"], ["--identity"]):
                 env["COVE_BROWSER_CA"] = str(fixture / "cert.pem")
                 env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
-                subprocess.run([sys.executable, str(ROOT / "scripts/test-managed-data.py")], cwd=ROOT, env=env, check=True)
+                script = "test-identity.py" if identity is not None else "test-managed-data.py"
+                subprocess.run([sys.executable, str(ROOT / "scripts" / script)], cwd=ROOT, env=env, check=True)
             else:
                 subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
         finally:
@@ -296,7 +312,7 @@ def main():
                         'test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; find /fixture -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +', "sh", name)
                 if network_created:
                     subprocess.run(["docker", "network", "rm", name], check=False, stdout=subprocess.DEVNULL)
-                for image in (worker_image, panel_image):
+                for image in (*identity_images, worker_image, panel_image):
                     subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if ingress:
                     assert_ingress_removed()

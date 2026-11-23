@@ -3,13 +3,15 @@ import { getRouteApi, Link, Navigate, useNavigate } from "@tanstack/react-router
 import { KeyRound } from "lucide-react";
 import { useEffect, useReducer, useRef, useState, type FormEvent } from "react";
 import { useGitHubStart } from "../api/auth";
-import { errorMessage } from "../api/client";
+import { useLdapSignIn, type PublicLdapProvider } from "../api/directory";
+import { errorMessage, isStatus } from "../api/client";
 import { useLogin } from "../api/mutations";
 import { authConfigQuery } from "../api/queries";
 import { signInMethodsQuery, useOidcStart, usePasskeySignIn, useSecondFactorChallenge } from "../api/security";
 import type { AuthConfig } from "../api/types";
 import { AuthFrame } from "../components/AuthFrame";
 import { Button, Field, Notice } from "../components/ui";
+import { ldapMalformedMessage, ldapSignInErrorMessage } from "../lib/directory";
 import { safeRedirect } from "../lib/redirect";
 import {
   autoRedirectProvider,
@@ -266,11 +268,103 @@ function PasswordForm({ breakGlass, emailEnabled, onAccepted }: { breakGlass: bo
   );
 }
 
+function DirectoryButtons({ providers, onChoose }: { providers: PublicLdapProvider[]; onChoose: (provider: PublicLdapProvider) => void }) {
+  if (providers.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      {providers.map((provider) => (
+        <Button key={provider.id} className="w-full" onClick={() => onChoose(provider)}>
+          Continue with {provider.display_name}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function DirectorySignIn({ provider, onAccepted, onBack, onProviderChanged }: { provider: PublicLdapProvider; onAccepted: (secondFactorRequired: boolean) => Promise<void> | void; onBack: () => void; onProviderChanged: () => void }) {
+  const signIn = useLdapSignIn();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [empty, setEmpty] = useState(false);
+  const [continuing, setContinuing] = useState(false);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = username.trim();
+    setEmpty(trimmed === "" || password === "");
+    if (trimmed === "" || password === "") return;
+    signIn.mutate(
+      { provider: provider.id, username: trimmed, password },
+      {
+        onSuccess: (result) => {
+          setPassword("");
+          setContinuing(true);
+          void Promise.resolve(onAccepted(result.second_factor_required)).finally(() => setContinuing(false));
+        },
+        onError: (error) => {
+          setPassword("");
+          if (isStatus(error, 404) || isStatus(error, 409)) onProviderChanged();
+        },
+      },
+    );
+  }
+
+  // A 400 is a malformed entry, shown at the fields; wrong credentials and other refusals are shown below them.
+  const malformed = isStatus(signIn.error, 400);
+  const fieldError = empty ? "Enter your directory username and password." : malformed ? ldapMalformedMessage : undefined;
+  const error = signIn.isError && !malformed ? ldapSignInErrorMessage(signIn.error, errorMessage) : null;
+  return (
+    <AuthFrame title={`Sign in with ${provider.display_name}`} description="Use the username and password from your organization's directory.">
+      <form onSubmit={submit} className="space-y-4" noValidate>
+        <Field id="directory-username" label="Directory username" hint="Your directory login name, for example jsmith. Not necessarily your email address." error={fieldError}>
+          <input
+            id="directory-username"
+            className={inputClass}
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            maxLength={254}
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            aria-invalid={fieldError ? true : undefined}
+            aria-describedby={describedBy("directory-username", fieldError, true)}
+          />
+        </Field>
+        <Field id="directory-password" label="Password">
+          <input
+            id="directory-password"
+            className={inputClass}
+            type="password"
+            autoComplete="current-password"
+            maxLength={4096}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? "directory-error" : undefined}
+          />
+        </Field>
+        {error && (
+          <p id="directory-error" role="alert" className="text-[13px] text-bad">
+            {error}
+          </p>
+        )}
+        <Button type="submit" variant="primary" className="w-full" pending={signIn.isPending || continuing}>
+          Sign in
+        </Button>
+        <Button variant="ghost" className="w-full" onClick={onBack} disabled={signIn.isPending || continuing}>
+          Use another sign-in method
+        </Button>
+      </form>
+    </AuthFrame>
+  );
+}
+
 export function LoginPage() {
   const search = route.useSearch();
   const navigate = useNavigate();
   const config = useQuery(authConfigQuery);
   const methods = useQuery(signInMethodsQuery);
+  const [directory, setDirectory] = useState<PublicLdapProvider | null>(null);
   const [state, dispatch] = useReducer(loginReducer, initialLoginState);
   const [skipRedirect, setSkipRedirect] = useState(false);
   const breakGlass = search.break_glass === true;
@@ -315,8 +409,22 @@ export function LoginPage() {
 
   const mode = passwordMode(methods.data, breakGlass);
 
+  if (directory && mode !== "break-glass") {
+    return (
+      <DirectorySignIn
+        key={directory.id}
+        provider={directory}
+        onAccepted={passwordAccepted}
+        onBack={() => setDirectory(null)}
+        onProviderChanged={() => void methods.refetch()}
+      />
+    );
+  }
+
   const providerError = search.error ? (signInErrors[search.error] ?? "Sign-in did not complete. Try again.") : null;
   const providers = methods.data?.oidc_providers ?? [];
+  // Directories are external identity providers, so they stay available when local passwords are turned off.
+  const directories = methods.data?.ldap_providers ?? [];
 
   return (
     <AuthFrame title={mode === "break-glass" ? "Administrator sign-in" : "Sign in to Cove"}>
@@ -330,13 +438,16 @@ export function LoginPage() {
           </Notice>
         )}
         {mode === "disabled" ? (
-          <Notice title="Password sign-in is turned off">Sign in with single sign-on or a passkey.</Notice>
+          <Notice title="Password sign-in is turned off">
+            Local Cove passwords are turned off. Sign in with single sign-on{directories.length > 0 ? ", your organization's directory" : ""} or a passkey.
+          </Notice>
         ) : (
           <PasswordForm breakGlass={mode === "break-glass"} emailEnabled={config.data?.email_enabled === true} onAccepted={passwordAccepted} />
         )}
         {mode !== "break-glass" && (
           <div className="space-y-3 border-t border-line pt-4">
             <ProviderButtons providers={providers} />
+            <DirectoryButtons providers={directories} onChoose={setDirectory} />
             {methods.data?.passkeys_enabled !== false && <PasskeySignIn onSignedIn={finish} />}
             <GitHubButton config={config.data} />
             {(config.isError || methods.isError) && <p className="text-xs text-fg-subtle">Some sign-in options could not be loaded. Email and password sign-in is still available.</p>}

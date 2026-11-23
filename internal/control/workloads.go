@@ -452,6 +452,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	templateDone := make(chan struct{})
 	go func() { defer close(templateDone); s.runTemplateRepositories(templateCtx) }()
 	defer func() { stopTemplates(); <-templateDone }()
+	directoryCtx, stopDirectories := context.WithCancel(ctx)
+	directoryDone := make(chan struct{})
+	go func() { defer close(directoryDone); s.runGithubTeamSync(directoryCtx) }()
+	defer func() { stopDirectories(); <-directoryDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {
