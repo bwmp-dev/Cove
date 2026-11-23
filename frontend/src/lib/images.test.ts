@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ImageStatus, Operation, Workload } from "../api/types";
-import { imageRefreshKey, imageStatus, imageSummary, releaseLink, shortDigest, supportsImageLifecycle } from "./images";
+import { imageChecksSupported, imageRefreshKey, imageStatus, imageSummary, releaseLink, shortDigest, supportsImageLifecycle } from "./images";
 import { latestByWorkload, latestDeploymentOperation } from "./operations";
 
 const image = (status: ImageStatus["status"], service = "web"): ImageStatus => ({ service, reference: "ghcr.io/acme/web:1", image_id: "sha256:0123456789abcdef0123", status });
@@ -25,9 +25,9 @@ describe("image statuses", () => {
     expect(shortDigest("sha256:0123456789abcdef0123")).toBe("sha256:0123456789ab");
   });
 
-  it("checks deployed services but not jobs or managed previews", () => {
+  it("checks services and jobs but not managed previews", () => {
     expect(supportsImageLifecycle({ kind: "service", preview_source_id: "", environment_preview_id: "" } as Workload)).toBe(true);
-    expect(supportsImageLifecycle({ kind: "job" } as Workload)).toBe(false);
+    expect(supportsImageLifecycle({ kind: "job" } as Workload)).toBe(true);
     expect(supportsImageLifecycle({ kind: "service", preview_source_id: "w0" } as Workload)).toBe(false);
     expect(supportsImageLifecycle({ kind: "service", environment_preview_id: "p1" } as Workload)).toBe(false);
   });
@@ -55,5 +55,40 @@ describe("image checks as housekeeping", () => {
     expect(imageRefreshKey(operations, "w1")).toBe("check");
     expect(imageRefreshKey([operation("running", "image_check", "running", "2026-11-22T11:00:00Z"), ...operations], "w1")).toBe("check");
     expect(imageRefreshKey([], "w1")).toBeNull();
+  });
+
+  it("refreshes a service only after successful deployments", () => {
+    expect(imageRefreshKey([operation("failed", "deploy", "failed", "2026-11-22T11:00:00Z"), ...operations], "w1")).toBe("check");
+  });
+
+  it("refreshes a job after any newer run attempt and again when that run finishes", () => {
+    expect(imageRefreshKey(operations, "w1", "job")).toBe("check:succeeded");
+    const running = [operation("run", "deploy", "running", "2026-11-22T11:00:00Z"), ...operations];
+    const failed = [operation("run", "deploy", "failed", "2026-11-22T11:00:00Z"), ...operations];
+    const cancelled = [operation("run", "deploy", "cancelled", "2026-11-22T11:00:00Z"), ...operations];
+    expect(imageRefreshKey(running, "w1", "job")).toBe("run:running");
+    expect(imageRefreshKey(failed, "w1", "job")).toBe("run:failed");
+    expect(imageRefreshKey(cancelled, "w1", "job")).toBe("run:cancelled");
+    // An unfinished check does not change the cached result.
+    expect(imageRefreshKey([operation("check2", "image_check", "running", "2026-11-22T12:00:00Z"), ...failed], "w1", "job")).toBe("run:failed");
+  });
+});
+
+describe("image check support", () => {
+  const base = { protocol: 1, os: "linux", arch: "amd64", docker: "27", compose: "2", ready: true };
+
+  it("needs both image capabilities for jobs and only image lifecycle for services", () => {
+    expect(imageChecksSupported({ ...base, image_lifecycle: true }, "service")).toBe(true);
+    expect(imageChecksSupported({ ...base, image_lifecycle: true }, "job")).toBe(false);
+    expect(imageChecksSupported({ ...base, job_image_lifecycle: true }, "job")).toBe(false);
+    expect(imageChecksSupported({ ...base, image_lifecycle: true, job_image_lifecycle: true }, "job")).toBe(true);
+    expect(imageChecksSupported(null, "job")).toBe(false);
+    expect(imageChecksSupported(undefined, "service")).toBe(false);
+  });
+
+  it("describes job statuses without suggesting a redeploy", () => {
+    expect(imageStatus("update_available").description).toMatch(/Pull images and redeploy/);
+    expect(imageStatus("update_available", "job").description).not.toMatch(/redeploy/);
+    expect(imageStatus("pinned", "job")).toEqual(imageStatus("pinned"));
   });
 });

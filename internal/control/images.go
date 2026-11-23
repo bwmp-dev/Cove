@@ -12,13 +12,12 @@ import (
 )
 
 func (s *Server) workloadImages(w http.ResponseWriter, r *http.Request) {
-	var exists bool
-	if err := s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workloads WHERE id=$1)", r.PathValue("id")).Scan(&exists); err != nil {
-		http.Error(w, "image checks unavailable", 503)
-		return
-	}
-	if !exists {
+	var kind string
+	if err := s.DB.QueryRow(r.Context(), "SELECT kind FROM workloads WHERE id=$1", r.PathValue("id")).Scan(&kind); errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		http.Error(w, "image checks unavailable", 503)
 		return
 	}
 	var data []byte
@@ -39,7 +38,7 @@ func (s *Server) workloadImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var stale bool
-	if err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback') AND state='succeeded' AND updated_at>$2)`, r.PathValue("id"), updated).Scan(&stale); err != nil {
+	if err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback') AND (state='succeeded' OR $3='job') AND updated_at>$2)`, r.PathValue("id"), updated, kind).Scan(&stale); err != nil {
 		http.Error(w, "image checks unavailable", 503)
 		return
 	}
@@ -52,24 +51,28 @@ func (s *Server) scheduleImageChecks(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT w.id FROM workloads w JOIN nodes n ON n.id=w.node_id
-WHERE w.kind='service' AND NOT w.manually_stopped AND n.state='ready'
+	rows, err := tx.Query(ctx, `SELECT w.id,w.kind,w.configuration FROM workloads w JOIN nodes n ON n.id=w.node_id
+WHERE (w.kind='service' OR (w.kind='job' AND COALESCE((n.capabilities->>'job_image_lifecycle')::boolean,false))) AND NOT w.manually_stopped AND n.state='ready'
 AND COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) AND w.next_image_check_at<=now()
 AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running'))
-AND EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','rollback') AND o.state='succeeded')
+AND EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','rollback') AND (o.state='succeeded' OR (w.kind='job' AND o.state IN ('failed','cancelled','interrupted'))))
 AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id)
 AND NOT EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id)
 ORDER BY w.next_image_check_at LIMIT GREATEST(0,4-(SELECT count(*) FROM operations WHERE action='image_check' AND state IN ('queued','running'))) FOR UPDATE OF w SKIP LOCKED`)
 	if err != nil {
 		return err
 	}
-	ids := []string{}
+	type candidate struct {
+		id, kind      string
+		configuration []byte
+	}
+	candidates := []candidate{}
 	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
+		var item candidate
+		if err = rows.Scan(&item.id, &item.kind, &item.configuration); err != nil {
 			break
 		}
-		ids = append(ids, id)
+		candidates = append(candidates, item)
 	}
 	if err == nil {
 		err = rows.Err()
@@ -78,23 +81,34 @@ ORDER BY w.next_image_check_at LIMIT GREATEST(0,4-(SELECT count(*) FROM operatio
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		request := worker.Request{ID: resourceID(), Workload: id, Action: "image_check", Kind: "service"}
+	for _, item := range candidates {
+		request := worker.Request{ID: resourceID(), Workload: item.id, Action: "image_check", Kind: item.kind}
+		if item.kind == "job" {
+			data, err := unseal(s.Key, item.configuration)
+			var config workloadInput
+			if err != nil || json.Unmarshal(data, &config) != nil {
+				return errors.New("job configuration unavailable for image check")
+			}
+			request.JobService = config.JobService
+		}
+		if err := worker.ValidateRequest(request); err != nil {
+			return err
+		}
 		payload, err := s.sealJSON(request)
 		if err != nil {
 			return err
 		}
-		inserted, err := tx.Exec(ctx, `INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,'image_check',$3) ON CONFLICT DO NOTHING`, request.ID, id, payload)
+		inserted, err := tx.Exec(ctx, `INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,'image_check',$3) ON CONFLICT DO NOTHING`, request.ID, item.id, payload)
 		if err != nil {
 			return err
 		}
 		if inserted.RowsAffected() == 0 {
 			continue
 		}
-		if _, err = tx.Exec(ctx, `UPDATE workloads SET next_image_check_at=now()+interval '1 hour' WHERE id=$1`, id); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE workloads SET next_image_check_at=now()+interval '1 hour' WHERE id=$1`, item.id); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status) VALUES('scheduler','image digest check',$1,202)`, id); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status) VALUES('scheduler','image digest check',$1,202)`, item.id); err != nil {
 			return err
 		}
 	}

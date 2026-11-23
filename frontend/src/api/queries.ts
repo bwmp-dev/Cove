@@ -153,8 +153,8 @@ export const workloadRegistryQuery = (id: string) =>
     queryFn: ({ signal }) => request<{ registry_id: string }>("GET", `/api/workloads/${id}/registry`, undefined, signal),
   });
 
-// Cached results only; the API never contacts a registry on read. The key includes the newest finished
-// check, deploy or rollback so a completed check or a new deployment refreshes the result.
+// Cached results only; the API never contacts a registry on read. The key is imageRefreshKey: the newest
+// finished check or deployment, or for jobs any newer run attempt, so the result and its staleness refresh.
 export const workloadImagesQuery = (id: string, refresh: string | null) =>
   queryOptions({
     queryKey: [...keys.workloadImages(id), refresh] as const,

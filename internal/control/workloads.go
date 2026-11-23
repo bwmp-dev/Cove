@@ -289,19 +289,19 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		request = worker.Request{ID: id, Workload: request.Workload, Action: "build", Build: in.Build, Compose: config.Compose, Source: config.Source, Environment: config.Environment, FileSecrets: config.FileSecrets, Kind: config.Kind, JobService: config.JobService}
 	}
 	if in.Action == "image_check" {
-		if config.Kind == "job" {
-			http.Error(w, "image checks require a service", 400)
-			return
-		}
 		if in.PullLatest {
 			http.Error(w, "pull latest requires a deploy operation", 400)
 			return
 		}
-		request = worker.Request{ID: id, Workload: request.Workload, Action: "image_check", Kind: "service"}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: "image_check", Kind: config.Kind, JobService: config.JobService}
+	}
+	if in.PullLatest && config.Kind == "job" {
+		http.Error(w, "pull and redeploy is unavailable for jobs; run the job explicitly", 400)
+		return
 	}
 	if in.PullLatest || in.Action == "image_check" {
 		var supported bool
-		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) AND ($2<>'job' OR COALESCE((n.capabilities->>'job_image_lifecycle')::boolean,false)) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload, request.Kind).Scan(&supported); err != nil {
 			http.Error(w, "worker capabilities unavailable", 503)
 			return
 		}

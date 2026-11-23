@@ -95,3 +95,37 @@ func TestScheduledJobExecutionPolicies(t *testing.T) {
 	f.call("root", "default", "PUT", path, map[string]any{"cron": "* * * * *"}, 409)
 	f.call("root", "default", "PUT", path, map[string]any{"cron": "* * * * *", "overlap_policy": "skip", "timeout_seconds": 1800}, 200)
 }
+
+func TestJobScheduleRetainsTicksBlockedByImageMetadata(t *testing.T) {
+	f := newAccountFixture(t)
+	f.sql(`INSERT INTO nodes(id,name,address,port,public_key,private_key,state,capabilities) VALUES('metadata-node','Node','localhost',22,'',$1,'ready','{"job_runs":true}')`, []byte{})
+	f.sql(`INSERT INTO projects(id,name,team_id) VALUES('metadata-project','Project','default')`)
+	for _, policy := range []string{"skip", "queue_one", "replace"} {
+		input := workloadInput{Name: policy, NodeID: "metadata-node", ProjectID: "metadata-project", Kind: "job", JobService: "task", Compose: "services:\n  task:\n    image: busybox:1.37\n    command: ['true']\n"}
+		id := jsonString(t, f.call("root", "default", "POST", "/api/workloads", input, 201), "id")
+		f.call("root", "default", "PUT", "/api/workloads/"+id+"/schedule", map[string]any{"cron": "* * * * *", "overlap_policy": policy}, 200)
+		f.sql(`UPDATE workloads SET next_job_at=now()-interval '1 minute' WHERE id=$1`, id)
+		check := resourceID()
+		f.sql(`INSERT INTO operations(id,workload_id,action,state,payload) VALUES($1,$2,'image_check','running',$3)`, check, id, []byte{})
+		for range 2 {
+			if err := f.s.scheduleJobs(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var pending *time.Time
+		var next time.Time
+		var cancelled bool
+		var runs int
+		if err := f.s.DB.QueryRow(context.Background(), `SELECT w.job_pending_at,w.next_job_at,o.cancel_requested,(SELECT count(*) FROM operations WHERE workload_id=w.id AND action='deploy') FROM workloads w JOIN operations o ON o.id=$2 WHERE w.id=$1`, id, check).Scan(&pending, &next, &cancelled, &runs); err != nil || pending == nil || !next.After(time.Now()) || cancelled || runs != 0 {
+			t.Fatal("metadata consumed or preempted the tick", policy, pending, next, cancelled, runs, err)
+		}
+		f.sql(`UPDATE operations SET state='failed' WHERE id=$1`, check)
+		if err := f.s.scheduleJobs(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.s.DB.QueryRow(context.Background(), `SELECT job_pending_at,(SELECT count(*) FROM operations WHERE workload_id=w.id AND action='deploy' AND state='queued') FROM workloads w WHERE id=$1`, id).Scan(&pending, &runs); err != nil || pending != nil || runs != 1 {
+			t.Fatal("held execution was not queued once", policy, pending, runs, err)
+		}
+		f.sql(`UPDATE operations SET state='succeeded' WHERE workload_id=$1 AND state='queued'`, id)
+	}
+}
