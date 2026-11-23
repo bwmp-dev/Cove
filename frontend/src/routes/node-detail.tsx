@@ -17,6 +17,7 @@ import { NodeForm } from "../components/NodeForm";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
 import { nodeStates } from "../lib/nodes";
+import { HostSecurityUpdates } from "../components/HostSecurityUpdates";
 import { NodeCost } from "../components/NodeCost";
 import { NodeSSH } from "../components/NodeSSH";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Meter, MeterGroup, Notice, PageHeader, QueryError, Section, SectionGrid } from "../components/ui";
@@ -213,6 +214,7 @@ function NodeDetail({ node }: { node: Node }) {
         </Section>
 
         {admin && <NodeUsage node={node} />}
+        {admin && <HostSecurityUpdates node={node} />}
         <Section title="Capabilities" description="Reported by the worker during the last verification.">
           <Capabilities node={node} />
         </Section>

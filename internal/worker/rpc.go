@@ -15,26 +15,28 @@ import (
 )
 
 type RPCRequest struct {
-	Identity       *IdentityRequest      `json:"identity,omitempty"`
-	Snapshot       *VolumeSnapshotConfig `json:"snapshot,omitempty"`
-	Stream         *StreamRequest        `json:"stream,omitempty"`
-	TrafficControl *ProxyTrafficControl  `json:"traffic_control,omitempty"`
-	CleanupControl *CleanupControl       `json:"cleanup_control,omitempty"`
-	JournalPrune   *JournalPruneRequest  `json:"journal_prune,omitempty"`
-	Files          *FileRequest          `json:"files,omitempty"`
-	Telemetry      *TelemetryRequest     `json:"telemetry,omitempty"`
-	Links          *LinkConfig           `json:"links,omitempty"`
-	Ingress        *IngressConfigRequest `json:"ingress,omitempty"`
-	Tunnel         *TunnelRequest        `json:"tunnel,omitempty"`
-	Promotion      *PromotionExport      `json:"promotion,omitempty"`
-	Registry       *Registry             `json:"registry,omitempty"`
-	Storage        *StorageLocation      `json:"storage,omitempty"`
-	Terminal       *TerminalRequest      `json:"terminal,omitempty"`
-	Method         string                `json:"method"`
-	Request        *Request              `json:"request,omitempty"`
-	ID             string                `json:"id,omitempty"`
+	HostMaintenance *HostMaintenanceRequest `json:"host_maintenance,omitempty"`
+	Identity        *IdentityRequest        `json:"identity,omitempty"`
+	Snapshot        *VolumeSnapshotConfig   `json:"snapshot,omitempty"`
+	Stream          *StreamRequest          `json:"stream,omitempty"`
+	TrafficControl  *ProxyTrafficControl    `json:"traffic_control,omitempty"`
+	CleanupControl  *CleanupControl         `json:"cleanup_control,omitempty"`
+	JournalPrune    *JournalPruneRequest    `json:"journal_prune,omitempty"`
+	Files           *FileRequest            `json:"files,omitempty"`
+	Telemetry       *TelemetryRequest       `json:"telemetry,omitempty"`
+	Links           *LinkConfig             `json:"links,omitempty"`
+	Ingress         *IngressConfigRequest   `json:"ingress,omitempty"`
+	Tunnel          *TunnelRequest          `json:"tunnel,omitempty"`
+	Promotion       *PromotionExport        `json:"promotion,omitempty"`
+	Registry        *Registry               `json:"registry,omitempty"`
+	Storage         *StorageLocation        `json:"storage,omitempty"`
+	Terminal        *TerminalRequest        `json:"terminal,omitempty"`
+	Method          string                  `json:"method"`
+	Request         *Request                `json:"request,omitempty"`
+	ID              string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	HostPatches   *HostPatchStatus      `json:"host_patches,omitempty"`
 	Identity      *IdentityState        `json:"identity,omitempty"`
 	PITR          *PITRStatus           `json:"pitr,omitempty"`
 	Snapshot      *SnapshotPreview      `json:"snapshot,omitempty"`
@@ -69,6 +71,16 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "host_maintenance":
+		if r.HostMaintenance == nil {
+			return RPCResponse{Error: "host maintenance options required"}
+		}
+		status, err := e.HostMaintenance(ctx, *r.HostMaintenance)
+		response := RPCResponse{HostPatches: status}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
 	case "pitr_status":
 		status, err := e.PITRStatus(ctx, r.ID)
 		if err != nil {
@@ -453,6 +465,8 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
 	switch method {
+	case "host_maintenance":
+		return 90 * time.Second
 	case "stream":
 		return 30 * time.Minute
 	case "ingress_config_change":

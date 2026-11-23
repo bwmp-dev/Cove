@@ -5,6 +5,7 @@ export type NodeState = "pending" | "enrolled" | "unreachable" | "ssh_verified" 
 export interface MountMetric { path: string; filesystem: string; total: number; available: number; known: boolean; error?: string }
 export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number; network_rx?: number; network_tx?: number; cpus?: number; mounts?: MountMetric[] | null; mounts_limited?: boolean }
 export interface Capabilities {
+  host_maintenance?: boolean;
   metrics?: NodeMetrics;
   shared_host?: { coolify_detected: boolean; cleanup_verified: boolean };
   resource_limits?: boolean;

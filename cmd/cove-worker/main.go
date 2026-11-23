@@ -18,6 +18,8 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "host-maintenance":
+		err = worker.RunHostMaintenance(ctx, os.Stdin, os.Stdout)
 	case "pitr-fetch":
 		err = worker.RunPITRFetch(ctx, os.Stdin)
 	case "pitr-forget":
