@@ -18,6 +18,14 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "pitr-fetch":
+		err = worker.RunPITRFetch(ctx, os.Stdin)
+	case "pitr-forget":
+		err = worker.RunPITRForget(ctx)
+	case "pitr-base":
+		err = worker.RunPITRBase(ctx)
+	case "pitr-runner":
+		err = worker.RunPITRRunner(ctx)
 	case "snapshot-reap":
 		err = worker.RunFilesystemSnapshotReaper(ctx, os.Args[2], false)
 	case "snapshot-host":

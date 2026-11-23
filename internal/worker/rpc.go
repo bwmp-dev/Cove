@@ -34,6 +34,7 @@ type RPCRequest struct {
 	ID             string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	PITR          *PITRStatus           `json:"pitr,omitempty"`
 	Snapshot      *SnapshotPreview      `json:"snapshot,omitempty"`
 	TrafficState  *ProxyTrafficState    `json:"traffic_state,omitempty"`
 	TrafficPlan   *ProxyTrafficPlan     `json:"traffic_plan,omitempty"`
@@ -66,6 +67,21 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "pitr_status":
+		status, err := e.PITRStatus(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: "PITR status unavailable; verify worker metadata and capture state"}
+		}
+		return RPCResponse{PITR: &status}
+	case "pitr_copy_plan":
+		if r.Request == nil {
+			return RPCResponse{Error: "PITR copy request required"}
+		}
+		plan, err := e.PlanPITRCopy(ctx, *r.Request)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{RestoreCopy: plan}
 	case "snapshot_preview":
 		if r.Snapshot == nil {
 			return RPCResponse{Error: "snapshot options required"}

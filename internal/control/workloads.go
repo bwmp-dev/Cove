@@ -417,6 +417,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.scheduleBackups(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.schedulePITR(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -585,6 +588,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		return s.commitRoutes(ctx, id, request, result)
 	}
 	_, err = s.DB.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id)
+	if err == nil && state == "succeeded" && request.Action == "pitr_forget" {
+		_, err = s.DB.Exec(ctx, `DELETE FROM workload_pitr WHERE workload_id=$1 AND operation_id=$2`, request.Workload, id)
+	}
 	return err
 }
 

@@ -808,3 +808,11 @@ CREATE TABLE IF NOT EXISTS panel_recovery_jobs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_panel_recovery_job ON panel_recovery_jobs((true)) WHERE state IN ('queued','running');
 CREATE INDEX IF NOT EXISTS panel_recovery_history ON panel_recovery_jobs(requested_at DESC,id DESC);
+
+-- Encrypted PostgreSQL PITR policies; collection is bounded to 256 resources globally.
+CREATE TABLE IF NOT EXISTS workload_pitr (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ configuration bytea NOT NULL,enabled boolean NOT NULL,next_backup_at timestamptz NOT NULL DEFAULT now(),
+ operation_id text REFERENCES operations(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS workload_pitr_due ON workload_pitr(next_backup_at) WHERE enabled;

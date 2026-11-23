@@ -27,6 +27,11 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) error {
 	e.active[id] = true
 	e.mu.Unlock()
 	defer func() { e.mu.Lock(); delete(e.active, id); e.mu.Unlock() }()
+	if _, err := os.Lstat(filepath.Join(e.pitrDirectory(id), "state.json")); err == nil {
+		return errors.New("disable and delete PITR history before removing this resource")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if _, err := os.Lstat(filepath.Join(e.Root, "workloads", id, "filesystem-snapshot.json")); err == nil {
 		return errors.New("recover the pending filesystem snapshot before removing this workload")
 	} else if !os.IsNotExist(err) {
@@ -60,6 +65,34 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) error {
 		if err = e.Run(ctx, e.Root, []string{"docker", "network", "rm", network}, nil, io.Discard); err != nil {
 			return err
 		}
+	}
+	if _, err := os.Lstat(filepath.Join(e.Root, "workloads", id, "pitr-image.json")); err == nil {
+		owner, err := e.backupHelperOwner(false)
+		if err != nil {
+			return err
+		}
+		name := "cove-pitr-image-" + id
+		container, err := e.pitrContainerID(ctx, name)
+		if err != nil {
+			return err
+		}
+		if container != "" {
+			actual, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "dev.cove.pitr.owner"}}`, name)
+			if err != nil {
+				return err
+			}
+			if actual != owner {
+				return errors.New("PITR copy image ownership changed")
+			}
+			if err = e.Run(ctx, e.Root, []string{"docker", "rm", "--volumes", name}, nil, io.Discard); err != nil {
+				return err
+			}
+		}
+		if err = os.Remove(filepath.Join(e.Root, "workloads", id, "pitr-image.json")); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }

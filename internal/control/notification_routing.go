@@ -18,6 +18,12 @@ var notificationEvents = []string{
 }
 
 func operationEvent(action, state string) string {
+	if action == "pitr_backup" {
+		return "backup." + state
+	}
+	if action == "pitr_restore" {
+		return "restore." + state
+	}
 	if action == "backup" || action == "restore" || action == "drill" {
 		return action + "." + state
 	}

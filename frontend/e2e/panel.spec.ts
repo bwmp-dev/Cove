@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { createHash, randomBytes } from "node:crypto";
 import { expect, test, type Download, type Page, type TestInfo, type Locator } from "@playwright/test";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
 const compose = (marker: string) =>
@@ -16,7 +16,11 @@ test.afterEach(() => {
   const resources = execFileSync("docker", ["exec", database, "psql", "-U", "postgres", "-d", "cove", "-Atc", "UPDATE workloads w SET manually_stopped=true WHERE NOT EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running')) RETURNING w.id"], { encoding: "utf8" }).split(/\s+/).filter(value => /^[a-f0-9]{32}$/.test(value));
   for (const resource of resources) {
     const ids = execFileSync("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=cove-${resource}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
-    if (ids.length) execFileSync("docker", ["rm", "-f", "-v", ...ids]);
+    // PITR runners and their archive volumes are labelled for the resource rather than its Compose project.
+    const runners = execFileSync("docker", ["ps", "-aq", "--filter", `label=dev.cove.workload=${resource}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
+    if (ids.length || runners.length) execFileSync("docker", ["rm", "-f", "-v", ...ids, ...runners]);
+    const archives = execFileSync("docker", ["volume", "ls", "-q", "--filter", `name=cove-pitr-archive-${resource}`], { encoding: "utf8" }).split(/\s+/).filter(name => name === `cove-pitr-archive-${resource}`);
+    if (archives.length) execFileSync("docker", ["volume", "rm", ...archives]);
     const networks = execFileSync("docker", ["network", "ls", "-q", "--filter", `label=com.docker.compose.project=cove-${resource}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
     if (networks.length) execFileSync("docker", ["network", "rm", ...networks]);
   }
@@ -1039,6 +1043,219 @@ test("Redis complete-instance backups verify, restore in place and restore as a 
   await expect.poll(async () => (await (await page.request.get(`/api/operations/${operationID}`)).json() as { state: string }).state, { timeout: 240_000 }).toMatch(/succeeded|failed/);
   const result = await (await page.request.get(`/api/operations/${operationID}`)).json() as { state: string };
   expect(result.state, await (await page.request.get(`/api/operations/${operationID}/logs`)).text()).toBe("succeeded");
+});
+
+test("PostgreSQL point-in-time recovery captures WAL and restores a chosen time as a new resource", async ({ page }, testInfo) => {
+  test.setTimeout(2_400_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "PITR project");
+  const url = await createResource(page, "pitr-source");
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // CodeMirror input is unreliable for exact YAML, so the Compose file is saved through the API.
+  const yaml = "services:\n  db:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_PASSWORD: fixture-pitr-admin-password\n    volumes: [pgdata:/var/lib/postgresql/data]\n    healthcheck:\n      test: [CMD, pg_isready, -U, postgres]\n      interval: 1s\nvolumes:\n  pgdata: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+
+  // Fail fast against a panel or worker built without this branch's PITR API.
+  const initial = await page.request.get(`/api/workloads/${id}/pitr`);
+  expect(initial.status(), await initial.text()).toBe(200);
+  expect(await initial.json()).toEqual({ configured: false, supported: true, settings: null, status: null });
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; capabilities: { postgres_pitr?: boolean } | null }[];
+  expect(nodes.find(node => node.id === config.node_id)?.capabilities?.postgres_pitr).toBe(true);
+
+  const psql = (resourceURL: string, statement: string) => {
+    const container = containers(resourceURL).split("\n")[0]?.split("|")[0] ?? "";
+    return execFileSync("docker", ["exec", container, "psql", "-U", "postgres", "-d", "postgres", "-Atc", statement], { encoding: "utf8" }).trim();
+  };
+  const markers = "SELECT string_agg(value, ',' ORDER BY value) FROM pitr_marker";
+  const seen = async () => new Set(((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as { id: string }[]).map(item => item.id));
+  const finished = async (action: string, after: Set<string>, timeout = 300_000) => {
+    let operation: { id: string; action: string; state: string } | undefined;
+    try {
+      await expect.poll(async () => {
+        const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+        operation = operations.find(item => item.action === action && !after.has(item.id));
+        return operation && !["queued", "running"].includes(operation.state);
+      }, { timeout }).toBe(true);
+    } catch (error) {
+      await pitrDiagnostics(`${action} ${operation?.id ?? "missing"} did not finish`, operation ? await (await page.request.get(`/api/operations/${operation.id}`)).text() : "");
+      throw error;
+    }
+    const detail = await (await page.request.get(`/api/operations/${operation?.id}`)).text();
+    if (operation?.state !== "succeeded") await pitrDiagnostics(`${action} ${operation?.id ?? "missing"}`, detail);
+    expect(operation?.state, `${action} ${operation?.id}: ${detail} ${await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()}`).toBe("succeeded");
+  };
+  // Bounded evidence for this fixture resource only, written before teardown: file ownership and modes (never contents),
+  // runner container state and redacted stderr, and the PITR status response.
+  let diagnosticsCount = 0;
+  const pitrDiagnostics = async (label: string, detail: string, resources: string[] = [id]) => {
+    const redact = (value: string) => value.split("\n").filter(line => !/pass|secret|key|token|credential|aws_|authorization/i.test(line)).slice(-80).join("\n");
+    // Ownership listings carry only metadata, so they are kept whole; container output is redacted line by line.
+    const run = (args: string[], metadataOnly = false) => {
+      const result = spawnSync("docker", args, { encoding: "utf8", timeout: 30_000 });
+      const output = `${result.stdout}${result.stderr}`;
+      return `$ docker ${args.join(" ")}\nexit ${result.status}\n${metadataOnly ? output : redact(output)}`;
+    };
+    const worker = process.env.COVE_BROWSER_WORKER ?? "";
+    // API responses never include secrets by contract.
+    const sections = [`operation ${label}`, detail];
+    for (const resource of resources.filter(value => /^[a-f0-9]{32}$/.test(value))) {
+      sections.push(`resource ${resource}`);
+      if (/^cove-browser-[a-f0-9]+-worker$/.test(worker)) {
+        sections.push(run(["exec", worker, "sh", "-c", 'id; find "/var/lib/cove/pitr/$1" -maxdepth 4 -exec stat -c "%u:%g %a %s %F %n" {} +', "sh", resource], true));
+      }
+      const owned = new Set([`label=dev.cove.workload=${resource}`, `label=com.docker.compose.project=cove-${resource}`].flatMap(filter => execFileSync("docker", ["ps", "-aq", "--filter", filter], { encoding: "utf8" }).split(/\s+/).filter(Boolean)));
+      for (const container of owned) {
+        sections.push(run(["inspect", "--format", "{{.Name}} image={{.Config.Image}} status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}} restarts={{.RestartCount}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} user={{.Config.User}}", container]));
+        sections.push(run(["logs", "--tail", "80", container]));
+      }
+      sections.push(run(["volume", "ls", "--format", "{{.Name}}", "--filter", `name=${resource}`], true));
+      const status = await page.request.get(`/api/workloads/${resource}/pitr`);
+      sections.push(`GET /api/workloads/${resource}/pitr -> ${status.status()}\n${await status.text()}`);
+    }
+    diagnosticsCount++;
+    writeFileSync(testInfo.outputPath(`pitr-diagnostics-${diagnosticsCount}.txt`), sections.join("\n\n"));
+  };
+  interface Base { id: string; created_at: string; available_to?: string }
+  const pitr = async () => await (await page.request.get(`/api/workloads/${id}/pitr`)).json() as { configured: boolean; status: { state: string; bases: Base[] | null } | null };
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  const section = page.getByRole("region", { name: "PostgreSQL point-in-time recovery" });
+  await expect(section.getByText("Save a backup policy first", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await chooseOption(page.getByLabel("Backup method"), "postgresql");
+  await page.getByLabel("Database Compose service", { exact: true }).fill("db");
+  await page.getByLabel("Database name", { exact: true }).fill("postgres");
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-pitr-backup-password");
+  await page.getByLabel("Interval in hours", { exact: true }).fill("0");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit policy", exact: true })).toBeVisible();
+
+  await section.getByRole("button", { name: "Set up point-in-time recovery", exact: true }).click();
+  await expect(section.getByLabel("PostgreSQL Compose service", { exact: true })).toHaveValue("db");
+  await expect(section.getByText(/A separate local Docker volume on this node/)).toBeVisible();
+  await section.getByLabel("Archive size cap (MiB)", { exact: true }).fill("1024");
+  await capture(page, testInfo, "pitr-setup");
+  let before = await seen();
+  await section.getByRole("button", { name: "Enable point-in-time recovery", exact: true }).click();
+  const enable = page.getByRole("dialog", { name: "Enable point-in-time recovery?" });
+  await expect(enable.getByText(/PostgreSQL restarts once/)).toBeVisible();
+  await enable.getByRole("button", { name: "Restart and enable", exact: true }).click();
+  await finished("pitr_configure", before);
+  expect(await (await page.request.get(`/api/workloads/${id}/pitr`)).text()).not.toMatch(/"key"|password|secret/i);
+
+  // The scheduler may queue the first base at the same moment; either path must leave a finished base.
+  before = await seen();
+  await expect(section.getByRole("button", { name: "Take base backup now", exact: true })).toBeEnabled({ timeout: 60_000 });
+  const manual = page.waitForResponse(response => response.url().endsWith(`/api/workloads/${id}/pitr/backup`));
+  await section.getByRole("button", { name: "Take base backup now", exact: true }).click();
+  expect([202, 409]).toContain((await manual).status());
+  await finished("pitr_backup", before, 600_000);
+  await expect.poll(async () => (await pitr()).status?.bases?.length ?? 0, { timeout: 120_000 }).toBeGreaterThan(0);
+
+  expect(psql(url, "CREATE TABLE pitr_marker(value text); INSERT INTO pitr_marker VALUES ('before')")).toContain("INSERT");
+  await page.waitForTimeout(3_000);
+  const target = Math.floor(Date.now() / 1000) * 1000;
+  await page.waitForTimeout(3_000);
+  expect(psql(url, "INSERT INTO pitr_marker VALUES ('after')")).toContain("INSERT");
+  // The worker archives a bounded heartbeat transaction about once a minute; available_to follows it within 90 seconds.
+  let base: Base | undefined;
+  await expect.poll(async () => {
+    base = (await pitr()).status?.bases?.find(item => item.available_to && Date.parse(item.created_at) < target && Date.parse(item.available_to) > target + 1000);
+    return Boolean(base);
+  }, { timeout: 120_000, intervals: [5_000] }).toBe(true);
+
+  await page.reload();
+  await expect(section.getByText("Capturing", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(section.getByRole("meter", { name: "Archive storage" })).toBeVisible({ timeout: 120_000 });
+  await capture(page, testInfo, "pitr-status");
+
+  // Restore from retained history with capture disabled, so the copy proves offline history is usable.
+  before = await seen();
+  await section.getByRole("button", { name: "Disable capture", exact: true }).click();
+  await page.getByRole("dialog", { name: "Disable capture?" }).getByRole("button", { name: "Restart and disable", exact: true }).click();
+  await finished("pitr_configure", before);
+  await page.reload();
+  await expect(section.getByText("Capture disabled", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(section.getByText("Not streaming", { exact: true })).toBeVisible();
+  const disabled = await (await page.request.get(`/api/workloads/${id}/pitr`)).json() as { status: { state: string; receiver: boolean; enabled: boolean } };
+  expect(disabled.status).toMatchObject({ state: "disabled", receiver: false, enabled: false });
+  await expect.poll(async () => {
+    const retained = (await pitr()).status?.bases?.find(item => item.id === base?.id);
+    return Boolean(retained?.available_to && Date.parse(retained.available_to) > target + 1000);
+  }, { timeout: 120_000, intervals: [5_000] }).toBe(true);
+  await page.reload();
+  await expect(section.getByRole("button", { name: "Delete PITR history", exact: true })).toBeEnabled({ timeout: 60_000 });
+  await capture(page, testInfo, "pitr-disabled");
+  const ordered = ((await pitr()).status?.bases ?? []).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const row = section.getByRole("list", { name: "Base backups" }).getByRole("listitem").nth(ordered.findIndex(item => item.id === base?.id));
+  await expect(row.getByRole("button", { name: "Restore to new resource", exact: true })).toBeEnabled({ timeout: 60_000 });
+  await row.getByRole("button", { name: "Restore to new resource", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Restore to a new PostgreSQL resource" });
+  await dialog.getByLabel("New resource name", { exact: true }).fill("PITR recovered copy");
+  const when = new Date(target);
+  await dialog.getByLabel("Recovery time (UTC)", { exact: true }).fill(when.toISOString().slice(0, 19));
+  await capture(page, testInfo, "pitr-restore-form");
+  const restoreResponse = page.waitForResponse(response => response.url().endsWith(`/api/workloads/${id}/pitr/restore-copy`));
+  await dialog.getByRole("button", { name: "Create recovery copy", exact: true }).click();
+  const accepted = await restoreResponse;
+  expect(accepted.status(), await accepted.text()).toBe(202);
+  expect(JSON.parse(accepted.request().postData() ?? "{}")).toEqual({ name: "PITR recovered copy", base: base?.id, timestamp: when.toISOString() });
+  expect(accepted.headers()["cache-control"]).toContain("no-store");
+  const { id: restoreOperation, resource_id: copyId, credentials } = await accepted.json() as { id: string; resource_id: string; credentials: { username: string; password: string } };
+  expect(credentials.username).not.toBe("");
+  expect(credentials.password.length).toBeGreaterThanOrEqual(16);
+  await expect(dialog.getByText("Open new resource", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/It will not be shown again/)).toBeVisible();
+  await expect(dialog.getByLabel("Administrator password", { exact: true })).toHaveAttribute("type", "password");
+  await expect(dialog.getByLabel("Administrator password", { exact: true })).toHaveValue(credentials.password);
+  await capture(page, testInfo, "pitr-restore-credentials");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByLabel("Administrator password", { exact: true })).toHaveCount(0);
+  for (const path of [`/api/workloads/${copyId}`, `/api/workloads/${id}/pitr`, `/api/workloads/${copyId}/pitr`]) {
+    expect(await (await page.request.get(path)).text()).not.toContain(credentials.password);
+  }
+  const restoreDetail = async () => await (await page.request.get(`/api/operations/${restoreOperation}`)).text();
+  try {
+    await expect.poll(async () => (await (await page.request.get(`/api/operations/${restoreOperation}`)).json() as { state: string }).state, { timeout: 1_800_000, intervals: [10_000] }).toMatch(/succeeded|failed/);
+  } catch (error) {
+    await pitrDiagnostics(`pitr_restore ${restoreOperation} did not finish`, await restoreDetail(), [id, copyId]);
+    throw error;
+  }
+  const result = await (await page.request.get(`/api/operations/${restoreOperation}`)).json() as { state: string };
+  if (result.state !== "succeeded") await pitrDiagnostics(`pitr_restore ${restoreOperation}`, await restoreDetail(), [id, copyId]);
+  expect(result.state, `pitr_restore ${restoreOperation}: ${await restoreDetail()} ${await (await page.request.get(`/api/operations/${restoreOperation}/logs`)).text()}`).toBe("succeeded");
+  expect(psql(url, markers)).toBe("after,before");
+
+  const copyURL = `${origin}/resources/${copyId}`;
+  await page.goto(copyURL);
+  await deployFromHeader(page);
+  try {
+    await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 300_000 });
+  } catch (error) {
+    await pitrDiagnostics("copy deploy did not succeed", "", [copyId]);
+    throw error;
+  }
+  await expect.poll(() => { try { return psql(copyURL, markers); } catch { return ""; } }, { timeout: 120_000 }).toBe("before");
+  expect(containers(copyURL)).not.toContain("routed");
+  // Password authentication over TCP proves the one-time credentials work for a normal administrator login.
+  const copyContainer = containers(copyURL).split("\n")[0]?.split("|")[0] ?? "";
+  expect(execFileSync("docker", ["exec", "-e", `PGPASSWORD=${credentials.password}`, copyContainer, "psql", "-h", "127.0.0.1", "-U", credentials.username, "-d", "postgres", "-Atc", "SELECT current_user"], { encoding: "utf8" }).trim()).toBe(credentials.username);
+
+  await page.goto(url);
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await expect(section.getByRole("button", { name: "Delete PITR history", exact: true })).toBeEnabled({ timeout: 60_000 });
+  before = await seen();
+  await section.getByRole("button", { name: "Delete PITR history", exact: true }).click();
+  const remove = page.getByRole("dialog", { name: "Delete point-in-time recovery history?" });
+  await remove.getByLabel("Type db to confirm", { exact: true }).fill("db");
+  await remove.getByRole("button", { name: "Delete history", exact: true }).click();
+  await finished("pitr_forget", before);
+  await expect.poll(async () => (await pitr()).configured, { timeout: 60_000 }).toBe(false);
+  expect(psql(url, markers)).toBe("after,before");
 });
 
 test("resource bindings, hooks and promotion keep target configuration", async ({ page }, testInfo) => {

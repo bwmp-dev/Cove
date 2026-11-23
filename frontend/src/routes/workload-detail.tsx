@@ -39,6 +39,7 @@ import { projectsQuery, useAssignEnvironment, type Project } from "../api/projec
 import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
 import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
+import { PostgresPITR } from "../components/PostgresPITR";
 import { useCapacityGate } from "../components/CapacityCheck";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
@@ -687,9 +688,14 @@ export function ResourceBackups() {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
-    <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} />
-    </Section>
+    <>
+      <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
+        <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} />
+      </Section>
+      <Section width="form" title="PostgreSQL point-in-time recovery" description="Continuous WAL capture with periodic base backups, restored to a chosen time as a new resource. Separate from the backups above.">
+        <PostgresPITR workloadId={workload.id} busy={Boolean(active)} canEdit={can(workload.permissions, "edit")} nodeName={node?.name} />
+      </Section>
+    </>
   );
 }
 

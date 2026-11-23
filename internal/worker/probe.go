@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	PostgresPITR        bool         `json:"postgres_pitr"`
 	FilesystemSnapshots bool         `json:"filesystem_snapshots"`
 	BackupTransfers     bool         `json:"backup_transfers"`
 	StreamedBackups     bool         `json:"extended_logical_backups"`
@@ -64,6 +65,7 @@ func Inspect(ctx context.Context) Probe {
 	p.StreamedBackups = true
 	p.BackupTransfers = true
 	p.FilesystemSnapshots = runtime.GOOS == "linux"
+	p.PostgresPITR = runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64")
 	p.BackblazeB2 = true
 	p.FileBrowser = true
 	p.CapacityAdvice = true
