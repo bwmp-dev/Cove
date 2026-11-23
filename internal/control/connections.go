@@ -404,6 +404,9 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if err := s.prepareResourceDefaults(ctx, r); err != nil {
+		return err
+	}
 	if r.Action == "backup" && r.Backup != nil && r.Backup.VolumeSnapshot != nil {
 		var capable bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'filesystem_snapshots')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {

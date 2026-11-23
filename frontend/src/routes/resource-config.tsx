@@ -11,6 +11,7 @@ import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
 import { DatabaseAccess } from "../components/DatabaseAccess";
 import { RightSizing } from "../components/RightSizing";
+import { ResourceDefaultsNote } from "../components/ResourceDefaults";
 import { GitHubSource } from "../components/GitHubApp";
 import { Networks } from "../components/Networks";
 import { PrivateNetwork } from "../components/PrivateNetwork";
@@ -691,7 +692,7 @@ function LimitsForm({ workload }: { workload: Workload }) {
   }
   return <form onSubmit={submit}>
     <UnsavedChangesGuard dirty={dirty} />
-    <Section width="form" title="Resource limits" description="Limits apply per container on the next deploy. Blank values inherit the Compose file. Rollback restores the limits saved with that release." footer={editable && <SaveBar dirty={dirty} pending={update.isPending} blocked={blocked} onDiscard={() => { setRows(initial); setError(""); }} status={update.isSuccess ? `Saved. ${nextDeploy}` : undefined} />}>
+    <Section width="form" title="Resource limits" description="Limits apply per container on the next deploy. Blank values inherit the Compose file, then resource defaults. Rollback restores the limits saved with that release." footer={editable && <SaveBar dirty={dirty} pending={update.isPending} blocked={blocked} onDiscard={() => { setRows(initial); setError(""); }} status={update.isSuccess ? `Saved. ${nextDeploy}` : undefined} />}>
       <div className="space-y-4">
         {!editable && <ViewOnly />}
         <SaveBlockers workload={workload} />
@@ -706,6 +707,7 @@ function LimitsForm({ workload }: { workload: Workload }) {
           {error && <Notice tone="error" title="Check resource limits">{error}</Notice>}
           {update.error && <Notice tone="error" title="Could not save limits">{errorMessage(update.error)}</Notice>}
           <p className="text-xs text-fg-muted">These limits cover running containers, not builds or persistent disk usage. Removing a limit restores the setting from Compose on the next deploy.</p>
+          <ResourceDefaultsNote environmentId={workload.environment_id} />
         </fieldset>
       </div>
     </Section>

@@ -25,8 +25,9 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
-	PITR                   *PITRPolicy  `json:"pitr,omitempty"`
-	PITRRestore            *PITRRestore `json:"pitr_restore,omitempty"`
+	DefaultLimits          *ServiceLimits `json:"default_limits,omitempty"`
+	PITR                   *PITRPolicy    `json:"pitr,omitempty"`
+	PITRRestore            *PITRRestore   `json:"pitr_restore,omitempty"`
 	snapshotMounts         []backupMount
 	snapshotCheck          func(context.Context) error
 	volumeMethod           string
@@ -192,6 +193,11 @@ func ValidateRequest(r Request) error {
 	}
 	if err := ValidateLimits(r.Limits); err != nil {
 		return err
+	}
+	if r.DefaultLimits != nil {
+		if err := ValidateLimits(map[string]ServiceLimits{"default": *r.DefaultLimits}); err != nil {
+			return err
+		}
 	}
 	if err := ValidatePrivateNetwork(r.Private); err != nil {
 		return err
@@ -1017,7 +1023,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
 		}
-		if len(r.Limits) > 0 {
+		if len(r.Limits) > 0 || r.DefaultLimits != nil {
 			composePath, err = e.prepareLimits(ctx, r, dir, args, env, log)
 			if err != nil {
 				return err

@@ -32,8 +32,29 @@ func TestLimitsValidationAndCompose(t *testing.T) {
 	}
 }
 
+func TestResourceDefaultsPreserveComposeAndExplicitOverrides(t *testing.T) {
+	var config map[string]any
+	if err := json.Unmarshal([]byte(`{"services":{"defaulted":{},"compose":{"cpus":2,"mem_limit":"256m"},"partial":{"cpu_quota":25000,"cpu_period":100000}}}`), &config); err != nil {
+		t.Fatal(err)
+	}
+	defaults := &ServiceLimits{CPUs: 0.5, MemoryMB: 64}
+	if err := applyDefaultLimits(config, defaults); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLimits(config, map[string]ServiceLimits{"defaulted": {CPUs: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	services := config["services"].(map[string]any)
+	defaulted := services["defaulted"].(map[string]any)
+	compose := services["compose"].(map[string]any)
+	partial := services["partial"].(map[string]any)
+	if defaulted["cpus"] != float64(1) || defaulted["mem_limit"] != int64(64<<20) || compose["cpus"] != float64(2) || compose["mem_limit"] != "256m" || partial["cpus"] != nil || partial["cpu_quota"] != float64(25000) || partial["mem_limit"] != int64(64<<20) {
+		t.Fatal("default precedence changed existing declarations", services)
+	}
+}
+
 func TestLimitsRealDocker(t *testing.T) {
-	if os.Getenv("COVE_TEST_LIMITS_DOCKER") != "1" {
+	if os.Getenv("COVE_TEST_LIMITS_DOCKER") != "1" && os.Getenv("COVE_DATABASE_FIXTURE") == "" {
 		t.Skip("set COVE_TEST_LIMITS_DOCKER=1")
 	}
 	e, err := NewEngine(t.TempDir())
@@ -50,7 +71,7 @@ func TestLimitsRealDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"docker", "compose", "-p", project, "-f", path}
-	configured, err := e.prepareLimits(context.Background(), Request{ID: "limits", Limits: map[string]ServiceLimits{"app": {CPUs: 0.5, MemoryMB: 64}}}, e.Root, args, nil, io.Discard)
+	configured, err := e.prepareLimits(context.Background(), Request{ID: "limits", DefaultLimits: &ServiceLimits{CPUs: 0.75, MemoryMB: 64}, Limits: map[string]ServiceLimits{"app": {CPUs: 0.5}}}, e.Root, args, nil, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

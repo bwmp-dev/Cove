@@ -1,6 +1,7 @@
 import { Select } from "./Select";
 import { ChoiceGroup, type Choice } from "./ChoiceGroup";
 import { ResourcePlacement } from "./ResourcePlacement";
+import { PlacementAdvice } from "./PlacementAdvice";
 import type { ResourceDraft } from "../lib/templates";
 import { Link } from "@tanstack/react-router";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
@@ -195,6 +196,7 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
   const set: SetValue = (key, value) => setValues((current) => ({ ...current, [key]: value }));
 
   const readyNodes = nodes.filter((node) => node.state === "ready");
+  const [placementProject = "", placementEnvironment = ""] = resourcePlacement.split(":");
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -260,6 +262,14 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
                 ))}
               </Select>
             </Field>
+          )}
+          {resourcePlacement && readyNodes.length > 0 && (
+            <PlacementAdvice
+              key={resourcePlacement}
+              projectId={placementProject}
+              environmentId={placementEnvironment}
+              selectedNodeId={values.nodeId}
+            />
           )}
         </FormSection>
 

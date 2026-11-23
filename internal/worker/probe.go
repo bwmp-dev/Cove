@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	ResourceDefaults    bool         `json:"resource_defaults"`
 	Firewall            bool         `json:"firewall"`
 	HostMaintenance     bool         `json:"host_maintenance"`
 	SSHIdentity         bool         `json:"ssh_identity"`
@@ -77,6 +78,7 @@ func Inspect(ctx context.Context) Probe {
 	p.HostMaintenance = runtime.GOOS == "linux"
 	p.Firewall = runtime.GOOS == "linux"
 	p.CapacityAdvice = true
+	p.ResourceDefaults = true
 	p.TrafficLogs = runtime.GOOS == "linux"
 	p.StructuredLogs = true
 	p.AlertObservations = true

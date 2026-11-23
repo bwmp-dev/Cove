@@ -104,6 +104,10 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 		add("Compose", "error", "Compose reported warnings or could not produce a complete configuration. Check missing variables.")
 		return report
 	}
+	if err = applyDefaultLimits(config, r.DefaultLimits); err != nil {
+		add("Resource defaults", "error", "Default resource limits could not be applied.")
+		return report
+	}
 	if err = applyLimits(config, r.Limits); err != nil {
 		add("Resource limits", "error", "Limits reference invalid or missing services.")
 		return report

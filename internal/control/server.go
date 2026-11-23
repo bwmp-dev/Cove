@@ -93,6 +93,11 @@ func (s *Server) Init(ctx context.Context) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerPanelRecovery(mux)
+	mux.Handle("GET /api/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("PUT /api/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("GET /api/environments/{id}/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("PUT /api/environments/{id}/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("GET /api/placement-suggestions", s.admin(http.HandlerFunc(s.placementSuggestions)))
 	for _, pattern := range []string{"GET /api/node-providers", "POST /api/node-providers", "PUT /api/node-providers/{id}", "DELETE /api/node-providers/{id}"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.nodeProviders)))
 	}

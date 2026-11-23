@@ -15,6 +15,40 @@ type ServiceLimits struct {
 	MemoryMB int64   `json:"memory_mb"`
 }
 
+func applyDefaultLimits(config map[string]any, defaults *ServiceLimits) error {
+	if defaults == nil {
+		return nil
+	}
+	if err := ValidateLimits(map[string]ServiceLimits{"default": *defaults}); err != nil {
+		return err
+	}
+	services, ok := config["services"].(map[string]any)
+	if !ok || len(services) > 64 {
+		return errors.New("resource defaults require at most 64 Compose services")
+	}
+	limits := map[string]ServiceLimits{}
+	for name, raw := range services {
+		service, ok := raw.(map[string]any)
+		if !ok {
+			return errors.New("invalid Compose service")
+		}
+		deploy, _ := service["deploy"].(map[string]any)
+		resources, _ := deploy["resources"].(map[string]any)
+		caps, _ := resources["limits"].(map[string]any)
+		limit := ServiceLimits{}
+		if service["cpus"] == nil && service["cpu_quota"] == nil && caps["cpus"] == nil {
+			limit.CPUs = defaults.CPUs
+		}
+		if service["mem_limit"] == nil && caps["memory"] == nil {
+			limit.MemoryMB = defaults.MemoryMB
+		}
+		if limit.CPUs != 0 || limit.MemoryMB != 0 {
+			limits[name] = limit
+		}
+	}
+	return applyLimits(config, limits)
+}
+
 func ValidateLimits(limits map[string]ServiceLimits) error {
 	if len(limits) > 64 {
 		return errors.New("at most 64 service limits are allowed")
@@ -77,6 +111,9 @@ func (e *Engine) prepareLimits(ctx context.Context, r Request, dir string, args,
 	}
 	var config map[string]any
 	if err := json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+		return "", err
+	}
+	if err := applyDefaultLimits(config, r.DefaultLimits); err != nil {
 		return "", err
 	}
 	if err := applyLimits(config, r.Limits); err != nil {

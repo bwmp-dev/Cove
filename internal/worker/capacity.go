@@ -129,7 +129,7 @@ func (e *Engine) Capacity(ctx context.Context, r Request) (report PreflightRepor
 	out := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", compose, "config", "--format", "json"}, env, out)
 	var config map[string]any
-	if err != nil || json.Unmarshal(out.data.Bytes(), &config) != nil || applyLimits(config, r.Limits) != nil {
+	if err != nil || json.Unmarshal(out.data.Bytes(), &config) != nil || applyDefaultLimits(config, r.DefaultLimits) != nil || applyLimits(config, r.Limits) != nil {
 		return PreflightReport{Checks: []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Cannot resolve Compose resource limits."}}}
 	}
 	report.Checks = capacityChecks(config, inspectMetrics(ctx, e.Root))

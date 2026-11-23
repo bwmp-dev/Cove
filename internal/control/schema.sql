@@ -866,3 +866,9 @@ CREATE TABLE IF NOT EXISTS node_provisions (
 );
 ALTER TABLE node_provisions ADD COLUMN IF NOT EXISTS deadline timestamptz NOT NULL DEFAULT now()+interval '20 minutes';
 CREATE INDEX IF NOT EXISTS node_provision_active_idx ON node_provisions(next_check_at) WHERE phase IN ('queued','creating','server_pending','enrolling');
+
+-- Defaults are one bounded CPU/memory pair per existing team or environment.
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_cpu double precision NOT NULL DEFAULT 0 CHECK(resource_default_cpu=0 OR resource_default_cpu BETWEEN 0.01 AND 1024);
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_cpu double precision NOT NULL DEFAULT 0 CHECK(resource_default_cpu=0 OR resource_default_cpu BETWEEN 0.01 AND 1024);
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);

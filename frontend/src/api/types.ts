@@ -27,6 +27,7 @@ export interface Capabilities {
   filesystem_snapshots?: boolean;
   traffic_logs?: boolean;
   ssh_identity?: boolean;
+  resource_defaults?: boolean;
   protocol: number;
   os: string;
   arch: string;

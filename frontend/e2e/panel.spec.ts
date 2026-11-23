@@ -2336,6 +2336,134 @@ test("host security updates inspect the real worker host only on request and nev
   expect(errors).toEqual([]);
 });
 
+// Memory and CPU limits Docker applied to the running containers of a resource's Compose project.
+function runningLimits(resourceURL: string) {
+  const workload = new URL(resourceURL).pathname.split("/")[2] ?? "";
+  if (!/^[0-9a-f]{32}$/.test(workload)) throw new Error("Unexpected resource URL");
+  const ids = execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${workload}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
+  if (ids.length === 0) return "";
+  return execFileSync("docker", ["inspect", "--format", "{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}", ...ids], { encoding: "utf8" }).trim();
+}
+
+// Waits for the resource's next deploy operation and fails with the worker's result and log when it does not succeed.
+async function waitForNewDeploy(page: Page, workload: string, seen: string[]) {
+  type Operation = { id: string; action: string; state: string; result: unknown };
+  let operation: Operation | undefined;
+  await expect.poll(async () => {
+    const list = await (await page.request.get(`/api/operations?workload_id=${workload}`)).json() as Operation[];
+    operation = list.find((item) => item.action === "deploy" && !seen.includes(item.id));
+    return operation?.state ?? "missing";
+  }, { timeout: 180_000 }).toMatch(/^(succeeded|failed|interrupted|cancelled)$/);
+  if (!operation || operation.state !== "succeeded") {
+    const logs = operation ? await (await page.request.get(`/api/operations/${operation.id}/logs`)).text() : "";
+    const worker = process.env.COVE_BROWSER_WORKER ?? "";
+    // The panel only exposes a generic failure, so include the worker's own record of it.
+    const workerLogs = /^cove-browser-[a-f0-9]+-worker$/.test(worker) ? spawnSync("docker", ["logs", "--tail", "60", worker], { encoding: "utf8" }) : undefined;
+    const record = operation && worker ? spawnSync("docker", ["exec", worker, "sh", "-c", `find /var/lib/cove /tmp -name '*${operation.id}*' -type f 2>/dev/null | head -5 | xargs -r tail -c 3000`], { encoding: "utf8" }) : undefined;
+    throw new Error(`deploy ${operation?.state}: ${JSON.stringify(operation?.result)} ${logs.slice(0, 4000)}
+worker logs:
+${workerLogs?.stdout ?? ""}${workerLogs?.stderr ?? ""}
+worker record:
+${record?.stdout ?? ""}${record?.stderr ?? ""}`);
+  }
+  seen.push(operation.id);
+}
+
+test("team and environment resource defaults apply at deploy and placement advice never chooses the node", async ({ page }, testInfo) => {
+  test.setTimeout(300_000);
+  await page.goto("/projects");
+  await signIn(page);
+  const origin = new URL(page.url()).origin;
+  try {
+    await page.goto("/team");
+    const team = page.getByRole("region", { name: "Resource defaults", exact: true });
+    await team.getByLabel(/^CPU cores/).fill("0.001");
+    await team.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(team.getByText("Enter CPU cores from 0.01 to 1024, or leave blank.", { exact: true })).toBeVisible();
+    await expect(team.getByLabel(/^CPU cores/)).toHaveAttribute("aria-invalid", "true");
+    await team.getByLabel(/^CPU cores/).fill("");
+    await team.getByLabel(/^Memory \(MiB\)/).fill("128");
+    await expect(team.getByText("128 MiB memory", { exact: true })).toBeVisible();
+    await team.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(team.getByText("Saved. Applies at each resource's next deploy.", { exact: true })).toBeVisible();
+    // The packaged worker reports resource defaults support, so no upgrade warning is shown.
+    await expect(team.getByText("Some workers need an upgrade", { exact: true })).toHaveCount(0);
+    await capture(page, testInfo, "team-resource-defaults");
+
+    await createProject(page, "Defaults project");
+    await page.getByRole("link", { name: /production/ }).first().click();
+    const environment = page.getByRole("region", { name: "Resource defaults", exact: true });
+    await expect(environment.getByText("Blank inherits the team default of 128 MiB.", { exact: true })).toBeVisible();
+    await expect(environment.getByText("Blank inherits the team default, which is not set for CPU.", { exact: true })).toBeVisible();
+    await environment.getByLabel(/^Memory \(MiB\)/).fill("64");
+    await environment.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(environment.getByText("Saved. Applies at each resource's next deploy.", { exact: true })).toBeVisible();
+    await expect(environment.getByText("64 MiB memory", { exact: true })).toBeVisible();
+    await capture(page, testInfo, "environment-resource-defaults");
+
+    await page.getByRole("link", { name: "New resource", exact: true }).first().click();
+    await page.getByRole("button", { name: "Custom Compose or Git" }).click();
+    await page.getByLabel("Name", { exact: true }).fill("defaults-service");
+    const node = page.getByLabel("Node", { exact: true });
+    await expect(node).toHaveText(/Select a node/);
+    await page.getByLabel(/^Estimated memory \(MiB\)/).fill("32");
+    // Enter inspects nodes; it must not submit the resource form.
+    await page.getByLabel(/^Estimated memory \(MiB\)/).press("Enter");
+    const advice = page.getByRole("list", { name: "Nodes by measured free capacity", exact: true });
+    const workerRow = advice.getByRole("listitem").filter({ hasText: "ready-browser-worker" });
+    await expect(workerRow).toBeVisible({ timeout: 30_000 });
+    await expect(workerRow.getByText(/^(Fits measured free capacity|Exceeds measured free capacity|Capacity unknown)$/)).toBeVisible();
+    await expect(page.getByText(/no explicit CPU requirement and at least 32 MiB memory free/)).toBeVisible();
+    await expect(page).toHaveURL(/\/resources\/new/);
+    await expect(node).toHaveText(/Select a node/);
+    await page.getByRole("button", { name: "Refresh advice", exact: true }).click();
+    await expect(workerRow).toBeVisible();
+    await expect(node).toHaveText(/Select a node/);
+    await capture(page, testInfo, "placement-advice");
+    await chooseOption(node, { label: "ready-browser-worker" });
+    await expect(workerRow.getByText("Selected", { exact: true })).toBeVisible();
+    await page.getByLabel("Compose file", { exact: true }).fill(compose("defaults-service"));
+    await page.getByRole("button", { name: "Create resource", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "defaults-service", exact: true })).toBeVisible();
+    const url = page.url();
+    const workload = new URL(url).pathname.split("/")[2] ?? "";
+    const deploys: string[] = [];
+    // The CodeMirror editor can store non-breaking spaces from fill(), so set the exact ASCII Compose through the API.
+    const services = compose("defaults-service");
+    const created = await (await page.request.get(`/api/workloads/${workload}`)).json() as { name: string; node_id: string; environment_id?: string };
+    expect(created.environment_id).toBeTruthy();
+    expect((await page.request.put(`/api/workloads/${workload}`, { headers: { Origin: origin }, data: { name: created.name, node_id: created.node_id, kind: "service", compose: services } })).status()).toBe(200);
+    const stored = await (await page.request.get(`/api/workloads/${workload}`)).json() as { compose: string; environment_id?: string };
+    expect(stored.compose).toBe(services);
+    expect(stored.environment_id).toBe(created.environment_id);
+    await page.reload();
+
+    await deployFromHeader(page);
+    await waitForNewDeploy(page, workload, deploys);
+    // Environment memory overrides the team value; no CPU default anywhere, so Docker gets no CPU limit.
+    await expect.poll(() => runningLimits(url), { timeout: 120_000 }).toBe(`${64 * 1048576} 0`);
+
+    await page.goto(`${url}/limits`);
+    await expect(page.getByText(/Current environment and team defaults: 64 MiB memory\./)).toBeVisible();
+    await page.getByRole("button", { name: "Add service limit", exact: true }).click();
+    await page.getByLabel("Compose service", { exact: true }).fill("app");
+    await page.getByLabel("CPU cores", { exact: true }).fill("0.5");
+    await page.getByRole("button", { name: "Save changes", exact: true }).click();
+    // Saving refetches the resource and remounts the form, so check the stored limit rather than a transient status.
+    await expect.poll(async () => ((await (await page.request.get(`/api/workloads/${workload}`)).json()) as { limits?: Record<string, { cpus: number; memory_mb: number }> }).limits?.app?.cpus, { timeout: 15_000 }).toBe(0.5);
+    await page.reload();
+    await expect(page.getByLabel("CPU cores", { exact: true })).toHaveValue("0.5");
+    await expect(page.getByLabel("Memory (MiB)", { exact: true })).toHaveValue("");
+    await capture(page, testInfo, "resource-limits-defaults");
+    await deployFromHeader(page);
+    await waitForNewDeploy(page, workload, deploys);
+    // The explicit Cove CPU limit wins; memory still inherits the environment default because the service sets none.
+    await expect.poll(() => runningLimits(url), { timeout: 120_000 }).toBe(`${64 * 1048576} 500000000`);
+  } finally {
+    expect((await page.request.put("/api/resource-defaults", { headers: { Origin: origin }, data: { cpus: 0, memory_mb: 0 } })).status()).toBe(200);
+  }
+});
+
 test("administrator password rotation signs out every session", async ({ page }) => {
   await page.goto("/account");
   await signIn(page);
