@@ -26,7 +26,7 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 1 {
+	if len(os.Args) > 1 && os.Args[1] != "panel-backup-plan" {
 		if err := cli.Run(ctx, os.Args[1:]); err != nil {
 			var exit *cli.ExitError
 			if errors.As(err, &exit) {

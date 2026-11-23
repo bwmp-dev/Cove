@@ -46,7 +46,10 @@ def main():
                      (ROOT / 'scripts/install-panel-recovery.sh', '/fixture/install-panel-recovery.sh'),
                      (ROOT / 'test/systemd/panel_recovery_acceptance.py', '/fixture/acceptance.py')]
             for source, target in files:
-                run('docker', 'exec', '-i', name, 'sh', '-c', 'cat > ' + target, input=source.read_bytes())
+                payload = source.read_bytes()
+                if source.suffix == '.sh':
+                    payload = payload.replace(b'\r\n', b'\n')
+                run('docker', 'exec', '-i', name, 'sh', '-c', 'cat > ' + target, input=payload)
             run('docker', 'exec', name, 'chmod', '755', '/fixture/cove')
             run('docker', 'exec', name, 'chmod', '755', '/fixture/cove-old')
             run('docker', 'exec', name, 'python3', '-u', '/fixture/acceptance.py')

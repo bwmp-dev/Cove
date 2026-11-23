@@ -87,6 +87,7 @@ ENTRYPOINT ["/app/bin/cove"]
     recovery.clear_stage()
     first = recovery.create_snapshot(plan)
     assert len(first) == 64 and recovery.create_snapshot(plan) == first
+    assert sql('SELECT panel_backup_at IS NOT NULL FROM control_settings WHERE id=1') == 't'
     assert sql('SELECT name FROM projects WHERE id=\'before\'') == 'Preserved'
     print('PASS: real non-root panel, no Docker socket, sealed plan, verified encrypted snapshot and idempotent snapshot retry', flush=True)
     snapshots = [first]
@@ -303,6 +304,9 @@ ENTRYPOINT ["/app/bin/cove"]
     (legacy_root / 'compose.yaml').write_text(json.dumps(legacy_compose))
     legacy_cmd = ['docker', 'compose', '--project-directory', str(legacy_root)]
     run([*legacy_cmd, 'up', '-d', '--wait', '--wait-timeout', '120'], stdout=subprocess.DEVNULL)
+    legacy_sql = lambda query: module.command([*legacy_cmd, 'exec', '-T', 'database', 'psql', '-U', 'cove', '-d', 'cove', '-Atc', query]).decode().strip()
+    timestamp_columns = "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='control_settings' AND column_name='panel_backup_at'"
+    assert legacy_sql(timestamp_columns) == '0'
 
     class LegacyProxy(Proxy):
         backend_port = 8082
@@ -317,6 +321,8 @@ ENTRYPOINT ["/app/bin/cove"]
     legacy.inspect()
     old_snapshot = legacy.inventory()[0]['id']
     assert legacy.inventory()[0]['verified']
+    assert legacy_sql(timestamp_columns) == '0'
+    assert int(legacy_sql("SELECT count(*) FROM audit_events WHERE action='panel backup verified' AND status=200")) > 0
     assert module.read_json(legacy.root / 'receipt.json')['state'] == 'succeeded'
     assert not (legacy.root / 'journal.json').exists()
     legacy_compose['services']['cove']['image'] = 'cove-panel-recovery-fixture:local'

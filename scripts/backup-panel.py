@@ -133,7 +133,16 @@ def backup(installation, repository, password, max_bytes=8 << 30, stage=None, ex
             raise RuntimeError('Backup did not return a snapshot identity')
         restic(repository, password, 'check', '--read-data', owner=owner)
         run(['docker', 'exec', containers['database'], 'psql', '-U', 'cove', '-d', 'cove', '-v', 'ON_ERROR_STOP=1', '-c',
-             "BEGIN; UPDATE control_settings SET panel_backup_at=now() WHERE id=1; INSERT INTO audit_events(actor,action,subject,status) VALUES('host backup','panel backup verified','control-plane',200); COMMIT;"], stdout=subprocess.PIPE)
+             """BEGIN;
+DO $backup$
+BEGIN
+ IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='control_settings' AND column_name='panel_backup_at') THEN
+  UPDATE control_settings SET panel_backup_at=now() WHERE id=1;
+ END IF;
+END
+$backup$;
+INSERT INTO audit_events(actor,action,subject,status) VALUES('host backup','panel backup verified','control-plane',200);
+COMMIT;"""], stdout=subprocess.PIPE)
         return snapshot
 
 
