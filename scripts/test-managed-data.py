@@ -29,6 +29,9 @@ def docker(*args, env=None, input=None, check=True):
 
 
 def main():
+    # The parent holds the machine-wide lock through this subprocess and cleanup.
+    if os.environ.get("COVE_BROWSER_LOCK_OWNER") != str(os.getppid()):
+        raise RuntimeError("Run managed data through the locked scripts/test-browser.py fixture")
     origin = os.environ["COVE_BROWSER_URL"]
     worker = os.environ["COVE_BROWSER_WORKER"]
     if not worker.startswith("cove-browser-") or not os.environ.get("COVE_BROWSER_CA"):

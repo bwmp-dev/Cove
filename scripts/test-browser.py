@@ -1,5 +1,7 @@
 """Run browser acceptance against disposable packaged Cove and PostgreSQL containers."""
 import base64
+from contextlib import contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -17,12 +19,107 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 
 
+@contextmanager
+def browser_fixture_lock():
+    # Proxy/link names and worker state are shared across worktrees on the same Docker host.
+    path = Path(tempfile.gettempdir()) / "cove-browser-fixture.lock"
+    with path.open("a+b") as lock:
+        lock.seek(0, os.SEEK_END)
+        if lock.tell() == 0:
+            lock.write(b"\0")
+            lock.flush()
+        waiting = False
+        while True:
+            lock.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if not waiting:
+                    print("Waiting for another Cove browser fixture to finish...", flush=True)
+                    waiting = True
+                time.sleep(3)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, cwd=ROOT, **kwargs)
 
 
 def output_lines(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout.split()
+
+
+def worker_bind_helpers(previous):
+    helpers = set()
+    for container in set(output_lines("docker", "ps", "-aq")) - previous:
+        details = json.loads(run("docker", "inspect", container, capture_output=True, text=True).stdout)[0]
+        if any(mount.get("Type") == "bind" and mount.get("Source", "").startswith("/var/lib/cove/") for mount in details["Mounts"]):
+            helpers.add(container)
+    return helpers
+
+
+def cleanup_fixture_resources(workloads, operations, shared_networks, links_owned, bound_helpers=()):
+    for identifier in set(workloads) | set(operations) | set(shared_networks):
+        if not re.fullmatch(r"[0-9a-f]{32}", identifier):
+            raise RuntimeError("Unexpected fixture resource ID")
+    labels = [prefix + identifier for identifier in operations for prefix in
+              ("dev.cove.operation=", "dev.cove.hook=", "dev.cove.drill=", "dev.cove.candidate=")]
+    labels += [prefix + identifier for identifier in workloads for prefix in
+               ("com.docker.compose.project=cove-", "cove.database-tool.workload=", "cove.route-aux-owner=", "dev.cove.environment-preview=")]
+    containers = set(bound_helpers)
+    for label in labels:
+        containers.update(output_lines("docker", "ps", "-aq", "--filter", "label=" + label))
+    if links_owned:
+        containers.update(output_lines("docker", "ps", "-aq", "--filter", "name=^cove-link$", "--filter", "label=cove.managed=link"))
+        for label in ("cove.managed=ingress-check", "cove.managed=ingress-helper"):
+            for container in output_lines("docker", "ps", "-aq", "--filter", "label=" + label):
+                details = json.loads(run("docker", "inspect", container, capture_output=True, text=True).stdout)[0]
+                if any(mount.get("Name") == "cove-ingress" for mount in details["Mounts"]):
+                    containers.add(container)
+    for container in sorted(containers):
+        run("docker", "rm", "-f", "-v", container, stdout=subprocess.DEVNULL)
+    network_labels = [prefix + identifier for identifier in workloads for prefix in
+                      ("com.docker.compose.project=cove-", "cove.link-workload=", "cove.route-aux-owner=", "dev.cove.environment-preview=")]
+    network_labels += ["cove.shared-network=" + identifier for identifier in shared_networks]
+    if links_owned:
+        network_labels.append("cove.managed=link-mesh")
+    networks = set()
+    for label in network_labels:
+        networks.update(output_lines("docker", "network", "ls", "-q", "--filter", "label=" + label))
+    for network in sorted(networks):
+        run("docker", "network", "rm", network, stdout=subprocess.DEVNULL)
+    for workload in workloads:
+        for prefix in ("com.docker.compose.project=cove-", "cove.backup=", "dev.cove.restore=", "dev.cove.environment-preview="):
+            for volume in output_lines("docker", "volume", "ls", "-q", "--filter", "label=" + prefix + workload):
+                run("docker", "volume", "rm", volume, stdout=subprocess.DEVNULL)
+        for tag in output_lines("docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-release/" + workload + ":*"):
+            run("docker", "image", "rm", tag, stdout=subprocess.DEVNULL)
+
+
+def assert_ingress_removed():
+    remaining = []
+    for resource in ("container", "network", "volume"):
+        args = ["docker", resource, "ls", *(["-a"] if resource == "container" else []),
+                "--format", "{{.Names}}" if resource == "container" else "{{.Name}}", "--filter", "name=^cove-ingress$"]
+        if "cove-ingress" in output_lines(*args):
+            remaining.append(resource)
+    if remaining:
+        raise RuntimeError("Fixture cleanup left cove-ingress " + ", ".join(remaining))
 
 
 def main():
@@ -34,6 +131,9 @@ def main():
     ingress = []
     worker_state_owned = False
     links_owned = False
+    resources_cleaned = False
+    worker_containers_before = set()
+    link_images_before = set(output_lines("docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-link:*"))
     env = os.environ.copy()
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
@@ -123,6 +223,7 @@ def main():
                 worker_image, "-ec",
                 'test -z "$(ls -A /fixture)" || { echo "Refusing existing /var/lib/cove state" >&2; exit 1; }; cp -a /var/lib/cove/. /fixture/; printf %s "$1" > /fixture/.browser-owner; chown -R cove:cove /fixture', "sh", name)
             worker_state_owned = True
+            worker_containers_before = set(output_lines("docker", "ps", "-aq"))
             worker = name + "-worker"
             run("docker", "run", "-d", "--name", worker, "--network", name, "--network-alias", "worker",
                 "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
@@ -157,51 +258,39 @@ def main():
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
             if sys.argv[1:] == ["--managed-data"]:
                 env["COVE_BROWSER_CA"] = str(fixture / "cert.pem")
+                env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
                 subprocess.run([sys.executable, str(ROOT / "scripts/test-managed-data.py")], cwd=ROOT, env=env, check=True)
             else:
                 subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
         finally:
+            workloads, operation_ids, shared_networks, bound_helpers = set(), set(), set(), set()
             try:
-                if name+"-db" in containers:
+                try:
                     if name+"-worker" in containers:
                         subprocess.run(["docker", "stop", "--time", "10", name+"-worker"], check=True, stdout=subprocess.DEVNULL)
-                    operations = subprocess.run(["docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM operations"], capture_output=True, text=True, check=True)
-                    for operation in operations.stdout.splitlines():
-                        if not re.fullmatch(r"[0-9a-f]{32}", operation): raise RuntimeError("Unexpected fixture operation ID")
-                        for label in ("dev.cove.operation=", "dev.cove.hook=", "dev.cove.drill=", "dev.cove.candidate="):
-                            helpers = subprocess.run(["docker", "ps", "-aq", "--filter", "label="+label+operation], capture_output=True, text=True, check=True)
-                            for helper in helpers.stdout.split(): subprocess.run(["docker", "rm", "-f", "-v", helper], check=True, stdout=subprocess.DEVNULL)
-                    records = subprocess.run(["docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM workloads UNION SELECT subject FROM audit_events WHERE action='DELETE /api/workloads/{id}' AND status=200"], capture_output=True, text=True)
-                    if records.returncode == 0:
-                        for workload in records.stdout.splitlines():
-                            if not re.fullmatch(r"[0-9a-f]{32}", workload): raise RuntimeError("Unexpected fixture workload ID")
-                            for helper in output_lines("docker", "ps", "-aq", "--filter", "label=cove.database-tool.workload="+workload):
-                                subprocess.run(["docker", "rm", "-f", "-v", helper], check=True, stdout=subprocess.DEVNULL)
-                            for listing, removal in [(["ps", "-aq"], ["rm", "-f", "-v"]), (["network", "ls", "-q"], ["network", "rm"])]:
-                                owned = subprocess.run(["docker", *listing, "--filter", "label=com.docker.compose.project=cove-"+workload], capture_output=True, text=True, check=True)
-                                for resource in owned.stdout.split(): subprocess.run(["docker", *removal, resource], check=True, stdout=subprocess.DEVNULL)
-                            for label in ("com.docker.compose.project=cove-"+workload, "cove.backup="+workload, "dev.cove.restore="+workload):
-                                volumes = subprocess.run(["docker", "volume", "ls", "-q", "--filter", "label="+label], capture_output=True, text=True, check=True)
-                                for volume in volumes.stdout.split(): subprocess.run(["docker", "volume", "rm", volume], check=True, stdout=subprocess.DEVNULL)
-                            tags = subprocess.run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-release/"+workload+":*"], capture_output=True, text=True, check=True)
-                            for tag in tags.stdout.split(): subprocess.run(["docker", "image", "rm", tag], check=True, stdout=subprocess.DEVNULL)
-                    networks = subprocess.run(["docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM shared_networks"], capture_output=True, text=True, check=True)
-                    for network in networks.stdout.splitlines():
-                        if not re.fullmatch(r"[0-9a-f]{32}", network): raise RuntimeError("Unexpected fixture network ID")
-                        subprocess.run(["docker", "network", "rm", "cove-shared-"+network], check=True, stdout=subprocess.DEVNULL)
+                    if worker_state_owned:
+                        owners = run("docker", "run", "--rm", "--network", "none", "--entrypoint", "sh", "-v", "/var/lib/cove:/fixture:ro",
+                            worker_image, "-ec", 'test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; for dir in /fixture/workloads/*; do test ! -d "$dir" || printf "w:%s\\n" "${dir##*/}"; done; for file in /fixture/operations/*.json; do test ! -f "$file" || { id="${file##*/}"; printf "o:%s\\n" "${id%.json}"; }; done', "sh", name,
+                            capture_output=True, text=True)
+                        for owner in owners.stdout.splitlines():
+                            (workloads if owner.startswith("w:") else operation_ids).add(owner[2:])
+                        bound_helpers = worker_bind_helpers(worker_containers_before)
+                    if name+"-db" in containers:
+                        operation_ids.update(output_lines("docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM operations"))
+                        workloads.update(output_lines("docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM workloads UNION SELECT subject FROM audit_events WHERE action='DELETE /api/workloads/{id}' AND status=200"))
+                        shared_networks.update(output_lines("docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM shared_networks"))
+                finally:
+                    cleanup_fixture_resources(workloads, operation_ids, shared_networks, links_owned, bound_helpers)
+                    resources_cleaned = True
             finally:
                 for container in reversed(containers):
                     subprocess.run(["docker", "rm", "-f", "-v", container], check=False, stdout=subprocess.DEVNULL)
                 if links_owned:
-                    subprocess.run(["docker", "rm", "-f", "cove-link"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    for label in ("cove.managed=link", "cove.managed=link-mesh"):
-                        for network in output_lines("docker", "network", "ls", "-q", "--filter", "label=" + label):
-                            subprocess.run(["docker", "network", "rm", network], check=False, stdout=subprocess.DEVNULL)
-                    for image in output_lines("docker", "image", "ls", "-q", "--filter", "reference=cove-link:*"):
+                    for image in set(output_lines("docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-link:*")) - link_images_before:
                         subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL)
                 for resource in reversed(ingress):
                     subprocess.run(["docker", resource, "rm", "-f", "cove-ingress"] if resource == "container" else ["docker", resource, "rm", "cove-ingress"], check=False, stdout=subprocess.DEVNULL)
-                if worker_state_owned:
+                if worker_state_owned and resources_cleaned:
                     run("docker", "run", "--rm", "--entrypoint", "sh", "-v", "/var/lib/cove:/fixture",
                         worker_image, "-ec",
                         'test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; find /fixture -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +', "sh", name)
@@ -209,7 +298,10 @@ def main():
                     subprocess.run(["docker", "network", "rm", name], check=False, stdout=subprocess.DEVNULL)
                 for image in (worker_image, panel_image):
                     subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if ingress:
+                    assert_ingress_removed()
 
 
 if __name__ == "__main__":
-    main()
+    with browser_fixture_lock():
+        main()
