@@ -631,6 +631,9 @@ func routeOutcome(state string) string {
 
 // busy reports whether the workload has an executing operation or an unsettled route change.
 func (e *Engine) busy(workload string) bool {
+	if e.moving(workload) {
+		return true
+	}
 	if e.trafficRecoveryPending() {
 		return true
 	}

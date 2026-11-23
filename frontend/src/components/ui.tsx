@@ -365,7 +365,8 @@ export function MetaList({ children, className = "" }: { children: ReactNode; cl
     <span className={`-mx-1 -my-1 block overflow-hidden px-1 py-1 ${className}`}>
       <span className="-ml-4 flex flex-wrap items-center gap-y-1">
         {items.map((item, index) => (
-          <span key={isValidElement(item) && item.key !== null ? item.key : index} className="min-w-0 before:inline-block before:w-4 before:text-center before:text-fg-subtle before:content-['·']">
+          // The separator is its own flex item, so an item that wraps continues beside it rather than under the hidden leading separator.
+          <span key={isValidElement(item) && item.key !== null ? item.key : index} className="flex min-w-0 items-baseline before:w-4 before:shrink-0 before:text-center before:text-fg-subtle before:content-['·']">
             {item}
           </span>
         ))}

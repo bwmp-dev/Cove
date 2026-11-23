@@ -19,6 +19,8 @@ import (
 const MaxTransferBytes int64 = 64 << 30
 
 type StreamRequest struct {
+	Move          *MoveRequest     `json:"move,omitempty"`
+	SHA256        string           `json:"sha256,omitempty"`
 	Files         *FileRequest     `json:"files,omitempty"`
 	Workload      string           `json:"workload,omitempty"`
 	Action        string           `json:"action"`
@@ -63,6 +65,10 @@ func decodeRPCFrame(in io.Reader) (RPCRequest, io.Reader, error) {
 }
 
 func (e *Engine) serveStream(w http.ResponseWriter, httpRequest *http.Request, stream *StreamRequest, input io.Reader) {
+	if stream != nil && strings.HasPrefix(stream.Action, "move_") {
+		e.serveMoveStream(w, httpRequest, stream, input)
+		return
+	}
 	if stream != nil && strings.HasPrefix(stream.Action, "file_") {
 		e.serveFileStream(w, httpRequest, stream, input)
 		return

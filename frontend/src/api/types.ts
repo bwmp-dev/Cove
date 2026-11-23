@@ -5,6 +5,7 @@ export type NodeState = "pending" | "enrolled" | "unreachable" | "ssh_verified" 
 export interface MountMetric { path: string; filesystem: string; total: number; available: number; known: boolean; error?: string }
 export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number; network_rx?: number; network_tx?: number; cpus?: number; mounts?: MountMetric[] | null; mounts_limited?: boolean }
 export interface Capabilities {
+  workload_moves?: boolean;
   // Protocol support for per-service GPU selections; it does not mean the host has a GPU.
   gpu_assignments?: boolean;
   firewall?: boolean;
@@ -189,7 +190,7 @@ export interface WorkloadObservations {
   crash_events: number;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "pitr_configure" | "pitr_backup" | "pitr_forget" | "pitr_restore";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "pitr_configure" | "pitr_backup" | "pitr_forget" | "pitr_restore" | "move";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {

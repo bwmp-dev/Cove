@@ -57,6 +57,7 @@ export const actionLabels = {
   pitr_backup: "PITR base backup",
   pitr_forget: "Delete PITR history",
   pitr_restore: "PITR restore copy",
+  move: "Move to another node",
 } as const satisfies Record<OperationAction, string>;
 
 export const stateLabels: Record<OperationState, string> = {

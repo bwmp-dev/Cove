@@ -101,6 +101,7 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	moveMu           sync.Mutex
 	hostHelperBinary string
 	observationMu    sync.Mutex
 	tailSlots        chan struct{}
@@ -354,6 +355,9 @@ func (e *Engine) Submit(r Request) (Operation, error) {
 	return e.submitLocked(r)
 }
 func (e *Engine) submitLocked(r Request) (Operation, error) {
+	if e.moving(r.Workload) {
+		return Operation{}, errors.New("resource is fenced by an unfinished node move")
+	}
 	if err := ValidateRequest(r); err != nil {
 		return Operation{}, err
 	}

@@ -30,6 +30,7 @@ import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 import { formValues, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { UptimeChecks } from "../components/UptimeChecks";
+import { WorkloadMove } from "../components/WorkloadMove";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -152,6 +153,8 @@ export function ResourceGeneral() {
   const nodeName = nodes.data?.find((node) => node.id === workload.node_id)?.name ?? "Node";
   const kind = workloadKind(workload.kind);
   const editable = can(workload.permissions, "edit");
+  // Jobs and preview copies cannot be moved between nodes.
+  const movable = kind === "service" && !workload.preview_source_id;
   if (!editable) {
     return (
       <>
@@ -169,6 +172,7 @@ export function ResourceGeneral() {
           </div>
         </Section>
         <ResourceOwner id={workload.id} editable={false} />
+        {movable && <WorkloadMove workload={workload} />}
       </>
     );
   }
@@ -176,6 +180,7 @@ export function ResourceGeneral() {
     <>
       <GeneralForm workload={workload} nodeName={nodeName} />
       <ResourceOwner id={workload.id} editable />
+      {movable && <WorkloadMove workload={workload} />}
     </>
   );
 }
@@ -232,7 +237,7 @@ function GeneralForm({ workload, nodeName }: { workload: Workload; nodeName: str
               aria-describedby={describedBy(`${id}-name`, errors.name)}
             />
           </Field>
-          <SettingRow label="Node" description="Moving an existing resource to another node requires a data migration and is not supported.">
+          <SettingRow label="Node" description={workloadKind(workload.kind) === "service" && !workload.preview_source_id ? "Fixed here. Use Move to another node below to transfer the service and its data." : "Fixed after creation."}>
             <span className="text-fg-muted">{nodeName}</span>
           </SettingRow>
           {/* The type choices are wide cards, so this row spans the full width instead of the right column. */}

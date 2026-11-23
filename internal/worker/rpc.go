@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Move            *MoveRequest            `json:"move,omitempty"`
 	Firewall        *FirewallControl        `json:"firewall,omitempty"`
 	HostMaintenance *HostMaintenanceRequest `json:"host_maintenance,omitempty"`
 	Identity        *IdentityRequest        `json:"identity,omitempty"`
@@ -37,6 +38,7 @@ type RPCRequest struct {
 	ID              string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Move          *MoveState            `json:"move,omitempty"`
 	GPUs          *GPUInventory         `json:"gpus,omitempty"`
 	Firewall      *FirewallResult       `json:"firewall,omitempty"`
 	HostPatches   *HostPatchStatus      `json:"host_patches,omitempty"`
@@ -74,6 +76,16 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "move":
+		if r.Move == nil {
+			return RPCResponse{Error: "move request required"}
+		}
+		state, err := e.Move(ctx, *r.Move)
+		response := RPCResponse{Move: state}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
 	case "gpus":
 		state, err := e.GPUs(ctx)
 		response := RPCResponse{GPUs: state}
@@ -487,7 +499,7 @@ func RPCTimeout(method string) time.Duration {
 	switch method {
 	case "host_maintenance", "firewall", "gpus":
 		return 90 * time.Second
-	case "stream":
+	case "stream", "move":
 		return 30 * time.Minute
 	case "ingress_config_change":
 		return 5 * time.Minute

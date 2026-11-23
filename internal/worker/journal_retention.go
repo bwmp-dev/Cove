@@ -34,7 +34,7 @@ func (e *Engine) PruneJournals(ctx context.Context, in JournalPruneRequest) (*Jo
 		candidates[c.ID] = true
 	}
 	e.mu.Lock()
-	if e.draining || len(e.active) > 0 || len(e.pending) > 0 || len(e.recovering) > 0 {
+	if e.draining || e.hasMoveFence() || len(e.active) > 0 || len(e.pending) > 0 || len(e.recovering) > 0 {
 		e.mu.Unlock()
 		return nil, errors.New("worker operations or recovery prevent journal pruning")
 	}

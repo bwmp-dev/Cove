@@ -519,6 +519,16 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if err != nil {
 		return s.failOperation(ctx, id, "Operation configuration could not be decrypted.")
 	}
+	var header struct {
+		Action string `json:"action"`
+	}
+	if json.Unmarshal(data, &header) == nil && header.Action == "move" {
+		var intent workloadMoveIntent
+		if json.Unmarshal(data, &intent) != nil {
+			return s.failOperation(ctx, id, "Move configuration is invalid.")
+		}
+		return s.processWorkloadMove(ctx, id, intent)
+	}
 	var request worker.Request
 	if json.Unmarshal(data, &request) != nil {
 		return s.failOperation(ctx, id, "Operation configuration is invalid.")

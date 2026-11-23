@@ -872,3 +872,12 @@ ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_cpu double precision
 ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_cpu double precision NOT NULL DEFAULT 0 CHECK(resource_default_cpu=0 OR resource_default_cpu BETWEEN 0.01 AND 1024);
 ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);
+
+CREATE TABLE IF NOT EXISTS workload_moves (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ source_node text REFERENCES nodes(id) ON DELETE SET NULL,
+ target_node text REFERENCES nodes(id) ON DELETE SET NULL,
+ phase text NOT NULL DEFAULT 'queued' CHECK(phase IN ('queued','freezing','exporting','transferring','starting','committing','cleaning','rolling_back','discarding','succeeded','rolled_back')),
+ last_error text NOT NULL DEFAULT '' CHECK(length(last_error)<=1024),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);

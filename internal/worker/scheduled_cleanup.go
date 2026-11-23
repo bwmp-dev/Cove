@@ -94,7 +94,7 @@ func (e *Engine) CleanupPolicy(ctx context.Context, in CleanupControl) (*Cleanup
 		return &s, p, err
 	case "run":
 		e.mu.Lock()
-		if e.draining || len(e.active) > 0 || len(e.pending) > 0 || len(e.recovering) > 0 {
+		if e.draining || e.hasMoveFence() || len(e.active) > 0 || len(e.pending) > 0 || len(e.recovering) > 0 {
 			e.mu.Unlock()
 			return nil, nil, errors.New("wait for worker operations and recovery before cleanup")
 		}

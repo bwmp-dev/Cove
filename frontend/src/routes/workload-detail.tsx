@@ -299,7 +299,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
               {node && <NodeStateLabel state={node.state} />}
             </span>
             {latest && (
-              <span key="operation" className="inline-flex items-center gap-2 align-middle">
+              <span key="operation" className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 align-middle">
                 <Link to="/operations/$operationId" params={{ operationId: latest.id }} className="rounded hover:text-fg">
                   {kind === "job" && latest.action === "deploy" ? "Run" : actionLabels[latest.action]}
                 </Link>

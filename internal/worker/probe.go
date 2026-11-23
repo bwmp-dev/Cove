@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	WorkloadMoves       bool         `json:"workload_moves"`
 	GPUAssignments      bool         `json:"gpu_assignments"`
 	ResourceDefaults    bool         `json:"resource_defaults"`
 	Firewall            bool         `json:"firewall"`
@@ -65,6 +66,7 @@ func Inspect(ctx context.Context) Probe {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	p := Probe{GuardedDeploy: true, RestoreCopies: true, DatabaseAccess: runtime.GOOS == "linux", FileSecrets: true, ExactPromotion: true, DeploymentHooks: true, RestoreDrills: true, Preflight: true, ResourceLimits: true, PrivateNetworks: true, LogicalBackups: true, Infrastructure: true, Terminal: runtime.GOOS == "linux", SharedNetworks: true, PrivateLinks: runtime.GOOS == "linux", LiveRoutes: true, Protocol: 1, OS: runtime.GOOS, Arch: runtime.GOARCH}
+	p.WorkloadMoves = runtime.GOOS == "linux"
 	p.Previews = true
 	p.Telemetry = true
 	p.BackupRetention = true
