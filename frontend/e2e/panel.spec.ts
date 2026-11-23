@@ -1538,7 +1538,7 @@ test("environment graph creates, applies and revokes a private connection on the
   await dialog.getByLabel("Target port", { exact: true }).fill("8080");
   await dialog.getByRole("button", { name: "Create connection", exact: true }).click();
   await expect(dialog).toBeHidden();
-  const edge = section.getByRole("button", { name: /Graph API Â· app to Graph DB Â· app, graph-db.internal port 8080, Active/ });
+  const edge = section.getByRole("button", { name: /Graph API · app to Graph DB · app, graph-db.internal port 8080, Active/ });
   await expect(edge).toBeVisible({ timeout: 120_000 });
   expect(execFileSync("docker", ["inspect", "--format", "{{index .Config.Labels \"cove.managed\"}}", "cove-link"], { encoding: "utf8" }).trim()).toBe("link");
   await edge.click();
@@ -1554,7 +1554,7 @@ test("environment graph creates, applies and revokes a private connection on the
   await page.setViewportSize({ width: 1280, height: 900 });
   await section.getByRole("button", { name: "List", exact: true }).click();
   const list = section.getByRole("list", { name: "Private connections" });
-  await expect(list.getByText("graph-db.internal:8080 Â· TCP")).toBeVisible();
+  await expect(list.getByText("graph-db.internal:8080 · TCP")).toBeVisible();
   await list.getByRole("button", { name: /Actions for Graph API/ }).click();
   await page.getByRole("menuitem", { name: "Remove connection" }).click();
   await page.getByRole("dialog", { name: "Remove this connection?" }).getByRole("button", { name: "Remove connection" }).click();
@@ -1579,7 +1579,7 @@ test("environment graph creates, applies and revokes a private connection on the
     await page.setViewportSize({ width, height: 900 });
     await page.goto(environmentURL);
     await expect(section.getByRole("button", { name: "Graph", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await section.getByRole("button", { name: /D Â· app to C Â· app, c.internal port 5432, Error/ }).click();
+    await section.getByRole("button", { name: /D · app to C · app, c.internal port 5432, Error/ }).click();
     await expect(section.getByText("Broader access exists")).toBeVisible();
     await expectNoHorizontalScroll(page);
     await page.screenshot({ path: testInfo.outputPath(`connections-matrix-${width}.png`), fullPage: true });
@@ -1693,13 +1693,13 @@ test("Redis backups download as a verified RDB, import back through the panel an
     await expect(dialog.getByText("Verified backup stored", { exact: true })).toBeVisible({ timeout: 240_000 });
     await expect(dialog.getByText(createHash("sha256").update(bytes).digest("hex"), { exact: true })).toBeVisible();
     expect(redis(["GET", "marker"])).toBe("changed");
-    await expect(dialog.getByRole("button", { name: "Restore this backupâ€¦", exact: true })).toBeVisible({ timeout: 60_000 });
+    await expect(dialog.getByRole("button", { name: "Restore this backup…", exact: true })).toBeVisible({ timeout: 60_000 });
     await capture(page, testInfo, "backup-import-verified");
     const ids = await backupIds();
     expect(ids).toHaveLength(2);
     const imported = ids.find(item => item !== original);
 
-    await dialog.getByRole("button", { name: "Restore this backupâ€¦", exact: true }).click();
+    await dialog.getByRole("button", { name: "Restore this backup…", exact: true }).click();
     const confirm = page.getByRole("dialog", { name: "Restore Redis complete instance?" });
     await expect(confirm.getByText(/saves a safety backup/)).toBeVisible();
     before = await seen();
@@ -1791,7 +1791,7 @@ test("scoped editors stream, replace and edit container files on the real worker
     await expect(root.getByRole("button", { name: "proc", exact: true })).toHaveCount(0);
     await root.getByRole("button", { name: "tmp", exact: true }).click();
     const tmp = files.getByRole("list", { name: "Contents of /tmp" });
-    await expect(tmp.getByText("39.1 KiB Â· download or replace", { exact: true })).toBeVisible();
+    await expect(tmp.getByText("39.1 KiB · download or replace", { exact: true })).toBeVisible();
 
     // The download is a native link opened in a new tab, so the browser writes it to disk without page buffering.
     const link = tmp.getByRole("link", { name: "Download seed.bin", exact: true });
@@ -1936,7 +1936,7 @@ test("alert observations inspect a real service and certificate and container ru
   await capture(page, testInfo, "certificate-rule-form");
   await rules.getByRole("button", { name: "Create rule", exact: true }).click();
   const list = rules.getByRole("list", { name: "Threshold rules" });
-  await expect(list.getByText(new RegExp(String.raw`^Certificate expiry for ${hostname.replaceAll(".", String.raw`\.`)} at or below 14 days for 5 minutes on alerts-service \(Alerts project / [^)]+\) Â· repeats at most every 1 hour$`))).toBeVisible();
+  await expect(list.getByText(new RegExp(String.raw`^Certificate expiry for ${hostname.replaceAll(".", String.raw`\.`)} at or below 14 days for 5 minutes on alerts-service \(Alerts project / [^)]+\) · repeats at most every 1 hour$`))).toBeVisible();
   await rules.getByRole("button", { name: "New rule", exact: true }).click();
   await rules.getByLabel("Name", { exact: true }).fill("Restart loop");
   await chooseOption(rules.getByLabel("Metric", { exact: true }), "restarts");
@@ -1947,7 +1947,7 @@ test("alert observations inspect a real service and certificate and container ru
   await expect(rules.getByText("Enter a whole number from 1 to 1000.", { exact: true })).toBeVisible();
   await rules.getByLabel("Threshold (events)", { exact: true }).fill("3");
   await rules.getByRole("button", { name: "Create rule", exact: true }).click();
-  await expect(list.getByText(/^Container restarts at or above 3 in ten minutes for 5 minutes on alerts-service \(Alerts project \/ [^)]+\) Â· repeats at most every 1 hour$/)).toBeVisible();
+  await expect(list.getByText(/^Container restarts at or above 3 in ten minutes for 5 minutes on alerts-service \(Alerts project \/ [^)]+\) · repeats at most every 1 hour$/)).toBeVisible();
   await capture(page, testInfo, "resource-threshold-rules");
   for (const name of ["Certificate expiring", "Restart loop"]) {
     await rules.getByRole("button", { name: `Delete ${name}`, exact: true }).click();

@@ -1,5 +1,3 @@
-import { NodeGPUs } from "../components/GPUs";
-import { NodeCloudOrigin } from "../components/NodeProviders";
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
 import { CleanupPreview } from "../components/CleanupPreview";
@@ -19,10 +17,12 @@ import { NodeForm } from "../components/NodeForm";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
 import { nodeStates } from "../lib/nodes";
+import { NodeCost } from "../components/NodeCost";
+import { NodeCloudOrigin } from "../components/NodeProviders";
+import { NodeSSH } from "../components/NodeSSH";
 import { HostSecurityUpdates } from "../components/HostSecurityUpdates";
 import { NodeFirewall } from "../components/NodeFirewall";
-import { NodeCost } from "../components/NodeCost";
-import { NodeSSH } from "../components/NodeSSH";
+import { NodeGPUs } from "../components/GPUs";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Meter, MeterGroup, Notice, PageHeader, QueryError, Section, SectionGrid } from "../components/ui";
 import { projectsQuery } from "../api/projects";
 import { findPlacement } from "../lib/hierarchy";
@@ -218,8 +218,6 @@ function NodeDetail({ node }: { node: Node }) {
 
         {admin && <NodeUsage node={node} />}
         {admin && <HostSecurityUpdates node={node} />}
-      {admin && <NodeFirewall node={node} />}
-      {admin && <NodeGPUs node={node} />}
         <Section title="Capabilities" description="Reported by the worker during the last verification.">
           <Capabilities node={node} />
         </Section>
@@ -247,6 +245,7 @@ function NodeDetail({ node }: { node: Node }) {
         {admin && <NodeSSH node={node} verify={verify} />}
 
         {admin && <NodeCloudOrigin nodeId={node.id} />}
+
         {admin && <NodeCost nodeId={node.id} />}
 
         {admin && <NodeLinks nodeId={node.id} />}
@@ -272,6 +271,8 @@ function NodeDetail({ node }: { node: Node }) {
         </div>
       </SectionGrid>
       {admin && <NodeMounts node={node} />}
+      {admin && <NodeFirewall node={node} />}
+      {admin && <NodeGPUs node={node} />}
       {admin && (
         <Section title="Usage history" description="Host usage recorded by Cove from this node's worker." flush>
           <NodeMetricHistory nodeId={node.id} />
