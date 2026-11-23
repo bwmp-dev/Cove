@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var errRouteProtocolUnsupported = errors.New("upgrade and verify the worker before using maintenance pages, error pages or forward-auth")
+var errRouteProtocolUnsupported = errors.New("upgrade and verify the worker before using these route features")
 
 func checkRouteProtocol(ctx context.Context, db interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -23,7 +23,7 @@ func checkRouteProtocol(ctx context.Context, db interface {
 	if err := db.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'route_protocol')::integer,0) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, workload).Scan(&version); err != nil {
 		return err
 	}
-	if version < 2 {
+	if version < worker.RouteProtocol(routes) {
 		return errRouteProtocolUnsupported
 	}
 	return nil
@@ -65,6 +65,14 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 	if input.Policy != nil {
 		incoming = *input.Policy
 	}
+	if !provided("certificate_source", incoming.CertificateSource != "") && !provided("certificate_id", incoming.CertificateID != "") {
+		if ambiguous && policy.CertificateID != previous.CertificateID {
+			return errors.New("set the certificate explicitly when changing a path with different certificate settings")
+		}
+		if previous.CertificateID != "" {
+			policy.CertificateID, policy.CertificateSource = previous.CertificateID, previous.CertificateSource
+		}
+	}
 	if !provided("forward_auth", incoming.ForwardAuth != nil) {
 		if ambiguous && !reflect.DeepEqual(policy.ForwardAuth, previous.ForwardAuth) {
 			return errors.New("set forward-auth explicitly when changing a path with different route protections")
@@ -83,7 +91,7 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 		}
 		policy.ErrorPages = previous.ErrorPages
 	}
-	if target.Policy != nil || policy.ForwardAuth != nil || policy.Maintenance != nil || policy.ErrorPages != nil {
+	if target.Policy != nil || policy.CertificateID != "" || policy.ForwardAuth != nil || policy.Maintenance != nil || policy.ErrorPages != nil {
 		target.Policy = &policy
 	}
 	return nil

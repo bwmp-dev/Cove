@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Route } from "../api/types";
-import { emptyForwardAuth, emptyPolicy, extensionSummary, isCIDR, parseDotenv, routeRows, sameRoutes, validateComposePath, validateRepository, validateRoutes, validateWorkload, type PolicyDraft, type RouteRow, type WorkloadFormValues } from "./workload-form";
+import { certificateSwitches, emptyForwardAuth, emptyPolicy, extensionSummary, isCIDR, parseDotenv, refreshCertificateErrors, routeRows, sameRoutes, validateComposePath, validateRepository, validateRoutes, validateWorkload, type PolicyDraft, type RouteRow, type WorkloadFormValues } from "./workload-form";
 
 const base: WorkloadFormValues = {
   name: "web",
@@ -295,5 +295,77 @@ describe("route maintenance, error pages and forward-auth", () => {
     expect(extensionSummary(extended.policy)).toEqual(["forward-auth", "2 error pages"]);
     expect(extensionSummary({ maintenance: { enabled: true } })).toEqual(["maintenance on"]);
     expect(extensionSummary(undefined)).toEqual([]);
+  });
+});
+
+describe("uploaded route certificates", () => {
+  const id = "a".repeat(32);
+  const other = "b".repeat(32);
+  const uploaded: Route = { domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "uploaded", certificate_id: id } };
+  const metadata = (certificateId: string, dnsNames: string[]) => ({ id: certificateId, name: "Origin", fingerprint: "f".repeat(64), dns_names: dnsNames, not_before: "2026-01-01T00:00:00Z", expires_at: "2027-01-01T00:00:00Z", created_at: "2026-01-01T00:00:00Z" });
+  const withPolicy = (route: Route, patch: Partial<PolicyDraft>): RouteRow => {
+    const [row] = routeRows([route]) as [RouteRow];
+    return { ...row, policy: { ...(row.policy ?? emptyPolicy()), ...patch } };
+  };
+
+  it("round-trips a saved selection, even when the certificate list is unavailable", () => {
+    const rows = routeRows([uploaded]);
+    expect(rows[0]?.policy).toMatchObject({ certificateSource: "uploaded", certificateId: id });
+    expect(sameRoutes(rows, [uploaded])).toBe(true);
+    expect(validateRoutes(rows, [uploaded])).toEqual({ routes: [uploaded], errors: {} });
+    expect(validateRoutes(rows, [uploaded], [metadata(other, ["app.example.com"])])).toEqual({ routes: [uploaded], errors: {} });
+  });
+
+  it("names the new source when switching away so the saved selection is not kept", () => {
+    const acme = withPolicy(uploaded, { certificateSource: "acme", certificateId: "" });
+    expect(validateRoutes([acme], [uploaded]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "acme" } }]);
+    const fallback = withPolicy(uploaded, { certificateSource: "default", certificateId: "" });
+    expect(validateRoutes([fallback], [uploaded]).routes?.[0]?.policy).toEqual({ certificate_source: "default" });
+  });
+
+  it("clears the selection with a null ID when the hostname is added again without a certificate source", () => {
+    const fresh: RouteRow = { id: "new", domain: "app.example.com", service: "web", port: 8080 };
+    expect(validateRoutes([fresh], [uploaded]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_id: null } }]);
+    expect(validateRoutes([{ ...fresh, domain: "new.example.com" }], [uploaded]).routes).toEqual([{ domain: "new.example.com", service: "web", port: 8080 }]);
+  });
+
+  it("requires a chosen certificate and the same certificate on every path of a hostname", () => {
+    const unchosen = withPolicy(uploaded, { certificateId: "" });
+    expect(validateRoutes([unchosen]).errors[`${unchosen.id}.certificate`]).toBe("Choose an uploaded certificate.");
+    const api = withPolicy({ ...uploaded, policy: { path_prefix: "/api" } }, { certificateSource: "acme" });
+    expect(validateRoutes([...routeRows([uploaded]), api]).errors[`${api.id}.certificate`]).toMatch(/same uploaded certificate/);
+    const apiSame = withPolicy({ ...uploaded, policy: { path_prefix: "/api" } }, { certificateSource: "uploaded", certificateId: id });
+    expect(validateRoutes([...routeRows([uploaded]), apiSame]).errors).toEqual({});
+  });
+
+  it("lists hostnames that start or stop using an uploaded certificate", () => {
+    expect(certificateSwitches(routeRows([uploaded]), [uploaded])).toEqual([]);
+    expect(certificateSwitches([withPolicy(uploaded, { certificateId: other })], [uploaded])).toEqual([]);
+    expect(certificateSwitches([withPolicy(uploaded, { certificateSource: "acme", certificateId: "" })], [uploaded])).toEqual(["app.example.com"]);
+    expect(certificateSwitches([], [uploaded])).toEqual(["app.example.com"]);
+    expect(certificateSwitches(routeRows([uploaded]), [])).toEqual(["app.example.com"]);
+  });
+
+  it("reports certificates naming hostnames outside the resource's routes", () => {
+    const rows = routeRows([uploaded]);
+    expect(validateRoutes(rows, [], [metadata(id, ["app.example.com", "api.example.com"])]).errors[`${rows[0]?.id}.certificate`]).toMatch(/api\.example\.com/);
+    const both = [...rows, { id: "api", domain: "api.example.com", service: "web", port: 8080 }];
+    expect(validateRoutes(both, [], [metadata(id, ["app.example.com", "api.example.com"])]).errors).toEqual({});
+  });
+
+  it("re-checks shown certificate errors against the current rows and keeps other errors", () => {
+    const certificates = [metadata(id, ["app.example.com", "api.example.com"]), metadata(other, ["app.example.com"])];
+    const row = withPolicy(uploaded, {});
+    const wide = [row];
+    const key = `${row.id}.certificate`;
+    const shown = { ...validateRoutes(wide, [], certificates).errors, [`${row.id}.path`]: "Start with /." };
+    expect(shown[key]).toMatch(/api\.example\.com/);
+    const choose = (patch: Partial<PolicyDraft>): RouteRow[] => [{ ...row, policy: { ...emptyPolicy(), ...row.policy, ...patch } }];
+    expect(refreshCertificateErrors(shown, choose({ certificateId: other }), [], certificates)).toEqual({ [`${row.id}.path`]: "Start with /." });
+    const owned = [...wide, { id: "api", domain: "api.example.com", service: "web", port: 8080 }];
+    expect(refreshCertificateErrors(shown, owned, [], certificates)[key]).toBeUndefined();
+    expect(refreshCertificateErrors(shown, wide, [], certificates)[key]).toBe(shown[key]);
+    expect(refreshCertificateErrors(shown, choose({ certificateId: "" }), [], certificates)[key]).toBe("Choose an uploaded certificate.");
+    expect(refreshCertificateErrors({}, wide, [], certificates)).toEqual({});
   });
 });

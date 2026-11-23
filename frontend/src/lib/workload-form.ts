@@ -1,4 +1,5 @@
-import type { GitSourceInput, Route, RouteForwardAuth, RoutePolicy, Workload, WorkloadInput, WorkloadKind } from "../api/types";
+import type { GitSourceInput, Route, RouteCertificate, RouteForwardAuth, RoutePolicy, Workload, WorkloadInput, WorkloadKind } from "../api/types";
+import { ownershipProblem } from "./certificates";
 import type { ResourceDraft } from "./templates";
 
 export interface EnvRow {
@@ -246,7 +247,9 @@ export interface PolicyDraft {
   redirectHost: string;
   redirectPermanent: boolean;
   // Empty keeps an omitted value omitted; the worker treats it like "acme".
-  certificateSource: "" | "acme" | "default";
+  certificateSource: "" | "acme" | "default" | "uploaded";
+  // Saved only with the "uploaded" source. Kept as loaded even when the certificate list cannot be read.
+  certificateId: string;
   upstreams: UpstreamRow[];
   sticky: boolean;
 }
@@ -268,7 +271,7 @@ export function emptyForwardAuth(): ForwardAuthDraft {
 }
 
 export function emptyPolicy(): PolicyDraft {
-  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", upstreams: [], sticky: false };
+  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", certificateId: "", upstreams: [], sticky: false };
 }
 
 function headerRows(headers: Record<string, string> | undefined): HeaderRow[] {
@@ -301,6 +304,7 @@ function policyDraft(policy: RoutePolicy): PolicyDraft {
     redirectHost: policy.redirect_host ?? "",
     redirectPermanent: policy.redirect_permanent ?? false,
     certificateSource: policy.certificate_source ?? "",
+    certificateId: policy.certificate_id ?? "",
     upstreams: (policy.upstreams ?? []).map((target) => ({ id: crypto.randomUUID(), ...target })),
     sticky: policy.sticky ?? false,
   };
@@ -359,6 +363,7 @@ function policyOf(draft: PolicyDraft): RoutePolicy | undefined {
     if (draft.redirectPermanent) policy.redirect_permanent = true;
   }
   if (draft.certificateSource) policy.certificate_source = draft.certificateSource;
+  if (draft.certificateSource === "uploaded") policy.certificate_id = draft.certificateId;
   if (draft.upstreams.length > 0) policy.upstreams = draft.upstreams.map((target) => ({ service: target.service.trim(), port: target.port }));
   if (draft.sticky) policy.sticky = true;
   return Object.keys(policy).length > 0 ? policy : undefined;
@@ -387,14 +392,17 @@ export function routesUseExtensions(rows: RouteRow[]) {
 const extensionFields = ["maintenance", "error_pages", "forward_auth"] as const;
 
 // The API keeps a saved extension when its field is omitted on the same hostname, so a removed one, or one on a route
-// that was deleted and added again, must be sent as null. Routes on hostnames without saved extensions keep the shape
-// older workers accept.
+// that was deleted and added again, must be sent as null. It also keeps a saved uploaded certificate while both
+// certificate_source and certificate_id are omitted, so that selection is cleared with a null certificate_id. Routes on
+// hostnames without saved extensions or uploaded certificates keep the shape older workers accept.
 function withRemovals(route: Route, saved: Route[]): Route {
   const matches = saved.filter((item) => item.domain === route.domain);
   const removed = extensionFields.filter((field) => route.policy?.[field] === undefined && matches.some((item) => item.policy?.[field] != null));
-  if (removed.length === 0) return route;
+  const certificateRemoved = route.policy?.certificate_source === undefined && matches.some((item) => item.policy?.certificate_id);
+  if (removed.length === 0 && !certificateRemoved) return route;
   const policy: RoutePolicy = { ...route.policy };
   for (const field of removed) policy[field] = null;
+  if (certificateRemoved) policy.certificate_id = null;
   return { ...route, policy };
 }
 
@@ -584,6 +592,7 @@ function policyErrors(row: RouteRow, domain: string, service: string, errors: Re
   if (!draft) return;
   pageErrors(row, draft, errors);
   forwardAuthErrors(row, draft.forwardAuth, errors);
+  if (draft.certificateSource === "uploaded" && draft.certificateId === "") errors[`${row.id}.certificate`] = "Choose an uploaded certificate.";
   const path = draft.pathPrefix.trim();
   if (path && (path.length > 1024 || !routePath.test(path))) errors[`${row.id}.path`] = "Start with / and use a URL path without a query string, spaces or wildcards.";
   const redirect = draft.redirectHost.trim().toLowerCase();
@@ -608,10 +617,36 @@ function policyErrors(row: RouteRow, domain: string, service: string, errors: Re
   }
 }
 
+// Uploaded certificates are registered in the proxy's shared certificate store, so every path on a hostname must use the
+// same one and each certificate may name only hostnames this resource routes. Certificates missing from the list are
+// left to the control plane.
+function certificateErrors(rows: RouteRow[], routes: Route[], certificates: RouteCertificate[], errors: Record<string, string>) {
+  const hostnames = routes.map((route) => route.domain);
+  const selected = new Map<string, string>();
+  routes.forEach((route) => {
+    const id = route.policy?.certificate_id;
+    if (id && !selected.has(route.domain)) selected.set(route.domain, id);
+  });
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route || errors[`${row.id}.certificate`]) return;
+    const expected = selected.get(route.domain);
+    const id = route.policy?.certificate_id;
+    if (expected && id !== expected) {
+      errors[`${row.id}.certificate`] = `Every path on ${route.domain} must use the same uploaded certificate.`;
+      return;
+    }
+    const certificate = id ? certificates.find((item) => item.id === id) : undefined;
+    const problem = certificate && ownershipProblem(certificate, hostnames);
+    if (problem) errors[`${row.id}.certificate`] = problem;
+  });
+}
+
 // Mirrors the worker's route validation so mistakes are reported next to the field before saving. Hostname, service
 // and port errors are keyed by the row id; policy errors by "<row id>.<field>". Pass the saved routes when editing so
-// removed maintenance, error page and forward-auth settings are sent as explicit nulls.
-export function validateRoutes(rows: RouteRow[], saved: Route[] = []): { routes?: Route[]; errors: Record<string, string> } {
+// removed maintenance, error page and forward-auth settings are sent as explicit nulls, and the resource's uploaded
+// certificates so their hostname rules are checked.
+export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = []): { routes?: Route[]; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   const seen = new Set<string>();
   const routes = rows.map((row) => {
@@ -628,7 +663,23 @@ export function validateRoutes(rows: RouteRow[], saved: Route[] = []): { routes?
     policyErrors(row, domain, service, errors);
     return route;
   });
+  certificateErrors(rows, routes, certificates, errors);
   return Object.keys(errors).length > 0 ? { errors } : { routes: routes.map((route) => withRemovals(route, saved)), errors };
+}
+
+// Certificate errors shown after a save attempt depend on the selected certificate and on every route's hostname, so
+// they are re-checked against the edited rows: an error for a choice that was replaced is cleared or updated. Other
+// errors stay until the next save, and no certificate error appears on a row that had none.
+export function refreshCertificateErrors(errors: Record<string, string>, rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = []) {
+  const shown = Object.keys(errors).filter((key) => key.endsWith(".certificate"));
+  if (shown.length === 0) return errors;
+  const current = validateRoutes(rows, saved, certificates).errors;
+  const next = { ...errors };
+  for (const key of shown) {
+    if (current[key]) next[key] = current[key];
+    else delete next[key];
+  }
+  return next;
 }
 
 function canonical(value: unknown): unknown {
@@ -641,6 +692,14 @@ function canonical(value: unknown): unknown {
     );
   }
   return value;
+}
+
+// Hostnames that start or stop using an uploaded certificate compared with the saved routes, including removed ones.
+// The worker may have to restart the node's shared proxy to take a cached Let's Encrypt certificate out or back in.
+export function certificateSwitches(rows: RouteRow[], saved: Route[] = []) {
+  const before = new Set(saved.filter((route) => route.policy?.certificate_source === "uploaded").map((route) => route.domain));
+  const after = new Set(rows.filter((row) => row.policy?.certificateSource === "uploaded").map((row) => row.domain.trim().toLowerCase()));
+  return [...new Set([...before, ...after])].filter((domain) => before.has(domain) !== after.has(domain));
 }
 
 export function sameRoutes(rows: RouteRow[], routes: Route[] | undefined) {

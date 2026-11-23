@@ -309,7 +309,7 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
         {values.kind === "service" && (
           <FormSection
             title="Routes"
-            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced."
+            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced. To serve a certificate you provide, upload it on the resource's Domains page after creating it."
           >
             <RouteEditor
               routes={routes}

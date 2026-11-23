@@ -651,6 +651,11 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested FROM operations WHERE id=$1", id).Scan(&cancelRequested); err != nil {
 		return err
 	}
+	if !cancelRequested {
+		if err := s.prepareRouteCertificates(ctx, &request); err != nil {
+			return s.failOperation(ctx, id, "Selected route certificates are unavailable; check certificate ownership and expiry.")
+		}
+	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
 	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
@@ -669,6 +674,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if worker.HasRouteExtensions(request.Routes) {
 		method = "submit_routes_v2"
+	}
+	if worker.RouteProtocol(request.Routes) >= 3 {
+		method = "submit_routes_v3"
 	}
 	if cancelRequested {
 		method = "cancel"

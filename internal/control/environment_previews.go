@@ -617,6 +617,9 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 	for i, route := range src.Config.Routes {
 		routedServices[route.Service] = true
 		if route.Policy != nil {
+			if recipe.DomainTemplate != "" && route.Policy.CertificateID != "" {
+				block("route_certificate", "Uploaded certificates are scoped to production hostnames.", "Exclude this resource or remove its certificate assignment before publishing copied routes.", "")
+			}
 			for _, upstream := range route.Policy.Upstreams {
 				routedServices[upstream.Service] = true
 			}

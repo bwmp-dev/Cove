@@ -424,7 +424,7 @@ func certificatePath(value string) bool {
 	if path.Clean(value) != value || !strings.HasPrefix(value, "/data/") {
 		return false
 	}
-	for _, reserved := range []string{"/data/dynamic/", "/data/cove-custom-history/"} {
+	for _, reserved := range []string{"/data/dynamic/", "/data/cove-custom-history/", "/data/cove-certificates/"} {
 		if strings.HasPrefix(value, reserved) {
 			return false
 		}

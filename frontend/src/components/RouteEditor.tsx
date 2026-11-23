@@ -3,8 +3,8 @@ import { useId, useState } from "react";
 import type { Route } from "../api/types";
 import { cidrList, draftUsesExtensions, emptyPolicy, routeLimits, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
 import { describedBy, inputClass } from "../lib/styles";
+import { CertificateSourceField, UploadedCertificatePicker, type CertificateChoices } from "./RouteCertificatePicker";
 import { RouteExtensionFields } from "./RouteExtensions";
-import { Select } from "./Select";
 import { Button, Field, Notice, SwitchField } from "./ui";
 
 const label = "mb-1 block text-xs font-medium text-fg-muted";
@@ -14,8 +14,9 @@ const noErrors: Record<string, string> = {};
 // policies: whether the target node's worker reports route policy support; undefined while unknown, which hides the
 // advanced controls. Saved policies are always kept, whether or not they can be edited here. extensions: whether it
 // applies maintenance, error pages and forward-auth (route protocol 2); saved ones stay visible and removable when not.
-// saved: the routes the API has, so removing forward-auth from one of their hostnames can be called out.
-export function RouteEditor({ routes, errors = noErrors, policies, extensions, saved = noRoutes, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; saved?: Route[]; onChange: (routes: RouteRow[]) => void }) {
+// saved: the routes the API has, so removing forward-auth from one of their hostnames can be called out. certificates:
+// the resource's uploaded certificates; omitted where none can exist yet, such as the create form.
+export function RouteEditor({ routes, errors = noErrors, policies, extensions, saved = noRoutes, certificates, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; saved?: Route[]; certificates?: CertificateChoices; onChange: (routes: RouteRow[]) => void }) {
   const id = useId();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   function update(key: string, patch: Partial<RouteRow>) {
@@ -132,6 +133,7 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, s
                           route={route}
                           policy={route.policy}
                           errors={errors}
+                          certificates={certificates}
                           onChange={(patch) => update(route.id, { policy: { ...(route.policy ?? emptyPolicy()), ...patch } })}
                         />
                         {extensions !== undefined && (extensions || draftUsesExtensions(route.policy)) && (
@@ -177,10 +179,11 @@ function policySummary(policy: PolicyDraft) {
   if (policy.upstreams.length > 0) parts.push(policy.upstreams.length === 1 ? "1 extra upstream" : `${policy.upstreams.length} extra upstreams`);
   if (policy.sticky) parts.push("sticky sessions");
   if (policy.certificateSource === "default") parts.push("proxy default certificate");
+  if (policy.certificateSource === "uploaded") parts.push("uploaded certificate");
   return parts.length > 0 ? parts.join(", ") : "Not configured";
 }
 
-function PolicyFields({ id, route, policy, errors, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; onChange: (patch: Partial<PolicyDraft>) => void }) {
+function PolicyFields({ id, route, policy, errors, certificates, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; certificates?: CertificateChoices; onChange: (patch: Partial<PolicyDraft>) => void }) {
   const pathError = errors[`${route.id}.path`];
   const redirectError = errors[`${route.id}.redirect`];
   const cidrError = errors[`${route.id}.cidr`];
@@ -203,18 +206,9 @@ function PolicyFields({ id, route, policy, errors, onChange }: { id: string; rou
             aria-describedby={describedBy(`${id}-path`, pathError, true)}
           />
         </Field>
-        <Field id={`${id}-certificate`} label="Certificate" hint={policy.certificateSource === "default" ? "Uses the certificate configured in the node's proxy settings, which may be self-signed. Browsers trust it only if you provisioned one." : "Requested from Let's Encrypt automatically."}>
-          <Select
-            id={`${id}-certificate`}
-            value={policy.certificateSource || "acme"}
-            onChange={(event) => onChange({ certificateSource: event.target.value === "default" ? "default" : policy.certificateSource === "acme" ? "acme" : "" })}
-            aria-describedby={`${id}-certificate-hint`}
-          >
-            <option value="acme">Let's Encrypt</option>
-            <option value="default">Proxy default certificate</option>
-          </Select>
-        </Field>
+        <CertificateSourceField id={`${id}-certificate`} policy={policy} choices={certificates} onChange={onChange} />
       </div>
+      {policy.certificateSource === "uploaded" && <UploadedCertificatePicker id={`${id}-uploaded`} route={route} policy={policy} error={errors[`${route.id}.certificate`]} choices={certificates} onChange={onChange} />}
 
       <div className="space-y-3">
         <Field id={`${id}-redirect`} label="Redirect to hostname" optional error={redirectError} hint="Sends every request to this hostname over HTTPS, keeping the path and query. Its DNS record and route are not created for you.">

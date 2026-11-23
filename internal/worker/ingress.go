@@ -114,6 +114,7 @@ type ingressLoadBalancer struct {
 }
 
 type dynamicIngress struct {
+	TLS  *ingressTLS `json:"tls,omitempty"`
 	HTTP struct {
 		Routers     map[string]ingressRouter     `json:"routers,omitempty"`
 		Services    map[string]ingressService    `json:"services,omitempty"`
@@ -373,16 +374,22 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	if err = json.Unmarshal([]byte(config), &desired); err != nil {
 		return err
 	}
+	var certificateErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		current, readErr := e.output(ctx, "docker", "exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers")
 		if readErr == nil && ingressAccepted(current, desired) {
-			return e.pruneRouteAuxiliary(ctx, desired, out)
+			if certificateErr = e.confirmRouteCertificates(ctx, routes); certificateErr == nil {
+				return e.pruneRouteAuxiliary(ctx, desired, out)
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(time.Second):
 		}
+	}
+	if certificateErr != nil {
+		return certificateErr
 	}
 	return errors.New("ingress did not accept configuration; check ports 80/443 and ingress logs")
 }
@@ -725,4 +732,47 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		found++
 	}
 	return found == len(desired.HTTP.Routers)
+}
+
+func (e *Engine) recoverIngressDecisions() error {
+	e.mu.Lock()
+	ids := make([]string, 0, len(e.recovering))
+	for id := range e.recovering {
+		ids = append(ids, id)
+	}
+	e.mu.Unlock()
+	e.ingressMu.Lock()
+	defer e.ingressMu.Unlock()
+	routes, err := e.loadIngress()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, id := range ids {
+		journal, err := e.read(id)
+		if err != nil {
+			return err
+		}
+		if journal.RouteChange == nil {
+			continue
+		}
+		desired := journal.Request.Routes
+		if !journal.RouteChange.Committed {
+			desired = journal.RouteChange.Previous
+		}
+		if RoutesEqual(routes[journal.Request.Workload], desired) {
+			continue
+		}
+		if len(desired) == 0 {
+			delete(routes, journal.Request.Workload)
+		} else {
+			routes[journal.Request.Workload] = desired
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	// Decide all interrupted route changes before any startup sync can expose an uncommitted protection removal.
+	return writeJSON(filepath.Join(e.Root, "ingress.json"), routes)
 }

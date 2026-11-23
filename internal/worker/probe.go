@@ -59,7 +59,7 @@ func Inspect(ctx context.Context) Probe {
 	p.GuardedHooks = true
 	p.RoutePolicies = true
 	if runtime.GOOS == "linux" {
-		p.RouteProtocol = 2
+		p.RouteProtocol = 3
 	}
 	p.Rollouts = true
 	p.CPUAutoscale = true

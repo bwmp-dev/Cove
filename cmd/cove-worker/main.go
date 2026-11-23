@@ -35,6 +35,13 @@ func main() {
 		reload := make(chan os.Signal, 1)
 		signal.Notify(reload, syscall.SIGHUP)
 		err = worker.RunLinkGateway(ctx, reload)
+	case "certificate-probe":
+		var file *os.File
+		file, err = os.Open("/config/probes.json")
+		if err == nil {
+			defer file.Close()
+			err = worker.RunRouteCertificateProbe(ctx, file)
+		}
 	case "route-helper":
 		err = worker.RunRouteAuxiliary(ctx)
 	case "idle-gateway":

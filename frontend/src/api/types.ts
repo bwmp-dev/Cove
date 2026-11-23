@@ -8,7 +8,8 @@ export interface Capabilities {
   terminal?: boolean;
   infrastructure?: boolean;
   route_policies?: boolean;
-  // 2 means the worker applies maintenance pages, custom error pages and forward-auth. Missing, 0 and 1 do not.
+  // 2 means the worker applies maintenance pages, custom error pages and forward-auth; 3 adds uploaded route
+  // certificates. Missing, 0 and 1 support neither.
   route_protocol?: number;
   // Docker Buildx is present, so the worker can check deployed images and pull before redeploying.
   image_lifecycle?: boolean;
@@ -229,9 +230,25 @@ export interface RoutePolicy {
   ip_allow_list?: string[];
   redirect_host?: string;
   redirect_permanent?: boolean;
-  certificate_source?: "acme" | "default";
+  certificate_source?: "acme" | "default" | "uploaded";
+  // Set only with certificate_source "uploaded": a certificate uploaded to this resource. Like the extensions above, a
+  // saved selection is kept while both certificate fields are omitted; null, "acme" or "default" clears it.
+  certificate_id?: string | null;
   upstreams?: RouteUpstream[];
   sticky?: boolean;
+}
+
+// Public metadata of a certificate uploaded to a resource. The certificate chain and private key are never returned.
+export interface RouteCertificate {
+  id: string;
+  name: string;
+  fingerprint: string;
+  common_name?: string;
+  dns_names: string[];
+  ip_addresses?: string[];
+  not_before: string;
+  expires_at: string;
+  created_at: string;
 }
 
 export interface Route {

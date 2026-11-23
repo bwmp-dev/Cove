@@ -29,6 +29,7 @@ type RoutePolicy struct {
 	IPAllowList       []string          `json:"ip_allow_list,omitempty"`
 	RedirectHost      string            `json:"redirect_host,omitempty"`
 	RedirectPermanent bool              `json:"redirect_permanent,omitempty"`
+	CertificateID     string            `json:"certificate_id,omitempty"`
 	CertificateSource string            `json:"certificate_source,omitempty"`
 	Upstreams         []RouteUpstream   `json:"upstreams,omitempty"`
 	Sticky            bool              `json:"sticky,omitempty"`
@@ -63,8 +64,11 @@ func (r Route) validatePolicy() error {
 	if len(p.PathPrefix) > 1024 || (p.PathPrefix != "" && !routePath.MatchString(p.PathPrefix)) {
 		return errors.New("route path prefix must be an absolute URL path without query or rule syntax")
 	}
-	if p.CertificateSource != "" && p.CertificateSource != "acme" && p.CertificateSource != "default" {
-		return errors.New("route certificate source must be acme or default")
+	if p.CertificateSource != "" && p.CertificateSource != "acme" && p.CertificateSource != "default" && p.CertificateSource != "uploaded" {
+		return errors.New("route certificate source must be acme, default or uploaded")
+	}
+	if (p.CertificateSource == "uploaded") != (p.CertificateID != "") || (p.CertificateID != "" && !certificateIdentifier.MatchString(p.CertificateID)) {
+		return errors.New("uploaded certificate source requires a certificate ID; other sources cannot select one")
 	}
 	if p.RedirectHost != "" {
 		if p.RedirectHost == r.Domain || ValidateRoutes([]Route{{Domain: p.RedirectHost, Service: r.Service, Port: r.Port}}, "service") != nil {
@@ -146,7 +150,7 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 	if p.PathPrefix != "" {
 		router.Rule += " && PathPrefix(`" + p.PathPrefix + "`)"
 	}
-	if p.CertificateSource == "default" {
+	if p.CertificateSource == "default" || p.CertificateSource == "uploaded" {
 		router.TLS = map[string]string{}
 	}
 	if c.HTTP.Middlewares == nil {

@@ -146,6 +146,14 @@ func (s *Server) routeConflict(ctx context.Context, tx pgx.Tx, workload string, 
 
 // checkRouteClaims writes the HTTP error for an unavailable hostname and reports whether the routes may be saved.
 func (s *Server) checkRouteClaims(w http.ResponseWriter, ctx context.Context, tx pgx.Tx, workload string, routes []worker.Route) bool {
+	if err := s.validateRouteCertificates(ctx, tx, workload, routes); err != nil {
+		if errors.Is(err, errInvalidRouteCertificate) {
+			http.Error(w, err.Error(), 400)
+		} else {
+			http.Error(w, "route certificates unavailable", 503)
+		}
+		return false
+	}
 	domain, err := s.routeConflict(ctx, tx, workload, routes)
 	if err != nil {
 		http.Error(w, "could not check route hostnames", 503)

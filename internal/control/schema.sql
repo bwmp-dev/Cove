@@ -733,3 +733,14 @@ ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_cpu_scale_at timestamptz;
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_operation_id text NOT NULL DEFAULT '';
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_status text NOT NULL DEFAULT 'disabled';
 ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_error text NOT NULL DEFAULT '';
+
+-- Resource-scoped immutable TLS versions keep private keys outside configuration and history.
+CREATE TABLE IF NOT EXISTS route_certificates (
+ id text PRIMARY KEY,
+ workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ name text NOT NULL,
+ material bytea NOT NULL,
+ metadata jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS route_certificates_workload_idx ON route_certificates(workload_id);

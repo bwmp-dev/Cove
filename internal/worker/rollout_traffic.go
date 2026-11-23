@@ -258,6 +258,9 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 			config.HTTP.Routers[next] = router
 		}
 	}
+	if err := e.applyRouteCertificates(ctx, routes, &config, out); err != nil {
+		return "", err
+	}
 	if err := e.applyRouteAuxiliary(ctx, routes, &config, out); err != nil {
 		return "", err
 	}

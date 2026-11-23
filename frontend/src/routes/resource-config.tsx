@@ -6,7 +6,8 @@ import { useEffect, useId, useState, type FormEvent } from "react";
 import { errorMessage } from "../api/client";
 import { useUpdateRoutes, useUpdateWorkload } from "../api/mutations";
 import { keys, nodesQuery, operationQuery, workloadOperationsQuery } from "../api/queries";
-import type { Workload, WorkloadInput, DeploymentHooks, FileSecret } from "../api/types";
+import type { Route, RouteCertificate, Workload, WorkloadInput, DeploymentHooks, FileSecret } from "../api/types";
+import { certificatesQuery } from "../api/certificates";
 import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
 import { DatabaseAccess } from "../components/DatabaseAccess";
@@ -19,6 +20,10 @@ import { ResourceBuild } from "../components/ResourceBuild";
 import { supportsBuildPublish } from "../lib/builds";
 import { supportsImageLifecycle } from "../lib/images";
 import { RouteEditor } from "../components/RouteEditor";
+import { RouteCertificates } from "../components/RouteCertificates";
+import type { CertificateChoices } from "../components/RouteCertificatePicker";
+import { isManagedPreview } from "../lib/previews";
+import { shortId } from "../lib/format";
 import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
 import { Webhook } from "../components/Webhook";
 import { SourceFields, TypeFields } from "../components/WorkloadForm";
@@ -32,7 +37,7 @@ import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
-import { extensionSummary, formValues, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { certificateSwitches, extensionSummary, formValues, refreshCertificateErrors, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type RouteRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -578,34 +583,47 @@ export function ResourceDomains() {
   return <DomainsPanel workload={workload} />;
 }
 
+// Managed previews cannot hold uploaded certificates: their hostnames are generated and the API rejects their uploads.
 function DomainsPanel({ workload }: { workload: Workload }) {
   const nodes = useQuery(nodesQuery);
-  const nodeName = nodes.data?.find((node) => node.id === workload.node_id)?.name ?? "its node";
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
+  const nodeName = node?.name ?? "its node";
   const editable = can(workload.permissions, "edit");
+  const uploads = !isManagedPreview(workload);
+  const certificates = useQuery({ ...certificatesQuery(workload.id), enabled: uploads });
+  const busy = Boolean(useActiveOperation(workload.id));
+  const choices: CertificateChoices | undefined = uploads
+    ? { supported: node ? (node.capabilities?.route_protocol ?? 0) >= 3 : undefined, list: certificates.data, error: certificates.error, retry: () => void certificates.refetch(), retrying: certificates.isFetching }
+    : undefined;
   return (
-    <Section
-      width="form"
-      title="Domains"
-      description={`HTTPS hostnames served by the managed Traefik proxy on ${nodeName}. Point each hostname's DNS at that node and keep ports 80 and 443 reachable; certificates are issued automatically.`}
-    >
-      {editable ? (
-        <DomainsForm workload={workload} />
-      ) : (
-        <div className="space-y-4">
-          <ViewOnly />
-          <RouteList workload={workload} />
-        </div>
-      )}
-    </Section>
+    <>
+      <Section
+        width="form"
+        title="Domains"
+        description={`HTTPS hostnames served by the managed Traefik proxy on ${nodeName}. Point each hostname's DNS at that node and keep ports 80 and 443 reachable; certificates are issued automatically unless a route uses the proxy default or an uploaded certificate.`}
+      >
+        {editable ? (
+          <DomainsForm workload={workload} certificates={choices} />
+        ) : (
+          <div className="space-y-4">
+            <ViewOnly />
+            <RouteList workload={workload} certificates={certificates.data} />
+          </div>
+        )}
+      </Section>
+      {uploads && <RouteCertificates workloadId={workload.id} certificates={certificates} routes={workload.routes ?? []} editable={editable} busy={busy} />}
+    </>
   );
 }
 
-function RouteList({ workload }: { workload: Workload }) {
+function RouteList({ workload, certificates }: { workload: Workload; certificates?: RouteCertificate[] }) {
   if (!workload.routes?.length) return <p className="text-[13px] text-fg-muted">No domains.</p>;
   return (
     <ul aria-label="Routes" className="divide-y divide-line rounded-md border border-line">
       {workload.routes.map((route) => {
         const extensions = extensionSummary(route.policy);
+        const certificateId = route.policy?.certificate_id;
+        if (certificateId) extensions.push(`uploaded certificate ${certificates?.find((item) => item.id === certificateId)?.name ?? shortId(certificateId)}`);
         return (
           <li key={route.domain} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-2 text-[13px]">
             <a className="break-all underline underline-offset-4" href={`https://${route.domain}`} target="_blank" rel="noreferrer">
@@ -622,7 +640,19 @@ function RouteList({ workload }: { workload: Workload }) {
   );
 }
 
-function DomainsForm({ workload }: { workload: Workload }) {
+// Taking a cached Let's Encrypt certificate out of the shared proxy, or putting it back, can require restarting the proxy.
+function ProxyRestartNotice({ rows, saved, nodeName = "this node" }: { rows: RouteRow[]; saved?: Route[]; nodeName?: string }) {
+  const switches = certificateSwitches(rows, saved);
+  if (switches.length === 0) return null;
+  const one = switches.length === 1;
+  return (
+    <Notice tone="warn" title="Saving may briefly restart the shared proxy">
+      <span className="font-mono break-all">{switches.join(", ")}</span> {one ? "changes" : "change"} to or from an uploaded certificate. If the proxy holds a cached Let&apos;s Encrypt certificate for {one ? "this hostname" : "these hostnames"}, applying restarts it, interrupting connections to every resource on {nodeName} for a moment.
+    </Notice>
+  );
+}
+
+function DomainsForm({ workload, certificates }: { workload: Workload; certificates?: CertificateChoices }) {
   const client = useQueryClient();
   const operations = useQuery(workloadOperationsQuery(workload.id));
   // The resource is fetched before a deploy finishes, so also trust a release seen in the live operation list.
@@ -646,7 +676,7 @@ function DomainsForm({ workload }: { workload: Workload }) {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = validateRoutes(rows, workload.routes);
+    const result = validateRoutes(rows, workload.routes, certificates?.list);
     setErrors(result.errors);
     if (!result.routes) {
       focusFirstInvalid(event.currentTarget);
@@ -721,13 +751,16 @@ function DomainsForm({ workload }: { workload: Workload }) {
           policies={node ? Boolean(node.capabilities?.route_policies) : undefined}
           extensions={node ? (node.capabilities?.route_protocol ?? 0) >= 2 : undefined}
           saved={workload.routes}
+          certificates={certificates}
           onChange={(next) => {
             save.reset();
             setApplying(null);
             setRows(next);
+            setErrors((current) => refreshCertificateErrors(current, next, workload.routes, certificates?.list));
           }}
         />
       </fieldset>
+      <ProxyRestartNotice rows={rows} saved={workload.routes} nodeName={node?.name} />
       {status}
       <div className="border-t border-line pt-4">
       <SaveBar

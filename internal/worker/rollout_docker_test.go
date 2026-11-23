@@ -22,6 +22,19 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "certificate-probe" {
+		file, err := os.Open("/config/probes.json")
+		if err == nil {
+			err = RunRouteCertificateProbe(context.Background(), file)
+			file.Close()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	if len(os.Args) == 2 && os.Args[1] == "route-helper" {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 		defer stop()
