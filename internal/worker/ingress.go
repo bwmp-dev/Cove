@@ -352,6 +352,9 @@ func (e *Engine) loadIngress() (map[string][]Route, error) {
 }
 
 func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out io.Writer) error {
+	if err := e.restrictCloudflareOrigins(ctx, routes); err != nil {
+		return err
+	}
 	if err := e.ingressExposureReady(); err != nil {
 		return err
 	}
@@ -530,9 +533,9 @@ func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route
 	if _, err = ingressConfig(desired); err != nil {
 		return err
 	}
-	if err = writeJSON(filepath.Join(e.Root, "ingress.json"), desired); err != nil {
+	if err = e.writeManagedIngress(desired); err != nil {
 		// A failed write may still have replaced the file, which the next worker start would apply.
-		if restoreErr := writeJSON(filepath.Join(e.Root, "ingress.json"), previous); restoreErr != nil {
+		if restoreErr := e.writeManagedIngress(previous); restoreErr != nil {
 			return fmt.Errorf("%w: %w", errIngressUnrestored, errors.Join(err, restoreErr))
 		}
 		return err
@@ -540,7 +543,7 @@ func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route
 	if err = e.syncIngress(ctx, desired, out); err != nil {
 		recovery, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancel()
-		if saveErr := writeJSON(filepath.Join(e.Root, "ingress.json"), previous); saveErr != nil {
+		if saveErr := e.writeManagedIngress(previous); saveErr != nil {
 			return fmt.Errorf("%w: %w", errIngressUnrestored, errors.Join(err, saveErr))
 		}
 		if restoreErr := e.syncIngress(recovery, previous, out); restoreErr != nil {
@@ -662,7 +665,7 @@ func (e *Engine) restoreRoutes(ctx context.Context, workload string, previous []
 	} else {
 		owned[workload] = previous
 	}
-	if err = writeJSON(filepath.Join(e.Root, "ingress.json"), owned); err != nil {
+	if err = e.writeManagedIngress(owned); err != nil {
 		return err
 	}
 	path := filepath.Join(e.Root, "workloads", workload, "current.json")
@@ -880,5 +883,5 @@ func (e *Engine) recoverIngressDecisions() error {
 		return nil
 	}
 	// Decide all interrupted route changes before any startup sync can expose an uncommitted protection removal.
-	return writeJSON(filepath.Join(e.Root, "ingress.json"), routes)
+	return e.writeManagedIngress(routes)
 }

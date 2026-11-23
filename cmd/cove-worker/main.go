@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "certificate-probe")) {
+	if len(os.Args) != 2 && !((len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "cloudflare-probe") && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "certificate-probe")) {
 		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|idle-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
@@ -18,6 +18,18 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "cloudflare-connector-origin-probe":
+		err = worker.RunCloudflareConnectorOriginProbe(ctx)
+	case "cloudflare-origin-probe":
+		err = worker.RunCloudflareOriginProbe(ctx)
+	case "cloudflare-origin":
+		err = worker.RunCloudflareOrigin(ctx)
+	case "cloudflare-probe":
+		revision := ""
+		if len(os.Args) == 4 {
+			revision = os.Args[3]
+		}
+		err = worker.RunCloudflareProbe(ctx, os.Args[2], revision)
 	case "healthcheck":
 		err = worker.HTTPHealth(ctx, os.Args[2])
 	case "tunnel":

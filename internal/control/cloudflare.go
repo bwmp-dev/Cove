@@ -323,6 +323,13 @@ func (s *Server) reconcileResourceDNS(ctx context.Context, zone, team string, ex
 	}
 	for _, route := range config.Routes {
 		if !route.IsTransportRoute() && (route.Policy == nil || route.Policy.Visibility == "" || route.Policy.Visibility == "public") && cloudflareDomainAllowed(domains, route.Domain) {
+			var reserved bool
+			if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM node_cloudflare_tunnels WHERE node_id=$1 AND $2=ANY(hostnames))", node, route.Domain).Scan(&reserved); err != nil {
+				return err
+			}
+			if reserved {
+				continue
+			}
 			if err = s.reconcileDNSRecord(ctx, c, route.Domain, c.Nodes[node]); err != nil {
 				return err
 			}

@@ -17,47 +17,69 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
-	Exposures *IngressExposureRequest `json:"exposures,omitempty"`
-	Links     *LinkConfig             `json:"links,omitempty"`
-	Ingress   *IngressConfigRequest   `json:"ingress,omitempty"`
-	Tunnel    *TunnelRequest          `json:"tunnel,omitempty"`
-	Promotion *PromotionExport        `json:"promotion,omitempty"`
-	Registry  *Registry               `json:"registry,omitempty"`
-	Storage   *StorageLocation        `json:"storage,omitempty"`
-	Terminal  *TerminalRequest        `json:"terminal,omitempty"`
-	Method    string                  `json:"method"`
-	Request   *Request                `json:"request,omitempty"`
-	ID        string                  `json:"id,omitempty"`
+	Publishing *CloudflarePublishing   `json:"publishing,omitempty"`
+	Exposures  *IngressExposureRequest `json:"exposures,omitempty"`
+	Links      *LinkConfig             `json:"links,omitempty"`
+	Ingress    *IngressConfigRequest   `json:"ingress,omitempty"`
+	Tunnel     *TunnelRequest          `json:"tunnel,omitempty"`
+	Promotion  *PromotionExport        `json:"promotion,omitempty"`
+	Registry   *Registry               `json:"registry,omitempty"`
+	Storage    *StorageLocation        `json:"storage,omitempty"`
+	Terminal   *TerminalRequest        `json:"terminal,omitempty"`
+	Method     string                  `json:"method"`
+	Request    *Request                `json:"request,omitempty"`
+	ID         string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
-	Exposures     *IngressExposureStatus `json:"exposures,omitempty"`
-	ExposurePlan  *IngressExposurePlan   `json:"exposure_plan,omitempty"`
-	CPUScale      *CPUScaleObservation   `json:"cpu_scale,omitempty"`
-	Idle          *IdleStatus            `json:"idle,omitempty"`
-	Rollout       *RolloutStatus         `json:"rollout,omitempty"`
-	Suspension    *SuspensionStatus      `json:"suspension,omitempty"`
-	Links         *LinkStatus            `json:"links,omitempty"`
-	Ingress       *IngressConfigState    `json:"ingress,omitempty"`
-	IngressFile   *IngressConfigFile     `json:"ingress_file,omitempty"`
-	IngressResult *IngressConfigResult   `json:"ingress_result,omitempty"`
-	RestoreCopy   *RestoreCopy           `json:"restore_copy,omitempty"`
-	Images        map[string]string      `json:"images,omitempty"`
-	Inventory     *PreviewInventory      `json:"inventory,omitempty"`
-	Cleanup       *CleanupPreview        `json:"cleanup,omitempty"`
-	Preflight     *PreflightReport       `json:"preflight,omitempty"`
-	Terminal      *TerminalResponse      `json:"terminal,omitempty"`
-	Releases      []Release              `json:"releases,omitempty"`
-	Backups       []BackupRecord         `json:"backups,omitempty"`
-	Maintenance   *Maintenance           `json:"maintenance,omitempty"`
-	Probe         *Probe                 `json:"probe,omitempty"`
-	Operation     *Operation             `json:"operation,omitempty"`
-	Logs          string                 `json:"logs,omitempty"`
-	Error         string                 `json:"error,omitempty"`
-	Containers    []Container            `json:"containers,omitempty"`
+	Publishing    *CloudflarePublishingStatus `json:"publishing,omitempty"`
+	Exposures     *IngressExposureStatus      `json:"exposures,omitempty"`
+	ExposurePlan  *IngressExposurePlan        `json:"exposure_plan,omitempty"`
+	CPUScale      *CPUScaleObservation        `json:"cpu_scale,omitempty"`
+	Idle          *IdleStatus                 `json:"idle,omitempty"`
+	Rollout       *RolloutStatus              `json:"rollout,omitempty"`
+	Suspension    *SuspensionStatus           `json:"suspension,omitempty"`
+	Links         *LinkStatus                 `json:"links,omitempty"`
+	Ingress       *IngressConfigState         `json:"ingress,omitempty"`
+	IngressFile   *IngressConfigFile          `json:"ingress_file,omitempty"`
+	IngressResult *IngressConfigResult        `json:"ingress_result,omitempty"`
+	RestoreCopy   *RestoreCopy                `json:"restore_copy,omitempty"`
+	Images        map[string]string           `json:"images,omitempty"`
+	Inventory     *PreviewInventory           `json:"inventory,omitempty"`
+	Cleanup       *CleanupPreview             `json:"cleanup,omitempty"`
+	Preflight     *PreflightReport            `json:"preflight,omitempty"`
+	Terminal      *TerminalResponse           `json:"terminal,omitempty"`
+	Releases      []Release                   `json:"releases,omitempty"`
+	Backups       []BackupRecord              `json:"backups,omitempty"`
+	Maintenance   *Maintenance                `json:"maintenance,omitempty"`
+	Probe         *Probe                      `json:"probe,omitempty"`
+	Operation     *Operation                  `json:"operation,omitempty"`
+	Logs          string                      `json:"logs,omitempty"`
+	Error         string                      `json:"error,omitempty"`
+	Containers    []Container                 `json:"containers,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "cloudflare_publishing", "cloudflare_publishing_apply", "cloudflare_publishing_disable":
+		var status CloudflarePublishingStatus
+		var err error
+		if r.Method == "cloudflare_publishing" {
+			status, err = e.CloudflarePublishingStatus(ctx)
+		} else {
+			if r.Method == "cloudflare_publishing_apply" && r.Publishing == nil {
+				return RPCResponse{Error: "managed tunnel specification required"}
+			}
+			value := r.Publishing
+			if r.Method == "cloudflare_publishing_disable" {
+				value = nil
+			}
+			status, err = e.ApplyCloudflarePublishing(ctx, value)
+		}
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Publishing: &status}
+
 	case "ingress_exposures", "ingress_exposures_initialize":
 		var status IngressExposureStatus
 		var err error
@@ -395,7 +417,7 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
 	switch method {
-	case "ingress_config_change", "ingress_exposures_apply":
+	case "cloudflare_publishing_apply", "cloudflare_publishing_disable", "ingress_config_change", "ingress_exposures_apply":
 		return 5 * time.Minute
 	case "links_apply":
 		return 4 * time.Minute

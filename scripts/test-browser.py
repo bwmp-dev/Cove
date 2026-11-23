@@ -165,7 +165,10 @@ def cleanup_worker_resources(fixture, state, root_owned, kinds=("container", "ne
 
 def main():
     certificate_dns = "--certificate-dns" in sys.argv[1:]
-    browser_args = [value for value in sys.argv[1:] if value != "--certificate-dns"]
+    cloudflare_tunnel = "--cloudflare-tunnel" in sys.argv[1:]
+    if certificate_dns and cloudflare_tunnel:
+        raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
@@ -174,6 +177,7 @@ def main():
     worker_state_owned = False
     certificate_config = None
     extra_images = []
+    tunnel_bridges = []
     env = os.environ.copy()
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
@@ -186,14 +190,14 @@ def main():
         run(openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
             "-config", str(fixture / "openssl.cnf"), "-keyout", str(fixture / "key.pem"),
             "-out", str(fixture / "cert.pem"), "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost,DNS:pebble,DNS:api.cloudflare.com" if certificate_dns else "subjectAltName=DNS:localhost", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            "-addext", "subjectAltName=DNS:localhost,DNS:pebble,DNS:api.cloudflare.com" if certificate_dns or cloudflare_tunnel else "subjectAltName=DNS:localhost", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         (fixture / "routes.yaml").write_text(json.dumps({
             "http":{"routers":{"panel":{"rule":"Host(`localhost`)","entryPoints":["websecure"],"service":"panel","tls":{}}},
                     "services":{"panel":{"loadBalancer":{"servers":[{"url":"http://panel:8080"}]}}}},
             "tls":{"certificates":[{"certFile":"/fixture/cert.pem","keyFile":"/fixture/key.pem"}]}}))
         try:
             run("docker", "build", "-t", panel_image, ".")
-            run("docker", "network", "create", name, stdout=subprocess.DEVNULL)
+            run("docker", "network", "create", *(["--internal"] if cloudflare_tunnel else []), name, stdout=subprocess.DEVNULL)
             network_created = True
             for suffix, image, extra in [
                 ("db", "postgres:17-alpine", ["--network-alias", "db", "-e", "POSTGRES_PASSWORD", "-e", "POSTGRES_DB=cove"]),
@@ -209,7 +213,11 @@ def main():
                 time.sleep(1)
             else:
                 raise RuntimeError("Disposable database did not start")
-            if certificate_dns:
+            if cloudflare_tunnel:
+                from tunnel_fixture import start_tunnel_fixture, TunnelFixtureBridge
+                extra_images.append(name + "-tunnel-provider:test")
+                certificate_config = start_tunnel_fixture(run, name, fixture, containers, tunnel_bridges)
+            elif certificate_dns:
                 from certificate_fixture import start_certificate_fixture
                 extra_images.append(name + "-certificate-provider:test")
                 certificate_config = start_certificate_fixture(run, name, fixture, containers)
@@ -220,17 +228,23 @@ def main():
             env.update(DATABASE_URL=f"postgres://postgres:{env['POSTGRES_PASSWORD']}@db:5432/cove?sslmode=disable", COVE_PUBLIC_URL=origin)
             options = [item for key in ("DATABASE_URL", "COVE_PUBLIC_URL", "COVE_ADMIN_PASSWORD", "COVE_ADMIN_TOKEN", "COVE_ENCRYPTION_KEY") for item in ("-e", key)]
             if certificate_config:
-                env.update(COVE_ACME_DIRECTORY="https://pebble:14000/dir", COVE_ACME_ROOT="/fixture-trust.pem", SSL_CERT_FILE="/fixture-trust.pem")
-                options += ["--dns", certificate_config["dns"], "--mount", f"type=bind,source={fixture / 'cert.pem'},target=/fixture-trust.pem,readonly"]
+                env.update(SSL_CERT_FILE="/fixture-trust.pem")
+                options += ["--mount", f"type=bind,source={fixture / 'cert.pem'},target=/fixture-trust.pem,readonly", "-e", "SSL_CERT_FILE"]
                 options += ["-e", "HTTP_PROXY=", "-e", "HTTPS_PROXY=", "-e", "ALL_PROXY=", "-e", "NO_PROXY=*"]
-                options += [item for key in ("COVE_ACME_DIRECTORY", "COVE_ACME_ROOT", "SSL_CERT_FILE") for item in ("-e", key)]
+                if certificate_dns:
+                    env.update(COVE_ACME_DIRECTORY="https://pebble:14000/dir", COVE_ACME_ROOT="/fixture-trust.pem")
+                    options += ["--dns", certificate_config["dns"]]
+                    options += [item for key in ("COVE_ACME_DIRECTORY", "COVE_ACME_ROOT") for item in ("-e", key)]
             run("docker", "run", "-d", "--name", name + "-panel", "--network", name,
                 "--network-alias", "panel", *options, panel_image, env=env, stdout=subprocess.DEVNULL)
             containers.append(name + "-panel")
             run("docker", "run", "-d", "--name", name + "-tls", "--network", name,
-                "-p", f"127.0.0.1:{port}:443", "--mount", f"type=bind,source={fixture},target=/fixture,readonly",
+                "--label", "cove.browser-fixture="+name,
+                *([] if cloudflare_tunnel else ["-p", f"127.0.0.1:{port}:443"]), "--mount", f"type=bind,source={fixture},target=/fixture,readonly",
                 "traefik:v3.7.19", "--entrypoints.websecure.address=:443", "--providers.file.filename=/fixture/routes.yaml", stdout=subprocess.DEVNULL)
             containers.append(name + "-tls")
+            if cloudflare_tunnel:
+                tunnel_bridges.append(TunnelFixtureBridge(name, "tls", port))
             context = ssl.create_default_context(cafile=str(fixture / "cert.pem"))
             for _ in range(60):
                 try:
@@ -272,9 +286,22 @@ def main():
                 'test -z "$(ls -A /fixture)" || { echo "Refusing existing /var/lib/cove state" >&2; exit 1; }; cp -a /var/lib/cove/. /fixture/; printf %s "$1" > /fixture/.browser-owner; chown -R cove:cove /fixture', "sh", name)
             worker_state_owned = True
             worker = name + "-worker"
-            run("docker", "run", "-d", "--name", worker, "--network", name, "--network-alias", "worker",
-                "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
-            containers.append(worker)
+            if cloudflare_tunnel:
+                shim = fixture / "docker-shim"
+                run("go", "build", "-o", str(shim), "./test/tunnels/docker-shim", env=env | {"GOOS":"linux", "GOARCH":"amd64", "CGO_ENABLED":"0"})
+                run("docker", "create", "--name", worker, "--network", name, "--network-alias", "worker", "-p", "127.0.0.1::22",
+                    "-e", "COVE_TUNNEL_FIXTURE_OWNER="+name, "-e", "COVE_TUNNEL_FIXTURE_IMAGE="+certificate_config["image"],
+                    "-e", "COVE_TUNNEL_FIXTURE_PROVIDER="+certificate_config["address"],
+                    "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
+                containers.append(worker)
+                run("docker", "cp", str(shim), worker+":/tmp/tunnel-docker-shim")
+                run("docker", "cp", str(fixture / "cert.pem"), worker+":/var/lib/cove/tunnel-fixture-ca.pem")
+                run("docker", "start", worker, stdout=subprocess.DEVNULL)
+            else:
+                run("docker", "run", "-d", "--name", worker, "--network", name, "--network-alias", "worker",
+                    "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
+            if worker not in containers:
+                containers.append(worker)
 
             def api(method, path, body=None, credential=None, raw=False):
                 request = urllib.request.Request(origin+path, method=method,
@@ -297,13 +324,20 @@ def main():
             else: raise RuntimeError("Browser worker did not become ready")
             client_binary=fixture / ("cove.exe" if os.name == "nt" else "cove")
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
-            ssh_port=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
-            env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
-            if certificate_config:
+            env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
+            if cloudflare_tunnel:
+                env.pop("COVE_BROWSER_SSH_PORT", None)
+            else:
+                env["COVE_BROWSER_SSH_PORT"]=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
+            if certificate_config and certificate_dns:
                 env.update(COVE_BROWSER_CERTIFICATE_PROVIDER=certificate_config["provider"], COVE_BROWSER_CERTIFICATE_TOKEN=certificate_config["token"],
                            COVE_BROWSER_CERTIFICATE_ROOT=str(fixture / "cert.pem"), COVE_BROWSER_CERTIFICATE_ISSUANCE_ROOT=certificate_config["management"] + "/roots/0")
+            if cloudflare_tunnel:
+                env.update(COVE_BROWSER_TUNNEL_PROVIDER=certificate_config["provider"],COVE_BROWSER_TUNNEL_TOKEN=certificate_config["token"],COVE_BROWSER_TUNNEL_ROOT=str(fixture / "cert.pem"))
             subprocess.run([shutil.which("pnpm"), "test:e2e", *browser_args], cwd=ROOT / "frontend", env=env, check=True)
         finally:
+            for bridge in reversed(tunnel_bridges):
+                bridge.stop()
             state = {"owner": None, "workloads": set(), "operations": set(), "links": False}
             root_proved = False
             cleanup_errors = []
@@ -319,7 +353,7 @@ def main():
                     cleanup_worker_resources(name, state, root_proved, kinds=("container",))
                 except Exception as error:
                     cleanup_errors.append(str(error))
-                if name+"-db" in containers:
+                if name+"-db" in containers and worker_state_owned:
                     operations = subprocess.run(["docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM operations"], capture_output=True, text=True, check=True)
                     if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in operations.stdout.splitlines()):
                         raise RuntimeError("Unexpected fixture operation ID")

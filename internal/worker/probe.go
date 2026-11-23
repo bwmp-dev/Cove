@@ -11,44 +11,45 @@ import (
 )
 
 type Probe struct {
-	IngressExposures    bool         `json:"ingress_exposures"`
-	RouteProtocol       int          `json:"route_protocol"`
-	CPUAutoscale        bool         `json:"cpu_autoscale"`
-	IdleSleep           bool         `json:"idle_sleep"`
-	Suspensions         bool         `json:"suspensions"`
-	UnhealthyRestart    bool         `json:"unhealthy_restart"`
-	JobRuns             bool         `json:"job_runs"`
-	Rollouts            bool         `json:"rollouts"`
-	EnvironmentPreviews bool         `json:"environment_previews"`
-	GuardedHooks        bool         `json:"guarded_hooks"`
-	Previews            bool         `json:"previews"`
-	GuardedDeploy       bool         `json:"guarded_deploy"`
-	RestoreCopies       bool         `json:"restore_copies"`
-	DatabaseAccess      bool         `json:"database_access"`
-	FileSecrets         bool         `json:"file_secrets"`
-	ExactPromotion      bool         `json:"exact_promotion"`
-	DeploymentHooks     bool         `json:"deployment_hooks"`
-	RestoreDrills       bool         `json:"restore_drills"`
-	Preflight           bool         `json:"preflight"`
-	Metrics             *NodeMetrics `json:"metrics,omitempty"`
-	SharedHost          *SharedHost  `json:"shared_host,omitempty"`
-	ResourceLimits      bool         `json:"resource_limits"`
-	PrivateNetworks     bool         `json:"private_networks"`
-	LogicalBackups      bool         `json:"logical_backups"`
-	Infrastructure      bool         `json:"infrastructure"`
-	Terminal            bool         `json:"terminal"`
-	SharedNetworks      bool         `json:"shared_networks"`
-	PrivateLinks        bool         `json:"private_links"`
-	LiveRoutes          bool         `json:"live_routes"`
-	RoutePolicies       bool         `json:"route_policies"`
-	ImageLifecycle      bool         `json:"image_lifecycle"`
-	BuildPublish        bool         `json:"build_publish"`
-	Protocol            int          `json:"protocol"`
-	OS                  string       `json:"os"`
-	Arch                string       `json:"arch"`
-	Docker              string       `json:"docker"`
-	Compose             string       `json:"compose"`
-	Ready               bool         `json:"ready"`
+	CloudflarePublishing bool         `json:"cloudflare_publishing"`
+	IngressExposures     bool         `json:"ingress_exposures"`
+	RouteProtocol        int          `json:"route_protocol"`
+	CPUAutoscale         bool         `json:"cpu_autoscale"`
+	IdleSleep            bool         `json:"idle_sleep"`
+	Suspensions          bool         `json:"suspensions"`
+	UnhealthyRestart     bool         `json:"unhealthy_restart"`
+	JobRuns              bool         `json:"job_runs"`
+	Rollouts             bool         `json:"rollouts"`
+	EnvironmentPreviews  bool         `json:"environment_previews"`
+	GuardedHooks         bool         `json:"guarded_hooks"`
+	Previews             bool         `json:"previews"`
+	GuardedDeploy        bool         `json:"guarded_deploy"`
+	RestoreCopies        bool         `json:"restore_copies"`
+	DatabaseAccess       bool         `json:"database_access"`
+	FileSecrets          bool         `json:"file_secrets"`
+	ExactPromotion       bool         `json:"exact_promotion"`
+	DeploymentHooks      bool         `json:"deployment_hooks"`
+	RestoreDrills        bool         `json:"restore_drills"`
+	Preflight            bool         `json:"preflight"`
+	Metrics              *NodeMetrics `json:"metrics,omitempty"`
+	SharedHost           *SharedHost  `json:"shared_host,omitempty"`
+	ResourceLimits       bool         `json:"resource_limits"`
+	PrivateNetworks      bool         `json:"private_networks"`
+	LogicalBackups       bool         `json:"logical_backups"`
+	Infrastructure       bool         `json:"infrastructure"`
+	Terminal             bool         `json:"terminal"`
+	SharedNetworks       bool         `json:"shared_networks"`
+	PrivateLinks         bool         `json:"private_links"`
+	LiveRoutes           bool         `json:"live_routes"`
+	RoutePolicies        bool         `json:"route_policies"`
+	ImageLifecycle       bool         `json:"image_lifecycle"`
+	BuildPublish         bool         `json:"build_publish"`
+	Protocol             int          `json:"protocol"`
+	OS                   string       `json:"os"`
+	Arch                 string       `json:"arch"`
+	Docker               string       `json:"docker"`
+	Compose              string       `json:"compose"`
+	Ready                bool         `json:"ready"`
 }
 
 func Inspect(ctx context.Context) Probe {
@@ -59,6 +60,7 @@ func Inspect(ctx context.Context) Probe {
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	p.IngressExposures = runtime.GOOS == "linux"
+	p.CloudflarePublishing = runtime.GOOS == "linux"
 	p.RoutePolicies = true
 	if runtime.GOOS == "linux" {
 		p.RouteProtocol = 6

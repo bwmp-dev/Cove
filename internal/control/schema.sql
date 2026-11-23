@@ -812,3 +812,20 @@ END
 $$;
 DROP TRIGGER IF EXISTS cove_certificate_dns_orphan ON route_certificate_dns_intents;
 CREATE TRIGGER cove_certificate_dns_orphan BEFORE UPDATE OF issuer_id,workload_id ON route_certificate_dns_intents FOR EACH ROW EXECUTE FUNCTION cove_queue_certificate_dns_cleanup();
+
+CREATE TABLE IF NOT EXISTS node_cloudflare_tunnels (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE RESTRICT,
+ id text NOT NULL UNIQUE,
+ zone_id text NOT NULL REFERENCES cloudflare_zones(zone_id) ON DELETE RESTRICT,
+ connection_id text NOT NULL REFERENCES cloudflare_accounts(id) ON DELETE RESTRICT,
+ owner_id text NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ hostnames text[] NOT NULL,
+ image text NOT NULL,
+ phase text NOT NULL DEFAULT 'pending',
+ state bytea NOT NULL,
+ cleanup_requested boolean NOT NULL DEFAULT false,
+ last_error text NOT NULL DEFAULT '',
+ next_check_at timestamptz DEFAULT now(),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);

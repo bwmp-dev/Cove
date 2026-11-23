@@ -24,7 +24,12 @@ func (p *RoutePolicy) UnmarshalJSON(data []byte) error {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return errors.New("invalid route policy JSON")
 	}
-	if wire.CertificateSource == protectedRouteSource {
+	if wire.CertificateSource == "cove-protected-tunnel-v1" {
+		if wire.Protocol != 3 || wire.Source == nil {
+			return errors.New("invalid protected tunnel route policy")
+		}
+		wire.CertificateSource = *wire.Source
+	} else if wire.CertificateSource == protectedRouteSource {
 		if wire.Protocol != 2 || wire.Source == nil {
 			return errors.New("invalid protected route policy")
 		}

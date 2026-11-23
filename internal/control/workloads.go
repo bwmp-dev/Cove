@@ -509,6 +509,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	dnsDone := make(chan error, 1)
 	go func() { dnsDone <- s.runDNS(dnsContext) }()
 	defer func() { stopDNS(); <-dnsDone }()
+	tunnelDone := make(chan struct{})
+	go func() { defer close(tunnelDone); s.runCloudflareTunnels(dnsContext) }()
+	defer func() { stopDNS(); <-tunnelDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {
