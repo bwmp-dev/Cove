@@ -14,19 +14,23 @@ import (
 )
 
 type certificateIssuer struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Provider      string     `json:"provider"`
-	ZoneID        string     `json:"zone_id"`
-	Domains       []string   `json:"domains"`
-	ValidityDays  int        `json:"validity_days"`
-	AutoRenew     bool       `json:"auto_renew"`
-	Phase         string     `json:"phase"`
-	CertificateID string     `json:"certificate_id"`
-	OperationID   string     `json:"operation_id"`
-	LastError     string     `json:"last_error"`
-	NextCheckAt   *time.Time `json:"next_check_at"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Provider        string     `json:"provider"`
+	ZoneID          string     `json:"zone_id"`
+	Domains         []string   `json:"domains"`
+	ValidityDays    int        `json:"validity_days"`
+	AutoRenew       bool       `json:"auto_renew"`
+	Phase           string     `json:"phase"`
+	CertificateID   string     `json:"certificate_id"`
+	OperationID     string     `json:"operation_id"`
+	LastError       string     `json:"last_error"`
+	NextCheckAt     *time.Time `json:"next_check_at"`
+	Directory       string     `json:"directory,omitempty"`
+	TermsURL        string     `json:"terms_url,omitempty"`
+	TermsText       string     `json:"terms_text,omitempty"`
+	TermsAcceptedAt *time.Time `json:"terms_accepted_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 type certificateIssuerState struct {
@@ -94,7 +98,7 @@ func (s *Server) certificateZones(w http.ResponseWriter, r *http.Request) {
 func (s *Server) certificateIssuers(w http.ResponseWriter, r *http.Request) {
 	workload := r.PathValue("id")
 	if r.Method == "GET" {
-		rows, err := s.DB.Query(r.Context(), `SELECT id,name,provider,zone_id,domains,validity_days,auto_renew,phase,COALESCE(certificate_id,''),operation_id,last_error,next_check_at,created_at FROM route_certificate_issuers WHERE workload_id=$1 ORDER BY created_at DESC,id`, workload)
+		rows, err := s.DB.Query(r.Context(), `SELECT id,name,provider,zone_id,domains,validity_days,auto_renew,phase,COALESCE(certificate_id,''),operation_id,last_error,next_check_at,created_at,acme_state FROM route_certificate_issuers WHERE workload_id=$1 ORDER BY created_at DESC,id`, workload)
 		if err != nil {
 			http.Error(w, "certificate issuers unavailable", 503)
 			return
@@ -103,9 +107,27 @@ func (s *Server) certificateIssuers(w http.ResponseWriter, r *http.Request) {
 		list := []certificateIssuer{}
 		for rows.Next() {
 			var item certificateIssuer
-			if rows.Scan(&item.ID, &item.Name, &item.Provider, &item.ZoneID, &item.Domains, &item.ValidityDays, &item.AutoRenew, &item.Phase, &item.CertificateID, &item.OperationID, &item.LastError, &item.NextCheckAt, &item.CreatedAt) != nil {
+			var acmeState []byte
+			if rows.Scan(&item.ID, &item.Name, &item.Provider, &item.ZoneID, &item.Domains, &item.ValidityDays, &item.AutoRenew, &item.Phase, &item.CertificateID, &item.OperationID, &item.LastError, &item.NextCheckAt, &item.CreatedAt, &acmeState) != nil {
 				http.Error(w, "certificate issuers unavailable", 503)
 				return
+			}
+			if item.Provider == "acme_dns" {
+				raw, err := unseal(s.Key, acmeState)
+				var pending certificateACMEIssuerState
+				if err != nil || json.Unmarshal(raw, &pending) != nil {
+					http.Error(w, "certificate authority metadata unavailable", 503)
+					return
+				}
+				item.Directory, item.TermsURL = pending.Directory, pending.TermsURL
+				item.TermsText, err = certificateTerms(pending.TermsURL)
+				if err != nil {
+					http.Error(w, "certificate authority metadata unavailable", 503)
+					return
+				}
+				if !pending.TermsAcceptedAt.IsZero() {
+					item.TermsAcceptedAt = &pending.TermsAcceptedAt
+				}
 			}
 			list = append(list, item)
 		}
@@ -123,19 +145,50 @@ func (s *Server) certificateIssuers(w http.ResponseWriter, r *http.Request) {
 		Domains      []string `json:"domains"`
 		ValidityDays int      `json:"validity_days"`
 		AutoRenew    *bool    `json:"auto_renew"`
+		TermsURL     string   `json:"terms_url"`
+		AcceptTerms  bool     `json:"accept_terms"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
-	if input.Name == "" || len(input.Name) > 60 || strings.ContainsFunc(input.Name, func(r rune) bool { return r < 32 || r == 127 }) || input.Provider != "cloudflare_origin" || !cloudflareID.MatchString(input.ZoneID) || input.AutoRenew == nil || !slices.Contains(originCertificateValidityDays, input.ValidityDays) {
-		http.Error(w, "a name up to 60 characters, connected Cloudflare zone, Origin CA provider, supported validity and explicit auto_renew are required", 400)
+	if input.Name == "" || len(input.Name) > 60 || strings.ContainsFunc(input.Name, func(r rune) bool { return r < 32 || r == 127 }) || !cloudflareID.MatchString(input.ZoneID) || input.AutoRenew == nil {
+		http.Error(w, "a name up to 60 characters, connected Cloudflare zone, supported certificate provider and explicit auto_renew are required", 400)
+		return
+	}
+	switch input.Provider {
+	case "cloudflare_origin":
+		if !slices.Contains(originCertificateValidityDays, input.ValidityDays) || input.AcceptTerms || input.TermsURL != "" {
+			http.Error(w, "Origin CA requires a supported validity and no ACME terms fields", 400)
+			return
+		}
+	case "acme_dns":
+		if input.ValidityDays != 0 || !input.AcceptTerms {
+			http.Error(w, "DNS-01 requires explicit acceptance of the authority's terms; its validity is chosen by the authority", 400)
+			return
+		}
+	default:
+		http.Error(w, "choose Cloudflare Origin CA or ACME DNS-01", 400)
 		return
 	}
 	csr, key, err := worker.NewRouteCertificateKey(input.Domains)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
+	}
+	var directory, terms string
+	if input.Provider == "acme_dns" {
+		lookup, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		directory, terms, err = discoverCertificateAuthority(lookup)
+		cancel()
+		if err != nil {
+			http.Error(w, "configured certificate authority unavailable", 503)
+			return
+		}
+		if terms != input.TermsURL {
+			http.Error(w, "certificate authority terms changed; refresh and accept the current terms before requesting", 409)
+			return
+		}
 	}
 	slices.Sort(input.Domains)
 	tx, err := s.DB.Begin(r.Context())
@@ -175,8 +228,16 @@ func (s *Server) certificateIssuers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not protect certificate request", 503)
 		return
 	}
+	var acmeState []byte
+	if input.Provider == "acme_dns" {
+		acmeState, err = s.sealJSON(certificateACMEIssuerState{Directory: directory, TermsURL: terms, TermsAcceptedAt: time.Now().UTC(), TermsAcceptedBy: actor(r).ID, CycleID: state.CandidateID})
+		if err != nil {
+			http.Error(w, "could not protect certificate authority request", 503)
+			return
+		}
+	}
 	id := resourceID()
-	if _, err = tx.Exec(r.Context(), `INSERT INTO route_certificate_issuers(id,workload_id,zone_id,name,provider,domains,validity_days,auto_renew,state,next_check_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now())`, id, workload, input.ZoneID, input.Name, input.Provider, input.Domains, input.ValidityDays, *input.AutoRenew, sealed); err != nil {
+	if _, err = tx.Exec(r.Context(), `INSERT INTO route_certificate_issuers(id,workload_id,zone_id,name,provider,domains,validity_days,auto_renew,state,next_check_at,acme_state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10)`, id, workload, input.ZoneID, input.Name, input.Provider, input.Domains, input.ValidityDays, *input.AutoRenew, sealed, acmeState); err != nil {
 		http.Error(w, "could not save certificate issuer", 503)
 		return
 	}
@@ -229,7 +290,10 @@ func (s *Server) updateCertificateIssuer(w http.ResponseWriter, r *http.Request)
 		}
 		_, err = tx.Exec(r.Context(), "DELETE FROM route_certificate_issuers WHERE id=$1", r.PathValue("issuer"))
 	} else {
-		_, err = tx.Exec(r.Context(), `UPDATE route_certificate_issuers SET auto_renew=COALESCE($2,auto_renew),next_check_at=CASE WHEN phase='issued' AND $2=false THEN NULL WHEN $3 OR phase='issued' AND $2=true THEN now() ELSE next_check_at END,last_error=CASE WHEN $3 THEN '' ELSE last_error END,updated_at=now() WHERE id=$1`, r.PathValue("issuer"), input.AutoRenew, input.Retry)
+		_, err = tx.Exec(r.Context(), `UPDATE route_certificate_issuers SET auto_renew=COALESCE($2,auto_renew),next_check_at=CASE WHEN phase='issued' AND $2=false THEN NULL WHEN $3 OR phase='issued' AND $2=true THEN now() ELSE next_check_at END,phase=CASE WHEN $3 AND provider='acme_dns' AND phase='failed' AND operation_id='' THEN 'requesting' ELSE phase END,last_error=CASE WHEN $3 THEN '' ELSE last_error END,updated_at=now() WHERE id=$1`, r.PathValue("issuer"), input.AutoRenew, input.Retry)
+		if err == nil && input.Retry {
+			_, err = tx.Exec(r.Context(), `UPDATE route_certificate_dns_intents SET phase='pending',last_error='',next_check_at=now(),updated_at=now() WHERE issuer_id=$1 AND phase='blocked' AND NOT cleanup_requested`, r.PathValue("issuer"))
+		}
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())

@@ -49,6 +49,12 @@ func validateCloudflare(c cloudflareZone) error {
 	return nil
 }
 
+type cloudflareStatusError int
+
+func (e cloudflareStatusError) Error() string {
+	return fmt.Sprintf("Cloudflare request failed (HTTP %d)", int(e))
+}
+
 func (s *Server) cloudflareRequest(ctx context.Context, c cloudflareZone, method, path string, body any, result any) error {
 	if c.ConnectionID != "" {
 		token, err := s.cloudflareConnectionToken(ctx, c.ConnectionID)
@@ -78,7 +84,7 @@ func (s *Server) cloudflareRequest(ctx context.Context, c cloudflareZone, method
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("Cloudflare request failed (HTTP %d)", response.StatusCode)
+		return cloudflareStatusError(response.StatusCode)
 	}
 	var envelope struct {
 		Success bool            `json:"success"`

@@ -19,6 +19,26 @@ import (
 	"time"
 )
 
+func TestCertificateRenewalLeavesTimeForShortLivedAuthorities(t *testing.T) {
+	issued := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		lifetime time.Duration
+		lead     time.Duration
+	}{
+		{90 * time.Second, 45 * time.Second},
+		{10 * time.Minute, 5 * time.Minute},
+		{12 * time.Minute, 5 * time.Minute},
+		{15 * time.Minute, 5 * time.Minute},
+		{90 * 24 * time.Hour, 30 * 24 * time.Hour},
+		{365 * 24 * time.Hour, 30 * 24 * time.Hour},
+	} {
+		info := worker.RouteCertificateInfo{NotBefore: issued, ExpiresAt: issued.Add(test.lifetime)}
+		if got := certificateRenewalAt(info); !got.Equal(info.ExpiresAt.Add(-test.lead)) {
+			t.Errorf("lifetime %s: renew at %s, want %s before expiry", test.lifetime, got, test.lead)
+		}
+	}
+}
+
 func TestCertificateIssuerSurvivesLostProviderResponseAndRenewsThroughRoutes(t *testing.T) {
 	f := newAccountFixture(t)
 	ctx := context.Background()

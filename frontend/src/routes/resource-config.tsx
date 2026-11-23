@@ -7,7 +7,8 @@ import { errorMessage } from "../api/client";
 import { useUpdateRoutes, useUpdateWorkload } from "../api/mutations";
 import { keys, nodesQuery, operationQuery, workloadOperationsQuery } from "../api/queries";
 import type { Route, RouteCertificate, Workload, WorkloadInput, DeploymentHooks, FileSecret } from "../api/types";
-import { certificateIssuersQuery, certificatesQuery, certificateZonesQuery } from "../api/certificates";
+import { certificateChallengesQuery, certificateIssuersQuery, certificatesQuery, certificateZonesQuery } from "../api/certificates";
+import { CertificateChallenges } from "../components/CertificateChallenges";
 import { CertificateIssuers } from "../components/CertificateIssuers";
 import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
@@ -595,6 +596,9 @@ function DomainsPanel({ workload }: { workload: Workload }) {
   const certificates = useQuery({ ...certificatesQuery(workload.id), enabled: uploads });
   const issuers = useQuery({ ...certificateIssuersQuery(workload.id), enabled: uploads });
   const zones = useQuery({ ...certificateZonesQuery(workload.id), enabled: uploads });
+  const challenges = useQuery({ ...certificateChallengesQuery(workload.id), enabled: uploads });
+  // DNS challenge cleanup can outlive every ACME issuer, so the section stays while any record is unresolved.
+  const showChallenges = uploads && (Boolean(issuers.data?.some((issuer) => issuer.provider === "acme_dns")) || Boolean(challenges.data?.items.length) || challenges.isError);
   const busy = Boolean(useActiveOperation(workload.id));
   const choices: CertificateChoices | undefined = uploads
     ? { supported: node ? (node.capabilities?.route_protocol ?? 0) >= 3 : undefined, list: certificates.data, error: certificates.error, retry: () => void certificates.refetch(), retrying: certificates.isFetching }
@@ -617,6 +621,7 @@ function DomainsPanel({ workload }: { workload: Workload }) {
       </Section>
       {uploads && <RouteCertificates workloadId={workload.id} certificates={certificates} routes={workload.routes ?? []} issuers={issuers.data} editable={editable} busy={busy} />}
       {uploads && <CertificateIssuers workloadId={workload.id} issuers={issuers} zones={zones} certificates={certificates.data} routes={workload.routes ?? []} editable={editable} />}
+      {showChallenges && <CertificateChallenges challenges={challenges} issuers={issuers.data} />}
     </>
   );
 }

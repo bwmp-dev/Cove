@@ -49,7 +49,10 @@ func (s *Server) scheduleCertificateIssuers(ctx context.Context) error {
 }
 
 func certificateRenewalAt(info worker.RouteCertificateInfo) time.Time {
-	return info.ExpiresAt.Add(-min(30*24*time.Hour, info.ExpiresAt.Sub(info.NotBefore)/3))
+	lifetime := info.ExpiresAt.Sub(info.NotBefore)
+	// Short-lived authorities need time for durable DNS validation and route delivery.
+	lead := max(lifetime/3, min(5*time.Minute, lifetime/2))
+	return info.ExpiresAt.Add(-min(30*24*time.Hour, lead))
 }
 
 func (s *Server) processCertificateIssuer(ctx context.Context, id string, freshAttempt bool) error {
@@ -62,8 +65,8 @@ func (s *Server) processCertificateIssuer(ctx context.Context, id string, freshA
 	defer tx.Rollback(ctx)
 	var item certificateIssuer
 	var workload string
-	var encrypted []byte
-	err = tx.QueryRow(ctx, `SELECT id,workload_id,name,provider,zone_id,domains,validity_days,auto_renew,phase,state,COALESCE(certificate_id,''),operation_id FROM route_certificate_issuers WHERE id=$1 FOR UPDATE`, id).Scan(&item.ID, &workload, &item.Name, &item.Provider, &item.ZoneID, &item.Domains, &item.ValidityDays, &item.AutoRenew, &item.Phase, &encrypted, &item.CertificateID, &item.OperationID)
+	var encrypted, acmeState []byte
+	err = tx.QueryRow(ctx, `SELECT id,workload_id,name,provider,zone_id,domains,validity_days,auto_renew,phase,state,COALESCE(certificate_id,''),operation_id,acme_state FROM route_certificate_issuers WHERE id=$1 FOR UPDATE`, id).Scan(&item.ID, &workload, &item.Name, &item.Provider, &item.ZoneID, &item.Domains, &item.ValidityDays, &item.AutoRenew, &item.Phase, &encrypted, &item.CertificateID, &item.OperationID, &acmeState)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -86,6 +89,9 @@ func (s *Server) processCertificateIssuer(ctx context.Context, id string, freshA
 		return tx.Commit(ctx)
 	}
 	soon := time.Now().Add(time.Minute)
+	if item.Provider == "acme_dns" {
+		soon = time.Now().Add(3 * time.Second)
+	}
 	if item.Phase == "issued" {
 		if !item.AutoRenew {
 			return save("issued", "", nil)
@@ -114,6 +120,9 @@ func (s *Server) processCertificateIssuer(ctx context.Context, id string, freshA
 	}
 	if item.Phase == "applying" || item.CertificateID == state.CandidateID {
 		return s.applyIssuerCertificate(ctx, tx, workload, item, state)
+	}
+	if item.Provider == "acme_dns" {
+		return s.processACMECertificateIssuer(ctx, tx, workload, item, state, acmeState, freshAttempt)
 	}
 	if !state.Attempted {
 		state.Attempted = true
@@ -174,17 +183,28 @@ func (s *Server) processCertificateIssuer(ctx context.Context, id string, freshA
 		}
 	}
 	material.CertificatePEM = issued.Certificate
+	if _, err := validateIssuedRouteCertificate(material, state.CSR, time.Now().UTC()); err != nil {
+		return save("failed", "the provider's certificate does not match this saved request; it was not installed", nil)
+	}
+	return s.storeIssuerCertificate(ctx, tx, workload, item, state, material)
+}
+
+func (s *Server) storeIssuerCertificate(ctx context.Context, tx pgx.Tx, workload string, item certificateIssuer, state certificateIssuerState, material worker.RouteCertificate) error {
 	now := time.Now().UTC()
 	info, err := validateIssuedRouteCertificate(material, state.CSR, now)
 	if err != nil {
-		return save("failed", "the provider's certificate does not match this saved request; it was not installed", nil)
+		return errors.New("issued certificate does not match the saved request")
 	}
 	var count int
-	if err = tx.QueryRow(ctx, "SELECT count(*) FROM route_certificates WHERE workload_id=$1", workload).Scan(&count); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM route_certificates WHERE workload_id=$1`, workload).Scan(&count); err != nil {
 		return err
 	}
 	if count >= 32 {
-		return save("failed", "remove unused certificate versions before retrying; the resource has reached its 32-version limit", nil)
+		_, err := tx.Exec(ctx, `UPDATE route_certificate_issuers SET phase='failed',last_error='Remove unused certificate versions before retrying; this resource has reached its 32-version limit',next_check_at=NULL WHERE id=$1`, item.ID)
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	protected, err := s.sealJSON(material)
 	if err != nil {
@@ -194,13 +214,13 @@ func (s *Server) processCertificateIssuer(ctx context.Context, id string, freshA
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO route_certificates(id,workload_id,name,material,metadata,created_at,source) VALUES($1,$2,$3,$4,$5,$6,$7)`, material.ID, workload, item.Name+" "+now.Format("2006-01-02 15:04:05"), protected, metadata, now, item.Provider); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO route_certificates(id,workload_id,name,material,metadata,created_at,source) VALUES($1,$2,$3,$4,$5,$6,$7)`, material.ID, workload, item.Name+" "+now.Format("2006-01-02 15:04:05"), protected, metadata, now, item.Provider); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE route_certificate_issuers SET certificate_id=$2,phase='applying',last_error='',updated_at=now() WHERE id=$1`, item.ID, material.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE route_certificate_issuers SET certificate_id=$2,phase='applying',last_error='',updated_at=now() WHERE id=$1`, item.ID, material.ID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status) VALUES('certificate-issuer','issue route certificate',$1,201)`, workload); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status) VALUES('certificate-issuer','issue route certificate',$1,201)`, workload); err != nil {
 		return err
 	}
 	item.CertificateID = material.ID
@@ -215,6 +235,9 @@ func (s *Server) applyIssuerCertificate(ctx context.Context, tx pgx.Tx, workload
 		return tx.Commit(ctx)
 	}
 	soon := time.Now().Add(time.Minute)
+	if item.Provider == "acme_dns" {
+		soon = time.Now().Add(3 * time.Second)
+	}
 	if item.OperationID != "" {
 		var status string
 		if err := tx.QueryRow(ctx, "SELECT state FROM operations WHERE id=$1", item.OperationID).Scan(&status); err != nil {

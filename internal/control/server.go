@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/cloudflare/oauth/start", s.admin(http.HandlerFunc(s.cloudflareOAuthStart)))
 	mux.HandleFunc("GET /api/cloudflare/oauth/callback", s.cloudflareOAuthCallback)
 	mux.Handle("PUT /api/cloudflare/{zone}/shares", s.admin(http.HandlerFunc(s.cloudflareShares)))
+	mux.Handle("GET /api/cloudflare/{zone}/certificate-challenges", s.admin(http.HandlerFunc(s.certificateDNSChallenges)))
 	mux.Handle("GET /api/workloads/{id}/private-network", s.admin(http.HandlerFunc(s.privateNetwork)))
 	mux.Handle("PUT /api/workloads/{id}/private-network", s.admin(http.HandlerFunc(s.privateNetwork)))
 	for _, pattern := range []string{"GET /api/shared-variables", "PATCH /api/shared-variables", "GET /api/projects/{id}/shared-variables", "PATCH /api/projects/{id}/shared-variables", "GET /api/environments/{id}/shared-variables", "PATCH /api/environments/{id}/shared-variables"} {
@@ -188,6 +189,8 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("DELETE /api/workloads/{id}/certificates/{certificate}", s.admin(http.HandlerFunc(s.routeCertificates)))
 	mux.Handle("GET /api/workloads/{id}/certificate-zones", s.admin(http.HandlerFunc(s.certificateZones)))
+	mux.Handle("GET /api/workloads/{id}/certificate-authority", s.admin(http.HandlerFunc(s.certificateAuthority)))
+	mux.Handle("GET /api/workloads/{id}/certificate-challenges", s.admin(http.HandlerFunc(s.certificateDNSChallenges)))
 	mux.Handle("GET /api/workloads/{id}/certificate-issuers", s.admin(http.HandlerFunc(s.certificateIssuers)))
 	mux.Handle("POST /api/workloads/{id}/certificate-issuers", s.admin(http.HandlerFunc(s.certificateIssuers)))
 	mux.Handle("PUT /api/workloads/{id}/certificate-issuers/{issuer}", s.admin(http.HandlerFunc(s.updateCertificateIssuer)))

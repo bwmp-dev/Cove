@@ -164,12 +164,16 @@ def cleanup_worker_resources(fixture, state, root_owned, kinds=("container", "ne
 
 
 def main():
+    certificate_dns = "--certificate-dns" in sys.argv[1:]
+    browser_args = [value for value in sys.argv[1:] if value != "--certificate-dns"]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
     network_created = False
     ingress = []
     worker_state_owned = False
+    certificate_config = None
+    extra_images = []
     env = os.environ.copy()
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
@@ -182,7 +186,7 @@ def main():
         run(openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
             "-config", str(fixture / "openssl.cnf"), "-keyout", str(fixture / "key.pem"),
             "-out", str(fixture / "cert.pem"), "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            "-addext", "subjectAltName=DNS:localhost,DNS:pebble,DNS:api.cloudflare.com" if certificate_dns else "subjectAltName=DNS:localhost", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         (fixture / "routes.yaml").write_text(json.dumps({
             "http":{"routers":{"panel":{"rule":"Host(`localhost`)","entryPoints":["websecure"],"service":"panel","tls":{}}},
                     "services":{"panel":{"loadBalancer":{"servers":[{"url":"http://panel:8080"}]}}}},
@@ -205,12 +209,21 @@ def main():
                 time.sleep(1)
             else:
                 raise RuntimeError("Disposable database did not start")
+            if certificate_dns:
+                from certificate_fixture import start_certificate_fixture
+                extra_images.append(name + "-certificate-provider:test")
+                certificate_config = start_certificate_fixture(run, name, fixture, containers)
             with socket.socket() as listener:
                 listener.bind(("127.0.0.1", 0))
                 port = listener.getsockname()[1]
             origin = f"https://localhost:{port}"
             env.update(DATABASE_URL=f"postgres://postgres:{env['POSTGRES_PASSWORD']}@db:5432/cove?sslmode=disable", COVE_PUBLIC_URL=origin)
             options = [item for key in ("DATABASE_URL", "COVE_PUBLIC_URL", "COVE_ADMIN_PASSWORD", "COVE_ADMIN_TOKEN", "COVE_ENCRYPTION_KEY") for item in ("-e", key)]
+            if certificate_config:
+                env.update(COVE_ACME_DIRECTORY="https://pebble:14000/dir", COVE_ACME_ROOT="/fixture-trust.pem", SSL_CERT_FILE="/fixture-trust.pem")
+                options += ["--dns", certificate_config["dns"], "--mount", f"type=bind,source={fixture / 'cert.pem'},target=/fixture-trust.pem,readonly"]
+                options += ["-e", "HTTP_PROXY=", "-e", "HTTPS_PROXY=", "-e", "ALL_PROXY=", "-e", "NO_PROXY=*"]
+                options += [item for key in ("COVE_ACME_DIRECTORY", "COVE_ACME_ROOT", "SSL_CERT_FILE") for item in ("-e", key)]
             run("docker", "run", "-d", "--name", name + "-panel", "--network", name,
                 "--network-alias", "panel", *options, panel_image, env=env, stdout=subprocess.DEVNULL)
             containers.append(name + "-panel")
@@ -286,7 +299,10 @@ def main():
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
             ssh_port=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
-            subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
+            if certificate_config:
+                env.update(COVE_BROWSER_CERTIFICATE_PROVIDER=certificate_config["provider"], COVE_BROWSER_CERTIFICATE_TOKEN=certificate_config["token"],
+                           COVE_BROWSER_CERTIFICATE_ROOT=str(fixture / "cert.pem"), COVE_BROWSER_CERTIFICATE_ISSUANCE_ROOT=certificate_config["management"] + "/roots/0")
+            subprocess.run([shutil.which("pnpm"), "test:e2e", *browser_args], cwd=ROOT / "frontend", env=env, check=True)
         finally:
             state = {"owner": None, "workloads": set(), "operations": set(), "links": False}
             root_proved = False
@@ -359,7 +375,7 @@ def main():
                         'test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; find /fixture -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +', "sh", name)
                 if network_created:
                     subprocess.run(["docker", "network", "rm", name], check=False, stdout=subprocess.DEVNULL)
-                for image in (worker_image, panel_image):
+                for image in (worker_image, panel_image, *extra_images):
                     subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if cleanup_errors:
                     raise RuntimeError("; ".join(cleanup_errors))

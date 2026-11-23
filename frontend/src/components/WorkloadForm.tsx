@@ -14,13 +14,13 @@ import { nodeStates, routeProtocolOf } from "../lib/nodes";
 import { Button, Field, Notice } from "./ui";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 
-interface Choice<T extends string> {
+export interface Choice<T extends string> {
   value: T;
   label: string;
   description: string;
 }
 
-function ChoiceGroup<T extends string>({ legend, name, value, choices, onChange }: { legend: string; name: string; value: T; choices: Choice<T>[]; onChange: (value: T) => void }) {
+export function ChoiceGroup<T extends string>({ legend, name, value, choices, onChange }: { legend: string; name: string; value: T; choices: Choice<T>[]; onChange: (value: T) => void }) {
   return (
     <fieldset>
       <legend className="mb-1.5 text-[13px] font-medium text-fg">{legend}</legend>

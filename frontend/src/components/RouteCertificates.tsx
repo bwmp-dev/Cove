@@ -78,7 +78,7 @@ function latestVersions(issuers: CertificateIssuer[] = []) {
   return new Map(issuers.filter((issuer) => issuer.certificate_id).map((issuer) => [issuer.certificate_id, issuer.name]));
 }
 
-// Uploading and deleting certificate versions for one resource, including versions Origin CA issuers created. They are
+// Uploading and deleting certificate versions for one resource, including versions certificate issuers created. They are
 // stored for the resource only; routes use one after it is selected in the Domains form and saved. busy: an operation is
 // queued or running for the resource. issuers: undefined while unknown, in which case the panel still refuses deleting
 // an issuer's latest version.
@@ -93,7 +93,7 @@ export function RouteCertificates({ workloadId, certificates, routes, issuers, e
     <Section
       width="form"
       title="Certificates"
-      description="Certificate versions stored for this resource: ones you upload, such as a certificate from your own certificate authority, and ones issued by Cloudflare Origin CA below. Select a version on a route above and save to serve it."
+      description="Certificate versions stored for this resource: ones you upload, such as a certificate from your own certificate authority, and ones issued by the certificate issuers below. Select a version on a route above and save to serve it."
       flush
     >
       <div className="divide-y divide-line">

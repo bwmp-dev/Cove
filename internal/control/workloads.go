@@ -536,6 +536,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.scheduleCertificateDNSIntents(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.scheduleCertificateIssuers(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}

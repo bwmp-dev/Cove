@@ -23,7 +23,7 @@ const sourceHints: Record<PolicyDraft["certificateSource"], string> = {
   "": "Requested from Let's Encrypt automatically.",
   acme: "Requested from Let's Encrypt automatically.",
   default: "Uses the certificate configured in the node's proxy settings, which may be self-signed, and stops Let's Encrypt renewing a certificate it cached for this hostname. Browsers trust it only if you provisioned one.",
-  uploaded: "A certificate version stored for this resource under Certificates: one you uploaded or one issued by Cloudflare Origin CA.",
+  uploaded: "A certificate version stored for this resource under Certificates: one you uploaded or one issued by Cloudflare Origin CA or ACME DNS-01.",
 };
 
 // choices is undefined where the resource has no certificate storage yet, such as the create form. A saved stored or

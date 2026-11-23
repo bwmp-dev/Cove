@@ -1,8 +1,8 @@
 import { queryOptions, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { issuerWorking } from "../lib/certificates";
+import { challengeWorking, issuerWorking } from "../lib/certificates";
 import { request } from "./client";
 import { keys } from "./queries";
-import type { CertificateIssuer, CertificateIssuerInput, CertificateZone, RouteCertificate } from "./types";
+import type { CertificateAuthority, CertificateChallengeList, CertificateIssuer, CertificateIssuerInput, CertificateZone, RouteCertificate } from "./types";
 
 export interface CertificateUpload {
   name: string;
@@ -52,6 +52,9 @@ export function useDeleteCertificate(workloadId: string) {
 
 export const certificateZonesKey = (workloadId: string) => [...keys.workload(workloadId), "certificate-zones"] as const;
 export const certificateIssuersKey = (workloadId: string) => [...keys.workload(workloadId), "certificate-issuers"] as const;
+export const certificateAuthorityKey = (workloadId: string) => [...keys.workload(workloadId), "certificate-authority"] as const;
+export const certificateChallengesKey = (workloadId: string) => [...keys.workload(workloadId), "certificate-challenges"] as const;
+export const zoneCertificateChallengesKey = (zoneId: string) => ["cloudflare", zoneId, "certificate-challenges"] as const;
 
 const workloadPath = (workloadId: string) => `/api/workloads/${encodeURIComponent(workloadId)}`;
 const issuerPath = (workloadId: string, issuerId: string) => `${workloadPath(workloadId)}/certificate-issuers/${encodeURIComponent(issuerId)}`;
@@ -73,10 +76,46 @@ export function certificateIssuersQuery(workloadId: string) {
   });
 }
 
-// An issued version appears in the certificate list, and routes may change after a renewal, so refresh those with issuers.
+// The panel operator's ACME authority and its current terms. Reading it makes the panel contact that authority, which may
+// be a public one, so callers enable it only once someone chooses ACME DNS-01. It is refreshed explicitly (or after the
+// panel reports changed terms) rather than on focus, and a failure is shown with Retry instead of retried silently.
+export function certificateAuthorityQuery(workloadId: string) {
+  return queryOptions({
+    queryKey: certificateAuthorityKey(workloadId),
+    queryFn: ({ signal }) => request<CertificateAuthority>("GET", `${workloadPath(workloadId)}/certificate-authority`, undefined, signal),
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
+const challengeInterval = (data: CertificateChallengeList | undefined) => (data?.items.some((item) => challengeWorking(item.phase)) ? 10_000 : 60_000);
+
+// Unresolved DNS-01 challenge records for a resource, including cleanup that outlives its issuers.
+export function certificateChallengesQuery(workloadId: string) {
+  return queryOptions({
+    queryKey: certificateChallengesKey(workloadId),
+    queryFn: ({ signal }) => request<CertificateChallengeList>("GET", `${workloadPath(workloadId)}/certificate-challenges`, undefined, signal),
+    refetchInterval: (query) => challengeInterval(query.state.data),
+  });
+}
+
+// Unresolved DNS-01 challenge records in a zone, for its connection owner or an instance administrator. Includes records
+// whose resource was deleted.
+export function zoneCertificateChallengesQuery(zoneId: string) {
+  return queryOptions({
+    queryKey: zoneCertificateChallengesKey(zoneId),
+    queryFn: ({ signal }) => request<CertificateChallengeList>("GET", `/api/cloudflare/${encodeURIComponent(zoneId)}/certificate-challenges`, undefined, signal),
+    refetchInterval: (query) => challengeInterval(query.state.data),
+  });
+}
+
+// An issued version appears in the certificate list, routes may change after a renewal, and DNS challenges follow the
+// issuer's requests and removal, so refresh those with issuers.
 function refreshIssuers(client: QueryClient, workloadId: string) {
   return Promise.all([
     client.invalidateQueries({ queryKey: certificateIssuersKey(workloadId), exact: true }),
+    client.invalidateQueries({ queryKey: certificateChallengesKey(workloadId), exact: true }),
     client.invalidateQueries({ queryKey: certificatesKey(workloadId), exact: true }),
     client.invalidateQueries({ queryKey: keys.workload(workloadId), exact: true }),
   ]);
