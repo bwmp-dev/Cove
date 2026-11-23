@@ -53,6 +53,8 @@ func compareConfiguration(a, b worker.Request) []releaseConfigurationChange {
 	add("backup_credentials_and_configuration", a.Backup, b.Backup)
 	add("networks", a.Networks, b.Networks)
 	add("guarded_deploy", a.GuardedDeploy, b.GuardedDeploy)
+	add("compose_bundle", a.ComposeBundle, b.ComposeBundle)
+	add("rollout", a.Rollout, b.Rollout)
 	sort.Slice(out, func(i, j int) bool { return out[i].Field < out[j].Field })
 	return out
 }

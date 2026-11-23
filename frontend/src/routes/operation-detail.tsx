@@ -10,20 +10,33 @@ import { useOnline } from "../lib/hooks";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { operationQuery, workloadsQuery } from "../api/queries";
 import { projectsQuery } from "../api/projects";
+import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
 import { OperationResultNotice } from "../components/OperationResultNotice";
 import { OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, Field, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { shortId } from "../lib/format";
 import { formatAbsolute, formatDuration } from "../lib/format";
-import { actionLabels, durationMs, isActive, overrideEligible, reasonError, workerResult } from "../lib/operations";
+import { actionLabels, durationMs, isActive, isSuspensionAction, overrideEligible, reasonError, workerResult } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
+import { resultSummary } from "../lib/rollouts";
 import { inputClass, linkClass } from "../lib/styles";
+import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
+import type { SuspensionResult, WorkloadSummary } from "../api/types";
+import { useEnvironmentHold } from "../components/EnvironmentSuspension";
+import { holdReason } from "../lib/suspension";
+import { useIdleState } from "../components/IdleSleep";
+import { idleReason } from "../lib/idle";
+import { ScaleOutcome } from "../components/CpuAutoscale";
 
 const route = getRouteApi("/app/operations/$operationId");
 
-function RollbackRelease({ workloadId, release }: { workloadId: string; release: string }) {
+function RollbackRelease({ workload, release }: { workload: WorkloadSummary; release: string }) {
+  const workloadId = workload.id;
+  const pendingRollout = usePendingRollout(workload);
+  const idle = useIdleState(workload);
+  const held = holdReason(useEnvironmentHold(workload).hold, "rollback", "Rolling back") ?? idleReason(idle.hold, "rollback", "Rolling back");
   const retained = useQuery({ queryKey: ["releases", workloadId], queryFn: ({ signal }) => request<{ releases: { id: string }[] }>("GET", `/api/workloads/${workloadId}/releases`, undefined, signal) });
   const rollback = useRollback(workloadId);
   const [confirm, setConfirm] = useState(false);
@@ -31,7 +44,9 @@ function RollbackRelease({ workloadId, release }: { workloadId: string; release:
   const online = useOnline();
   const navigate = useNavigate();
   return <>
-    <Button disabled={!online || rollback.isPending || retained.isError || !retained.data?.releases.some((item) => item.id === release)} onClick={() => setConfirm(true)}>Roll back to this release</Button>
+    <Button disabled={!online || rollback.isPending || Boolean(pendingRollout) || Boolean(held) || retained.isError || !retained.data?.releases.some((item) => item.id === release)} onClick={() => setConfirm(true)}>Roll back to this release</Button>
+    {pendingRollout && <PendingRolloutMessage workloadId={workloadId} action="roll back" />}
+    {held && <p className="text-xs text-fg-muted">{held}</p>}
     {retained.isError && <Notice tone="error">Could not verify whether this release is retained.</Notice>}
     {retained.data && !retained.data.releases.some((item) => item.id === release) && <p className="text-xs text-fg-muted">This release is no longer retained on the worker.</p>}
     {rollback.isError && <Notice tone="error" title="Could not queue rollback">{errorMessage(rollback.error)}</Notice>}
@@ -78,6 +93,40 @@ function EmergencyOverride({ operation }: { operation: Operation }) {
       </form>
     </Dialog>
   </>;
+}
+
+const suspensionPhases: Record<SuspensionResult["phase"], string> = {
+  pausing: "Pausing",
+  paused: "Paused",
+  resuming: "Resuming",
+  resumed: "Resumed",
+  stopped: "Left stopped",
+};
+
+const idleSuspensionPhases: Record<SuspensionResult["phase"], string> = {
+  pausing: "Going to sleep",
+  paused: "Asleep",
+  resuming: "Waking",
+  resumed: "Woke the sleeping app",
+  stopped: "Left stopped",
+};
+
+const suspensionTerms: Record<SuspensionResult["reason"], string> = { idle: "Idle sleep", environment: "Environment pause", manual_stop: "Manual stop" };
+
+// A manual Start can wake an app that idle sleep stopped, so its result is not an environment resume.
+function SuspensionOutcome({ suspension }: { suspension: SuspensionResult }) {
+  const idle = suspension.reason === "idle";
+  const labels = idle ? idleSuspensionPhases : suspensionPhases;
+  const before = idle ? "before it went to sleep" : suspension.reason === "manual_stop" ? "before the stop" : "before the pause";
+  return (
+    <div className="space-y-1">
+      <p>{labels[suspension.phase] ?? suspension.phase}</p>
+      <p className="text-xs text-fg-muted">
+        {suspension.captured} {suspension.captured === 1 ? "container" : "containers"} captured, {suspension.previously_running} running {before}.
+        {suspension.phase === "stopped" && (idle ? " It was stopped manually while asleep, so it was left stopped." : " It was stopped manually while paused, so the resume left it stopped.")}
+      </p>
+    </div>
+  );
 }
 
 const stateDescriptions = {
@@ -156,7 +205,7 @@ export function OperationPage() {
           ) : back
         }
         actions={
-          active && can(workload?.permissions, "operate") ? (
+          active && can(workload?.permissions, "operate") && !isSuspensionAction(operation.action) ? (
             <Button disabled={!online || cancel.isPending || operation.cancel_requested || cancel.isSuccess} onClick={() => setConfirmCancel(true)}>
               {operation.cancel_requested || cancel.isSuccess ? "Cancellation requested" : "Cancel operation"}
             </Button>
@@ -190,6 +239,23 @@ export function OperationPage() {
           </Notice>
         </div>
       )}
+      {isSuspensionAction(operation.action) && (
+        <div className="px-4 pt-4 sm:px-6">
+          <Notice title={operation.action === "suspend" ? "Queued by an environment pause" : "Queued by an environment resume"}>
+            {placement?.environment ? (
+              <>
+                The control plane runs this operation for the resource's environment. Pause, resume or retry it from{" "}
+                <Link to="/projects/$projectId/environments/$environmentId" params={{ projectId: placement.project.id, environmentId: placement.environment.id }} className={linkClass}>
+                  {placement.environment.name}
+                </Link>
+                .
+              </>
+            ) : (
+              "The control plane runs this operation for the resource's environment. Pause, resume or retry it from the environment page."
+            )}
+          </Notice>
+        </div>
+      )}
       {operations.isRefetchError && (
         <div className="px-4 pt-4 sm:px-6">
           <QueryError what="the latest status" error={operations.error} onRetry={() => void operations.refetch()} retrying={operations.isFetching} />
@@ -198,7 +264,7 @@ export function OperationPage() {
 
       <Section title="Summary">
         <div className="space-y-4">
-          {workload?.kind === "service" && can(workload.permissions, "operate") && operation.state === "succeeded" && (operation.action === "deploy" || operation.action === "rollback") && <RollbackRelease workloadId={workload.id} release={operation.id} />}
+          {workload?.kind === "service" && can(workload.permissions, "operate") && operation.state === "succeeded" && (operation.action === "deploy" || operation.action === "rollback") && <RollbackRelease workload={workload} release={operation.id} />}
           {cancel.isError && <Notice tone="error" title="Could not request cancellation">{errorMessage(cancel.error)}</Notice>}
           {active && operation.cancel_requested && <Notice tone="warn" title="Waiting for the worker">The request is saved and will be delivered when the worker is reachable.</Notice>}
           <p className="text-[13px] text-fg-muted">{stateDescriptions[operation.state]}</p>
@@ -232,6 +298,31 @@ export function OperationPage() {
               { term: "Queued", value: formatAbsolute(operation.created_at) },
               ...(worker?.finished_at ? [{ term: "Finished", value: formatAbsolute(worker.finished_at) }] : []),
               ...(duration !== null ? [{ term: "Duration", value: formatDuration(duration) }] : []),
+              ...(worker?.job ? [{ term: "Job result", value: <JobOutcome job={worker.job} /> }] : []),
+              ...(worker?.rollout
+                ? [
+                    {
+                      term: "Rollout",
+                      value: (
+                        <div className="space-y-1">
+                          <p>{resultSummary(worker.rollout)}</p>
+                          {worker.rollout.reason && <p className="text-xs text-fg-muted">{worker.rollout.reason}</p>}
+                          {worker.rollout.phase === "waiting" && workload && (
+                            <p className="text-xs text-fg-muted">
+                              The resource{" "}
+                              <Link to="/resources/$resourceId" params={{ resourceId: workload.id }} className={linkClass}>
+                                Overview
+                              </Link>{" "}
+                              shows whether it is still waiting.
+                            </p>
+                          )}
+                        </div>
+                      ),
+                    },
+                  ]
+                : []),
+              ...(worker?.scale ? [{ term: "CPU scaling", value: <ScaleOutcome scale={worker.scale} /> }] : []),
+              ...(worker?.suspension ? [{ term: suspensionTerms[worker.suspension.reason], value: <SuspensionOutcome suspension={worker.suspension} /> }] : []),
               ...(worker?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{worker.revision}</span> }] : []),
               ...(!worker ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),
             ]}

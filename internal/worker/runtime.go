@@ -12,9 +12,13 @@ import (
 	"time"
 )
 
+const MaxResourceContainers = 128
+
 type Container struct {
 	Service            string            `json:"service"`
 	ExposedPorts       bool              `json:"exposed_ports"`
+	Health             string            `json:"health,omitempty"`
+	ExitCode           *int              `json:"exit_code,omitempty"`
 	ExpectedCompleted  bool              `json:"expected_completed,omitempty"`
 	Metrics            *ContainerMetrics `json:"metrics,omitempty"`
 	MetricsUnavailable bool              `json:"metrics_unavailable,omitempty"`
@@ -25,6 +29,57 @@ type Container struct {
 	Status             string            `json:"status"`
 	Ports              string            `json:"ports"`
 }
+
+func (e *Engine) inspectContainerStates(ctx context.Context, containers []Container) error {
+	if len(containers) == 0 {
+		return nil
+	}
+	args := []string{"docker", "inspect", "--format", `{"id":{{json .Id}},"state":{{json .State}},"service":{{json (or (index .Config.Labels "dev.cove.service") (index .Config.Labels "com.docker.compose.service"))}}}`}
+	for _, container := range containers {
+		args = append(args, container.ID)
+	}
+	out := &limitedBuffer{Limit: 2 * 1024 * 1024}
+	if err := e.Run(ctx, e.Root, args, nil, out); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(&out.data)
+	seen := map[string]bool{}
+	for {
+		var detail struct {
+			ID      string
+			Service string
+			State   struct {
+				Status   string
+				ExitCode int
+				Health   *struct{ Status string }
+			}
+		}
+		if err := decoder.Decode(&detail); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return err
+		}
+		for i := range containers {
+			if detail.ID == "" || !strings.HasPrefix(detail.ID, containers[i].ID) {
+				continue
+			}
+			containers[i].State, containers[i].Service = detail.State.Status, detail.Service
+			if detail.State.Health != nil {
+				containers[i].Health = detail.State.Health.Status
+			}
+			if detail.State.Status == "exited" || detail.State.Status == "dead" {
+				code := detail.State.ExitCode
+				containers[i].ExitCode = &code
+			}
+			seen[containers[i].ID] = true
+		}
+	}
+	if len(seen) != len(containers) {
+		return errors.New("container state inspection was incomplete")
+	}
+	return nil
+}
+
 type limitedBuffer struct {
 	data  bytes.Buffer
 	Limit int
@@ -60,6 +115,10 @@ func (e *Engine) Containers(ctx context.Context, id string) ([]Container, error)
 		service := ""
 		for _, label := range strings.Split(docker.Labels, ",") {
 			key, value, ok := strings.Cut(label, "=")
+			if ok && key == "dev.cove.service" && serviceIdentifier.MatchString(value) {
+				service = value
+				break
+			}
 			if ok && key == "com.docker.compose.service" && serviceIdentifier.MatchString(value) {
 				service = value
 			}
@@ -87,6 +146,7 @@ func (e *Engine) ContainerLogs(ctx context.Context, id string) (string, error) {
 	var output bytes.Buffer
 	log := &boundedLog{file: &output, remaining: 65536}
 	log.secrets = append(log.secrets, current.AdditionalSecrets...)
+	log.secrets = append(log.secrets, routeSecrets(current.Routes)...)
 	var environment []string
 	for key, value := range current.Environment {
 		environment = append(environment, key+"="+value)

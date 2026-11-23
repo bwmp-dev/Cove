@@ -15,7 +15,7 @@ func TestMergedComposeDollarSnapshotRoundTrip(t *testing.T) {
 	}
 	dir := t.TempDir()
 	source := filepath.Join(dir, "compose.yaml")
-	if err := os.WriteFile(source, []byte("services:\n  app:\n    image: busybox:1.37\n    environment:\n      VALUE: ${VALUE:?required}\n    command: ['printf', '$$SHELL']\n"), 0600); err != nil {
+	if err := os.WriteFile(source, []byte("services:\n  app:\n    image: busybox:1.37\n    environment:\n      VALUE: ${VALUE:?required}\n    labels:\n      literal$$key: value$$literal\n    command: ['printf', '$$SHELL']\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	resolve := func(file string) map[string]any {
@@ -44,5 +44,26 @@ func TestMergedComposeDollarSnapshotRoundTrip(t *testing.T) {
 	right, _ := json.Marshal(reread["services"])
 	if string(left) != string(right) {
 		t.Fatalf("resolved snapshot changed dollars: before %s after %s", left, right)
+	}
+	generated := resolve(source)
+	request := Request{ID: "dollar-generation", Workload: "app", Rollout: &RolloutOptions{Strategy: "rolling", Replicas: map[string]int{"app": 2}}}
+	traffic, _, err := generationConfig(request, generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := filepath.Join(dir, "generation.json")
+	if err = writeJSON(generation, literalCompose(generated)); err != nil {
+		t.Fatal(err)
+	}
+	actual := resolve(generation)
+	service := actual["services"].(map[string]any)[generationName(request.ID, "app")].(map[string]any)
+	if service["environment"].(map[string]any)["VALUE"] != "resolved-$VALUE-$$PAIR" || service["command"].([]any)[1] != "$SHELL" || service["labels"].(map[string]any)["literal$$key"] != "value$literal" {
+		t.Fatal("rollout generation changed literal dollars", service)
+	}
+	if err = restoreServiceNames(actual, traffic); err != nil {
+		t.Fatal(err)
+	}
+	if actual["services"].(map[string]any)["app"] == nil {
+		t.Fatal("retained generation could not restore its logical service")
 	}
 }

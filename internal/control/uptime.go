@@ -256,6 +256,18 @@ func (s *Server) collectUptime(ctx context.Context) error {
 		group.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
+			down, err := s.resourceIntentionallyDown(ctx, j.workload)
+			if err != nil {
+				failures <- err
+				return
+			}
+			if down {
+				_, err = s.DB.Exec(ctx, `UPDATE route_checks SET checked_at=now(),last_up=NULL,last_status=NULL,latency_ms=NULL,last_error='Resource intentionally stopped, paused or asleep; checks deferred.',consecutive_failures=0 WHERE id=$1 AND version=$2`, j.check.ID, j.check.version)
+				if err != nil {
+					failures <- err
+				}
+				return
+			}
 			var configuration []byte
 			if err := s.DB.QueryRow(ctx, `SELECT configuration FROM workloads WHERE id=$1 AND team_id=$2`, j.workload, j.team).Scan(&configuration); err != nil {
 				if !errors.Is(err, pgx.ErrNoRows) {

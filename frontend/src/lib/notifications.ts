@@ -113,6 +113,8 @@ const outcomeGroups = {
   security: { title: "Account security", description: "Messages name the event only, without addresses, browsers or reasons. Review the audit log for details." },
   changes: { title: "Deployments and configuration", description: "Policy overrides, deploy hook deliveries and reviewed configuration changes. Applying configuration does not deploy resources." },
   migration: { title: "Imports and adoption", description: "Import reviews and Compose adoption. Importers do not change the source system." },
+  rollouts: { title: "Rollouts and CPU scaling", description: "Staged rollouts waiting for promotion and their outcome, and replica changes queued by CPU autoscaling." },
+  sleep: { title: "Idle sleep", description: "Request-driven services stopped after being idle and woken by the next request." },
 } satisfies Record<string, { title: string; description: string }>;
 
 const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: string }> = {
@@ -130,6 +132,15 @@ const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: 
   "import.failed": { group: "migration", label: "Import request refused" },
   "adoption.succeeded": { group: "migration", label: "Resource adopted" },
   "adoption.failed": { group: "migration", label: "Compose adoption did not finish" },
+  "rollout.staged": { group: "rollouts", label: "Rollout staged for promotion" },
+  "rollout.promoted": { group: "rollouts", label: "Rollout promoted" },
+  "rollout.aborted": { group: "rollouts", label: "Rollout aborted" },
+  "rollout.failed": { group: "rollouts", label: "Rollout failed" },
+  "autoscale.queued": { group: "rollouts", label: "CPU scaling queued" },
+  "autoscale.succeeded": { group: "rollouts", label: "CPU scaling applied" },
+  "autoscale.failed": { group: "rollouts", label: "CPU scaling failed" },
+  "resource.asleep": { group: "sleep", label: "Resource went to sleep" },
+  "resource.awake": { group: "sleep", label: "Resource woke" },
 };
 
 export interface EventGroup {

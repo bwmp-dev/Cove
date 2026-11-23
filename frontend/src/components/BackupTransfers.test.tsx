@@ -43,7 +43,7 @@ function mockApi(backups: () => object[], saved: object | null = policy) {
 const allRights: BackupRights = { backup: true, configure: true, restore: true, download: true, import: true };
 
 function renderBackups(support: WorkerSupport = upgraded, rights: BackupRights = allRights) {
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Backups workloadId="w1" busy={false} rights={rights} support={support} /></QueryClientProvider>);
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Backups workloadId="w1" busy={false} rights={rights} support={support} restoreHeld={null} verifyHeld={null} /></QueryClientProvider>);
 }
 
 it("warns about plaintext scope and downloads through a plain same-origin link with the team context", async () => {

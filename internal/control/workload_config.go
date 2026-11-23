@@ -6,7 +6,6 @@ import (
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -14,6 +13,9 @@ import (
 func validateWorkload(in workloadInput) error {
 	if in.Source != nil && in.Source.SSHPrivateKey != "" {
 		return errors.New("SSH private keys are managed through the deploy key endpoint")
+	}
+	if err := validateAutoscale(in); err != nil {
+		return err
 	}
 	if in.Kind == "job" && in.Backup != nil {
 		return errors.New("disable backups before converting a service to a job")
@@ -24,13 +26,13 @@ func validateWorkload(in workloadInput) error {
 	if strings.TrimSpace(in.Name) == "" || len(in.Name) > 120 {
 		return errors.New("a name of at most 120 characters is required")
 	}
-	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", ComposeBundle: in.ComposeBundle, Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy})
+	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", ComposeBundle: in.ComposeBundle, Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy, Rollout: in.Rollout})
 }
 func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	var encrypted []byte
 	var environmentID, projectID string
-	var stopped bool
-	err := s.DB.QueryRow(r.Context(), "SELECT configuration,COALESCE(environment_id,''),project_id,manually_stopped FROM workloads WHERE id=$1", r.PathValue("id")).Scan(&encrypted, &environmentID, &projectID, &stopped)
+	var stopped, paused bool
+	err := s.DB.QueryRow(r.Context(), "SELECT configuration,COALESCE(environment_id,''),project_id,manually_stopped,EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) FROM workloads w WHERE id=$1", r.PathValue("id")).Scan(&encrypted, &environmentID, &projectID, &stopped, &paused)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -104,11 +106,20 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	for i := range configuration.Routes {
 		configuration.Routes[i].Auth = ""
 	}
-	respond(w, 200, workloadView{PendingAdoptionID: pendingAdoption, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: configuration.Kind, JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: names, ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
+	configuration.Routes = routesWithoutSecrets(configuration.Routes)
+	respond(w, 200, workloadView{PendingAdoptionID: pendingAdoption, EnvironmentPaused: paused, Rollout: configuration.Rollout, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: configuration.Kind, JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: names, ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
 }
 func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
-	var in workloadInput
-	if !decode(w, r, &in) {
+	var input struct {
+		workloadInput
+		Routes []routeInput `json:"routes"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	in := input.workloadInput
+	if in.Autoscale != nil {
+		http.Error(w, "use the CPU scaling policy endpoint", 400)
 		return
 	}
 	if in.Backup != nil {
@@ -184,6 +195,11 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "configuration unavailable", 500)
 			return
 		}
+		in.Routes, err = retainedRouteAuth(input.Routes, old.Routes)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 		if in.Backup == nil {
 			in.Backup = old.Backup
 		} else if !s.requireBackupConfigurationAccess(w, r, "workload", r.PathValue("id")) {
@@ -205,12 +221,16 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		if in.ComposeBundle == nil {
 			in.ComposeBundle = old.ComposeBundle
 		}
+		in.Autoscale = old.Autoscale
+		if in.Rollout == nil {
+			in.Rollout = old.Rollout
+		}
 		if in.Environment == nil {
 			in.Environment = old.Environment
 		}
 		if in.Routes == nil {
 			in.Routes = old.Routes
-		} else if !slices.Equal(in.Routes, old.Routes) {
+		} else if !worker.RoutesEqual(in.Routes, old.Routes) {
 			attempted, err := deployAttempted(r.Context(), tx, r.PathValue("id"))
 			if err != nil {
 				http.Error(w, "database unavailable", 503)
@@ -260,6 +280,10 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 	if in.Kind == "" {
 		in.Kind = "service"
 	}
+	if in.Rollout != nil {
+		value := in.Rollout.Normalized()
+		in.Rollout = &value
+	}
 	data, err := json.Marshal(in)
 	if err != nil {
 		http.Error(w, "invalid configuration", 400)
@@ -271,7 +295,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cpu, memory := configuredUsage(in)
-	_, err = tx.Exec(r.Context(), "UPDATE workloads SET name=$1,configuration=$2,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END WHERE id=$3", in.Name, encrypted, r.PathValue("id"), in.Kind, cpu, memory)
+	_, err = tx.Exec(r.Context(), "UPDATE workloads SET name=$1,configuration=$2,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END,job_pending_at=CASE WHEN $4='job' THEN job_pending_at ELSE NULL END,job_overlap_policy=CASE WHEN $4='job' THEN job_overlap_policy ELSE 'skip' END,job_timeout_seconds=CASE WHEN $4='job' THEN job_timeout_seconds ELSE 1800 END WHERE id=$3", in.Name, encrypted, r.PathValue("id"), in.Kind, cpu, memory)
 	if quotaError(w, err) {
 		return
 	}

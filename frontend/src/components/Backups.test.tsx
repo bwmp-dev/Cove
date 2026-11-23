@@ -34,7 +34,7 @@ function renderBackups(saved: SavedPolicy | null, support: WorkerSupport, backup
     if (path.endsWith("/backups")) return Promise.resolve({ backups });
     return Promise.resolve([]);
   });
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Backups workloadId="w1" busy={false} rights={{ backup: true, configure: true, restore: true, download: true, import: true }} support={support} /></QueryClientProvider>);
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Backups workloadId="w1" busy={false} rights={{ backup: true, configure: true, restore: true, download: true, import: true }} support={support} restoreHeld={null} verifyHeld={null} /></QueryClientProvider>);
 }
 
 function chooseMethod(name: string) {

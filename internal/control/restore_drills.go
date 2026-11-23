@@ -12,7 +12,7 @@ func (s *Server) scheduleRestoreDrills(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,COALESCE((SELECT o.id FROM operations o WHERE o.workload_id=w.id AND o.action='backup' AND o.state='succeeded' ORDER BY o.updated_at DESC LIMIT 1),'') FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.drill_interval>0 AND w.next_drill_at<=now() AND COALESCE((n.capabilities->>'restore_drills')::boolean,false) ORDER BY w.next_drill_at LIMIT 16 FOR UPDATE OF w SKIP LOCKED`)
+	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,COALESCE((SELECT o.id FROM operations o WHERE o.workload_id=w.id AND o.action='backup' AND o.state='succeeded' ORDER BY o.updated_at DESC LIMIT 1),'') FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE NOT EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) AND NOT EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id) AND w.drill_interval>0 AND w.next_drill_at<=now() AND COALESCE((n.capabilities->>'restore_drills')::boolean,false) ORDER BY w.next_drill_at LIMIT 16 FOR UPDATE OF w SKIP LOCKED`)
 	if err != nil {
 		return err
 	}

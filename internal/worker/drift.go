@@ -32,6 +32,7 @@ type DriftChange struct {
 }
 
 type DriftReport struct {
+	Deferred   string        `json:"deferred,omitempty"`
 	Baseline   bool          `json:"baseline"`
 	Busy       bool          `json:"busy"`
 	Operation  string        `json:"operation"`
@@ -141,6 +142,14 @@ func (e *Engine) Drift(ctx context.Context, workload string) (DriftReport, error
 		delete(e.active, workload)
 		e.mu.Unlock()
 	}()
+	suspension, err := e.readSuspension(workload)
+	if err != nil {
+		return report, err
+	}
+	if suspension != nil && suspension.Phase != "awake" {
+		report.Busy, report.Deferred = true, "suspended"
+		return report, nil
+	}
 	data, err := os.ReadFile(filepath.Join(e.Root, "workloads", workload, "drift.json"))
 	if os.IsNotExist(err) {
 		return report, nil

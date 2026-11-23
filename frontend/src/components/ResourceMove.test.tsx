@@ -53,6 +53,7 @@ beforeEach(() => {
       if (custom) return Promise.resolve(custom);
       if (path === "/api/projects") return Promise.resolve(json(200, projectsByTeam[new Headers(init.headers).get("x-cove-team") ?? "a"] ?? []));
       if (path.startsWith("/api/operations")) return Promise.resolve(json(200, []));
+      if (path === "/api/environments/e1/suspension") return Promise.resolve(json(200, { paused: false, phase: "active", resources: [] }));
       return Promise.resolve(text(404, "not found"));
     }),
   );
@@ -165,4 +166,14 @@ it("hides the move form for preview resources", () => {
   renderMove({ ...workload, preview_source_id: "w0" });
   expect(screen.getByText("Preview resources cannot be moved")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Review move" })).not.toBeInTheDocument();
+});
+
+it("locks moving while the environment is paused", async () => {
+  const user = userEvent.setup();
+  handler = (path) => (path === "/api/environments/e1/suspension" ? json(200, { paused: true, phase: "paused", resources: [] }) : undefined);
+  renderMove();
+  expect(await screen.findByText("Moving is locked while the environment is paused or resuming")).toBeInTheDocument();
+  await choose(user, "Project and environment", "Shop / staging");
+  expect(screen.getByRole("button", { name: "Review move" })).toBeDisabled();
+  expect(calls().some((call) => call.path === "/api/workloads/w1/move/preview")).toBe(false);
 });

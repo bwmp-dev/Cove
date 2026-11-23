@@ -178,6 +178,9 @@ func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, kind, id 
 		if !ok {
 			return false
 		}
+		if field(fields, "action") == "build" && !s.requirePermission(w, r, kind, id, "read_secrets") {
+			return false
+		}
 		if action := field(fields, "action"); action == "backup" || action == "restore" || action == "drill" {
 			if action != "backup" && !s.requirePermission(w, r, kind, id, "edit_configuration") {
 				return false
@@ -429,6 +432,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == "GET" && r.Context().Value(apiRouteKey{}) != nil {
 			return s.requireAccess(w, r, "environment", id, 1)
 		}
+		if strings.HasSuffix(path, "/suspension") {
+			needed := 1
+			if r.Method != "GET" {
+				needed = 2
+			}
+			return s.requireAccess(w, r, "environment", id, needed)
+		}
 		if r.Method != "GET" {
 			var preview bool
 			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM environment_previews WHERE environment_id=$1)`, id).Scan(&preview); err != nil {
@@ -530,6 +540,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			}
 			if field(v, "action") != "restore" && field(v, "action") != "drill" {
 				needed = 2
+			}
+			if field(v, "action") == "build" {
+				needed = 3
 			}
 		}
 		if !s.requireAccess(w, r, "workload", id, needed) {

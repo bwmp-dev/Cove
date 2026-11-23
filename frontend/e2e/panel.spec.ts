@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { createHash, randomBytes } from "node:crypto";
-import { expect, test, type Download, type Page, type TestInfo, type Locator } from "@playwright/test";
+import { expect, test, type APIResponse, type Download, type Page, type TestInfo, type Locator } from "@playwright/test";
 import { spawn, execFileSync } from "node:child_process";
 
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
@@ -69,9 +69,11 @@ async function createProject(page: Page, name: string) {
   await page.goto("/projects");
   await page.locator("main header").getByRole("button", { name: "New project", exact: true }).click();
   await page.getByLabel("Project name", { exact: true }).fill(name);
+  const created = page.waitForResponse(response => new URL(response.url()).pathname === "/api/projects" && response.request().method() === "POST");
   await page.getByRole("button", { name: "Create project", exact: true }).click();
+  const { id } = (await (await created).json()) as { id: string };
+  await expect(page).toHaveURL(new RegExp(`/projects/${id}/environments/[^/?#]+$`));
   await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: /production/ }).first()).toBeVisible();
 }
 
 // Reads the resource's application containers from the Docker host the real worker manages.
@@ -97,6 +99,26 @@ async function deployFromHeader(page: Page) {
   if (await proceed.isVisible()) await proceed.click();
   await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
   await expect(dialog).toBeHidden();
+}
+
+// Groups the resource's containers by the rollout generation (the deploy operation ID) the worker labels them with.
+function generations(workload: string) {
+  const ids = execFileSync("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=cove-${workload}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
+  const grouped: Record<string, string[]> = {};
+  if (!ids.length) return grouped;
+  const format = '{{index .Config.Labels "dev.cove.generation"}}|{{index .Config.Labels "dev.cove.service"}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{if index .NetworkSettings.Networks "cove-ingress"}}routed{{end}}';
+  for (const line of execFileSync("docker", ["inspect", "--format", format, ...ids], { encoding: "utf8" }).trim().split(/\r?\n/)) {
+    const [generation = "", ...state] = line.split("|");
+    (grouped[generation] ??= []).push(state.join("|"));
+  }
+  for (const states of Object.values(grouped)) states.sort();
+  return grouped;
+}
+
+// An HTTPS request through the real Traefik ingress, addressed by Host header so no DNS or public certificate is involved.
+function routedResponses(hostname: string, count: number) {
+  return Array.from({ length: count }, () =>
+    execFileSync("docker", ["exec", "cove-ingress", "wget", "-qO-", "-T", "5", "--no-check-certificate", `--header=Host: ${hostname}`, "https://127.0.0.1/"], { encoding: "utf8" }).trim());
 }
 
 async function createResource(page: Page, name: string) {
@@ -318,7 +340,7 @@ test("project, environment and resource lifecycle through the real worker", asyn
 
   await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByText("running", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Healthy", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
   await capture(page, testInfo, "resource");
 
   // Unsaved section edits are guarded and can be discarded or saved in place.
@@ -465,19 +487,52 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await expect(page.getByText("No resources in Acceptance yet.")).toBeVisible();
   await capture(page, testInfo, "environment");
 
+  // Same-team moves are reviewed and acknowledged; containers keep running and nothing is redeployed.
+  const beforeMoves = containers(resourceURL);
+  // The shared network connection saved earlier blocks the move until it is detached.
   await page.goto(resourceURL + "/settings");
-  await chooseOption(page.getByLabel("Project and environment", { exact: true }), { label: "Browser project / Project resources" });
-  await page.getByRole("button", { name: "Save placement", exact: true }).click();
-  await expect(page.getByText("Placement saved", { exact: true })).toBeVisible();
+  const blockedMove = page.getByRole("region", { name: "Move resource", exact: true });
+  await chooseOption(blockedMove.getByLabel("Project and environment", { exact: true }), { label: "Browser project / Project resources" });
+  await blockedMove.getByRole("button", { name: "Review move", exact: true }).click();
+  const blockedReview = page.getByRole("dialog", { name: "Move browser-service", exact: true });
+  await expect(blockedReview.getByText("Detach private connections and shared networks before moving.", { exact: true })).toBeVisible();
+  await expect(blockedReview.getByRole("button", { name: "Move resource", exact: true })).toHaveCount(0);
+  await blockedReview.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(blockedReview).toHaveCount(0);
+  await sections.getByRole("link", { name: "Networking", exact: true }).click();
+  await networks.getByRole("button", { name: "Remove connection 1", exact: true }).click();
+  await networks.getByRole("button", { name: "Save connections", exact: true }).click();
+  await expect(networks.getByText("Connections saved", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(networks.getByRole("button", { name: "Add connection", exact: true })).toBeVisible();
+  await expect(networks.getByRole("button", { name: /^Remove connection/ })).toHaveCount(0);
+  expect(containers(resourceURL)).toBe(beforeMoves);
+  const moveResource = async (destination: string) => {
+    await page.goto(resourceURL + "/settings");
+    const move = page.getByRole("region", { name: "Move resource", exact: true });
+    await chooseOption(move.getByLabel("Project and environment", { exact: true }), { label: destination });
+    await move.getByRole("button", { name: "Review move", exact: true }).click();
+    const review = page.getByRole("dialog", { name: "Move browser-service", exact: true });
+    await expect(review.getByText(destination, { exact: true })).toBeVisible();
+    const confirm = review.getByRole("button", { name: "Move resource", exact: true });
+    await expect(confirm).toBeDisabled();
+    await review.getByRole("checkbox", { name: "I understand these effects", exact: true }).check();
+    await confirm.click();
+    await expect(review).toHaveCount(0);
+    await expect(move.getByText(`Moved to ${destination}.`)).toBeVisible();
+    expect(containers(resourceURL)).toBe(beforeMoves);
+  };
+  await moveResource("Browser project / Project resources");
   await expect(breadcrumb.getByRole("link", { name: "production", exact: true })).toHaveCount(0);
   await breadcrumb.getByRole("link", { name: "Browser project", exact: true }).click();
   await expect(page.getByRole("region", { name: "Project resources", exact: true }).getByRole("link", { name: "browser-service", exact: true })).toBeVisible();
   await capture(page, testInfo, "project-resources");
-  await page.goto(resourceURL + "/settings");
-  await chooseOption(page.getByLabel("Project and environment", { exact: true }), { label: "Browser project / Acceptance" });
-  await page.getByRole("button", { name: "Save placement", exact: true }).click();
-  await expect(page.getByText("Placement saved", { exact: true })).toBeVisible();
+  await moveResource("Browser project / Acceptance");
   await expect(breadcrumb.getByRole("link", { name: "Acceptance", exact: true })).toBeVisible();
+  // The worker refuses rollbacks that change the network layout, and the first release still has the shared-network
+  // binding detached above. Deploying the current configuration creates the release the rollback below targets.
+  await page.goto(resourceURL);
+  await deployFromHeader(page);
 
   await page.getByRole("link", { name: "Backups", exact: true }).click();
   await page.getByRole("button", { name: "Configure backups", exact: true }).click();
@@ -490,22 +545,28 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
   await page.getByRole("link", { name: "Operations", exact: true }).filter({ visible: true }).last().click();
-  await page.getByRole("link", { name: "Deploy", exact: true }).first().click();
+  // Operations are listed newest first, so this row is the deploy started after the moves.
+  const currentDeploy = page.getByRole("table", { name: "Operations for browser-service", exact: true }).getByRole("row")
+    .filter({ has: page.getByRole("link", { name: "Deploy", exact: true }) }).first();
+  await expect(currentDeploy.getByText("Succeeded", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await currentDeploy.getByRole("link", { name: "Deploy", exact: true }).click();
   await page.getByRole("button", { name: "Roll back to this release" }).click();
   await page.getByRole("button", { name: "Roll back", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Rollback browser-service", exact: true })).toBeVisible();
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
 
   await page.goto("/tokens");
-  await page.getByLabel("Name", { exact: true }).fill("browser-reader");
-  await chooseOption(page.getByLabel("Resource", { exact: true }), { label: "browser-service" });
-  await page.getByRole("button", { name: "Create token", exact: true }).click();
-  await expect(page.getByLabel("New API token")).toBeVisible();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
-  await expect(page.getByLabel("New API token")).toHaveCount(0);
-  await page.getByRole("button", { name: "Revoke browser-reader", exact: true }).click();
-  await page.getByRole("button", { name: "Revoke token", exact: true }).click();
-  await expect(page.getByText("No API tokens created.")).toBeVisible();
+  const createResourceToken = page.getByRole("region", { name: "Create resource token", exact: true });
+  const resourceTokens = page.getByRole("region", { name: "Resource tokens", exact: true });
+  await createResourceToken.getByLabel("Name", { exact: true }).fill("browser-reader");
+  await chooseOption(createResourceToken.getByLabel("Resource", { exact: true }), { label: "browser-service" });
+  await createResourceToken.getByRole("button", { name: "Create token", exact: true }).click();
+  await expect(createResourceToken.getByLabel("New resource token", { exact: true })).toBeVisible();
+  await createResourceToken.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(createResourceToken.getByLabel("New resource token", { exact: true })).toHaveCount(0);
+  await resourceTokens.getByRole("button", { name: "Revoke browser-reader", exact: true }).click();
+  await page.getByRole("dialog", { name: "Revoke this resource token?" }).getByRole("button", { name: "Revoke token", exact: true }).click();
+  await expect(resourceTokens.getByText("No resource tokens created.", { exact: true })).toBeVisible();
 
   await page.goto(resourceURL + "/settings");
   await page.getByRole("button", { name: "Delete resource", exact: true }).click();
@@ -514,7 +575,7 @@ test("project, environment and resource lifecycle through the real worker", asyn
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Stop", exact: true }).click();
   await page.getByRole("link", { name: "Overview", exact: true }).click();
-  await expect(page.getByText("exited", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByRole("table", { name: "Containers" }).getByText("Stopped", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText("Manually stopped, automatic deployments paused", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Deploy", exact: true })).toBeEnabled();
 
@@ -1223,6 +1284,397 @@ test("guarded deployment rejects an unhealthy candidate without replacing the ap
   const success = await deploy();
   expect(success.result.state, success.logs).toBe("succeeded");
   expect(containers(url).split("|")[0]).not.toBe(original.split("|")[0]);
+});
+
+test("automatic health restarts restart only the unhealthy container through the real monitor and worker", async ({ page }, testInfo) => {
+  test.setTimeout(420_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Health restart project");
+  const url = await createResource(page, "health-restart-app");
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const headers = { Origin: new URL(url).origin };
+  // app is healthy only while /tmp/healthy exists; its command recreates the file, so a restart makes it healthy again.
+  const restartCompose = [
+    "services:",
+    "  app:",
+    "    image: busybox:1.37",
+    "    pull_policy: never",
+    "    command: [sh, -c, 'touch /tmp/healthy; sleep 3600']",
+    "    healthcheck:",
+    "      test: [CMD, test, -f, /tmp/healthy]",
+    "      interval: 2s",
+    "      timeout: 2s",
+    "      retries: 1",
+    "  steady:",
+    "    image: busybox:1.37",
+    "    pull_policy: never",
+    "    command: [sh, -c, 'sleep 3600']",
+    "    healthcheck:",
+    "      test: [CMD, 'true']",
+    "      interval: 2s",
+    "",
+  ].join("\n");
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  expect((await page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: restartCompose } })).status()).toBe(200);
+  await page.reload();
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+  const service = (name: string) => {
+    const ids = execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${id}`, "--filter", `label=com.docker.compose.service=${name}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
+    expect(ids).toHaveLength(1);
+    const [container = "", startedAt = "", health = ""] = execFileSync("docker", ["inspect", "--format", "{{.Id}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}", ids[0] ?? ""], { encoding: "utf8" }).trim().split("|");
+    return { container, startedAt, health };
+  };
+  await expect.poll(() => service("app").health, { timeout: 60_000 }).toBe("healthy");
+  await expect.poll(() => service("steady").health, { timeout: 60_000 }).toBe("healthy");
+  const app = service("app");
+  const steady = service("steady");
+
+  await page.goto(`${url}/deployment-safety`);
+  const section = page.getByRole("region", { name: "Automatic health restarts" });
+  const enabled = section.getByRole("switch", { name: "Restart unhealthy containers" });
+  await expect(enabled).toBeEnabled();
+  await expect(enabled).not.toBeChecked();
+  await enabled.focus();
+  await page.keyboard.press("Space");
+  await expect(enabled).toBeChecked();
+  const saved = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}/restart-policy` && response.request().method() === "PUT");
+  await section.getByRole("button", { name: "Save changes", exact: true }).click();
+  expect((await saved).status()).toBe(200);
+  await expect(section.getByText(/no deploy is needed/)).toBeVisible();
+  // The control plane queues an image check once the deployed resource is idle, and the monitor shows Waiting until it finishes.
+  const activeOperations = async () => {
+    const response = await page.request.get(`/api/operations?workload_id=${id}`);
+    expect(response.status()).toBe(200);
+    return (await response.json() as { action: string; state: string }[]).filter(operation => ["queued", "running"].includes(operation.state)).map(operation => operation.action);
+  };
+  await expect.poll(activeOperations, { timeout: 120_000 }).toEqual([]);
+  await expect(section.getByText("Checking", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "health-restart-enabled");
+
+  execFileSync("docker", ["exec", app.container, "rm", "-f", "/tmp/healthy"]);
+  await expect.poll(() => service("app").health, { timeout: 30_000 }).toBe("unhealthy");
+  type Listed = { id: string; action: string; state: string };
+  const automatic = async () => ((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as Listed[]).find(operation => operation.action === "restart_unhealthy");
+  await expect.poll(async () => (await automatic())?.state ?? "not queued", { timeout: 240_000, intervals: [5_000] }).toMatch(/^(succeeded|failed|cancelled|interrupted)$/);
+  const operation = await automatic();
+  if (operation?.state !== "succeeded") throw new Error(`restart_unhealthy operation ${operation?.id} ended ${operation?.state}:\n${await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()}`);
+  await expect.poll(() => service("app").health, { timeout: 60_000 }).toBe("healthy");
+  const restarted = service("app");
+  expect(restarted.container).toBe(app.container);
+  expect(restarted.startedAt).not.toBe(app.startedAt);
+  expect(service("steady")).toEqual(steady);
+
+  const policy = await (await page.request.get(`/api/workloads/${id}/restart-policy`)).json() as { enabled: boolean; attempts_in_window: number; operation_id: string | null; last_queued_at: string | null; window_started_at: string | null };
+  expect(policy).toMatchObject({ enabled: true, attempts_in_window: 1, operation_id: operation?.id });
+  expect(policy.last_queued_at).not.toBeNull();
+  expect(policy.window_started_at).not.toBeNull();
+  expect((await page.request.post(`/api/workloads/${id}/operations`, { headers, data: { action: "restart_unhealthy" } })).status()).toBe(400);
+
+  await page.reload();
+  await expect(section.getByText("1 of 3", { exact: true })).toBeVisible();
+  await expect(section.getByText("Cooling down", { exact: true })).toBeVisible();
+  await expect(section.getByRole("link", { name: "View operation" })).toBeVisible();
+  // The resource header's latest-operation label is long; every line of it must stay inside the header's clipping box.
+  const latestOperation = page.locator("main header").getByRole("link", { name: "Restart unhealthy containers", exact: true });
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const outside = await latestOperation.evaluate((link) => {
+      let clip = link.parentElement;
+      while (clip && getComputedStyle(clip).overflow !== "hidden") clip = clip.parentElement;
+      const box = (clip ?? document.documentElement).getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(link);
+      return [...range.getClientRects()].filter(line => line.left < box.left - 0.5 || line.right > box.right + 0.5).length;
+    });
+    expect(outside).toBe(0);
+  }
+  await capture(page, testInfo, "health-restart-history");
+  await page.goto(`/operations/${operation?.id}`);
+  await expect(page.getByRole("heading", { name: /^Restart unhealthy containers/ })).toBeVisible();
+});
+
+test("replacement strategies stage, abort and promote rollouts through the real worker and ingress", async ({ page }, testInfo) => {
+  // Above the earlier 300s: each step may first wait out a background image check the control plane queues once the resource is idle.
+  test.setTimeout(420_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Rollout project");
+  const url = await createResource(page, "rollout-app");
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const headers = { Origin: new URL(url).origin };
+  const hostname = `rollout-${Date.now()}.cove.test`;
+  // init forwards SIGTERM so httpd stops promptly instead of waiting out Docker's stop grace period as PID 1.
+  const httpCompose = (marker: string) =>
+    `services:\n  app:\n    image: busybox:1.37\n    init: true\n    command: [sh, -c, 'mkdir -p /www && echo ${marker}-$$(cat /etc/hostname) > /www/index.html && exec httpd -f -p 8080 -h /www']\n    healthcheck:\n      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8080/']\n      interval: 1s\n      timeout: 2s\n      retries: 3\n`;
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+
+  // The control plane queues image checks for idle deployed resources and locks configuration while any operation is active.
+  const activeOperations = async () => {
+    const response = await page.request.get(`/api/operations?workload_id=${id}`);
+    expect(response.status()).toBe(200);
+    return (await response.json() as { action: string; state: string }[]).filter(operation => ["queued", "running"].includes(operation.state)).map(operation => operation.action);
+  };
+  const idle = async () => expect.poll(activeOperations, { timeout: 120_000 }).toEqual([]);
+  // A check can still be queued between the idle read and the write; only that lock conflict is retried.
+  const activeConflict = async (response: { status(): number; text(): Promise<string> }) => response.status() === 409 && (await response.text()).includes("active operation");
+  const mutate = async (send: () => Promise<APIResponse>) => {
+    for (let attempt = 1; ; attempt++) {
+      await idle();
+      const response = await send();
+      if (attempt < 3 && await activeConflict(response)) continue;
+      expect(response.status(), await response.text()).toBe(200);
+      return;
+    }
+  };
+  const saveCompose = (marker: string) =>
+    mutate(() => page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: httpCompose(marker) } }));
+  await saveCompose("rollout-one");
+  await mutate(() => page.request.put(`/api/workloads/${id}/routes`, { headers, data: { routes: [{ domain: hostname, service: "app", port: 8080, policy: { certificate_source: "default" } }] } }));
+
+  type Rollout = { strategy: string; replicas?: Record<string, number>; canary_percent: number };
+  const savedRollout = async () => ((await (await page.request.get(`/api/workloads/${id}`)).json()) as { rollout?: Rollout | null }).rollout;
+  const safety = page.getByRole("region", { name: "Deployment safety", exact: true });
+  const saveStrategy = async (strategy: string, configure?: () => Promise<void>) => {
+    await page.goto(`${url}/deployment-safety`);
+    await chooseOption(safety.getByLabel("Replacement strategy", { exact: true }), strategy);
+    await configure?.();
+    const save = safety.getByRole("button", { name: "Save changes", exact: true });
+    for (let attempt = 1; ; attempt++) {
+      await idle();
+      await expect(save).toBeEnabled({ timeout: 30_000 });
+      const request = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}` && response.request().method() === "PUT");
+      await save.click();
+      const response = await request;
+      if (attempt < 3 && await activeConflict(response)) continue;
+      expect(response.status(), await response.text()).toBe(200);
+      break;
+    }
+    await expect(safety.getByText("Saved. Changes apply on the next deploy.", { exact: true })).toBeVisible();
+    await expect.poll(async () => (await savedRollout())?.strategy).toBe(strategy);
+  };
+
+  type RuntimeState = { containers: { service?: string; state: string; health?: string }[]; rollout?: { operation: string; release?: string; strategy: string; phase: string; candidate_percent: number } | null };
+  const runtime = async () => {
+    const response = await page.request.get(`/api/workloads/${id}/runtime`);
+    expect(response.status()).toBe(200);
+    const state = await response.json() as RuntimeState;
+    const app = state.containers.filter(container => container.service === "app");
+    return {
+      app: app.length,
+      healthy: app.filter(container => container.state === "running" && container.health === "healthy").length,
+      rollout: state.rollout ? { strategy: state.rollout.strategy, phase: state.rollout.phase, candidate_percent: state.rollout.candidate_percent, operations: [state.rollout.operation, state.rollout.release] } : null,
+    };
+  };
+  const healthyGeneration = ["app|running|healthy|routed", "app|running|healthy|routed"];
+
+  // Queues an action through the UI, checks the request the page sent, and waits for the real worker to finish it.
+  const queued = async (action: string, trigger: () => Promise<void>) => {
+    const request = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}/operations` && response.request().method() === "POST");
+    await trigger();
+    const response = await request;
+    expect(response.status()).toBe(202);
+    expect(response.request().postDataJSON()).toEqual({ action });
+    const operation = (await response.json() as { id: string }).id;
+    const read = async () => await (await page.request.get(`/api/operations/${operation}`)).json() as { state: string; result: { rollout?: { strategy: string; phase: string } } | null };
+    await expect.poll(async () => (await read()).state, { timeout: 120_000 }).toMatch(/^(succeeded|failed|cancelled|interrupted)$/);
+    const result = await read();
+    if (result.state !== "succeeded") throw new Error(await (await page.request.get(`/api/operations/${operation}/logs`)).text());
+    return { operation, result: result.result };
+  };
+  const deployButton = page.getByRole("button", { name: "Deploy", exact: true });
+  const deploy = async () => {
+    await idle();
+    await page.goto(url);
+    await expect(deployButton).toBeEnabled({ timeout: 30_000 });
+    return queued("deploy", () => deployFromHeader(page));
+  };
+  const staged = page.getByRole("region", { name: "Staged rollout", exact: true });
+
+  // Rolling with two replicas: the first deploy has no current release, so it commits all traffic at once.
+  await saveStrategy("rolling", async () => {
+    const replicas = safety.getByRole("group", { name: "Replicas", exact: true });
+    await replicas.getByRole("button", { name: "Add replica setting", exact: true }).click();
+    await replicas.getByLabel("Compose service", { exact: true }).fill("app");
+    await replicas.getByLabel("Replicas", { exact: true }).fill("2");
+  });
+  expect((await savedRollout())?.replicas).toEqual({ app: 2 });
+  const first = await deploy();
+  expect(first.result?.rollout?.strategy).not.toBe("guarded");
+  await expect.poll(runtime, { timeout: 60_000 }).toEqual({ app: 2, healthy: 2, rollout: null });
+  expect(generations(id)).toEqual({ [first.operation]: healthyGeneration });
+  await expect(page.getByText("Healthy", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  const initial = routedResponses(hostname, 12);
+  expect(initial.every(body => body.startsWith("rollout-one-"))).toBe(true);
+  expect(new Set(initial).size).toBe(2);
+
+  // Canary at 25%: the candidate runs beside the current release and shares traffic until aborted.
+  await saveCompose("rollout-two");
+  await saveStrategy("canary", async () => {
+    await safety.getByLabel("Canary traffic", { exact: true }).fill("25");
+  });
+  expect(await savedRollout()).toMatchObject({ strategy: "canary", canary_percent: 25, replicas: { app: 2 } });
+  const canary = await deploy();
+  await expect.poll(runtime, { timeout: 60_000 }).toMatchObject({ app: 4, healthy: 4, rollout: { strategy: "canary", phase: "waiting", candidate_percent: 25 } });
+  expect((await runtime()).rollout?.operations).toContain(canary.operation);
+  expect(generations(id)).toEqual({ [first.operation]: healthyGeneration, [canary.operation]: healthyGeneration });
+  const split = routedResponses(hostname, 40);
+  expect(split.every(body => body.startsWith("rollout-one-") || body.startsWith("rollout-two-"))).toBe(true);
+  expect(split.some(body => body.startsWith("rollout-one-"))).toBe(true);
+  expect(split.some(body => body.startsWith("rollout-two-"))).toBe(true);
+  await expect(staged).toBeVisible({ timeout: 30_000 });
+  await expect(deployButton).toBeDisabled({ timeout: 30_000 });
+  // Staged actions stay disabled while a background image check runs, so allow it to finish.
+  await idle();
+  await expect(staged.getByRole("button", { name: "Abort", exact: true })).toBeEnabled({ timeout: 120_000 });
+  await expect(staged.getByRole("button", { name: "Promote", exact: true })).toBeEnabled({ timeout: 120_000 });
+  await capture(page, testInfo, "rollout-canary-staged");
+  await queued("rollout_abort", async () => {
+    await staged.getByRole("button", { name: "Abort", exact: true }).click();
+    await page.getByRole("dialog", { name: "Abort this rollout?" }).getByRole("button", { name: "Abort rollout", exact: true }).click();
+  });
+  await expect.poll(runtime, { timeout: 60_000 }).toEqual({ app: 2, healthy: 2, rollout: null });
+  expect(generations(id)).toEqual({ [first.operation]: healthyGeneration });
+  expect(routedResponses(hostname, 12).every(body => body.startsWith("rollout-one-"))).toBe(true);
+  await expect(staged).toHaveCount(0, { timeout: 30_000 });
+  // A background image check may run once the rollout settles.
+  await expect(deployButton).toBeEnabled({ timeout: 120_000 });
+
+  // Blue/green: the candidate receives no traffic until it is promoted, then the old release is removed.
+  await saveCompose("rollout-three");
+  await saveStrategy("blue_green");
+  const blueGreen = await deploy();
+  await expect.poll(runtime, { timeout: 60_000 }).toMatchObject({ app: 4, healthy: 4, rollout: { strategy: "blue_green", phase: "waiting", candidate_percent: 0 } });
+  expect((await runtime()).rollout?.operations).toContain(blueGreen.operation);
+  // A 0% blue/green candidate is not attached to cove-ingress until it is promoted.
+  expect(generations(id)).toEqual({ [first.operation]: healthyGeneration, [blueGreen.operation]: ["app|running|healthy|", "app|running|healthy|"] });
+  expect(routedResponses(hostname, 12).every(body => body.startsWith("rollout-one-"))).toBe(true);
+  await expect(staged).toBeVisible({ timeout: 30_000 });
+  await expect(deployButton).toBeDisabled({ timeout: 30_000 });
+  await idle();
+  await expect(staged.getByRole("button", { name: "Promote", exact: true })).toBeEnabled({ timeout: 120_000 });
+  await capture(page, testInfo, "rollout-blue-green-staged");
+  await queued("rollout_promote", async () => {
+    await staged.getByRole("button", { name: "Promote", exact: true }).click();
+    await page.getByRole("dialog", { name: "Promote the new release?" }).getByRole("button", { name: "Promote release", exact: true }).click();
+  });
+  await expect.poll(runtime, { timeout: 60_000 }).toEqual({ app: 2, healthy: 2, rollout: null });
+  await expect.poll(() => generations(id), { timeout: 30_000 }).toEqual({ [blueGreen.operation]: healthyGeneration });
+  const promoted = routedResponses(hostname, 12);
+  expect(promoted.every(body => body.startsWith("rollout-three-"))).toBe(true);
+  expect(new Set(promoted).size).toBe(2);
+  await expect(staged).toHaveCount(0, { timeout: 30_000 });
+  // A background image check may run once the rollout settles.
+  await expect(deployButton).toBeEnabled({ timeout: 120_000 });
+});
+
+test("scheduled job execution reports results, enforces the timeout and runs now through the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(420_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Job execution project");
+  const marker = `job-${Date.now()}`;
+  // pull_policy never keeps every run on the busybox image the harness already loaded.
+  const jobCompose = (command: string) => `services:\n  task:\n    image: busybox:1.37\n    pull_policy: never\n    command: [sh, -c, '${command}']\n`;
+  await page.getByRole("link", { name: "New resource", exact: true }).first().click();
+  await page.getByRole("button", { name: "Custom Compose or Git" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("job-execution");
+  await chooseOption(page.getByLabel("Node", { exact: true }), { label: "ready-browser-worker" });
+  await page.getByRole("radio", { name: /^Job/ }).check();
+  await page.getByLabel("Job service", { exact: true }).fill("task");
+  await page.getByLabel("Compose file", { exact: true }).fill(jobCompose(`echo ${marker}-stdout; echo ${marker}-stderr >&2`));
+  await page.getByRole("button", { name: "Create resource", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "job-execution", exact: true })).toBeVisible();
+  const url = page.url();
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const headers = { Origin: new URL(url).origin };
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; capabilities: { job_runs?: boolean } | null }[];
+  expect(nodes.find(node => node.id === resource.node_id)?.capabilities?.job_runs).toBe(true);
+
+  const activeOperations = async () => {
+    const response = await page.request.get(`/api/operations?workload_id=${id}`);
+    expect(response.status()).toBe(200);
+    return (await response.json() as { state: string }[]).filter(operation => ["queued", "running"].includes(operation.state)).length;
+  };
+  const idle = async () => expect.poll(activeOperations, { timeout: 120_000 }).toBe(0);
+  const runningContainers = () => execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${id}`], { encoding: "utf8" }).trim();
+
+  const schedule = page.getByRole("region", { name: "Scheduled job", exact: true });
+  const runSection = page.getByRole("region", { name: "Run now", exact: true });
+  const saveExecution = async (overlap: string, timeout: string) => {
+    await page.goto(`${url}/schedule`);
+    const overlapControl = schedule.getByLabel("When a run overlaps", { exact: true });
+    await expect(overlapControl).toBeEnabled({ timeout: 30_000 });
+    await chooseOption(overlapControl, overlap);
+    await schedule.getByLabel("Timeout (seconds)", { exact: true }).fill(timeout);
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}/schedule` && response.request().method() === "PUT");
+    await schedule.getByRole("button", { name: "Save schedule", exact: true }).click();
+    const response = await saved;
+    expect(response.status(), await response.text()).toBe(200);
+    expect(response.request().postDataJSON()).toEqual({ cron: "", timezone: "UTC", overlap_policy: overlap, timeout_seconds: Number(timeout) });
+    await expect(schedule.getByText("Schedule saved", { exact: true })).toBeVisible();
+  };
+  type JobResult = { exit_code?: number; timed_out: boolean; containers_stopped: boolean; logs_unavailable?: boolean };
+  // Queues a run from the schedule page, checks the request the page sent, and waits for the real worker to finish it.
+  const runNow = async () => {
+    await idle();
+    await page.goto(`${url}/schedule`);
+    const button = runSection.getByRole("button", { name: "Run now", exact: true });
+    await expect(button).toBeEnabled({ timeout: 120_000 });
+    await button.click();
+    // Run now is a manual deploy: a passed capacity check opens the review at once; otherwise the capacity dialog needs a choice.
+    const proceed = page.getByRole("dialog", { name: "Capacity before deploy" }).getByRole("button", { name: /^Run now (anyway|without check)$/ });
+    const review = page.getByRole("dialog", { name: "Run job-execution now?" });
+    await expect(proceed.or(review)).toBeVisible({ timeout: 60_000 });
+    if (await proceed.isVisible()) await proceed.click();
+    const queued = page.waitForResponse(response => new URL(response.url()).pathname === `/api/workloads/${id}/operations` && response.request().method() === "POST");
+    await review.getByRole("button", { name: "Run now", exact: true }).click();
+    const response = await queued;
+    expect(response.status()).toBe(202);
+    expect(response.request().postDataJSON()).toEqual({ action: "deploy" });
+    const operation = (await response.json() as { id: string }).id;
+    await expect(runSection.getByText("Run queued", { exact: true })).toBeVisible();
+    const read = async () => await (await page.request.get(`/api/operations/${operation}`)).json() as { state: string; result: { job?: JobResult } | null };
+    await expect.poll(async () => (await read()).state, { timeout: 120_000 }).toMatch(/^(succeeded|failed|cancelled|interrupted)$/);
+    const result = await read();
+    const logs = await (await page.request.get(`/api/operations/${operation}/logs`)).json() as { logs?: string };
+    return { operation, state: result.state, job: result.result?.job, logs: logs.logs ?? "" };
+  };
+
+  // Saved overlap and timeout survive a reload.
+  await saveExecution("queue_one", "60");
+  expect(await (await page.request.get(`/api/workloads/${id}/schedule`)).json()).toMatchObject({ cron: "", timezone: "UTC", overlap_policy: "queue_one", timeout_seconds: 60, pending_since: null });
+  await page.reload();
+  await expect(schedule.getByLabel("When a run overlaps", { exact: true })).toHaveText("Queue one");
+  await expect(schedule.getByLabel("Timeout (seconds)", { exact: true })).toHaveValue("60");
+
+  // A successful run keeps stdout and stderr in the logs and reports Docker's exit status.
+  const success = await runNow();
+  expect(success.state, success.logs).toBe("succeeded");
+  expect(success.job).toMatchObject({ exit_code: 0, timed_out: false, containers_stopped: true });
+  expect(success.logs).toContain(`${marker}-stdout`);
+  expect(success.logs).toContain(`${marker}-stderr`);
+  expect(runningContainers()).toBe("");
+  await page.reload();
+  await expect(runSection.getByText("Exited with code 0.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "job-schedule");
+  await page.goto(`/operations/${success.operation}`);
+  await expect(page.getByText("Exited with code 0.", { exact: true })).toBeVisible();
+  await expect(page.getByText(`${marker}-stderr`).first()).toBeVisible({ timeout: 30_000 });
+
+  // A run past its timeout is stopped together with every container it started.
+  await idle();
+  const updated = await page.request.put(`/api/workloads/${id}`, { headers, data: { name: resource.name, node_id: resource.node_id, kind: "job", job_service: "task", compose: jobCompose(`echo ${marker}-sleeping; sleep 300`) } });
+  expect(updated.status(), await updated.text()).toBe(200);
+  await saveExecution("skip", "5");
+  const timedOut = await runNow();
+  expect(timedOut.state, timedOut.logs).toBe("failed");
+  expect(timedOut.job).toMatchObject({ timed_out: true, containers_stopped: true });
+  expect(timedOut.logs).toContain(`${marker}-sleeping`);
+  expect(runningContainers()).toBe("");
+  await page.goto(`/operations/${timedOut.operation}`);
+  await expect(page.getByText(/^Execution timed out/)).toBeVisible();
+  await expect(page.getByText("All containers from this run are stopped.", { exact: true })).toBeVisible();
+  await capture(page, testInfo, "job-timeout-operation");
 });
 
 test("preview settings keep preview variables separate and fit mobile", async ({ page }, testInfo) => {

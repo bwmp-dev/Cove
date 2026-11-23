@@ -1,11 +1,14 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { workloadConfigurationDiffQuery, type WorkloadConfigurationDiff } from "../api/project-configuration";
 import { errorMessage } from "../api/client";
 import { shortRevision } from "../lib/project-configuration";
+import { reasonError } from "../lib/operations";
 import { linkClass } from "../lib/styles";
 import { FieldChanges } from "./ConfigurationChanges";
+import { Dialog } from "./ConfirmDialog";
+import { ReasonField } from "./ReasonField";
 import { Button, Notice, Spinner } from "./ui";
 
 interface Props {
@@ -35,6 +38,31 @@ export function DeployReview({ workloadId, confirmLabel, onCancel, onConfirm, ch
         </Button>
       </div>
     </div>
+  );
+}
+
+// Every manual deploy ends here after its capacity check: the pending configuration changes, then an optional reason.
+export function DeployDialog({ open, title, confirmLabel, workloadId, pending, onCancel, onDeploy, children }: { open: boolean; title: string; confirmLabel: string; workloadId: string; pending: boolean; onCancel: () => void; onDeploy: (reason: string) => void; children: ReactNode }) {
+  const [reason, setReason] = useState("");
+  const invalid = Boolean(reasonError(reason));
+  return (
+    <Dialog open={open} title={title} onClose={onCancel}>
+      <DeployReview
+        workloadId={workloadId}
+        confirmLabel={confirmLabel}
+        pending={pending}
+        confirmDisabled={invalid}
+        onCancel={onCancel}
+        onConfirm={() => {
+          if (invalid) return;
+          onDeploy(reason);
+          setReason("");
+        }}
+      >
+        <p>{children}</p>
+        <ReasonField id="deploy-reason" value={reason} onChange={setReason} />
+      </DeployReview>
+    </Dialog>
   );
 }
 

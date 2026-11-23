@@ -94,6 +94,8 @@ export interface DriftChange {
 export interface WorkloadDrift {
   baseline: boolean;
   busy: boolean;
+  // Set with busy when the resource is paused with its environment or asleep, so the runtime was not inspected.
+  deferred?: "suspended";
   operation: string;
   captured_at: string | null;
   checked_at: string;

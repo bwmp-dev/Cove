@@ -109,6 +109,10 @@ func (s *Server) mcpServer(r *http.Request) *mcp.Server {
 	}
 	for _, tool := range []struct{ name, description, scope, method, path, action string }{
 		{"deploy", "Queue a new deployment. Poll the returned operation ID for its outcome.", "workloads:operate", "POST", "/workloads/{id}/operations", "deploy"},
+		{"pull_and_deploy", "Pull referenced images and queue a deployment through normal admission.", "workloads:operate", "POST", "/workloads/{id}/operations", "deploy"},
+		{"rollout_promote", "Promote a staged rollout through normal deployment admission.", "workloads:operate", "POST", "/workloads/{id}/operations", "rollout_promote"},
+		{"rollout_abort", "Abort a staged rollout and recover the retained generation.", "workloads:operate", "POST", "/workloads/{id}/operations", "rollout_abort"},
+		{"image_check", "Queue a registry digest check without deploying.", "workloads:operate", "POST", "/workloads/{id}/operations", "image_check"},
 		{"restart", "Queue a resource restart.", "workloads:operate", "POST", "/workloads/{id}/operations", "restart"},
 		{"logs", "Read a bounded container log snapshot.", "logs:read", "GET", "/workloads/{id}/logs", ""},
 	} {
@@ -121,7 +125,7 @@ func (s *Server) mcpServer(r *http.Request) *mcp.Server {
 			}
 			var body any
 			if tool.action != "" {
-				body = apiOperationInput{Action: tool.action, Reason: input.Reason}
+				body = apiOperationInput{Action: tool.action, Reason: input.Reason, PullLatest: tool.name == "pull_and_deploy"}
 			}
 			raw, err := s.invokePublic(ctx, r, tool.method, tool.path, map[string]string{"id": input.Workload}, body)
 			if err != nil {

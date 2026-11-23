@@ -420,7 +420,11 @@ func (s *Server) planComposeAdoption(w http.ResponseWriter, r *http.Request, nod
 		http.Error(w, "adoption configuration exceeds canonical project limits", 400)
 		return
 	}
-	saved.Changes = projectConfigurationChanges(before, manifest)
+	saved.Changes, err = projectConfigurationChanges(before, manifest)
+	if err != nil {
+		http.Error(w, "adoption route protections require explicit review", 409)
+		return
+	}
 	payload, err := s.sealJSON(saved)
 	if err != nil {
 		http.Error(w, "could not protect adoption review", 503)
@@ -436,6 +440,7 @@ func (s *Server) planComposeAdoption(w http.ResponseWriter, r *http.Request, nod
 }
 
 func publicAdoption(id, status, project, environment string, saved savedComposeAdoption, completed []string) map[string]any {
+	redactConfigurationChanges(saved.Changes)
 	items := []map[string]any{}
 	for _, item := range saved.Items {
 		items = append(items, map[string]any{"project": item.Request.Project, "key": item.Key, "name": item.Configuration.Name, "resource_id": item.Request.Workload, "complete": slices.Contains(completed, item.Request.Workload)})

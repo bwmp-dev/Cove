@@ -27,6 +27,17 @@ it("labels the server's outcome events and keeps them out of incident conditions
   expect(incidentConditions([...outcomes, "threshold.alert", "threshold.recovered"])).toEqual([{ value: "threshold", label: "Threshold condition" }]);
 });
 
+it("labels rollout, CPU scaling and idle sleep events and never offers them to incident providers", () => {
+  const outcomes = ["rollout.staged", "rollout.promoted", "rollout.aborted", "rollout.failed", "autoscale.queued", "autoscale.succeeded", "autoscale.failed", "resource.asleep", "resource.awake"];
+  const groups = groupNotificationEvents([...outcomes, "resource_unhealthy.alert", "resource_unhealthy.recovered"]);
+  expect(groups.map((group) => group.title)).toEqual(["Rollouts and CPU scaling", "Idle sleep", "Health alerts"]);
+  const labelled = groups.flatMap((group) => group.events).filter((event) => outcomes.includes(event.value));
+  expect(labelled.map((event) => event.value)).toEqual(outcomes);
+  for (const event of labelled) expect(event.label).not.toMatch(/[._]/);
+  expect(groups.every((group) => group.health === (group.title === "Health alerts"))).toBe(true);
+  expect(incidentConditions([...outcomes, "resource_unhealthy.alert", "resource_unhealthy.recovered"])).toEqual([{ value: "resource_unhealthy", label: "Unhealthy resource" }]);
+});
+
 it("sends exact events without the legacy switches", () => {
   expect(notificationFromForm(form([["provider", "slack"], ["url", " https://hooks.example.com/x "], ["enabled", "on"], ["routing", "events"], ["success", "on"], ["events", "backup.failed"], ["events", "drill.failed"]]))).toEqual({
     provider: "slack", url: "https://hooks.example.com/x", enabled: true, success: false, failure: false, health: false, events: ["backup.failed", "drill.failed"],

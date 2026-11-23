@@ -47,7 +47,11 @@ func safeConfigurationDiffs(before, after map[string]json.RawMessage) []configur
 	diffs := []configurationDiff{}
 	for _, key := range []string{"name", "kind", "job_service", "routes", "limits"} {
 		if !bytes.Equal(before[key], after[key]) {
-			diffs = append(diffs, configurationDiff{key, string(before[key]), string(after[key])})
+			left, right := string(before[key]), string(after[key])
+			if key == "routes" {
+				left, right = safeRouteJSON(before[key]), safeRouteJSON(after[key])
+			}
+			diffs = append(diffs, configurationDiff{key, left, right})
 		}
 	}
 	var a, b map[string]json.RawMessage

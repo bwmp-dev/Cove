@@ -7,6 +7,8 @@ import (
 )
 
 type workloadView struct {
+	EnvironmentPaused    bool                            `json:"environment_paused"`
+	Rollout              *worker.RolloutOptions          `json:"rollout"`
 	PendingAdoptionID    string                          `json:"pending_adoption_id,omitempty"`
 	ID                   string                          `json:"id"`
 	Name                 string                          `json:"name"`

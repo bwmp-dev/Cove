@@ -39,15 +39,18 @@ import { useCancelOperation, useQueueOperation } from "../api/mutations";
 import { projectsQuery, type Project } from "../api/projects";
 import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
 import { ResourceExec } from "../components/ResourceExec";
-import type { Operation, Workload } from "../api/types";
+import type { Operation, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { useCapacityGate } from "../components/CapacityCheck";
-import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
-import { DeployReview } from "../components/DeployReview";
-import { ReasonField } from "../components/ReasonField";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DeployDialog } from "../components/DeployReview";
 import { DeleteResource } from "../components/DeleteResource";
 import { LiveLogs } from "../components/LiveLogs";
 import { LogHistory } from "../components/LogHistory";
+import { EnvironmentHoldNotice, useEnvironmentHold } from "../components/EnvironmentSuspension";
+import { IdleHoldNotice, useIdleState } from "../components/IdleSleep";
+import { ScaleOutcome } from "../components/CpuAutoscale";
+import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
 import { OperationResultNotice } from "../components/OperationResultNotice";
 import { WorkloadMetricHistory } from "../components/MetricHistory";
@@ -56,6 +59,7 @@ import { Notes } from "../components/Notes";
 import { RelativeTime } from "../components/RelativeTime";
 import { RouteTraffic } from "../components/RouteTraffic";
 import { RuntimeContainers } from "../components/Runtime";
+import { PendingRolloutMessage, StagedRollout, usePendingRollout } from "../components/StagedRollout";
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
@@ -63,7 +67,10 @@ import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { backupRights, can, currentTeam, managesTeam } from "../lib/permissions";
 import { useSession } from "../lib/session";
-import { actionLabels, activeOperation, allowedActions, isActive, reasonError, stateLabels, workerResult, workloadKind } from "../lib/operations";
+import { actionLabels, activeOperation, allowedActions, isActive, isSuspensionAction, latestDeploymentOperation, stateLabels, workerResult, workloadKind } from "../lib/operations";
+import { holdBlocks, holdReason, type EnvironmentHold } from "../lib/suspension";
+import { idleBlocks, type IdleHold } from "../lib/idle";
+import { resultSummary } from "../lib/rollouts";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -79,7 +86,8 @@ export function useResource() {
 const actionIcons = { deploy: Rocket, start: Play, stop: Square, restart: RotateCcw } as const;
 
 function outcome(operation: Operation, kind: "service" | "job") {
-  if (kind === "job" && operation.action === "deploy") {
+  // Workers with job results report the exit status themselves; it is shown with JobOutcome.
+  if (kind === "job" && operation.action === "deploy" && !workerResult(operation)?.job) {
     if (operation.state === "succeeded") return "The last run completed with exit code 0.";
     if (operation.state === "failed") return "The last run failed. Check the logs for the job's exit status.";
   }
@@ -91,7 +99,8 @@ function outcome(operation: Operation, kind: "service" | "job") {
 
 function LatestOperation({ operation, kind }: { operation: Operation; kind: "service" | "job" }) {
   const message = outcome(operation, kind);
-  const revision = workerResult(operation)?.revision;
+  const worker = workerResult(operation);
+  const revision = worker?.revision;
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px]">
@@ -107,8 +116,24 @@ function LatestOperation({ operation, kind }: { operation: Operation; kind: "ser
         )}
       </div>
       {message && <p className="text-[13px] text-fg-muted">{message}</p>}
+      {worker?.job && <JobOutcome job={worker.job} />}
+      {worker?.rollout && <RolloutResult rollout={worker.rollout} />}
+      {worker?.scale && (
+        <div className="text-[13px]">
+          <ScaleOutcome scale={worker.scale} />
+        </div>
+      )}
       <OperationResultNotice operation={operation} />
       <LogViewer operationId={operation.id} active={isActive(operation.state)} />
+    </div>
+  );
+}
+
+function RolloutResult({ rollout }: { rollout: NonNullable<WorkerOperation["rollout"]> }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[13px] text-fg-muted">{resultSummary(rollout)}</p>
+      {rollout.reason && <p className="text-xs break-words text-fg-muted">{rollout.reason}</p>}
     </div>
   );
 }
@@ -146,6 +171,8 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
   const [confirm, setConfirm] = useState(false);
   const label = kind === "job" && operation.action === "deploy" ? "Run" : actionLabels[operation.action];
   const requested = operation.cancel_requested || cancel.isSuccess;
+  // Pause and resume operations belong to the environment; they are changed from its page, not cancelled here.
+  const environmentOwned = isSuspensionAction(operation.action);
   return (
     <div id={id} className="flex max-w-md flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted md:justify-end md:text-right">
       <span>
@@ -155,14 +182,14 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
         <Link to="/operations/$operationId" params={{ operationId: operation.id }} className={linkClass}>
           View operation
         </Link>
-        <button
+        {!environmentOwned && <button
           type="button"
           className={`${linkClass} disabled:cursor-not-allowed disabled:text-fg-disabled disabled:no-underline`}
           disabled={!online || cancel.isPending || requested}
           onClick={() => setConfirm(true)}
         >
           {requested ? "Cancellation requested" : "Cancel operation"}
-        </button>
+        </button>}
       </span>
       {cancel.isError && <span role="alert" className="text-bad">Could not request cancellation: {errorMessage(cancel.error)}</span>}
       <ConfirmDialog open={confirm} title="Cancel this operation?" confirmLabel="Cancel operation" danger onCancel={() => setConfirm(false)} onConfirm={() => { setConfirm(false); cancel.mutate(); }}>
@@ -172,31 +199,7 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
   );
 }
 
-function DeployDialog({ open, label, name, workloadId, pending, onCancel, onDeploy }: { open: boolean; label: string; name: string; workloadId: string; pending: boolean; onCancel: () => void; onDeploy: (reason: string) => void }) {
-  const [reason, setReason] = useState("");
-  const invalid = Boolean(reasonError(reason));
-  return (
-    <Dialog open={open} title={`${label} ${name}?`} onClose={onCancel}>
-      <DeployReview
-        workloadId={workloadId}
-        confirmLabel={label}
-        pending={pending}
-        confirmDisabled={invalid}
-        onCancel={onCancel}
-        onConfirm={() => {
-          if (invalid) return;
-          onDeploy(reason);
-          setReason("");
-        }}
-      >
-        <p>Cove queues the deployment with the saved configuration. Deployment policies, approvals and windows still apply.</p>
-        <ReasonField id="deploy-reason" value={reason} onChange={setReason} />
-      </DeployReview>
-    </Dialog>
-  );
-}
-
-function useResourceActions(workload: Workload) {
+function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: string, idle: IdleHold, idleId: string) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
@@ -204,10 +207,12 @@ function useResourceActions(workload: Workload) {
   const [confirmDeploy, setConfirmDeploy] = useState(false);
   const kind = workloadKind(workload.kind);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const pendingRollout = usePendingRollout(workload, Boolean(active));
   // The capacity check runs first; a passed or skipped check opens the deployment review, which still asks for a reason.
   const capacity = useCapacityGate({ workloadId: workload.id, actionLabel: kind === "job" ? "Deploy and run" : "Deploy", onDeploy: () => setConfirmDeploy(true) });
   const blocked = !online || Boolean(active) || queue.isPending || operations.isPending || capacity.checking;
   const statusId = useId();
+  const rolloutId = useId();
   const deployLabel = kind === "job" ? "Deploy and run" : actionLabels.deploy;
   const queuedAction = queue.variables?.action;
 
@@ -219,12 +224,15 @@ function useResourceActions(workload: Workload) {
             const Icon = actionIcons[action];
             const pending = (queue.isPending && queuedAction === action) || (action === "deploy" && capacity.checking);
             const label = action === "deploy" ? deployLabel : actionLabels[action];
+            const waitsForRollout = action === "deploy" && Boolean(pendingRollout);
+            const held = action !== "stop" && holdBlocks(hold, action);
+            const asleep = action !== "stop" && idleBlocks(idle, action);
             return (
               <Button
                 key={action}
                 variant={action === "deploy" ? "primary" : "secondary"}
-                disabled={blocked}
-                aria-describedby={active ? statusId : undefined}
+                disabled={blocked || waitsForRollout || held || asleep}
+                aria-describedby={active ? statusId : held && hold.kind !== "loading" ? holdId : asleep && idle.kind !== "loading" ? idleId : waitsForRollout ? rolloutId : undefined}
                 pending={pending}
                 onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? capacity.start() : queue.mutate({ action }))}
               >
@@ -235,6 +243,7 @@ function useResourceActions(workload: Workload) {
           })}
         </div>
         {active && <ActiveOperationStatus id={statusId} operation={active} kind={kind} />}
+        {!active && pendingRollout && <PendingRolloutMessage id={rolloutId} workloadId={workload.id} action="deploy again" className="max-w-md md:text-right" />}
       </div>
     ),
     feedback: (
@@ -242,13 +251,15 @@ function useResourceActions(workload: Workload) {
         {capacity.dialog}
         <DeployDialog
           open={confirmDeploy}
-          label={deployLabel}
-          name={workload.name}
+          title={`${deployLabel} ${workload.name}?`}
+          confirmLabel={deployLabel}
           workloadId={workload.id}
           pending={queue.isPending}
           onCancel={() => setConfirmDeploy(false)}
           onDeploy={(reason) => queue.mutate({ action: "deploy", reason }, { onSettled: () => setConfirmDeploy(false) })}
-        />
+        >
+          Cove queues the deployment with the saved configuration. Deployment policies, approvals and windows still apply.
+        </DeployDialog>
         <ConfirmDialog
           open={confirmStop}
           title={`Stop ${workload.name}?`}
@@ -289,11 +300,15 @@ function ResourceHeader({ workload }: { workload: Workload }) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const nodes = useQuery(nodesQuery);
   const projects = useQuery(projectsQuery);
-  const actions = useResourceActions(workload);
+  const { hold, state: holdState } = useEnvironmentHold(workload);
+  const holdId = useId();
+  const idle = useIdleState(workload);
+  const idleId = useId();
+  const actions = useResourceActions(workload, hold, holdId, idle.hold, idleId);
   const kind = workloadKind(workload.kind);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   const placement = findPlacement(projects.data, workload.environment_id, workload.project_id);
-  const latest = operations.data?.find((operation) => operation.workload_id === workload.id);
+  const latest = operations.data ? latestDeploymentOperation(operations.data, workload.id) : undefined;
   const admin = useSession()?.is_admin ?? false;
 
   return (
@@ -340,7 +355,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
               {node && <NodeStateLabel state={node.state} />}
             </span>
             {latest && (
-              <span key="operation" className="inline-flex items-center gap-2 align-middle">
+              <span key="operation" className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 align-middle">
                 <Link to="/operations/$operationId" params={{ operationId: latest.id }} className="rounded hover:text-fg">
                   {kind === "job" && latest.action === "deploy" ? "Run" : actionLabels[latest.action]}
                 </Link>
@@ -388,6 +403,20 @@ function ResourceHeader({ workload }: { workload: Workload }) {
             {admin ? " Resume or refresh the adoption on the node page." : " Ask an instance administrator to finish the adoption on the node page."}
           </Notice>
         )}
+        <EnvironmentHoldNotice
+          id={holdId}
+          hold={hold}
+          onRetry={() => void holdState.refetch()}
+          retrying={holdState.isFetching}
+          environment={
+            placement?.environment && (
+              <Link to="/projects/$projectId/environments/$environmentId" params={{ projectId: placement.project.id, environmentId: placement.environment.id }} className={buttonClass("secondary")}>
+                Open {placement.environment.name}
+              </Link>
+            )
+          }
+        />
+        <IdleHoldNotice id={idleId} workload={workload} idle={idle} />
         {workload.preview_source_id && <Notice>This is a temporary preview. Its configuration is managed by <Link to="/resources/$resourceId/previews" params={{ resourceId: workload.preview_source_id }} className="underline">the source resource</Link>. Closing it deletes its preview data.</Notice>}
         {node && node.state !== "ready" && (
           <Notice
@@ -619,13 +648,14 @@ export function ResourceOverview() {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const projects = useQuery(projectsQuery);
   const kind = workloadKind(workload.kind);
-  const history = useMemo(() => (operations.data ?? []).filter((operation) => operation.workload_id === workload.id), [operations.data, workload.id]);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
-  const latest = history[0];
+  // An active image check shows its progress here; otherwise housekeeping checks do not replace the latest deployment.
+  const latest = active ?? (operations.data ? latestDeploymentOperation(operations.data, workload.id) : undefined);
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       <div className="min-w-0">
+        <StagedRollout workload={workload} operationActive={Boolean(active)} />
         <Section title={active ? "Active operation" : kind === "job" ? "Last run" : "Latest operation"}>
           {operations.isPending ? (
             <p className="text-[13px] text-fg-muted">Loading operations</p>
@@ -644,7 +674,7 @@ export function ResourceOverview() {
           description={kind === "job" ? "Containers from the latest run. An exited job container is expected after a run completes." : "Live Docker state on the node."}
           flush
         >
-          <RuntimeContainers workloadId={workload.id} kind={kind} operationActive={Boolean(active)} />
+          <RuntimeContainers workloadId={workload.id} kind={kind} operationActive={Boolean(active)} manuallyStopped={workload.manually_stopped} />
         </Section>
         <Notes key={workload.id} scope="resource" id={workload.id} canEdit={can(workload.permissions, "edit")} />
       </div>
@@ -755,12 +785,13 @@ export function ResourceBackups() {
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const nodes = useQuery(nodesQuery);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
+  const { hold } = useEnvironmentHold(workload);
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
     <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} rights={backupRights(workload.permissions)} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} />
+      <Backups workloadId={workload.id} busy={Boolean(active)} rights={backupRights(workload.permissions)} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} restoreHeld={holdReason(hold, "restore", "Restoring, verifying and copying backups")} verifyHeld={holdReason(hold, "drill", "Verifying and copying backups")} />
     </Section>
   );
 }

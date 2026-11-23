@@ -194,9 +194,20 @@ func TestGithubDeploymentFeedback(t *testing.T) {
 	if apiCalls != before {
 		t.Fatal("repeated already reported state")
 	}
-	f.sql(`UPDATE operations SET state='succeeded' WHERE id='op'`)
+	f.sql(`UPDATE operations SET state='succeeded',result='{"rollout":{"phase":"waiting","release":"op"}}' WHERE id='op'`)
 	dispatch()
-	if !strings.Contains(commentBody, "**succeeded**") || !strings.Contains(commentBody, "https://pr.example.com") || patches != 2 || statuses < 2 {
+	if !strings.Contains(commentBody, "**running**") {
+		t.Fatal("staged candidate was reported as deployed", commentBody)
+	}
+	f.sql(`INSERT INTO operations(id,workload_id,action,payload,state,result) VALUES('promote','preview','rollout_promote',$1,'failed','{"rollout":{"phase":"completed","release":"op"}}')`, payload)
+	before = apiCalls
+	dispatch()
+	if apiCalls != before {
+		t.Fatal("failed promotion changed provider feedback")
+	}
+	f.sql(`UPDATE operations SET state='succeeded' WHERE id='promote'`)
+	dispatch()
+	if !strings.Contains(commentBody, "**succeeded**") || !strings.Contains(commentBody, "https://pr.example.com") || patches != 3 || statuses < 3 {
 		t.Fatalf("missing terminal preview feedback: %s", commentBody)
 	}
 	f.sql(`UPDATE operations SET state='failed' WHERE id='op'`)

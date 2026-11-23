@@ -6,7 +6,7 @@ import { useEffect, useId, useState, type FormEvent } from "react";
 import { errorMessage } from "../api/client";
 import { useUpdateRoutes, useUpdateWorkload } from "../api/mutations";
 import { keys, nodesQuery, operationQuery, workloadOperationsQuery } from "../api/queries";
-import type { Workload, WorkloadInput, DeploymentHooks, FileSecret } from "../api/types";
+import type { Workload, WorkloadInput, DeploymentHooks, FileSecret, Route } from "../api/types";
 import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
 import { BuiltinVariables, EnvironmentFileActions, SecretReferenceBuilder } from "../components/EnvironmentFile";
@@ -26,38 +26,147 @@ import { PortBindings } from "../components/PortBindings";
 import { PrivateNetwork } from "../components/PrivateNetwork";
 import { ResourceOwner } from "../components/ResourceOwner";
 import { ResourceRegistry } from "../components/ResourceRegistry";
+import { ResourceImages } from "../components/ResourceImages";
+import { ResourceBuild } from "../components/ResourceBuild";
+import { supportsBuildPublish } from "../lib/builds";
+import { supportsImageLifecycle } from "../lib/images";
 import { RouteEditor } from "../components/RouteEditor";
 import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
 import { Webhook } from "../components/Webhook";
 import { SourceFields, TypeFields } from "../components/WorkloadForm";
+import { RolloutAvailability, RolloutEligibility, RolloutServiceEditors, RolloutStrategyRows, useRolloutSupport } from "../components/RolloutSettings";
+import { UnhealthyRestartSettings } from "../components/UnhealthyRestart";
+import { IdleSleepSettings } from "../components/IdleSleep";
+import { CpuAutoscaleSettings } from "../components/CpuAutoscale";
 import { Button, DefinitionList, EmptyState, Field, Notice, Section, SettingRow, SettingRows, Spinner, SwitchField } from "../components/ui";
+import { rolloutChanged, rolloutDraft, rolloutsApply, validateRollout, type RolloutDraft, type RolloutErrors } from "../lib/rollouts";
 import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
-import { createRow, formValues, isSSHRepository, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { createRow, extensionSummary, formValues, isSSHRepository, routeRows, sameRoutes, validateRoutes, validateWorkload, withoutAuthSecrets, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { UptimeChecks } from "../components/UptimeChecks";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
+const noRoutes: Route[] = [];
 
 export function ResourceDeploymentSafety() {
- const resource = useResource();
- const { save, update } = useSectionSave(resource);
- const blocked = useSaveBlocked(resource.id);
- const [enabled, setEnabled] = useState(Boolean(resource.guarded_deploy));
- const [errors, setErrors] = useState<WorkloadFormErrors>({});
- const dirty = enabled !== Boolean(resource.guarded_deploy);
- return <form onSubmit={event => { event.preventDefault(); setErrors(save({}, event.currentTarget, undefined, input => { input.guarded_deploy = enabled; })); }}>
-  <UnsavedChangesGuard dirty={dirty} />
-  <Section width="form" title="Deployment safety" description="Health-test a temporary candidate before replacing the application, then recover the previous release automatically if replacement fails." footer={can(resource.permissions, "edit") && <SaveBar dirty={dirty} pending={update.isPending} blocked={blocked} onDiscard={() => setEnabled(Boolean(resource.guarded_deploy))} status={update.isSuccess ? `Saved. ${nextDeploy}` : undefined} />}>
-   <div className="space-y-4">
-    <Notice>This is for one stateless service with an enabled Docker healthcheck. Persistent volumes, host ports, fixed container names, and privileged options are rejected. A brief replacement interruption is possible; this is not a rolling or highly available deployment.</Notice>
-    <SwitchField layout="row" id="guarded-deploy" checked={enabled} onChange={event => setEnabled(event.target.checked)} disabled={!can(resource.permissions, "edit")} label="Enable guarded deployment" description="The candidate receives the application's credentials and can reach its databases. Startup tasks must tolerate overlap. Hooks and database migrations are not undone by recovery. Post-deployment hook failures leave the new healthy release running." />
-    <FormError errors={errors} error={update.error} />
-   </div>
-  </Section>
- </form>;
+  const resource = useResource();
+  return (
+    <>
+      <DeploymentSafetyForm workload={resource} />
+      {rolloutsApply(resource) && <UnhealthyRestartSettings workload={resource} />}
+      {rolloutsApply(resource) && <IdleSleepSettings workload={resource} />}
+      {rolloutsApply(resource) && <CpuAutoscaleSettings workload={resource} />}
+    </>
+  );
+}
+
+function GuardedDeploymentSwitch({ id, checked, disabled, strategySelected, onChange }: { id: string; checked: boolean; disabled: boolean; strategySelected: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <SwitchField
+      layout="row"
+      id={id}
+      checked={checked}
+      onChange={(event) => onChange(event.target.checked)}
+      disabled={disabled}
+      label="Enable guarded deployment"
+      description={strategySelected ? guardedWithStrategy : guardedDescription}
+    />
+  );
+}
+
+const guardedDescription =
+  "Health-tests a temporary candidate before replacing the application, then recovers the previous release if replacement fails. The candidate receives the application's credentials and can reach its databases. Startup tasks must tolerate overlap. Hooks and database migrations are not undone by recovery.";
+const guardedWithStrategy = "Applies only while the replacement strategy is off. With a strategy selected, ineligible deploys always use guarded replacement.";
+
+function DeploymentSafetyForm({ workload }: { workload: Workload }) {
+  const id = useId();
+  const { save, update } = useSectionSave(workload);
+  const blocked = useSaveBlocked(workload.id);
+  const editable = can(workload.permissions, "edit");
+  const supported = useRolloutSupport(workload).supported;
+  const [guarded, setGuarded] = useState(Boolean(workload.guarded_deploy));
+  const [draft, setDraft] = useState(() => rolloutDraft(workload.rollout));
+  const [errors, setErrors] = useState<WorkloadFormErrors>({});
+  const [rolloutErrors, setRolloutErrors] = useState<RolloutErrors>({});
+  const applies = rolloutsApply(workload);
+  const strategySelected = applies && draft.strategy !== "disabled";
+  const rolloutDirty = applies && rolloutChanged(draft, workload.rollout);
+  const dirty = guarded !== Boolean(workload.guarded_deploy) || rolloutDirty;
+  const rolloutLocked = !editable || !supported || update.isPending;
+
+  function change(next: (current: RolloutDraft) => RolloutDraft) {
+    update.reset();
+    setDraft(next);
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const rollout = rolloutDirty ? validateRollout(draft, workload.rollout) : { errors: {} };
+    setRolloutErrors(rollout.errors);
+    if (rolloutDirty && !rollout.options) {
+      focusFirstInvalid(form);
+      return;
+    }
+    setErrors(save({}, form, undefined, (input) => {
+      input.guarded_deploy = guarded;
+      // Sent only when changed: omitting it keeps the saved options, and an unchanged "off" stays unsaved.
+      if (rollout.options) input.rollout = rollout.options;
+    }));
+  }
+
+  function discard() {
+    setGuarded(Boolean(workload.guarded_deploy));
+    setDraft(rolloutDraft(workload.rollout));
+    setErrors({});
+    setRolloutErrors({});
+  }
+
+  return (
+    <form onSubmit={submit} noValidate>
+      <UnsavedChangesGuard dirty={dirty} />
+      <Section
+        width="form"
+        title="Deployment safety"
+        description={`How a deploy replaces running containers. ${nextDeploy}`}
+        footer={editable && <SaveBar dirty={dirty} pending={update.isPending} blocked={blocked} onDiscard={discard} status={update.isSuccess ? `Saved. ${nextDeploy}` : undefined} />}
+      >
+        <div className="space-y-5">
+          {editable ? <SaveBlockers workload={workload} /> : <ViewOnly />}
+          <RolloutAvailability workload={workload} editable={editable} />
+          <SettingRows>
+            {applies && <RolloutStrategyRows id={id} draft={draft} errors={rolloutErrors} disabled={rolloutLocked} onChange={change} />}
+            <GuardedDeploymentSwitch
+              id={`${id}-guarded`}
+              checked={guarded}
+              disabled={!editable || update.isPending}
+              strategySelected={strategySelected}
+              onChange={(checked) => {
+                update.reset();
+                setGuarded(checked);
+              }}
+            />
+          </SettingRows>
+          {strategySelected ? (
+            <>
+              <RolloutServiceEditors id={id} draft={draft} errors={rolloutErrors} disabled={rolloutLocked} onChange={change} />
+              <RolloutEligibility resourceId={workload.id} />
+            </>
+          ) : (
+            <Notice>
+              Guarded deployment is for one stateless service with an enabled Docker healthcheck. Persistent volumes, host ports, fixed container names and privileged options are
+              rejected. A brief interruption is possible: it is a health check before replacement, not a traffic handoff.
+            </Notice>
+          )}
+          {Object.keys(rolloutErrors).length > 0 && <Notice tone="error" title="Check the deployment settings">Fix the highlighted fields.</Notice>}
+          <FormError errors={errors} error={update.error} />
+        </div>
+      </Section>
+    </form>
+  );
 }
 
 function ResourceFileSecrets() {
@@ -549,16 +658,20 @@ function RouteList({ workload }: { workload: Workload }) {
   if (!workload.routes?.length) return <p className="text-[13px] text-fg-muted">No domains.</p>;
   return (
     <ul aria-label="Routes" className="divide-y divide-line rounded-md border border-line">
-      {workload.routes.map((route) => (
-        <li key={route.domain} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-2 text-[13px]">
-          <a className="break-all underline underline-offset-4" href={`https://${route.domain}`} target="_blank" rel="noreferrer">
-            {route.domain}
-          </a>
-          <span className="font-mono text-xs text-fg-muted">
-            {route.service}:{route.port}
-          </span>
-        </li>
-      ))}
+      {workload.routes.map((route) => {
+        const extensions = extensionSummary(route.policy);
+        return (
+          <li key={route.domain} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-2 text-[13px]">
+            <a className="break-all underline underline-offset-4" href={`https://${route.domain}`} target="_blank" rel="noreferrer">
+              {route.domain}
+            </a>
+            <span className="font-mono text-xs text-fg-muted">
+              {route.service}:{route.port}
+            </span>
+            {extensions.length > 0 && <span className="basis-full text-xs text-fg-muted">{extensions.join(", ")}</span>}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -570,13 +683,16 @@ function DomainsForm({ workload }: { workload: Workload }) {
   const deployed = workload.deployed || Boolean(operations.data?.some((item) => item.workload_id === workload.id && (item.action === "deploy" || item.action === "rollback") && item.state === "succeeded"));
   const save = useUpdateRoutes(workload.id);
   const blocked = useSaveBlocked(workload.id);
-  const [rows, setRows] = useState(() => routeRows(workload.routes));
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
+  const savedRoutes = workload.routes ?? noRoutes;
+  const [rows, setRows] = useState(() => routeRows(savedRoutes));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [applying, setApplying] = useState<string | null>(null);
   const operation = useQuery({ ...operationQuery(applying ?? ""), enabled: applying !== null });
   const applyState = applying ? operation.data?.state : undefined;
   const inProgress = save.isPending || (applying !== null && (applyState === undefined || isActive(applyState)));
-  const dirty = !sameRoutes(rows, workload.routes);
+  const dirty = !sameRoutes(rows, savedRoutes);
 
   // Saved routes change only after the worker applies them, so reload the resource once it reports a result.
   useEffect(() => {
@@ -585,14 +701,19 @@ function DomainsForm({ workload }: { workload: Workload }) {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = validateRoutes(rows);
+    const result = validateRoutes(rows, savedRoutes);
     setErrors(result.errors);
     if (!result.routes) {
       focusFirstInvalid(event.currentTarget);
       return;
     }
     setApplying(null);
-    save.mutate(result.routes, { onSuccess: (outcome) => setApplying(outcome.state === "queued" ? outcome.id : null) });
+    save.mutate(result.routes, {
+      onSuccess: (outcome) => {
+        setApplying(outcome.state === "queued" ? outcome.id : null);
+        setRows(withoutAuthSecrets);
+      },
+    });
   }
 
   let status = null;
@@ -657,6 +778,9 @@ function DomainsForm({ workload }: { workload: Workload }) {
         <RouteEditor
           routes={rows}
           errors={errors}
+          policies={node ? Boolean(node.capabilities?.route_policies) : undefined}
+          extensions={node ? (node.capabilities?.route_protocol ?? 0) >= 2 : undefined}
+          saved={savedRoutes}
           onChange={(next) => {
             save.reset();
             setApplying(null);
@@ -672,7 +796,7 @@ function DomainsForm({ workload }: { workload: Workload }) {
         blocked={blocked}
         label={deployed ? "Save and apply" : "Save routes"}
         onDiscard={() => {
-          setRows(routeRows(workload.routes));
+          setRows(routeRows(savedRoutes));
           setErrors({});
           save.reset();
           setApplying(null);
@@ -692,7 +816,7 @@ export function ResourceNetworking() {
 export function ResourceRegistryPage() {
   const workload = useResource();
   const active = useActiveOperation(workload.id);
-  return <ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />;
+  return <div className="space-y-6"><ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />{supportsBuildPublish(workload) && <ResourceBuild workload={workload} />}{supportsImageLifecycle(workload) && <ResourceImages workload={workload} />}</div>;
 }
 
 export function ResourceLimits() {

@@ -8,6 +8,7 @@ import { keys, workloadOperationsQuery } from "../api/queries";
 import { applyMove, destinationProjectsQuery, previewMove, refusedReview, type MoveDestination, type MoveReview } from "../api/resource-move";
 import type { Workload } from "../api/types";
 import { findPlacement } from "../lib/hierarchy";
+import { holdBlocks, holdReason } from "../lib/suspension";
 import { useOnline } from "../lib/hooks";
 import { activeOperation } from "../lib/operations";
 import { managesTeam } from "../lib/permissions";
@@ -16,6 +17,7 @@ import { rememberTeam } from "../lib/team";
 import { inputClass } from "../lib/styles";
 import { Checkbox } from "./Checkbox";
 import { Dialog } from "./ConfirmDialog";
+import { useEnvironmentHold } from "./EnvironmentSuspension";
 import { ResourcePlacement } from "./ResourcePlacement";
 import { Select } from "./Select";
 import { Button, Field, LoadingRows, Notice, QueryError, Section, Spinner } from "./ui";
@@ -72,6 +74,8 @@ function MoveForm({ workload, currentTeamId, teams }: MoveFormProps) {
   const projects = useQuery(destinationProjectsQuery(teamId));
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const { hold } = useEnvironmentHold(workload);
+  const held = holdBlocks(hold, "placement");
   const [projectId = "", environmentId = ""] = placement.split(":");
   const destination: MoveDestination = { team_id: teamId, project_id: projectId, environment_id: environmentId };
   const unchanged = teamId === currentTeamId && projectId === workload.project_id && environmentId === (workload.environment_id ?? "");
@@ -124,7 +128,7 @@ function MoveForm({ workload, currentTeamId, teams }: MoveFormProps) {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (online && projectId && !unchanged && !active && !preview.isPending) {
+    if (online && projectId && !unchanged && !active && !held && !preview.isPending) {
       apply.reset();
       preview.mutate();
     }
@@ -196,6 +200,11 @@ function MoveForm({ workload, currentTeamId, teams }: MoveFormProps) {
             Finish or cancel the current operation before moving this resource.
           </Notice>
         )}
+        {held && hold.kind !== "loading" && (
+          <Notice tone="info" title="Moving is locked while the environment is paused or resuming">
+            {holdReason(hold, "placement", "Moving")}
+          </Notice>
+        )}
         {unchanged && placement && <p className="text-xs text-fg-muted">This is the resource's current placement. Choose a different destination.</p>}
         {preview.isError && (
           <Notice tone="error" title="Could not review the move">
@@ -209,7 +218,7 @@ function MoveForm({ workload, currentTeamId, teams }: MoveFormProps) {
         )}
         {!online && <p className="text-xs text-fg-muted">You are offline. Reconnect to review a move.</p>}
         <div className="flex justify-end">
-          <Button type="submit" disabled={!online || !projectId || unchanged || Boolean(active)} pending={preview.isPending}>
+          <Button type="submit" disabled={!online || !projectId || unchanged || Boolean(active) || held} pending={preview.isPending}>
             <ArrowRightLeft aria-hidden className="size-3.5" />
             Review move
           </Button>

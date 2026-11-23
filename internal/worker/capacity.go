@@ -49,6 +49,12 @@ func capacityChecks(config map[string]any, sample *NodeMetrics) []PreflightCheck
 				return []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Replica capacity could not be estimated."}}
 			}
 		}
+		if count, ok := service["scale"]; ok {
+			replicas = capacityNumber(count)
+			if replicas < 0 || replicas > 10000 {
+				return []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Replica capacity could not be estimated."}}
+			}
+		}
 		cores := capacityNumber(service["cpus"])
 		if cores == 0 {
 			cores = capacityNumber(limits["cpus"])
@@ -126,17 +132,34 @@ func (e *Engine) Capacity(ctx context.Context, r Request) (report PreflightRepor
 	for key, value := range r.Environment {
 		env = append(env, key+"="+value)
 	}
+	compose, err = e.prepareComposeBundle(ctx, r, dir, compose, env)
+	if err != nil {
+		return PreflightReport{Checks: []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Cannot resolve the ordered Compose selection."}}}
+	}
 	out := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", compose, "config", "--format", "json"}, env, out)
 	var config map[string]any
 	if err != nil || json.Unmarshal(out.data.Bytes(), &config) != nil || applyLimits(config, r.Limits) != nil {
 		return PreflightReport{Checks: []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Cannot resolve Compose resource limits."}}}
 	}
+	applyCapacityReplicas(config, r.Rollout)
 	report.Checks = capacityChecks(config, inspectMetrics(ctx, e.Root))
 	return report
 }
 
-func (e *Engine) warnDeploymentCapacity(ctx context.Context, dir string, args, env []string, out io.Writer) {
+func applyCapacityReplicas(config map[string]any, rollout *RolloutOptions) {
+	if rollout == nil || rollout.Strategy == "disabled" {
+		return
+	}
+	services, _ := config["services"].(map[string]any)
+	for name, count := range rollout.Replicas {
+		if service, ok := services[name].(map[string]any); ok {
+			service["scale"] = float64(count)
+		}
+	}
+}
+
+func (e *Engine) warnDeploymentCapacity(ctx context.Context, dir string, args, env []string, out io.Writer, rollout *RolloutOptions) {
 	data := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	if err := e.Run(ctx, dir, append(append([]string{}, args...), "config", "--format", "json"), env, data); err != nil {
 		fmt.Fprintln(out, "Capacity warning: Compose demand could not be inspected.")
@@ -147,6 +170,7 @@ func (e *Engine) warnDeploymentCapacity(ctx context.Context, dir string, args, e
 		fmt.Fprintln(out, "Capacity warning: Compose demand could not be read.")
 		return
 	}
+	applyCapacityReplicas(config, rollout)
 	for _, check := range capacityChecks(config, inspectMetrics(ctx, e.Root)) {
 		if check.State != "pass" {
 			fmt.Fprintln(out, "Capacity warning:", check.Message)

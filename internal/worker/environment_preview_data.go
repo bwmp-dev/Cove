@@ -107,7 +107,7 @@ func (e *Engine) InventoryPreviewSource(ctx context.Context, workload string, da
 	sort.Strings(names)
 	for _, name := range names {
 		service := config.Services[name]
-		item := PreviewInventoryService{Name: name}
+		item := PreviewInventoryService{Name: trafficServiceName(current.Traffic, name)}
 		item.Image, _ = service["image"].(string)
 		item.Immutable = imageDigest.MatchString(item.Image)
 		if item.Image != "" {
@@ -134,7 +134,7 @@ func (e *Engine) InventoryPreviewSource(ctx context.Context, workload string, da
 		}
 		if dependencies, ok := service["depends_on"].(map[string]any); ok {
 			for dependency := range dependencies {
-				item.DependsOn = append(item.DependsOn, dependency)
+				item.DependsOn = append(item.DependsOn, trafficServiceName(current.Traffic, dependency))
 			}
 			sort.Strings(item.DependsOn)
 		}
@@ -185,7 +185,7 @@ func (e *Engine) InventoryPreviewSource(ctx context.Context, workload string, da
 				volumes[key] = v
 			}
 			v.ReadOnly = v.ReadOnly && readOnly
-			v.Services = append(v.Services, name)
+			v.Services = append(v.Services, item.Name)
 		}
 		inventory.Services = append(inventory.Services, item)
 	}
@@ -201,7 +201,8 @@ func (e *Engine) InventoryPreviewSource(ctx context.Context, workload string, da
 		if strings.HasPrefix(network.Name, "cove-shared-") || strings.HasPrefix(network.Name, "cove-link-") || network.Name == "cove-ingress" {
 			continue
 		}
-		if network.External || (network.Name != "" && !strings.HasPrefix(network.Name, e.composeProject(workload)+"_")) {
+		generationNetwork := current.Generation != "" && strings.HasPrefix(network.Name, "cove-"+workload+"-coveg-")
+		if network.External || (network.Name != "" && !strings.HasPrefix(network.Name, e.composeProject(workload)+"_") && !generationNetwork) {
 			inventory.ExternalNetworks = append(inventory.ExternalNetworks, name)
 		}
 	}

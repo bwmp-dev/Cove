@@ -176,8 +176,17 @@ func TestMCPDisabledScopeFilteringAndRevocation(t *testing.T) {
 	}
 	defer session.Close()
 	tools, err := session.ListTools(ctx, nil)
-	if err != nil || len(tools.Tools) != 3 {
+	if err != nil || len(tools.Tools) != 7 {
 		t.Fatal("MCP tool registration failed", err)
+	}
+	names := map[string]bool{}
+	for _, tool := range tools.Tools {
+		names[tool.Name] = true
+	}
+	for _, name := range []string{"deploy", "restart", "logs", "pull_and_deploy", "rollout_promote", "rollout_abort", "image_check"} {
+		if !names[name] {
+			t.Fatal("scoped MCP tool missing", name)
+		}
 	}
 	resources, err := session.ListResources(ctx, nil)
 	if err != nil || len(resources.Resources) != 2 {

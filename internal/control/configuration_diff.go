@@ -10,7 +10,18 @@ import (
 )
 
 func deploymentConfiguration(request worker.Request) map[string]json.RawMessage {
-	config := workloadInput{Compose: request.Compose, ComposeBundle: request.ComposeBundle, Environment: request.Environment, Source: request.Source, Kind: request.Kind, JobService: request.JobService, Routes: request.Routes, Private: request.Private, Limits: request.Limits, Hooks: request.Hooks, FileSecrets: request.FileSecrets, GuardedDeploy: request.GuardedDeploy}
+	if request.Scale != nil && request.Rollout != nil {
+		options := *request.Rollout
+		options.Replicas = map[string]int{}
+		for service, count := range request.Rollout.Replicas {
+			options.Replicas[service] = count
+		}
+		for service, count := range request.Scale.Replicas {
+			options.Replicas[service] = count
+		}
+		request.Rollout = &options
+	}
+	config := workloadInput{Compose: request.Compose, ComposeBundle: request.ComposeBundle, Environment: request.Environment, Source: request.Source, Kind: request.Kind, JobService: request.JobService, Routes: request.Routes, Private: request.Private, Limits: request.Limits, Hooks: request.Hooks, FileSecrets: request.FileSecrets, GuardedDeploy: request.GuardedDeploy, Rollout: request.Rollout}
 	if config.Source != nil {
 		source := *config.Source
 		source.Token, source.SSHPrivateKey, source.Revision = "", "", ""
@@ -37,7 +48,7 @@ func (s *Server) workloadConfigurationDiff(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var operation, revision string
-	err := s.DB.QueryRow(r.Context(), `SELECT id,declared_payload,COALESCE(result->>'revision','') FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback','adopt') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1`, id).Scan(&operation, &encrypted, &revision)
+	err := s.DB.QueryRow(r.Context(), `SELECT d.declaration_id,o.declared_payload,d.revision FROM cove_committed_deployments d JOIN operations o ON o.id=d.declaration_id WHERE d.workload_id=$1 ORDER BY d.updated_at DESC,d.operation_id DESC LIMIT 1`, id).Scan(&operation, &encrypted, &revision)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "deployment baseline unavailable", 503)
 		return
@@ -72,7 +83,7 @@ func (s *Server) workloadConfigurationDiff(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
-	after := deploymentConfiguration(worker.Request{Compose: config.Compose, ComposeBundle: config.ComposeBundle, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy})
+	after := deploymentConfiguration(worker.Request{Compose: config.Compose, ComposeBundle: config.ComposeBundle, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout})
 	w.Header().Set("Cache-Control", "no-store")
 	respond(w, 200, map[string]any{"has_baseline": hasBaseline, "operation_id": operation, "revision": revision, "fields": configurationChanges(before, after), "diffs": safeConfigurationDiffs(before, after)})
 }

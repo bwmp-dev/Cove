@@ -1291,11 +1291,15 @@ BEGIN
   event_message='Reviewed project configuration was saved. This did not deploy resources.';
  ELSIF NEW.action LIKE 'POST /api/projects/{id}/imports%' THEN
   IF NEW.status<300 THEN event_name='import.reviewed'; event_message='An importer prepared a review. The source system was not changed.'; ELSE event_name='import.failed'; event_message='An importer request was refused. Review the audit log.'; END IF;
+ ELSIF NEW.actor='cpu-scaler' AND NEW.action='scale service replicas' THEN event_name='autoscale.queued'; event_message='CPU observations queued a replica change. Deployment admission still applies.';
+ ELSIF NEW.action='idle state observed' AND NEW.details->>'state'='asleep' THEN event_name='resource.asleep'; event_message='The request-driven resource was observed asleep. Availability checks are deferred.';
+ ELSIF NEW.action='idle state observed' AND NEW.details->>'state'='awake' THEN event_name='resource.awake'; event_message='The request-driven resource was observed awake.';
  ELSIF NEW.action='resource.adopt' THEN event_name='adoption.succeeded'; event_message='A reviewed resource was adopted without restarting containers.';
  ELSIF NEW.action LIKE 'POST /api/nodes/{id}/adoptions%' AND NEW.status>=400 THEN event_name='adoption.failed'; event_message='A Compose adoption request did not finish. Reload its review before retrying.';
  ELSE RETURN NEW;
  END IF;
- SELECT id INTO resource FROM workloads WHERE id=NEW.subject AND team_id=NEW.team_id;
+ SELECT id INTO resource FROM workloads WHERE id=NEW.subject AND (NEW.team_id IS NULL OR team_id=NEW.team_id);
+ IF source_team IS NULL AND resource IS NOT NULL THEN SELECT team_id INTO source_team FROM workloads WHERE id=resource; END IF;
  PERFORM cove_queue_channel_event(event_name,event_message,source_team,COALESCE(resource,''),'audit:'||NEW.id,affected);
  RETURN NEW;
 END $$;
@@ -1310,3 +1314,120 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS cove_lockout_notification ON authentication_failures;
 CREATE TRIGGER cove_lockout_notification AFTER INSERT OR UPDATE ON authentication_failures FOR EACH ROW EXECUTE FUNCTION cove_audit_lockout();
+-- Deploy track: per-job calendar timezone. Existing schedules retain UTC semantics.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timezone text NOT NULL DEFAULT 'UTC';
+
+-- Deploy track: bounded hourly image digest checks use the existing durable operation queue.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_image_check_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS due_image_checks ON workloads(next_image_check_at) WHERE kind='service';
+-- Metadata polling must not generate generic deployment notifications every hour.
+DROP TRIGGER IF EXISTS cove_operation_notification ON operations;
+CREATE TRIGGER cove_operation_notification AFTER UPDATE OF state ON operations FOR EACH ROW
+ WHEN (OLD.state IS DISTINCT FROM NEW.state AND NEW.action <> 'image_check' AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();
+
+-- Deploy track: scheduled runs coalesce at most one tick and bound execution.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_overlap_policy text NOT NULL DEFAULT 'skip' CHECK (job_overlap_policy IN ('skip','queue_one','replace'));
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timeout_seconds integer NOT NULL DEFAULT 1800 CHECK (job_timeout_seconds BETWEEN 5 AND 86400);
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_pending_at timestamptz;
+
+-- Deploy track: health restarts share the durable operation queue and workload lock.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS restart_unhealthy boolean NOT NULL DEFAULT false;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_unhealthy_check_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_unhealthy_restart_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_operation_id text REFERENCES operations(id) ON DELETE SET NULL;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_error text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS unhealthy_restart_attempts ON operations(workload_id,created_at) WHERE action='restart_unhealthy';
+
+-- Deploy track: desired environment suspension and worker-confirmed resource checkpoints.
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS paused boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS environment_suspensions (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ environment_id text NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+ suspended boolean NOT NULL DEFAULT false,
+ resume_wanted boolean NOT NULL DEFAULT false,
+ operation_id text REFERENCES operations(id),
+ action text NOT NULL DEFAULT '' CHECK (action IN ('','suspend','resume')),
+ error text NOT NULL DEFAULT ''
+);
+CREATE OR REPLACE FUNCTION cove_cancel_paused_operation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE held boolean;
+BEGIN
+ IF NEW.action IN ('deploy','rollback','start','restart','restart_unhealthy','rollout_promote','restore','drill') THEN
+  SELECT e.paused INTO held FROM environments e JOIN workloads w ON w.environment_id=e.id WHERE w.id=NEW.workload_id FOR SHARE OF e;
+  IF held THEN NEW.cancel_requested := true; END IF;
+ END IF;
+ RETURN NEW;
+END
+$$;
+DROP TRIGGER IF EXISTS cove_paused_operation ON operations;
+CREATE TRIGGER cove_paused_operation BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_cancel_paused_operation();
+
+-- Deploy track: desired idle sleep policy is committed only after worker route confirmation.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS idle_policy jsonb NOT NULL DEFAULT '{"enabled":false,"after_seconds":300,"request_driven":false}'::jsonb;
+
+-- CPU scaling samples and attempt cooldown survive control-plane restarts.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_cpu_check_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_samples jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_cpu_scale_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_operation_id text NOT NULL DEFAULT '';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_status text NOT NULL DEFAULT 'disabled';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_error text NOT NULL DEFAULT '';
+
+-- Cross-track observed runtime states and durable rollout notification outcomes.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS observed_idle_state text NOT NULL DEFAULT 'awake';
+CREATE OR REPLACE FUNCTION cove_notify_deployment_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE event_name text; event_message text; source_team text;
+BEGIN
+ IF NEW.state NOT IN ('succeeded','failed','interrupted','cancelled') OR (OLD.state=NEW.state AND OLD.result IS NOT DISTINCT FROM NEW.result) THEN RETURN NEW; END IF;
+ IF EXISTS(SELECT 1 FROM workloads WHERE id=NEW.workload_id AND cpu_scale_operation_id=NEW.id) THEN
+  IF NEW.state='succeeded' THEN event_name='autoscale.succeeded'; event_message='The observed CPU replica change completed.'; ELSE event_name='autoscale.failed'; event_message='The CPU replica change did not complete. Review its operation.'; END IF;
+ ELSIF NEW.action='rollout_abort' AND NEW.state='succeeded' THEN event_name='rollout.aborted'; event_message='The staged rollout was aborted and retained traffic restored.';
+ ELSIF NEW.action='rollout_promote' AND NEW.state='succeeded' THEN event_name='rollout.promoted'; event_message='The rollout became active.';
+ ELSIF NEW.action IN ('deploy','rollback') AND jsonb_typeof(NEW.result->'rollout')='object' THEN
+  IF NEW.state<>'succeeded' THEN event_name='rollout.failed'; event_message='The rollout did not complete. Review its operation and retained state.';
+  ELSIF NEW.result->'rollout'->>'phase'='waiting' THEN event_name='rollout.staged'; event_message='A healthy candidate is staged for an explicit rollout decision.';
+  ELSIF NEW.result->'rollout'->>'phase'='aborted' THEN event_name='rollout.aborted'; event_message='The rollout was aborted and retained traffic restored.';
+  ELSE event_name='rollout.promoted'; event_message='The rollout became active.'; END IF;
+ ELSIF NEW.action IN ('rollout_promote','rollout_abort') THEN event_name='rollout.failed'; event_message='The rollout decision did not complete. Review its operation.';
+ ELSE RETURN NEW;
+ END IF;
+ SELECT team_id INTO source_team FROM workloads WHERE id=NEW.workload_id;
+ PERFORM cove_queue_channel_event(event_name,event_message,source_team,NEW.workload_id,'operation:'||NEW.id||':'||event_name);
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_deployment_notifications ON operations;
+CREATE TRIGGER cove_deployment_notifications AFTER UPDATE OF state,result ON operations FOR EACH ROW EXECUTE FUNCTION cove_notify_deployment_outcome();
+
+-- Rollout promotion changes live release traffic and inherits preview-aware approval policies.
+CREATE OR REPLACE FUNCTION cove_deployment_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF NEW.action IN ('deploy','rollback','rollout_promote') THEN
+ SELECT EXISTS(SELECT 1 FROM workloads w JOIN deployment_policies p ON p.team_id=w.team_id AND ((p.project_id IS NULL AND p.environment_id IS NULL) OR p.project_id=w.project_id OR p.environment_id=cove_deployment_environment(w.id)) WHERE w.id=NEW.workload_id AND p.approval) INTO NEW.approval_required;
+ END IF;
+ RETURN NEW;
+END $$;
+
+-- A staged candidate is not the deployed declaration until an explicit promotion commits it.
+CREATE OR REPLACE VIEW cove_committed_deployments AS
+ SELECT decision.workload_id,decision.id AS operation_id,declaration.id AS declaration_id,decision.updated_at,COALESCE(declaration.result->>'revision','') AS revision
+ FROM operations decision JOIN operations declaration ON declaration.workload_id=decision.workload_id AND declaration.id=CASE WHEN decision.action='rollout_promote' THEN decision.result->'rollout'->>'release' ELSE decision.id END
+ WHERE decision.state='succeeded' AND decision.action IN ('deploy','rollback','adopt','rollout_promote')
+ AND COALESCE(decision.result->'rollout'->>'phase','') NOT IN ('waiting','aborted')
+ AND (decision.action<>'rollout_promote' OR decision.result->'rollout'->>'phase'='completed');
+
+
+-- Provider feedback follows the traffic decision rather than successful staging.
+CREATE INDEX IF NOT EXISTS operations_rollout_decisions ON operations(workload_id,(result->'rollout'->>'release'),updated_at DESC,id DESC)
+ WHERE state='succeeded' AND action IN ('rollout_promote','rollout_abort','stop');
+CREATE OR REPLACE VIEW cove_deployment_feedback_states AS
+ SELECT source.id,CASE WHEN source.state='succeeded' AND source.result->'rollout'->>'phase'='waiting'
+  THEN CASE decision.phase WHEN 'completed' THEN 'succeeded' WHEN 'aborted' THEN 'cancelled' ELSE 'running' END
+  ELSE source.state END AS state
+ FROM operations source LEFT JOIN LATERAL (
+  SELECT outcome.result->'rollout'->>'phase' AS phase FROM operations outcome
+  WHERE source.state='succeeded' AND source.result->'rollout'->>'phase'='waiting'
+   AND outcome.workload_id=source.workload_id AND outcome.state='succeeded'
+   AND outcome.action IN ('rollout_promote','rollout_abort','stop')
+   AND outcome.result->'rollout'->>'release'=source.id
+   AND outcome.result->'rollout'->>'phase' IN ('completed','aborted')
+  ORDER BY outcome.updated_at DESC,outcome.id DESC LIMIT 1
+ ) decision ON true WHERE source.action='deploy';

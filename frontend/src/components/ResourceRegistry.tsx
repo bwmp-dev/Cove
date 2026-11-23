@@ -3,12 +3,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { errorMessage, request } from "../api/client";
 import { connectionsQuery } from "../api/connections";
+import { workloadRegistryQuery } from "../api/queries";
 import { inputClass } from "../lib/styles";
 import { useOnline } from "../lib/hooks";
 import { Button, Field, Notice, QueryError, Section } from "./ui";
 
 export function ResourceRegistry({ id, canEdit, busy }: { id: string; canEdit: boolean; busy: boolean }) {
-  const query = useQuery({ queryKey: ["resource-registry", id], queryFn: ({ signal }) => request<{ registry_id: string }>("GET", `/api/workloads/${id}/registry`, undefined, signal) });
+  const query = useQuery(workloadRegistryQuery(id));
   const registries = useQuery(connectionsQuery("registries"));
   const [selection, setSelection] = useState<string | null>(null);
   const client = useQueryClient();

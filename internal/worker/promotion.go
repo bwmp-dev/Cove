@@ -87,6 +87,7 @@ func (e *Engine) ExportRelease(ctx context.Context, in PromotionExport) (map[str
 	result := map[string]string{}
 	for _, name := range names {
 		image := config.Services[name].Image
+		resultName := trafficServiceName(state.Traffic, name)
 		if !serviceIdentifier.MatchString(name) || !imageDigest.MatchString(image) {
 			return nil, errors.New("release image is not immutable")
 		}
@@ -119,11 +120,11 @@ func (e *Engine) ExportRelease(ctx context.Context, in PromotionExport) (map[str
 			if err = e.Run(ctx, e.Root, []string{"docker", "image", "inspect", "--platform", platform, "--format", "{{.Id}}", published}, env, check); err != nil || strings.TrimSpace(check.data.String()) != expected {
 				return nil, errors.New("published image does not match the retained release")
 			}
-			result[name] = published
+			result[resultName] = published
 			continue
 		}
 		if !in.Portable && in.Registry == nil {
-			result[name] = image
+			result[resultName] = image
 			continue
 		}
 		inspected := &limitedBuffer{Limit: 65536}
@@ -142,10 +143,10 @@ func (e *Engine) ExportRelease(ctx context.Context, in PromotionExport) (map[str
 			if in.Registry != nil && repository != in.Registry.Server+"/"+in.Repository {
 				continue
 			}
-			result[name] = digest
+			result[resultName] = digest
 			break
 		}
-		if result[name] == "" {
+		if result[resultName] == "" {
 			return nil, errors.New("cross-node promotion requires published image digests; select a registry and repository")
 		}
 	}

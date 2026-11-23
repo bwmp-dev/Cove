@@ -198,7 +198,11 @@ func TestWorkloadObservationsOwnershipAndBoundaries(t *testing.T) {
 		case strings.Contains(joined, "ps --all"):
 			fmt.Fprintln(out, `{"ID":"aaaaaaaaaaaa","Names":"app","State":"running"}`)
 		case args[1] == "inspect":
-			fmt.Fprint(out, `{"restart_count":3,"oom_killed":false,"exit_code":0,"exited":false}`)
+			if strings.Contains(joined, `"state":`) {
+				fmt.Fprintln(out, `{"id":"aaaaaaaaaaaa","state":{"Status":"running","ExitCode":0},"service":"app"}`)
+			} else {
+				fmt.Fprint(out, `{"restart_count":3,"oom_killed":false,"exit_code":0,"exited":false}`)
+			}
 		case args[1] == "events":
 			if !strings.Contains(joined, "--filter container=aaaaaaaaaaaa") || !strings.Contains(joined, "--until") {
 				t.Fatal("unbounded or unscoped events", args)

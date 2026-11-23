@@ -70,6 +70,10 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	src, dst := resources[in.Source], resources[target]
+	if _, err = environmentOperationGate(r.Context(), tx, target, "rollout_promote"); err != nil {
+		http.Error(w, "resume the target environment before promoting a release", 409)
+		return
+	}
 	if src.project != dst.project {
 		http.Error(w, "promotion requires resources in the same project", 400)
 		return
@@ -79,7 +83,7 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var valid, active bool
-	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback','adopt')),EXISTS(SELECT 1 FROM operations WHERE workload_id IN ($2,$3) AND state IN ('queued','running'))`, in.Release, in.Source, target).Scan(&valid, &active); err != nil {
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback','adopt') AND COALESCE(result->'rollout'->>'phase','') NOT IN ('waiting','aborted')),EXISTS(SELECT 1 FROM operations WHERE workload_id IN ($2,$3) AND state IN ('queued','running'))`, in.Release, in.Source, target).Scan(&valid, &active); err != nil {
 		http.Error(w, "operations unavailable", 503)
 		return
 	}
@@ -120,7 +124,7 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source images unavailable; verify the retained release and registry publication settings", 502)
 		return
 	}
-	request := worker.Request{ID: resourceID(), Workload: target, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, ImagePins: result.Images, Registry: export.Registry}
+	request := worker.Request{ID: resourceID(), Workload: target, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout, ImagePins: result.Images, Registry: export.Registry}
 	if err = loadNetworkRequest(r.Context(), tx, &request); err != nil {
 		http.Error(w, "target networking unavailable", 409)
 		return

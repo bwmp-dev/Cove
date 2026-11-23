@@ -24,6 +24,8 @@ func resourceID() string {
 
 type workloadInput struct {
 	ComposeBundle    *worker.ComposeBundle           `json:"compose_bundle,omitempty"`
+	Autoscale        *worker.AutoscalePolicy         `json:"autoscale,omitempty"`
+	Rollout          *worker.RolloutOptions          `json:"rollout,omitempty"`
 	GuardedDeploy    *bool                           `json:"guarded_deploy,omitempty"`
 	FileSecrets      []worker.FileSecret             `json:"file_secrets,omitempty"`
 	Hooks            *worker.DeploymentHooks         `json:"hooks,omitempty"`
@@ -58,6 +60,10 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if in.Autoscale != nil {
+		http.Error(w, "create the resource first, then configure CPU scaling", 400)
+		return
+	}
 	if in.Backup != nil && (in.Backup.Remote != nil || in.Backup.StorageID != "" || in.Backup.Database != nil) {
 		http.Error(w, "use the backup policy endpoint to configure logical backups or a storage location", 400)
 		return
@@ -87,6 +93,10 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	if err := s.DB.QueryRow(r.Context(), "SELECT state FROM nodes WHERE id=$1", in.NodeID).Scan(&state); err != nil || state != "ready" {
 		http.Error(w, "select a ready node", 409)
 		return
+	}
+	if in.Rollout != nil {
+		value := in.Rollout.Normalized()
+		in.Rollout = &value
 	}
 	data, err := json.Marshal(in)
 	if err != nil {
@@ -169,10 +179,12 @@ func (s *Server) listWorkloads(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Action   string `json:"action"`
-		Release  string `json:"release"`
-		BackupID string `json:"backup_id"`
-		Reason   string `json:"reason"`
+		Action     string               `json:"action"`
+		Release    string               `json:"release"`
+		BackupID   string               `json:"backup_id"`
+		PullLatest bool                 `json:"pull_latest"`
+		Build      *worker.BuildOptions `json:"build"`
+		Reason     string               `json:"reason"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -181,12 +193,12 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reason must be at most 1000 bytes without NUL", 400)
 		return
 	}
-	if in.Reason != "" && in.Action != "deploy" && in.Action != "rollback" {
-		http.Error(w, "reasons apply to deploy and rollback operations", 400)
+	if in.Reason != "" && in.Action != "deploy" && in.Action != "rollback" && in.Action != "rollout_promote" && in.Action != "rollout_abort" && in.Action != "build" {
+		http.Error(w, "reasons apply to deployments, rollout decisions and builds", 400)
 		return
 	}
 	switch in.Action {
-	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill":
+	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check", "build", "rollout_promote", "rollout_abort":
 	default:
 		http.Error(w, "unsupported action", 400)
 		return
@@ -217,8 +229,25 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "configuration unavailable", 500)
 		return
 	}
+	repair, err := environmentOperationGate(r.Context(), tx, r.PathValue("id"), in.Action)
+	if err != nil {
+		if errors.Is(err, errEnvironmentPaused) {
+			http.Error(w, err.Error(), 409)
+		} else {
+			http.Error(w, "environment state unavailable", 503)
+		}
+		return
+	}
+	if err = s.idleOperationGate(r.Context(), tx, r.PathValue("id"), in.Action); err != nil {
+		if errors.Is(err, errIdleAsleep) {
+			http.Error(w, err.Error(), 409)
+		} else {
+			http.Error(w, "idle state unavailable; confirm the app is awake before deploying", 502)
+		}
+		return
+	}
 	id := resourceID()
-	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	request := worker.Request{ID: id, Workload: r.PathValue("id"), Action: in.Action, Release: in.Release, ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Source: config.Source, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	if in.Action != "deploy" {
 		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'drift')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&request.RecordDrift); err != nil {
 			http.Error(w, "worker capabilities unavailable", 503)
@@ -226,6 +255,83 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	request.Backup, request.BackupID = config.Backup, in.BackupID
+	request.PullLatest = in.PullLatest
+	if request.Kind == "job" && request.Action == "deploy" {
+		request.Job, err = jobExecutionOptions(r.Context(), tx, request.Workload)
+		if err != nil {
+			if errors.Is(err, errJobWorkerUnsupported) {
+				http.Error(w, err.Error(), 409)
+			} else {
+				http.Error(w, "job execution settings unavailable", 503)
+			}
+			return
+		}
+	}
+	if in.Action != "deploy" && in.Action != "rollback" || request.Rollout != nil && request.Rollout.Strategy == "disabled" {
+		request.Rollout = nil
+	}
+	if in.Action == "rollout_promote" || in.Action == "rollout_abort" {
+		if config.Kind == "job" || in.PullLatest || in.Build != nil {
+			http.Error(w, "rollout actions require a service", 400)
+			return
+		}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: in.Action, Kind: "service"}
+	}
+	request.Build = in.Build
+	request.ResumeSuspended = repair
+	if request.Rollout != nil || in.Action == "rollout_promote" || in.Action == "rollout_abort" {
+		var supported bool
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'rollouts')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
+			http.Error(w, "worker capabilities unavailable", 503)
+			return
+		}
+		if !supported {
+			http.Error(w, "upgrade and verify the worker before using deployment rollouts", 409)
+			return
+		}
+	}
+	if in.Build != nil && in.Action != "build" {
+		http.Error(w, "build options require a build operation", 400)
+		return
+	}
+	if in.Action == "build" {
+		var supported, connected, preview bool
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'build_publish')::boolean,false), EXISTS(SELECT 1 FROM workload_connections c WHERE c.workload_id=w.id AND c.kind='registry'), EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported, &connected, &preview); err != nil {
+			http.Error(w, "build configuration unavailable", 503)
+			return
+		}
+		if preview || in.PullLatest || in.Release != "" || in.BackupID != "" {
+			http.Error(w, "build requires source inputs outside managed previews", 400)
+			return
+		}
+		if !supported || !connected {
+			http.Error(w, "connect a registry and upgrade and verify the worker before building", 409)
+			return
+		}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: "build", Build: in.Build, Compose: config.Compose, ComposeBundle: config.ComposeBundle, Source: config.Source, Environment: config.Environment, FileSecrets: config.FileSecrets, Kind: config.Kind, JobService: config.JobService}
+	}
+	if in.Action == "image_check" {
+		if config.Kind == "job" {
+			http.Error(w, "image checks require a service", 400)
+			return
+		}
+		if in.PullLatest {
+			http.Error(w, "pull latest requires a deploy operation", 400)
+			return
+		}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: "image_check", Kind: "service"}
+	}
+	if in.PullLatest || in.Action == "image_check" {
+		var supported bool
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
+			http.Error(w, "worker capabilities unavailable", 503)
+			return
+		}
+		if !supported {
+			http.Error(w, "upgrade and verify the worker before using image lifecycle operations", 409)
+			return
+		}
+	}
 	if in.Action == "drill" {
 		var supported bool
 		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'restore_drills')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported); err != nil {
@@ -288,12 +394,32 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not record deployment reason", 503)
 		return
 	}
+	if in.Action == "image_check" {
+		if _, err = tx.Exec(r.Context(), `UPDATE workloads SET next_image_check_at=now()+interval '1 hour' WHERE id=$1`, request.Workload); err != nil {
+			http.Error(w, "could not schedule the next image check", 503)
+			return
+		}
+	}
+	if repair && in.Action != "restore" {
+		if _, err = tx.Exec(r.Context(), `UPDATE environment_suspensions SET operation_id=$2,action='resume',error='' WHERE workload_id=$1`, request.Workload, id); err != nil {
+			http.Error(w, "could not queue environment repair", 503)
+			return
+		}
+	}
 	if in.Action == "stop" || in.Action == "start" || in.Action == "restart" || in.Action == "deploy" || in.Action == "rollback" {
 		if _, err = tx.Exec(r.Context(), "UPDATE workloads SET manually_stopped=$2 WHERE id=$1", request.Workload, in.Action == "stop"); err != nil {
 			http.Error(w, "could not save workload intent", 500)
 			return
 		}
 		if in.Action == "stop" {
+			if _, err = tx.Exec(r.Context(), `UPDATE environment_suspensions SET resume_wanted=false WHERE workload_id=$1`, request.Workload); err != nil {
+				http.Error(w, "could not save stop intent", 503)
+				return
+			}
+			if _, err = tx.Exec(r.Context(), `UPDATE workloads SET job_pending_at=NULL WHERE id=$1`, request.Workload); err != nil {
+				http.Error(w, "could not pause scheduled jobs", 503)
+				return
+			}
 			if _, err = tx.Exec(r.Context(), "DELETE FROM webhook_deliveries WHERE workload_id=$1 AND operation_id IS NULL", request.Workload); err != nil {
 				http.Error(w, "could not pause automatic deployments", 500)
 				return
@@ -458,6 +584,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := owner.Ping(ctx); err != nil {
 			return err
 		}
+		if err := s.reconcileEnvironmentSuspensions(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchOperations(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -465,6 +594,15 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if err := s.scheduleJobs(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
+		if err := s.scheduleImageChecks(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
+		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
+		if err := s.scheduleUnhealthyRestarts(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
 		if err := s.reconcilePreviews(ctx); err != nil && ctx.Err() == nil {
@@ -595,7 +733,7 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		return err
 	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
-	if !cancelRequested && request.Action != "routes" {
+	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
 			var resolution *variableResolutionError
 			if errors.As(err, &resolution) {
@@ -611,6 +749,12 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		}
 	}
 	method := "submit"
+	if request.Scale != nil {
+		method = "submit_cpu_scale"
+	}
+	if worker.HasRouteExtensions(request.Routes) {
+		method = "submit_routes_v2"
+	}
 	if cancelRequested {
 		method = "cancel"
 	}
@@ -628,6 +772,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		if request.Action == "routes" {
 			return s.deferRouteResult(ctx, id)
 		}
+		if request.Action == "idle_policy" {
+			return s.deferIdlePolicyResult(ctx, id)
+		}
 		var rejected *RemoteError
 		if errors.As(err, &rejected) {
 			return s.failOperation(ctx, id, "Worker rejected the operation; check its configuration.")
@@ -639,6 +786,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		if request.Action == "routes" {
 			return s.deferRouteResult(ctx, id)
 		}
+		if request.Action == "idle_policy" {
+			return s.deferIdlePolicyResult(ctx, id)
+		}
 		return s.failOperation(ctx, id, "Worker returned an invalid response.")
 	}
 	state := response.Operation.State
@@ -648,14 +798,41 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		if request.Action == "routes" {
 			return s.deferRouteResult(ctx, id)
 		}
+		if request.Action == "idle_policy" {
+			return s.deferIdlePolicyResult(ctx, id)
+		}
 		return s.failOperation(ctx, id, "Worker returned an unsupported state.")
 	}
 	result, err := json.Marshal(response.Operation)
 	if err != nil {
 		return err
 	}
+	if request.Scale != nil && state == "succeeded" {
+		if !confirmedCPUScale(request.Scale, response.Operation) {
+			_, err = s.DB.Exec(ctx, `UPDATE operations SET result=$2,updated_at=now() WHERE id=$1`, id, []byte(`{"error":"Waiting for the worker to confirm the CPU scaling outcome; the resource remains locked."}`))
+			return err
+		}
+		return s.commitCPUScale(ctx, id, request, result)
+	}
+	if request.Action == "idle_policy" && state == "succeeded" {
+		return s.commitIdlePolicy(ctx, id, request, result)
+	}
 	if request.Action == "routes" && state == "succeeded" {
 		return s.commitRoutes(ctx, id, request, result)
+	}
+	if rollout := response.Operation.Rollout; rollout != nil && rollout.Release != "" && rollout.Release != id && (rollout.Phase == "completed" || rollout.Phase == "aborted") {
+		tx, err := s.DB.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if _, err = tx.Exec(ctx, `UPDATE operations SET result=jsonb_set(result,'{rollout,phase}',to_jsonb($3::text)),updated_at=now() WHERE id=$1 AND workload_id=$2 AND action IN ('deploy','rollback') AND result->'rollout'->>'phase'='waiting'`, rollout.Release, request.Workload, rollout.Phase); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	_, err = s.DB.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id)
 	return err

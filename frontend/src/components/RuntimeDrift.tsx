@@ -69,6 +69,11 @@ function DriftReport({ drift }: { drift: WorkloadDrift }) {
             An operation is running on this resource, so the containers were not compared. Refresh when it finishes.
           </Notice>
         )}
+        {result === "suspended" && (
+          <Notice title="Inspection deferred while stopped">
+            This resource is paused with its environment or asleep, so its containers were not inspected. Refresh after it resumes or wakes.
+          </Notice>
+        )}
         {result === "clean" && (
           <p role="status">
             <StatusLabel tone="ok" label="No drift since the last Cove operation" />

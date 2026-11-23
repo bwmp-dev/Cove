@@ -20,7 +20,7 @@ type configurationChange struct {
 	Diffs    []configurationDiff `json:"diffs"`
 }
 
-func mergeManifestResource(in, old workloadInput) workloadInput {
+func mergeManifestResource(in, old workloadInput) (workloadInput, error) {
 	if in.Kind == "" {
 		in.Kind = "service"
 	}
@@ -32,6 +32,12 @@ func mergeManifestResource(in, old workloadInput) workloadInput {
 	}
 	if in.Routes == nil {
 		in.Routes = old.Routes
+	} else {
+		var err error
+		in.Routes, err = retainedRouteAuth(portableRouteInput(in.Routes, old.Routes), old.Routes)
+		if err != nil {
+			return in, err
+		}
 	}
 	in.Private, in.Backup = old.Private, old.Backup
 	if in.Source != nil && old.Source != nil && in.Source.Repository == old.Source.Repository && in.Source.Token == "" {
@@ -39,10 +45,10 @@ func mergeManifestResource(in, old workloadInput) workloadInput {
 		copy.Token = old.Source.Token
 		in.Source = &copy
 	}
-	return in
+	return in, nil
 }
 
-func projectConfigurationChanges(before, after projectConfiguration) []configurationChange {
+func projectConfigurationChanges(before, after projectConfiguration) ([]configurationChange, error) {
 	changes := []configurationChange{}
 	add := func(resource, action string, fields []string, diffs []configurationDiff) {
 		if len(fields) > 0 {
@@ -87,7 +93,10 @@ func projectConfigurationChanges(before, after projectConfiguration) []configura
 			add(resource.Key, "create", []string{"resource"}, nil)
 			continue
 		}
-		config := mergeManifestResource(resource.Configuration, old.Configuration)
+		config, err := mergeManifestResource(resource.Configuration, old.Configuration)
+		if err != nil {
+			return nil, err
+		}
 		a, _ := json.Marshal(old.Configuration)
 		b, _ := json.Marshal(config)
 		var first, second map[string]json.RawMessage
@@ -102,7 +111,7 @@ func projectConfigurationChanges(before, after projectConfiguration) []configura
 		}
 		add(resource.Key, "update", fields, safeConfigurationDiffs(first, second))
 	}
-	return changes
+	return changes, nil
 }
 
 func (s *Server) projectConfigurationHandler(w http.ResponseWriter, r *http.Request) {
@@ -170,6 +179,7 @@ func (s *Server) configurationDrafts(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "drafts unavailable", 503)
 				return
 			}
+			redactConfigurationChanges(item.Changes)
 			items = append(items, item)
 		}
 		if rows.Err() != nil {
@@ -215,7 +225,11 @@ func (s *Server) configurationDrafts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project configuration unavailable", 503)
 		return
 	}
-	changes := projectConfigurationChanges(before, manifest)
+	changes, err := projectConfigurationChanges(before, manifest)
+	if err != nil {
+		http.Error(w, "route protections are ambiguous; set them explicitly through the route settings before importing", 409)
+		return
+	}
 	base := s.configurationVersion(before)
 	encrypted, err := s.sealJSON(manifest)
 	if err != nil {
@@ -349,7 +363,10 @@ func (s *Server) applyProjectConfiguration(w http.ResponseWriter, r *http.Reques
 	sort.Slice(resources, func(i, j int) bool { return resources[i].Key < resources[j].Key })
 	for _, resource := range resources {
 		old, exists := oldResources[resource.Key]
-		config := mergeManifestResource(resource.Configuration, old.Configuration)
+		config, mergeErr := mergeManifestResource(resource.Configuration, old.Configuration)
+		if mergeErr != nil {
+			return fail("route protections are ambiguous; review the route settings before applying", 409)
+		}
 		if err = validateWorkload(config); err != nil {
 			return fail("resource configuration is invalid: "+err.Error(), 400)
 		}

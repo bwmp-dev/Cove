@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 
-// Cron expressions and scheduled datetimes are always evaluated in UTC on the server; only display follows the preference.
-export const scheduleTimeZone = "UTC";
+// Scheduled backups are evaluated in UTC on the server. Scheduled jobs and deployment windows use the IANA time zone saved with each one; only display follows the preference.
+export const backupScheduleTimeZone = "UTC";
 
 // Undefined until the signed-in preference loads, so timestamps keep the browser's zone instead of another team's.
 let displayTimeZone: string | undefined;

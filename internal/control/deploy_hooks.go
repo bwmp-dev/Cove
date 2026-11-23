@@ -181,7 +181,7 @@ func (s *Server) inboundDeployHook(w http.ResponseWriter, r *http.Request) {
 		}
 		config.Source.Revision = in.Revision
 	}
-	request := worker.Request{ID: resourceID(), Workload: workload, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	request := worker.Request{ID: resourceID(), Workload: workload, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	if err = worker.ValidateRequest(request); err != nil {
 		http.Error(w, "deployment configuration is invalid", 400)
 		return

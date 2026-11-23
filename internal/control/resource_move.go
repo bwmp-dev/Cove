@@ -102,6 +102,9 @@ func (s *Server) moveResource(w http.ResponseWriter, r *http.Request) {
 		review.Blockers = append(review.Blockers, "Choose a different destination.")
 	}
 	checks := []struct{ query, message string }{
+		{`SELECT EXISTS(SELECT 1 FROM environments WHERE id IN ($2,$3) AND paused) OR EXISTS(SELECT 1 FROM environment_suspensions WHERE workload_id=$1)`, "Finish resuming both environments and the resource before moving."},
+		{`SELECT COALESCE((SELECT result->'rollout'->>'phase'='waiting' FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback','rollout_promote','rollout_abort') AND state='succeeded' ORDER BY updated_at DESC,id DESC LIMIT 1),false)`, "Promote or abort the staged rollout before moving."},
+		{`SELECT observed_idle_state<>'awake' FROM workloads WHERE id=$1`, "Wake the resource and refresh its observed state before moving."},
 		{`SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND state IN ('queued','running','awaiting_approval'))`, "Finish or cancel pending operations before moving."},
 		{`SELECT EXISTS(SELECT 1 FROM previews WHERE workload_id=$1 OR source_id=$1) OR EXISTS(SELECT 1 FROM environment_preview_resources WHERE resource_id=$1 OR base_id=$1)`, "Close active previews that use this resource before moving."},
 		{`SELECT EXISTS(SELECT 1 FROM environment_previews WHERE environment_id=$2 OR base_environment_id=$2) OR EXISTS(SELECT 1 FROM environment_previews WHERE environment_id=$3) OR EXISTS(SELECT 1 FROM preview_recipes WHERE base_environment_id=$2 AND enabled)`, "Close dependent environment previews and disable the source environment's preview recipe before moving; preview environments cannot be selected."},
@@ -159,7 +162,7 @@ func (s *Server) moveResource(w http.ResponseWriter, r *http.Request) {
 			review.Blockers = append(review.Blockers, "Disable private endpoints and backups before transferring teams, then configure destination credentials explicitly.")
 		}
 		var deployedPayload []byte
-		err = tx.QueryRow(ctx, `SELECT payload FROM operations WHERE workload_id=$1 AND action IN ('deploy','rollback','adopt') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1`, id).Scan(&deployedPayload)
+		err = tx.QueryRow(ctx, `SELECT o.payload FROM cove_committed_deployments d JOIN operations o ON o.id=d.declaration_id WHERE d.workload_id=$1 ORDER BY d.updated_at DESC,d.operation_id DESC LIMIT 1`, id).Scan(&deployedPayload)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "deployment state unavailable", 503)
 			return

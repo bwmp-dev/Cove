@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const rpcMessageLimit = 2 * 1024 * 1024
+
 type RPCRequest struct {
 	Diff           *ReleaseComparisonRequest `json:"release_comparison,omitempty"`
 	Proxy          *outbound.Config          `json:"outbound_proxy,omitempty"`
@@ -75,10 +77,14 @@ type RPCResponse struct {
 	Observations    *WorkloadObservations `json:"observations,omitempty"`
 	Files           *FileResponse         `json:"files,omitempty"`
 	Telemetry       *Telemetry            `json:"telemetry,omitempty"`
+	CPUScale        *CPUScaleObservation  `json:"cpu_scale,omitempty"`
+	Idle            *IdleStatus           `json:"idle,omitempty"`
+	Rollout         *RolloutStatus        `json:"rollout,omitempty"`
+	Suspension      *SuspensionStatus     `json:"suspension,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
-	if err := e.configureOutbound(r.Proxy); err != nil {
+	if err := e.configureOutbound(ctx, r.Proxy); err != nil {
 		return RPCResponse{Error: err.Error()}
 	}
 	switch r.Method {
@@ -245,6 +251,12 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: err.Error()}
 		}
 		return RPCResponse{Telemetry: result}
+	case "cpu_scale_sample":
+		sample, err := e.CPUScaleSample(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{CPUScale: sample}
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()
 		if err != nil {
@@ -387,9 +399,13 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		if err != nil {
 			return RPCResponse{Error: "could not inspect resource health"}
 		}
-		return RPCResponse{Containers: containers}
+		suspension, err := e.suspensionStatus(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect resource suspension"}
+		}
+		return RPCResponse{Containers: containers, Suspension: suspension}
 	case "containers":
-		containers, err := e.Containers(ctx, r.ID)
+		containers, err := e.HealthContainers(ctx, r.ID)
 		if err != nil {
 			return RPCResponse{Error: "could not inspect workload containers"}
 		}
@@ -398,7 +414,19 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 				containers[i].MetricsUnavailable = true
 			}
 		}
-		return RPCResponse{Containers: containers}
+		rollout, err := e.rolloutStatus(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect deployment traffic state"}
+		}
+		suspension, err := e.suspensionStatus(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect resource suspension"}
+		}
+		idle, err := e.IdleStatus(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: "could not inspect idle policy"}
+		}
+		return RPCResponse{Containers: containers, Rollout: rollout, Suspension: suspension, Idle: idle}
 	case "container_logs":
 		logs, err := e.ContainerLogs(ctx, r.ID)
 		if err != nil {
@@ -408,9 +436,19 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit":
+	case "submit", "submit_cpu_scale", "submit_routes_v2":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
+		}
+		expected := "submit"
+		if r.Request.Scale != nil {
+			expected = "submit_cpu_scale"
+		}
+		if HasRouteExtensions(r.Request.Routes) {
+			expected = "submit_routes_v2"
+		}
+		if r.Method != expected {
+			return RPCResponse{Error: "request requires its dedicated submission method"}
 		}
 		op, err := e.Submit(*r.Request)
 		if err != nil {
@@ -488,7 +526,7 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 			return
 		}
 		if request.Method == "stream" {
-			if err := e.configureOutbound(request.Proxy); err != nil {
+			if err := e.configureOutbound(r.Context(), request.Proxy); err != nil {
 				w.Header().Set("Content-Type", "application/octet-stream")
 				_ = json.NewEncoder(w).Encode(StreamResponse{Error: err.Error()})
 				return

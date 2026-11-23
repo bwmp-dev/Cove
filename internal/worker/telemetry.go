@@ -88,8 +88,8 @@ func (e *Engine) collectTelemetry(ctx context.Context, id string, since time.Tim
 	if err != nil {
 		return nil, err
 	}
-	if len(containers) > 32 {
-		return nil, errors.New("telemetry supports at most 32 containers per resource")
+	if len(containers) > MaxResourceContainers {
+		return nil, errors.New("telemetry supports at most 128 containers per resource")
 	}
 	if metrics {
 		if err = e.containerMetrics(ctx, containers); err != nil {
@@ -107,9 +107,12 @@ func (e *Engine) collectTelemetry(ctx context.Context, id string, since time.Tim
 	if err = json.Unmarshal(data, &current); err != nil {
 		return nil, err
 	}
-	secrets := []string{}
-	for _, value := range current.Environment {
-		secrets = append(secrets, value)
+	secrets := append([]string{}, current.AdditionalSecrets...)
+	secrets = append(secrets, routeSecrets(current.Routes)...)
+	for key, value := range current.Environment {
+		if public, ok := current.PublicBuiltins[key]; !ok || public != value {
+			secrets = append(secrets, value)
+		}
 	}
 	result := &Telemetry{SampledAt: now, Containers: containers, Logs: []LogEntry{}, LogsLimited: clamped}
 	for _, container := range containers {

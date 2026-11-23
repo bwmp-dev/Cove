@@ -107,3 +107,31 @@ func TestLogDeltaRotatingSnapshots(t *testing.T) {
 		}
 	}
 }
+
+func TestDeployPullLatestAndReason(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if r.Method != "POST" || r.URL.Path != "/api/v1/workloads/app/operations" || json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Fatal("unexpected request", r.Method, r.URL.Path)
+		}
+		if body["pull_latest"] != true || body["reason"] != "Reviewed images" || body["action"] != "deploy" {
+			t.Fatal(body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(202)
+		fmt.Fprint(w, `{"id":"queued","state":"queued"}`)
+	}))
+	defer server.Close()
+	api, err := client.New(server.URL, "fixture-token", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.HTTP.Transport = server.Client().Transport
+	var out bytes.Buffer
+	if err = execute(t.Context(), api, []string{"deploy", "--wait=false", "--pull-latest", "--reason", "Reviewed images", "app"}, options{JSON: true, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "queued") {
+		t.Fatal(out.String())
+	}
+}

@@ -78,12 +78,12 @@ type githubFeedback struct {
 }
 
 func (s *Server) dispatchGithubFeedback(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `SELECT o.id,o.workload_id,o.state,g.repository,g.installation_id,g.repository_id,o.payload,COALESCE(o.result->>'revision',''),COALESCE(p.number,0),COALESCE(f.reported_state,''),COALESCE(f.deployment_id,0),COALESCE(f.attempts,0),COALESCE(w.environment_id,w.project_id)
- FROM operations o JOIN workloads w ON w.id=o.workload_id JOIN github_sources g ON g.workload_id=w.id
+	rows, err := s.DB.Query(ctx, `SELECT o.id,o.workload_id,feedback.state,g.repository,g.installation_id,g.repository_id,o.payload,COALESCE(o.result->>'revision',''),COALESCE(p.number,0),COALESCE(f.reported_state,''),COALESCE(f.deployment_id,0),COALESCE(f.attempts,0),COALESCE(w.environment_id,w.project_id)
+ FROM operations o JOIN cove_deployment_feedback_states feedback ON feedback.id=o.id JOIN workloads w ON w.id=o.workload_id JOIN github_sources g ON g.workload_id=w.id
  JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id
  LEFT JOIN previews p ON p.workload_id=w.id JOIN github_reporting settings ON settings.workload_id=COALESCE(p.source_id,w.id) AND settings.enabled
  LEFT JOIN github_operation_feedback f ON f.operation_id=o.id
- WHERE o.action='deploy' AND o.created_at>=settings.enabled_at AND (f.operation_id IS NULL OR (f.reported_state<>o.state AND f.next_attempt_at<=now()))
+ WHERE o.action='deploy' AND o.created_at>=settings.enabled_at AND (f.operation_id IS NULL OR (f.reported_state<>feedback.state AND f.next_attempt_at<=now()))
  ORDER BY o.created_at LIMIT 4`)
 	if err != nil {
 		return err

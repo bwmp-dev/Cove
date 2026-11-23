@@ -101,7 +101,7 @@ func (s *Server) evaluateResourceThresholds(ctx context.Context, id string) erro
 	if rpcErr != nil || response.Error != "" || response.Observations == nil {
 		return nil
 	}
-	if len(response.Observations.Events) > 4096 || len(response.Observations.Containers) > 32 || len(response.Observations.Certificates) > 100 {
+	if len(response.Observations.Events) > 4096 || len(response.Observations.Containers) > worker.MaxResourceContainers || len(response.Observations.Certificates) > 100 {
 		return fmt.Errorf("resource observation exceeds limits")
 	}
 	windows, err := s.DB.Query(ctx, `SELECT created_at,updated_at FROM operations WHERE workload_id=$1 AND updated_at>now()-interval '11 minutes' ORDER BY updated_at DESC LIMIT 4097`, id)
@@ -162,6 +162,12 @@ func (s *Server) evaluateResourceThresholds(ctx context.Context, id string) erro
 	}
 	if busy {
 		return nil
+	}
+	if !stopped {
+		stopped, err = s.resourceIntentionallyDown(ctx, id)
+		if err != nil {
+			return err
+		}
 	}
 	for _, r := range rules {
 		value, known := resourceThresholdValue(r.metric, r.domain, &sample)

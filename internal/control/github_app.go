@@ -523,17 +523,17 @@ func (s *Server) githubSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareAppDeployment(ctx context.Context, request *worker.Request) error {
-	if request.Action == "deploy" && request.Source != nil && strings.HasPrefix(request.Source.Repository, "ssh://") {
+	if (request.Action == "deploy" || request.Action == "build") && request.Source != nil && strings.HasPrefix(request.Source.Repository, "ssh://") {
 		return s.prepareGitDeployKey(ctx, request)
 	}
 
-	if request.Action == "deploy" && request.Source != nil {
+	if (request.Action == "deploy" || request.Action == "build") && request.Source != nil {
 		handled, err := s.prepareConnectedGitDeployment(ctx, request)
 		if handled || err != nil {
 			return err
 		}
 	}
-	if request.Action != "deploy" || request.Source == nil || request.Source.Token != "" {
+	if (request.Action != "deploy" && request.Action != "build") || request.Source == nil || request.Source.Token != "" {
 		return nil
 	}
 	var installation, repo int64
@@ -660,7 +660,7 @@ func (s *Server) githubAppPush(w http.ResponseWriter, r *http.Request, body []by
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), "SELECT w.id,w.configuration,g.repository,COALESCE(t.kind,'branch'),COALESCE(t.pattern,'') FROM github_sources g JOIN workloads w ON w.id=g.workload_id LEFT JOIN git_source_triggers t ON t.workload_id=w.id JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.installation_id=$1 AND g.repository_id=$2 AND g.automatic AND NOT w.manually_stopped FOR UPDATE OF w", event.Installation.ID, event.Repository.ID)
+	rows, err := tx.Query(r.Context(), "SELECT w.id,w.configuration,g.repository,COALESCE(t.kind,'branch'),COALESCE(t.pattern,'') FROM github_sources g JOIN workloads w ON w.id=g.workload_id LEFT JOIN git_source_triggers t ON t.workload_id=w.id JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.installation_id=$1 AND g.repository_id=$2 AND g.automatic AND NOT w.manually_stopped AND NOT EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) AND NOT EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id) FOR UPDATE OF w", event.Installation.ID, event.Repository.ID)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -689,7 +689,7 @@ func (s *Server) githubAppPush(w http.ResponseWriter, r *http.Request, body []by
 		}
 		c.Source.Revision = event.After
 		c.Source.Token = ""
-		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Source: c.Source, ComposeBundle: c.ComposeBundle, Compose: c.Compose, Environment: c.Environment, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy})
+		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Source: c.Source, ComposeBundle: c.ComposeBundle, Compose: c.Compose, Environment: c.Environment, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy, Rollout: c.Rollout})
 	}
 	if err == nil {
 		err = rows.Err()

@@ -50,8 +50,8 @@ func (e *Engine) ObserveWorkload(ctx context.Context, id string) (*WorkloadObser
 	if err != nil {
 		return nil, err
 	}
-	if len(containers) > 32 {
-		return nil, errors.New("observations support at most 32 containers")
+	if len(containers) > MaxResourceContainers {
+		return nil, errors.New("observations support at most 128 containers")
 	}
 	now := time.Now().UTC()
 	result := &WorkloadObservations{SampledAt: now, Containers: []ContainerObservation{}, Certificates: []CertificateObservation{}}

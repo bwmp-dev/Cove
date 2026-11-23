@@ -2,6 +2,7 @@
 import base64
 from contextlib import contextmanager
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -64,6 +65,125 @@ def output_lines(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True).stdout.split()
 
 
+
+def worker_fixture_state(image, fixture):
+    script = ('test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; '
+              'printf "OWNER "; if test -f /fixture/build-owner.json; then cat /fixture/build-owner.json; else printf null; fi; printf "\\n"; '
+              'printf "BACKUP_OWNER "; if test -f /fixture/backup-helper-owner.json; then cat /fixture/backup-helper-owner.json; else printf null; fi; printf "\\n"; '
+              'for p in /fixture/workloads/*; do test ! -d "$p" || printf "WORKLOAD %s\\n" "${p##*/}"; done; '
+              'for p in /fixture/operations/*.json; do test ! -f "$p" || { n="${p##*/}"; printf "OPERATION %s\\n" "${n%.json}"; }; done; '
+              'test ! -d /fixture/links/identity || printf "LINKS present\\n"')
+    result = run("docker", "run", "--rm", "--read-only", "--cap-drop=ALL", "--network=none", "--user=cove",
+                 "--mount", "type=bind,source=/var/lib/cove,target=/fixture,readonly", "--entrypoint=sh", image,
+                 "-ec", script, "sh", fixture, capture_output=True, text=True)
+    state = {"owner": None, "backup_owner": None, "workloads": set(), "operations": set(), "shared_networks": set(), "links": False}
+    for line in result.stdout.splitlines():
+        kind, value = line.split(" ", 1)
+        if kind == "OWNER":
+            state["owner"] = json.loads(value)
+            if state["owner"] is not None and not re.fullmatch(r"[a-f0-9]{32}", state["owner"]):
+                raise RuntimeError("Invalid fixture worker owner")
+        elif kind == "BACKUP_OWNER":
+            owner = json.loads(value)
+            state["backup_owner"] = owner.get("ID") if isinstance(owner, dict) else owner
+            if state["backup_owner"] is not None and not re.fullmatch(r"[a-f0-9]{32}", state["backup_owner"]):
+                raise RuntimeError("Invalid fixture backup owner")
+        elif kind in ("WORKLOAD", "OPERATION"):
+            if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", value):
+                raise RuntimeError("Invalid fixture worker resource ID")
+            state["workloads" if kind == "WORKLOAD" else "operations"].add(value)
+        elif kind == "LINKS":
+            state["links"] = True
+        else:
+            raise RuntimeError("Unexpected fixture ownership metadata")
+    return state
+
+
+def inspect_cleanup_resource(kind, resource):
+    if kind == "container":
+        template = '{"ID":{{json .Id}},"Name":{{json .Name}},"Labels":{{json .Config.Labels}},"Mounts":{{json .Mounts}},"Networks":{{json .NetworkSettings.Networks}}}'
+    else:
+        template = '{"ID":{{json .Id}},"Name":{{json .Name}},"Labels":{{json .Labels}}}' if kind == "network" else '{"Name":{{json .Name}},"Labels":{{json .Labels}}}'
+    result = subprocess.run(["docker", kind, "inspect", "--format", template, resource], capture_output=True, text=True)
+    if result.returncode:
+        if "no such" in result.stderr.lower() or "not found" in result.stderr.lower():
+            return None
+        raise RuntimeError("Could not inspect fixture cleanup resource: " + kind + " " + resource)
+    return json.loads(result.stdout)
+
+
+def owns_worker_resource(kind, resource, fixture, state, root_owned):
+    labels = resource.get("Labels") or {}
+    owners = [value for key, value in labels.items() if key.startswith(("cove.", "dev.cove.")) and (key.endswith("owner") or key == "cove.browser-fixture")]
+    identities = {fixture}
+    if state["owner"]:
+        identities.add(state["owner"])
+    if state.get("backup_owner"):
+        identities.add(state["backup_owner"])
+    if owners:
+        return all(value in identities for value in owners)
+    if root_owned and state["owner"]:
+        builder = "buildx_buildkit_cove-" + state["owner"] + "0"
+        if resource["Name"].lstrip("/") == (builder if kind == "container" else builder + "_state"):
+            return kind in ("container", "volume")
+    if labels.get("com.docker.compose.project") in {"cove-" + workload for workload in state["workloads"]}:
+        return True
+    if labels.get("cove.shared-network") in state.get("shared_networks", set()):
+        return True
+    if labels.get("cove.database-tool.workload") in state["workloads"]:
+        return root_owned and labels.get("cove.database-tool.root") == hashlib.sha256(b"/var/lib/cove").hexdigest()
+    if any(value in state["workloads"] for key, value in labels.items() if key.startswith(("cove.", "dev.cove.")) and (key.endswith("-workload") or key in ("cove.workload", "dev.cove.workload", "cove.backup", "dev.cove.restore", "dev.cove.environment-preview"))):
+        return True
+    if any(labels.get(key) in state["operations"] for key in ("dev.cove.operation", "dev.cove.hook", "dev.cove.drill", "dev.cove.candidate")):
+        return True
+    if kind == "container" and any(mount.get("Type") == "volume" and mount.get("Name") in state.get("volumes", set()) for mount in resource.get("Mounts", [])):
+        return bool(labels.get("cove.managed")) or re.fullmatch(r"cove-files-[a-f0-9]{24}", resource["Name"].lstrip("/")) is not None
+    if root_owned and kind == "container" and resource.get("ID") in state.get("bound", set()):
+        return True
+    if not labels.get("cove.managed"):
+        return False
+    if root_owned and kind == "container" and any(mount.get("Type") == "bind" and (mount.get("Source") == "/var/lib/cove" or mount.get("Source", "").startswith("/var/lib/cove/")) for mount in resource.get("Mounts", [])):
+        return True
+    # Legacy link mesh networks have no owner label, but their gateway configuration lives in the exclusively owned worker root.
+    return root_owned and state["links"] and kind == "network" and resource["Name"] == "cove-link-mesh" and labels.get("cove.managed") == "link-mesh"
+
+
+def cleanup_worker_resources(fixture, state, root_owned, kinds=("container", "network", "volume")):
+    listings = {"container": ["ps", "-aq", "--no-trunc"], "network": ["network", "ls", "-q", "--no-trunc"], "volume": ["volume", "ls", "-q"]}
+    resources = {}
+    for kind, listing in reversed(list(listings.items())):
+        resources[kind] = []
+        candidates = set(output_lines("docker", *listing)) - state.get("previous", {}).get(kind, set())
+        for resource in candidates - state.get("previous", {}).get(kind, set()):
+            current = inspect_cleanup_resource(kind, resource)
+            if current and root_owned and kind == "container":
+                if current["Name"] == "/" + fixture + "-worker":
+                    continue
+                if any(mount.get("Type") == "bind" and (mount.get("Source") == "/var/lib/cove" or mount.get("Source", "").startswith("/var/lib/cove/")) for mount in current.get("Mounts", [])):
+                    state.setdefault("bound", set()).add(resource)
+            if current and owns_worker_resource(kind, current, fixture, state, root_owned):
+                resources[kind].append((resource, current))
+        if kind == "volume":
+            state["volumes"] = {current["Name"] for _, current in resources[kind]}
+    failures = []
+    for kind in kinds:
+        for resource, before in resources[kind]:
+            current = inspect_cleanup_resource(kind, resource)
+            if current is None:
+                continue
+            if current != before or not owns_worker_resource(kind, current, fixture, state, root_owned):
+                # Running state/attachments may change after containers stop; immutable ID and labels must still match.
+                if current.get("ID", current["Name"]) != before.get("ID", before["Name"]) or current.get("Labels") != before.get("Labels"):
+                    failures.append("ownership changed: " + kind + " " + resource)
+                    continue
+            args = ["docker", "rm", "-f", "-v", resource] if kind == "container" else ["docker", kind, "rm", resource]
+            result = subprocess.run(args, capture_output=True, text=True)
+            if result.returncode and inspect_cleanup_resource(kind, resource) is not None:
+                failures.append("could not remove " + kind + " " + resource)
+    if failures:
+        raise RuntimeError("Fixture worker cleanup failed: " + "; ".join(failures))
+
+
 def main():
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image = name + "-panel:development"
@@ -75,8 +195,9 @@ def main():
     network_created = False
     ingress = []
     worker_state_owned = False
-    links_owned = False
     fixture_workloads = []
+    baseline = {kind: set(output_lines("docker", *listing)) for kind, listing in (
+        ("container", ["ps", "-aq", "--no-trunc"]), ("network", ["network", "ls", "-q", "--no-trunc"]), ("volume", ["volume", "ls", "-q"]))}
     env = os.environ.copy()
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
@@ -99,7 +220,7 @@ def main():
             while True:
                 occupied = any(subprocess.run(["docker", kind, "inspect", "cove-ingress"], capture_output=True).returncode == 0 for kind in ("container", "network", "volume"))
                 if not occupied:
-                    claim = subprocess.run(["docker", "network", "create", "--label", "cove.managed=ingress", "cove-ingress"], capture_output=True)
+                    claim = subprocess.run(["docker", "network", "create", "--label", "cove.managed=ingress", "--label", "cove.browser-fixture="+name, "cove-ingress"], capture_output=True)
                     if claim.returncode == 0:
                         ingress.append("network")
                         break
@@ -166,6 +287,8 @@ def main():
                 raise RuntimeError("Packaged panel does not expose the merged integration/trust contract")
             if "security.lockout" not in events or "adoption.succeeded" not in events:
                 raise RuntimeError("Packaged panel does not expose the merged operations outcome catalogue")
+            if "rollout.staged" not in events or "autoscale.queued" not in events:
+                raise RuntimeError("Packaged panel does not expose the merged deployment lifecycle contract")
             run("go", "build", "-o", "bin/cove-worker-linux-amd64", "./cmd/cove-worker", env=env | {"GOOS": "linux", "GOARCH": "amd64"})
             run("docker", "build", "-f", "test/worker/Dockerfile", "-t", worker_image, ".", stdout=subprocess.DEVNULL)
             for resource in ("container", "volume"):
@@ -174,13 +297,12 @@ def main():
             # Private connection tests create the worker's link gateway and networks on this Docker host.
             if subprocess.run(["docker", "container", "inspect", "cove-link"], capture_output=True).returncode == 0 or output_lines("docker", "network", "ls", "-q", "--filter", "label=cove.managed=link") or output_lines("docker", "network", "ls", "-q", "--filter", "label=cove.managed=link-mesh"):
                 raise RuntimeError("Refusing to run with an existing Cove private link gateway or networks on this Docker host")
-            links_owned = True
             # The worker adopts this Cove-labelled proxy for route tests. It publishes no host ports, and
             # its ACME resolver points at a closed loopback port so no public certificate authority is contacted.
             for resource in ("volume",):
-                run("docker", resource, "create", "--label", "cove.managed=ingress", "cove-ingress", stdout=subprocess.DEVNULL)
+                run("docker", resource, "create", "--label", "cove.managed=ingress", "--label", "cove.browser-fixture="+name, "cove-ingress", stdout=subprocess.DEVNULL)
                 ingress.append(resource)
-            run("docker", "create", "--name", "cove-ingress", "--label", "cove.managed=ingress", "--network", "cove-ingress",
+            run("docker", "create", "--name", "cove-ingress", "--label", "cove.managed=ingress", "--label", "cove.browser-fixture="+name, "--network", "cove-ingress",
                 "--security-opt", "no-new-privileges:true", "-v", "cove-ingress:/data", "--entrypoint", "sh", "traefik:v3.7.19",
                 "-ec", 'mkdir -p /data/dynamic; exec traefik "$@"', "traefik",
                 "--entrypoints.web.address=:80", "--entrypoints.websecure.address=:443",
@@ -217,62 +339,71 @@ def main():
             client_binary=fixture / ("cove.exe" if os.name == "nt" else "cove")
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
             ssh_port=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
+            env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
             subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
         finally:
+            state = {"owner": None, "backup_owner": None, "workloads": set(), "operations": set(), "shared_networks": set(), "links": False}
+            root_proved = False
+            cleanup_errors = []
             try:
+                if name+"-panel" in containers:
+                    run("docker", "stop", "--time", "10", name+"-panel", stdout=subprocess.DEVNULL)
+                if name+"-worker" in containers:
+                    run("docker", "stop", "--time", "10", name+"-worker", stdout=subprocess.DEVNULL)
+                if worker_state_owned:
+                    state = worker_fixture_state(worker_image, name)
+                    state["previous"] = baseline
+                    root_proved = True
                 if name+"-db" in containers:
-                    if name+"-worker" in containers:
-                        subprocess.run(["docker", "stop", "--time", "10", name+"-worker"], check=True, stdout=subprocess.DEVNULL)
-                    operations = subprocess.run(["docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM operations"], capture_output=True, text=True, check=True)
-                    for operation in operations.stdout.splitlines():
-                        if not re.fullmatch(r"[0-9a-f]{32}", operation): raise RuntimeError("Unexpected fixture operation ID")
-                        for label in ("dev.cove.operation=", "dev.cove.hook=", "dev.cove.drill=", "dev.cove.candidate="):
-                            helpers = subprocess.run(["docker", "ps", "-aq", "--filter", "label="+label+operation], capture_output=True, text=True, check=True)
-                            for helper in helpers.stdout.split(): subprocess.run(["docker", "rm", "-f", "-v", helper], check=True, stdout=subprocess.DEVNULL)
-                    records = subprocess.run(["docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM workloads UNION SELECT subject FROM audit_events WHERE action='DELETE /api/workloads/{id}' AND status=200"], capture_output=True, text=True)
-                    if records.returncode == 0:
-                        for workload in records.stdout.splitlines():
-                            if not re.fullmatch(r"[0-9a-f]{32}", workload): raise RuntimeError("Unexpected fixture workload ID")
-                            fixture_workloads.append(workload)
-                            for listing, removal in [(["ps", "-aq"], ["rm", "-f", "-v"]), (["network", "ls", "-q"], ["network", "rm"])]:
-                                owned = subprocess.run(["docker", *listing, "--filter", "label=com.docker.compose.project=cove-"+workload], capture_output=True, text=True, check=True)
-                                for resource in owned.stdout.split(): subprocess.run(["docker", *removal, resource], check=True, stdout=subprocess.DEVNULL)
-                            for label in ("com.docker.compose.project=cove-"+workload, "cove.backup="+workload, "dev.cove.restore="+workload):
-                                volumes = subprocess.run(["docker", "volume", "ls", "-q", "--filter", "label="+label], capture_output=True, text=True, check=True)
-                                for volume in volumes.stdout.split(): subprocess.run(["docker", "volume", "rm", volume], check=True, stdout=subprocess.DEVNULL)
-                            tags = subprocess.run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-release/"+workload+":*"], capture_output=True, text=True, check=True)
-                            for tag in tags.stdout.split(): subprocess.run(["docker", "image", "rm", tag], check=True, stdout=subprocess.DEVNULL)
-                    networks = subprocess.run(["docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", "SELECT id FROM shared_networks"], capture_output=True, text=True, check=True)
-                    for network in networks.stdout.splitlines():
-                        if not re.fullmatch(r"[0-9a-f]{32}", network): raise RuntimeError("Unexpected fixture network ID")
-                        subprocess.run(["docker", "network", "rm", "cove-shared-"+network], check=True, stdout=subprocess.DEVNULL)
+                    for key, query in (
+                        ("operations", "SELECT id FROM operations"),
+                        ("workloads", "SELECT id FROM workloads UNION SELECT subject FROM audit_events WHERE action='DELETE /api/workloads/{id}' AND status=200"),
+                        ("shared_networks", "SELECT id FROM shared_networks")):
+                        values = output_lines("docker", "exec", name+"-db", "psql", "-U", "postgres", "-d", "cove", "-Atc", query)
+                        if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in values):
+                            raise RuntimeError("Unexpected fixture " + key + " identity")
+                        state[key].update(values)
+                try:
+                    cleanup_worker_resources(name, state, root_proved, kinds=("container",))
+                except Exception as error:
+                    cleanup_errors.append(str(error))
             finally:
                 for container in reversed(containers):
                     subprocess.run(["docker", "rm", "-f", "-v", container], check=False, stdout=subprocess.DEVNULL)
-                if links_owned:
-                    gateway = subprocess.run(["docker", "inspect", "--format", '{"id":{{json .Id}},"mounts":{{json .Mounts}}}', "cove-link"], capture_output=True, text=True)
-                    owned_gateway = False
-                    if gateway.returncode == 0 and worker_state_owned:
-                        info = json.loads(gateway.stdout)
-                        owned_gateway = any(mount.get("Source") == "/var/lib/cove/links/gateway" and mount.get("Destination") == "/config" for mount in info["mounts"])
-                        if owned_gateway:
-                            subprocess.run(["docker", "rm", "-f", info["id"]], check=False, stdout=subprocess.DEVNULL)
-                    for workload in fixture_workloads:
-                        for network in output_lines("docker", "network", "ls", "-q", "--filter", "label=cove.managed=link", "--filter", "label=cove.link-workload=" + workload):
-                            subprocess.run(["docker", "network", "rm", network], check=False, stdout=subprocess.DEVNULL)
-                    if owned_gateway:
-                        subprocess.run(["docker", "network", "rm", "cove-link-mesh"], check=False, stdout=subprocess.DEVNULL)
-                if worker_state_owned:
+                try:
+                    cleanup_worker_resources(name, state, root_proved)
+                except Exception as error:
+                    cleanup_errors.append(str(error))
+                for resource in reversed(ingress):
+                    current = inspect_cleanup_resource(resource, "cove-ingress")
+                    if current is None:
+                        continue
+                    if (current.get("Labels") or {}).get("cove.browser-fixture") != name:
+                        cleanup_errors.append("refusing to remove another fixture's cove-ingress " + resource)
+                        continue
+                    result = subprocess.run(["docker", resource, "rm", "-f", "cove-ingress"] if resource == "container" else ["docker", resource, "rm", "cove-ingress"], capture_output=True, text=True)
+                    if result.returncode:
+                        cleanup_errors.append("could not remove cove-ingress " + resource)
+                if ingress:
+                    remaining = [kind for kind in ("container", "network", "volume") if inspect_cleanup_resource(kind, "cove-ingress") is not None]
+                    if remaining:
+                        cleanup_errors.append("cove-ingress remains after fixture cleanup: " + ", ".join(remaining))
+                if worker_state_owned and root_proved and not cleanup_errors:
                     run("docker", "run", "--rm", "--entrypoint", "sh", "-v", "/var/lib/cove:/fixture",
                         worker_image, "-ec",
                         'test "$(cat /fixture/.browser-owner)" = "$1" || exit 1; find /fixture -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +', "sh", name)
+                for workload in state["workloads"]:
+                    for tag in output_lines("docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-release/"+workload+":*"):
+                        subprocess.run(["docker", "image", "rm", tag], check=True, stdout=subprocess.DEVNULL)
                 if network_created:
-                    subprocess.run(["docker", "network", "rm", name], check=False, stdout=subprocess.DEVNULL)
-                for resource in reversed(ingress):
-                    subprocess.run(["docker", resource, "rm", "-f", "cove-ingress"] if resource == "container" else ["docker", resource, "rm", "cove-ingress"], check=False, stdout=subprocess.DEVNULL)
-                for image in (panel_image, worker_image):
+                    result = subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True)
+                    if result.returncode and inspect_cleanup_resource("network", name) is not None:
+                        cleanup_errors.append("could not remove fixture network " + name)
+                for image in (worker_image, panel_image):
                     subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if cleanup_errors:
+                    raise RuntimeError("; ".join(cleanup_errors))
 
 
 if __name__ == "__main__":

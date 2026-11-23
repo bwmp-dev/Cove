@@ -161,15 +161,15 @@ function SnapshotRow({ snapshot, actions }: { snapshot: Snapshot; actions: React
   return <li className="flex flex-wrap items-center justify-between gap-3 py-3"><div><RelativeTime value={snapshot.created_at} /><p className="text-xs text-fg-muted break-all">{snapshot.id}</p>{snapshot.database ? <p className="text-xs text-fg-muted">{backupScopeLabel(snapshot.database)}</p> : <VolumeMethod snapshot={snapshot} />}{snapshot.verified_at && <p className="text-xs text-fg-muted">{snapshot.verification === "database" ? "Database restore verified" : "File restore verified"} <RelativeTime value={snapshot.verified_at} /></p>}</div>{actions}</li>;
 }
 
-interface SnapshotActionsProps { disabled: boolean; canRestore: boolean; canDownload: boolean; restoreDisabled: boolean; downloadDisabled: boolean; onDownload: () => void; onCopy: () => void; onDrill: () => void; onRestore: () => void }
+interface SnapshotActionsProps { disabled: boolean; canRestore: boolean; canDownload: boolean; restoreDisabled: boolean; verifyHeld: boolean; restoreHeld: boolean; downloadDisabled: boolean; onDownload: () => void; onCopy: () => void; onDrill: () => void; onRestore: () => void }
 
-function SnapshotActions({ disabled, canRestore, canDownload, restoreDisabled, downloadDisabled, onDownload, onCopy, onDrill, onRestore }: SnapshotActionsProps) {
+function SnapshotActions({ disabled, canRestore, canDownload, restoreDisabled, verifyHeld, restoreHeld, downloadDisabled, onDownload, onCopy, onDrill, onRestore }: SnapshotActionsProps) {
   return <div className="flex flex-wrap gap-2">
     {canDownload && <Button size="sm" disabled={disabled || downloadDisabled} onClick={onDownload}>Download</Button>}
     {canRestore && <>
-      <Button size="sm" disabled={disabled || restoreDisabled} onClick={onCopy}>Restore as new resource</Button>
-      <Button size="sm" disabled={disabled || restoreDisabled} onClick={onDrill}>Verify restore</Button>
-      <Button size="sm" disabled={disabled || restoreDisabled} onClick={onRestore}>Restore</Button>
+      <Button size="sm" disabled={disabled || restoreDisabled || verifyHeld} onClick={onCopy}>Restore as new resource</Button>
+      <Button size="sm" disabled={disabled || restoreDisabled || verifyHeld} onClick={onDrill}>Verify restore</Button>
+      <Button size="sm" disabled={disabled || restoreDisabled || restoreHeld} onClick={onRestore}>Restore</Button>
     </>}
   </div>;
 }
@@ -197,7 +197,7 @@ function SnapshotList({ snapshots, row }: { snapshots: UseQueryResult<{ backups:
 // Configuring the policy needs all three, since its destination and encryption decide where data is exported.
 export interface BackupRights { backup: boolean; configure: boolean; restore: boolean; download: boolean; import: boolean }
 
-export function Backups({ workloadId, busy, rights, support }: { workloadId: string; busy: boolean; rights: BackupRights; support: WorkerSupport }) {
+export function Backups({ workloadId, busy, rights, support, restoreHeld, verifyHeld }: { workloadId: string; busy: boolean; rights: BackupRights; support: WorkerSupport; restoreHeld: string | null; verifyHeld: string | null }) {
   const canEdit = rights.configure;
  const [copy, setCopy] = useState<Snapshot | null>(null);
   const [download, setDownload] = useState<Snapshot | null>(null);
@@ -220,10 +220,11 @@ export function Backups({ workloadId, busy, rights, support }: { workloadId: str
     <div className="flex flex-wrap items-center gap-3 empty:hidden">{canEdit && <Button disabled={!online || busy} onClick={() => setEditing(true)}>{saved ? "Edit policy" : "Configure backups"}</Button>}{saved && rights.backup && <Button disabled={!online || busy} pending={action.isPending} onClick={() => action.mutate({ action: "backup" })}>Back up now</Button>}{saved?.database && rights.import && <Button disabled={!online || busy || transfersBlocked} onClick={() => { setInterrupted(false); setImporting(true); }}>Import dump</Button>}</div>
     <PolicySummary saved={saved} canEdit={canEdit} canBackup={rights.backup} canTransfer={rights.download || rights.import} transfersBlocked={transfersBlocked} nodeName={support.nodeName} interrupted={interrupted} />
     {action.isError && <Notice tone="error">{errorMessage(action.error)}</Notice>}
+    {rights.restore && (restoreHeld ?? verifyHeld) && <p className="text-xs text-fg-muted">{restoreHeld ?? verifyHeld}</p>}
     {copy && <RestoreCopyForm workloadId={workloadId} snapshot={copy} onClose={() => setCopy(null)} />}
-    <SnapshotList snapshots={snapshots} row={(snapshot) => <SnapshotRow key={snapshot.id} snapshot={snapshot} actions={(rights.restore || rights.download) && <SnapshotActions disabled={!online || busy} canRestore={rights.restore} canDownload={rights.download} restoreDisabled={action.isPending || saved?.repository !== snapshot.repository} downloadDisabled={transfersBlocked || !matchesPolicy(saved, snapshot)} onDownload={() => setDownload(snapshot)} onCopy={() => setCopy(snapshot)} onDrill={() => action.mutate({ action: "drill", backup_id: snapshot.id })} onRestore={() => setRestore(snapshot)} />} />} />
+    <SnapshotList snapshots={snapshots} row={(snapshot) => <SnapshotRow key={snapshot.id} snapshot={snapshot} actions={(rights.restore || rights.download) && <SnapshotActions disabled={!online || busy} canRestore={rights.restore} canDownload={rights.download} restoreDisabled={action.isPending || saved?.repository !== snapshot.repository} verifyHeld={Boolean(verifyHeld)} restoreHeld={Boolean(restoreHeld)} downloadDisabled={transfersBlocked || !matchesPolicy(saved, snapshot)} onDownload={() => setDownload(snapshot)} onCopy={() => setCopy(snapshot)} onDrill={() => action.mutate({ action: "drill", backup_id: snapshot.id })} onRestore={() => setRestore(snapshot)} />} />} />
     {download && <DownloadDialog workloadId={workloadId} snapshot={download} onClose={() => setDownload(null)} />}
-    {importing && saved?.database && <BackupImport workloadId={workloadId} database={saved.database} importedRow={findSnapshot} canRestore={rights.restore && !busy && !action.isPending} onRestore={(id) => { const row = findSnapshot(id); setImporting(false); if (row) setRestore(row); }} onClose={(wasInterrupted) => { setImporting(false); setInterrupted(wasInterrupted); }} />}
+    {importing && saved?.database && <BackupImport workloadId={workloadId} database={saved.database} importedRow={findSnapshot} canRestore={rights.restore && !restoreHeld && !busy && !action.isPending} onRestore={(id) => { const row = findSnapshot(id); setImporting(false); if (row) setRestore(row); }} onClose={(wasInterrupted) => { setImporting(false); setInterrupted(wasInterrupted); }} />}
     <ConfirmDialog open={restore !== null} title={restore?.database ? `Restore ${backupScopeLabel(restore.database)}?` : "Restore persistent data?"} confirmLabel="Restore data" danger onCancel={() => setRestore(null)} onConfirm={() => { if (restore) action.mutate({ action: "restore", backup_id: restore.id }); }}>
       {restoreWarning(restore?.database?.engine)}
     </ConfirmDialog>

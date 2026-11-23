@@ -126,9 +126,9 @@ func (d *fakeDocker) run(_ context.Context, _ string, args, _ []string, out io.W
 		if err = json.Unmarshal(data, &config); err != nil {
 			return err
 		}
-		routers := []map[string]string{}
+		routers := []map[string]any{}
 		for name, router := range config.HTTP.Routers {
-			routers = append(routers, map[string]string{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service + "@file"})
+			routers = append(routers, map[string]any{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service + "@file", "middlewares": router.Middlewares})
 		}
 		return json.NewEncoder(out).Encode(routers)
 	}

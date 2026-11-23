@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"cove/internal/worker"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -19,9 +20,18 @@ type teamQuota struct {
 func configuredUsage(config workloadInput) (float64, int64) {
 	var cpus float64
 	var memory int64
-	for _, limit := range config.Limits {
-		cpus += limit.CPUs
-		memory += limit.MemoryMB
+	var scaling map[string]worker.AutoscaleService
+	if config.Autoscale != nil && config.Autoscale.Enabled {
+		scaling = config.Autoscale.Normalized().Services
+	}
+	for service, limit := range config.Limits {
+		count := 1
+		if config.Rollout != nil && config.Rollout.Strategy != "disabled" && config.Rollout.Replicas[service] > 0 {
+			count = config.Rollout.Replicas[service]
+		}
+		count = max(count, scaling[service].MaxReplicas)
+		cpus += limit.CPUs * float64(count)
+		memory += limit.MemoryMB * int64(count)
 	}
 	return cpus, memory
 }
@@ -156,7 +166,7 @@ func (s *Server) admitDeployment(ctx context.Context, id string) (bool, error) {
 	if err = tx.QueryRow(ctx, `SELECT w.team_id,o.admitted_at IS NOT NULL,o.cancel_requested,o.action FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1`, id).Scan(&team, &admitted, &cancelled, &action); err != nil {
 		return false, err
 	}
-	if admitted || cancelled || action != "deploy" && action != "rollback" {
+	if admitted || cancelled || action != "deploy" && action != "rollback" && action != "rollout_promote" {
 		return true, nil
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('cove-quota:'||$1,0))`, team); err != nil {
@@ -176,7 +186,7 @@ func (s *Server) admitDeployment(ctx context.Context, id string) (bool, error) {
 	if reason != "" {
 		return holdDeployment(ctx, tx, id, reason)
 	}
-	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT deployments FROM team_quotas WHERE team_id=$1),0),(SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND o.action IN ('deploy','rollback'))`, team).Scan(&maximum, &used); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT deployments FROM team_quotas WHERE team_id=$1),0),(SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND o.action IN ('deploy','rollback','rollout_promote'))`, team).Scan(&maximum, &used); err != nil {
 		return false, err
 	}
 	if maximum > 0 && used >= maximum {

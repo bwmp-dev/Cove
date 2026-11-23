@@ -90,7 +90,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var encrypted, configuration []byte
 	var stopped bool
-	err = tx.QueryRow(r.Context(), "SELECT webhook_secret,configuration,manually_stopped FROM workloads WHERE id=$1 FOR UPDATE", r.PathValue("id")).Scan(&encrypted, &configuration, &stopped)
+	err = tx.QueryRow(r.Context(), "SELECT webhook_secret,configuration,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=workloads.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=workloads.id)) FROM workloads WHERE id=$1 FOR UPDATE", r.PathValue("id")).Scan(&encrypted, &configuration, &stopped)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && len(encrypted) == 0 {
 		http.NotFound(w, r)
 		return
@@ -163,7 +163,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	config.Source.Revision = event.After
-	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Source: config.Source, ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Source: config.Source, ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	if err = worker.ValidateRequest(request); err != nil {
 		http.Error(w, "invalid deployment configuration", 400)
 		return
@@ -223,7 +223,7 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 	var enabled bool
 	var configuration []byte
-	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM deploy_hooks h JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE h.workload_id=$1 AND h.expires_at>now() AND u.email_verified AND NOT u.disabled AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now()) AND (u.is_admin OR cove_permission(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate')) AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR (SELECT require_second_factor FROM teams WHERE id=w.team_id)) OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
+	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND NOT EXISTS(SELECT 1 FROM environments e WHERE e.id=workloads.environment_id AND e.paused) AND NOT EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=workloads.id) AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM deploy_hooks h JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE h.workload_id=$1 AND h.expires_at>now() AND u.email_verified AND NOT u.disabled AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now()) AND (u.is_admin OR cove_permission(u.id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate')) AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR (SELECT require_second_factor FROM teams WHERE id=w.team_id)) OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
 		return err
 	}
 	if !enabled {

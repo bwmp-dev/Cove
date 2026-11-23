@@ -5,7 +5,7 @@ import { saveTeamTimezone, saveUserTimezone, teamTimezoneQuery, timezonePreferen
 import { useOnline } from "../lib/hooks";
 import { useSession } from "../lib/session";
 import { inputClass } from "../lib/styles";
-import { browserTimeZone, scheduleTimeZone, timeZoneOptions } from "../lib/timezone";
+import { backupScheduleTimeZone, browserTimeZone, timeZoneOptions } from "../lib/timezone";
 import { SaveBar, UnsavedChangesGuard } from "./SaveBar";
 import { Select } from "./Select";
 import { Field, LoadingRows, Notice, QueryError, Section, SettingRow, SettingRows } from "./ui";
@@ -82,8 +82,8 @@ function ZoneForm({ title, description, label, hint, saved, inheritLabel, pendin
 
 function ScheduleRow() {
   return (
-    <SettingRow label="Schedules" description="Cron expressions and scheduled backups always run in UTC. Only how times are displayed changes.">
-      <span className="font-mono text-xs">{scheduleTimeZone}</span>
+    <SettingRow label="Backup schedules" description="Scheduled backups run in UTC. Scheduled jobs and deployment windows use the time zone saved with each one. Only how times are displayed changes.">
+      <span className="font-mono text-xs">{backupScheduleTimeZone}</span>
     </SettingRow>
   );
 }

@@ -38,6 +38,13 @@ it("does not call a missing baseline or a deferred inspection clean", async () =
   expect(request).toHaveBeenCalledWith("GET", "/api/workloads/w1/drift", undefined, expect.anything());
 });
 
+it("explains a deferral for a paused or sleeping resource without claiming an active operation", async () => {
+  setup(() => Promise.resolve({ baseline: false, busy: true, deferred: "suspended", operation: "", captured_at: null, checked_at: "2026-11-22T09:00:00Z", changes: null }));
+  expect(await screen.findByText("Inspection deferred while stopped")).toBeInTheDocument();
+  expect(screen.queryByText(/An operation is running/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/No drift/)).not.toBeInTheDocument();
+});
+
 it("lists changed categories per container without values", async () => {
   setup(() =>
     Promise.resolve(

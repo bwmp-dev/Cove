@@ -134,6 +134,16 @@ func scheduledDeploymentGate(ctx context.Context, tx pgx.Tx, id string, now time
 		return "", err
 	}
 	for _, p := range policies {
+		if p.Approval {
+			required = true
+		}
+	}
+	if required && !approved {
+		if _, err = tx.Exec(ctx, "UPDATE operations SET approval_required=true WHERE id=$1", id); err != nil {
+			return "", err
+		}
+	}
+	for _, p := range policies {
 		if err = validateSchedule(&p); err != nil {
 			return "", err
 		}

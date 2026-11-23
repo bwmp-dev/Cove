@@ -10,8 +10,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || ((os.Args[1] == "tunnel" || os.Args[1] == "snapshot-reap") && len(os.Args) != 3) || ((os.Args[1] != "tunnel" && os.Args[1] != "snapshot-reap") && len(os.Args) != 2) {
-		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|volume-copy|volume-free|volume-digest")
+	if len(os.Args) != 2 && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "snapshot-reap")) {
+		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|idle-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -22,6 +22,8 @@ func main() {
 		err = worker.RunFilesystemSnapshotReaper(ctx, os.Args[2], false)
 	case "snapshot-host":
 		err = worker.RunFilesystemSnapshotHost(ctx, os.Stdin, os.Stdout)
+	case "healthcheck":
+		err = worker.HTTPHealth(ctx, os.Args[2])
 	case "tunnel":
 		err = worker.TunnelProxy(ctx, "/run/cove/worker.sock", os.Args[2], os.Stdin, os.Stdout)
 	case "ingress-prepare":
@@ -37,6 +39,10 @@ func main() {
 		reload := make(chan os.Signal, 1)
 		signal.Notify(reload, syscall.SIGHUP)
 		err = worker.RunLinkGateway(ctx, reload)
+	case "route-helper":
+		err = worker.RunRouteAuxiliary(ctx)
+	case "idle-gateway":
+		err = worker.RunIdleGateway(ctx)
 	case "probe":
 		err = worker.Serve(ctx, os.Stdout)
 	case "rpc":

@@ -68,7 +68,7 @@ func (s *Server) readRuntime(w http.ResponseWriter, r *http.Request, method stri
 		if response.Containers == nil {
 			response.Containers = []worker.Container{}
 		}
-		respond(w, 200, map[string]any{"containers": response.Containers})
+		respond(w, 200, map[string]any{"containers": response.Containers, "rollout": response.Rollout, "suspension": response.Suspension, "idle": response.Idle})
 		return
 	}
 	respond(w, 200, map[string]string{"logs": response.Logs})

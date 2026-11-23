@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"cove/internal/worker"
 	"github.com/jackc/pgx/v5"
 	"go.yaml.in/yaml/v3"
 )
@@ -132,6 +133,14 @@ func validateProjectConfiguration(manifest projectConfiguration) error {
 		if config.EnvironmentID != "" || config.ProjectID != "" || config.EnvironmentPatch != nil || config.NodeID == "" || config.Private != nil || config.Backup != nil {
 			return errors.New("resource configuration requires node_id; declare placement outside configuration and manage infrastructure credentials through their dedicated settings")
 		}
+		config.Routes = append([]worker.Route(nil), config.Routes...)
+		for i, route := range config.Routes {
+			if route.Policy != nil && route.Policy.ForwardAuth != nil && route.Policy.ForwardAuth.URL == "" && route.Policy.ForwardAuth.Service == "" {
+				policy := *route.Policy
+				policy.ForwardAuth = nil
+				config.Routes[i].Policy = &policy
+			}
+		}
 		if err := validateWorkload(config); err != nil {
 			return err
 		}
@@ -187,7 +196,7 @@ func (s *Server) readProjectConfiguration(ctx context.Context, tx pgx.Tx, team, 
 	if err != nil {
 		return manifest, err
 	}
-	rows, err = tx.Query(ctx, `SELECT w.id,COALESCE(k.key,w.id),COALESCE(w.environment_id,''),w.configuration,COALESCE((SELECT o.result->>'revision' FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','rollback','adopt') AND o.state='succeeded' ORDER BY o.updated_at DESC LIMIT 1),'') FROM workloads w LEFT JOIN configuration_resource_keys k ON k.workload_id=w.id WHERE w.project_id=$1 AND w.team_id=$2 AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) AND NOT EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) ORDER BY COALESCE(k.key,w.id)`, project, team)
+	rows, err = tx.Query(ctx, `SELECT w.id,COALESCE(k.key,w.id),COALESCE(w.environment_id,''),w.configuration,COALESCE((SELECT d.revision FROM cove_committed_deployments d WHERE d.workload_id=w.id ORDER BY d.updated_at DESC,d.operation_id DESC LIMIT 1),'') FROM workloads w LEFT JOIN configuration_resource_keys k ON k.workload_id=w.id WHERE w.project_id=$1 AND w.team_id=$2 AND NOT EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) AND NOT EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) ORDER BY COALESCE(k.key,w.id)`, project, team)
 	if err != nil {
 		return manifest, err
 	}
@@ -355,9 +364,7 @@ func publicProjectConfiguration(manifest projectConfiguration, includeSecrets bo
 		}
 		// Infrastructure credentials are never part of a portable manifest.
 		config.Private, config.Backup = nil, nil
-		for j := range config.Routes {
-			config.Routes[j].Auth = ""
-		}
+		config.Routes = routesWithoutSecrets(config.Routes)
 	}
 	return manifest
 }

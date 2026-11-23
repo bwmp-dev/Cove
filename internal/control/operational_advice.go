@@ -39,7 +39,7 @@ func (s *Server) workloadCapacity(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resource configuration unavailable", 503)
 		return
 	}
-	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Compose: c.Compose, Source: c.Source, Environment: c.Environment, Limits: c.Limits, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy}
+	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Compose: c.Compose, ComposeBundle: c.ComposeBundle, Source: c.Source, Environment: c.Environment, Limits: c.Limits, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy, Rollout: c.Rollout}
 	if err = s.prepareInfrastructure(ctx, &request); err != nil {
 		http.Error(w, "check resource variables and worker capabilities", 409)
 		return

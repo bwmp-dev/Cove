@@ -36,11 +36,10 @@ func validateDatabaseBackup(d *DatabaseBackup) error {
 }
 
 func (e *Engine) databaseContainer(ctx context.Context, r Request) (string, error) {
-	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service="+r.Backup.Database.Service)
+	list, err := e.trafficContainers(ctx, r.Workload, r.Backup.Database.Service, true)
 	if err != nil {
 		return "", err
 	}
-	list := strings.Fields(ids)
 	if len(list) != 1 {
 		return "", errors.New("logical backups require exactly one running database service container")
 	}

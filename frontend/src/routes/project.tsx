@@ -2,6 +2,7 @@ import { SharedVariables } from "../components/SharedVariables";
 import { DeploymentPolicy } from "../components/DeploymentPolicy";
 import { DependencyMap } from "../components/DependencyMap";
 import { EnvironmentResources } from "../components/PrivateConnections";
+import { EnvironmentSuspensionSection } from "../components/EnvironmentSuspension";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
 import { FileCog, Folder, GitBranch, Layers, Plus } from "lucide-react";
@@ -413,6 +414,7 @@ export function EnvironmentPage() {
     return (
       <Fragment key={environment.id}>
         <PreviewStatus previewId={environment.preview_id} />
+        <EnvironmentSuspensionSection environment={environment} preview />
         <EnvironmentResources
           projectId={project.id}
           environmentId={environment.id}
@@ -430,6 +432,7 @@ export function EnvironmentPage() {
   // siblings individually with the same value made React keep the old section mounted each time.
   return (
     <Fragment key={environment.id}>
+      <EnvironmentSuspensionSection environment={environment} />
       <EnvironmentResources
         projectId={project.id}
         environmentId={environment.id}

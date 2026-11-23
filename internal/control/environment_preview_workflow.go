@@ -497,7 +497,34 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 		if src.Kind == "job" && policy.Schedule {
 			cron = src.JobCron
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='' THEN NULL ELSE now()+interval '1 minute' END)`, target, src.Node, src.Name, encrypted, config.Kind, environment, p.Team, p.Project, cpu, memory, cron); err != nil {
+		zone := src.JobTimezone
+		if zone == "" {
+			zone = "UTC"
+		}
+		var nextJob *time.Time
+		if cron != "" {
+			schedule, err := parseCron(cron)
+			if err != nil {
+				return err
+			}
+			schedule.location, err = time.LoadLocation(zone)
+			if err != nil {
+				return err
+			}
+			next, err := schedule.next(time.Now())
+			if err != nil {
+				return err
+			}
+			nextJob = &next
+		}
+		overlap, timeout := src.JobOverlap, src.JobTimeout
+		if overlap == "" {
+			overlap = "skip"
+		}
+		if timeout == 0 {
+			timeout = worker.DefaultJobTimeoutSeconds
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at,job_timezone,job_overlap_policy,job_timeout_seconds) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, target, src.Node, src.Name, encrypted, config.Kind, environment, p.Team, p.Project, cpu, memory, cron, nextJob, zone, overlap, timeout); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.ConstraintName == "cove_team_quota" {
 				tx.Rollback(ctx)
@@ -559,7 +586,8 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 			if err != nil {
 				return s.failPreview(ctx, p.ID, "plan", err.Error())
 			}
-			routes = append(routes, worker.Route{Domain: domain, Service: route.Service, Port: route.Port, Auth: p.Snapshot.Auth})
+			route.Domain, route.Auth = domain, p.Snapshot.Auth
+			routes = append(routes, route)
 		}
 		routesJSON, err := json.Marshal(routes)
 		if err != nil {
@@ -1205,7 +1233,7 @@ func (s *Server) removePreviewStage(ctx context.Context, p *previewRow) error {
 		if _, err = s.DB.Exec(ctx, `DELETE FROM resource_connections WHERE source_id=ANY($1) OR target_id=ANY($1)`, ids); err != nil {
 			return err
 		}
-		if _, err = s.DB.Exec(ctx, `UPDATE workloads SET job_cron='',next_job_at=NULL WHERE id=ANY($1)`, ids); err != nil {
+		if _, err = s.DB.Exec(ctx, `UPDATE workloads SET job_cron='',next_job_at=NULL,job_pending_at=NULL WHERE id=ANY($1)`, ids); err != nil {
 			return err
 		}
 	}

@@ -29,6 +29,7 @@ it("reports no drift only with a baseline, a completed inspection and no changes
   expect(driftResult(report({ changes: null }))).toBe("clean");
   expect(driftResult(report({ baseline: false }))).toBe("no-baseline");
   expect(driftResult(report({ busy: true }))).toBe("busy");
+  expect(driftResult(report({ baseline: false, busy: true, deferred: "suspended" }))).toBe("suspended");
   // The worker skips loading a baseline while busy, so the real response is baseline:false with busy:true.
   expect(driftResult({ baseline: false, busy: true, operation: "", captured_at: null, checked_at: "2026-11-22T00:00:00Z", changes: null })).toBe("busy");
   expect(driftResult(report({ changes: [{ container: "c", service: "web", state: "missing", fields: null }] }))).toBe("drifted");

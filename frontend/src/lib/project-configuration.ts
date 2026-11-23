@@ -37,11 +37,12 @@ export function newestFirst(drafts: readonly ConfigurationDraft[]) {
   return drafts.toSorted((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
 }
 
-export type DriftResult = "no-baseline" | "busy" | "clean" | "drifted";
+export type DriftResult = "no-baseline" | "busy" | "suspended" | "clean" | "drifted";
 
 // Only a recorded baseline with a completed inspection and no changes counts as clean. A busy worker
 // reports baseline:false because it skipped loading one, so busy must be checked first.
 export function driftResult(drift: WorkloadDrift): DriftResult {
+  if (drift.deferred === "suspended") return "suspended";
   if (drift.busy) return "busy";
   if (!drift.baseline) return "no-baseline";
   return (drift.changes ?? []).length === 0 ? "clean" : "drifted";

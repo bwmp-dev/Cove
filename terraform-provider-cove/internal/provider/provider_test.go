@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"cove/internal/client"
+	"cove/internal/worker"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
@@ -347,3 +348,53 @@ resource "cove_routes" "routes" {
 }
 
 var _ provider.Provider = New()
+
+func TestRoutesRefreshKeepsHiddenForwardAuthAndPolicies(t *testing.T) {
+	ctx := context.Background()
+	fixture, _, api := newFixture(t)
+	configured := `[{"domain":"app.example.com","service":"web","port":8080,"policy":{"path_prefix":"/api","sticky":true,"ip_allow_list":["192.0.2.0/24"],"response_headers":{"X-App":"api"},"forward_auth":{"url":"https://auth.example.com/check?token=private","response_headers":["Remote-User"]}}}]`
+	routes, err := parseRoutes(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes[0].Policy.ForwardAuth.URL = ""
+	fixture.objects["/workloads/app"] = map[string]any{"routes": routes}
+	r := &managedResource{kind: "routes", api: api}
+	var definition resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &definition)
+	data := map[string]types.String{"id": types.StringValue("app"), "workload_id": types.StringValue("app"), "routes_json": types.StringValue(configured)}
+	state := tfsdk.State{Schema: definition.Schema}
+	attributeTypes := map[string]attr.Type{}
+	attributeValues := map[string]attr.Value{}
+	for name, value := range data {
+		attributeTypes[name] = types.StringType
+		attributeValues[name] = value
+	}
+	if diagnostics := state.Set(ctx, types.ObjectValueMust(attributeTypes, attributeValues)); diagnostics.HasError() {
+		t.Fatal(diagnostics)
+	}
+	var read resource.ReadResponse
+	r.Read(ctx, resource.ReadRequest{State: state}, &read)
+	if read.Diagnostics.HasError() {
+		t.Fatal(read.Diagnostics)
+	}
+	var retained types.String
+	if diagnostics := read.State.GetAttribute(ctx, path.Root("routes_json"), &retained); diagnostics.HasError() {
+		t.Fatal(diagnostics)
+	}
+	if !sameJSON(configured, retained.ValueString()) {
+		t.Fatal("refresh lost route policy or protected destination", retained)
+	}
+	parsed, err := parseRoutes(retained.ValueString())
+	if err != nil || !worker.RoutesEqual(parsed, mustParseRoutes(t, configured)) {
+		t.Fatal(parsed, err)
+	}
+}
+func mustParseRoutes(t *testing.T, text string) []worker.Route {
+	t.Helper()
+	routes, err := parseRoutes(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return routes
+}

@@ -69,7 +69,7 @@ func (r *managedResource) attributes() map[string]schema.Attribute {
 		attributes["revision"] = schema.StringAttribute{Computed: true, Description: "Opaque server revision; plaintext is never returned."}
 	case "routes":
 		required("workload_id", "Resource whose complete public route set is managed.", true, false)
-		required("routes_json", "JSON array of {domain,service,port}. One resource owns the entire route set.", false, false)
+		required("routes_json", "JSON array of routes and policy fields. One resource owns the entire route set. Forward-auth destinations are kept only in sensitive Terraform state.", false, true)
 	}
 	return attributes
 }
@@ -335,6 +335,32 @@ func (r *managedResource) Read(ctx context.Context, request resource.ReadRequest
 		}
 		if routes == nil {
 			routes = []worker.Route{}
+		}
+		var saved []worker.Route
+		if !data["routes_json"].IsNull() && !data["routes_json"].IsUnknown() {
+			if err := json.Unmarshal([]byte(data["routes_json"].ValueString()), &saved); err != nil {
+				response.Diagnostics.AddError("Invalid saved routes", "The previous route configuration cannot be decoded.")
+				return
+			}
+		}
+		for i := range routes {
+			current := &routes[i]
+			if current.Policy == nil || current.Policy.ForwardAuth == nil {
+				continue
+			}
+			for _, previous := range saved {
+				if previous.Domain != current.Domain || previous.Policy == nil || previous.Policy.PathPrefix != current.Policy.PathPrefix || previous.Policy.ForwardAuth == nil {
+					continue
+				}
+				auth, old := current.Policy.ForwardAuth, previous.Policy.ForwardAuth
+				if auth.URL == "" && auth.Service == "" {
+					auth.URL = old.URL
+				}
+				if auth.Path == "" {
+					auth.Path = old.Path
+				}
+				break
+			}
 		}
 		encoded, _ := json.Marshal(routes)
 		if !sameJSON(data["routes_json"].ValueString(), string(encoded)) {

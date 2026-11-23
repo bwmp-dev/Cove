@@ -553,7 +553,7 @@ func (s *Server) queueProviderPush(ctx context.Context, p connectedGitProvider, 
 		if strings.HasPrefix(push.Ref, "refs/tags/") {
 			config.Source.Branch = strings.TrimPrefix(push.Ref, "refs/tags/")
 		}
-		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy})
+		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout})
 	}
 	if err == nil {
 		err = rows.Err()

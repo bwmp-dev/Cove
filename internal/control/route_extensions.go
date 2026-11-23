@@ -1,0 +1,147 @@
+package control
+
+import (
+	"bytes"
+	"context"
+	"cove/internal/worker"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+)
+
+var errRouteProtocolUnsupported = errors.New("upgrade and verify the worker before using maintenance pages, error pages or forward-auth")
+
+func checkRouteProtocol(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, workload string, routes []worker.Route) error {
+	if !worker.HasRouteExtensions(routes) {
+		return nil
+	}
+	var version int
+	if err := db.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'route_protocol')::integer,0) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, workload).Scan(&version); err != nil {
+		return err
+	}
+	if version < 2 {
+		return errRouteProtocolUnsupported
+	}
+	return nil
+}
+
+func (r *routeInput) UnmarshalJSON(data []byte) error {
+	type input routeInput
+	var decoded input
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields struct {
+		Policy map[string]json.RawMessage `json:"policy"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*r = routeInput(decoded)
+	r.extensionFields = fields.Policy
+	return nil
+}
+
+func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Route, ambiguous bool) error {
+	previous := worker.RoutePolicy{}
+	if old.Policy != nil {
+		previous = *old.Policy
+	}
+	policy := worker.RoutePolicy{}
+	if target.Policy != nil {
+		policy = *target.Policy
+	}
+	provided := func(name string, nonempty bool) bool {
+		_, present := input.extensionFields[name]
+		return present || nonempty
+	}
+	var incoming worker.RoutePolicy
+	if input.Policy != nil {
+		incoming = *input.Policy
+	}
+	if !provided("forward_auth", incoming.ForwardAuth != nil) {
+		if ambiguous && !reflect.DeepEqual(policy.ForwardAuth, previous.ForwardAuth) {
+			return errors.New("set forward-auth explicitly when changing a path with different route protections")
+		}
+		policy.ForwardAuth = previous.ForwardAuth
+	} else if policy.ForwardAuth != nil && previous.ForwardAuth != nil {
+		auth := *policy.ForwardAuth
+		var fields map[string]json.RawMessage
+		if raw := input.extensionFields["forward_auth"]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				return err
+			}
+		}
+		if auth.URL == "" && auth.Service == "" {
+			auth.URL = previous.ForwardAuth.URL
+			auth.Service, auth.Port = previous.ForwardAuth.Service, previous.ForwardAuth.Port
+		}
+		if _, supplied := fields["path"]; !supplied && auth.Path == "" && auth.Service == previous.ForwardAuth.Service {
+			auth.Path = previous.ForwardAuth.Path
+		}
+		policy.ForwardAuth = &auth
+	}
+	if !provided("maintenance", incoming.Maintenance != nil) {
+		if ambiguous && !reflect.DeepEqual(policy.Maintenance, previous.Maintenance) {
+			return errors.New("set maintenance explicitly when changing a path with different route protections")
+		}
+		policy.Maintenance = previous.Maintenance
+	}
+	if !provided("error_pages", incoming.ErrorPages != nil) {
+		if ambiguous && !reflect.DeepEqual(policy.ErrorPages, previous.ErrorPages) {
+			return errors.New("set error pages explicitly when changing a path with different route settings")
+		}
+		policy.ErrorPages = previous.ErrorPages
+	}
+	encode := func(value worker.RoutePolicy) (map[string]json.RawMessage, error) {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		var fields map[string]json.RawMessage
+		err = json.Unmarshal(data, &fields)
+		return fields, err
+	}
+	oldFields, err := encode(previous)
+	if err != nil {
+		return err
+	}
+	newFields, err := encode(policy)
+	if err != nil {
+		return err
+	}
+	incomingFields, err := encode(incoming)
+	if err != nil {
+		return err
+	}
+	for name, value := range oldFields {
+		if name == "forward_auth" || name == "maintenance" || name == "error_pages" {
+			continue
+		}
+		if _, nonempty := incomingFields[name]; provided(name, nonempty) {
+			continue
+		}
+		if ambiguous && !bytes.Equal(newFields[name], value) {
+			return errors.New("set " + strings.ReplaceAll(name, "_", "-") + " explicitly when changing a path with different route policies")
+		}
+		newFields[name] = value
+	}
+	data, err := json.Marshal(newFields)
+	if err != nil {
+		return err
+	}
+	if err = json.Unmarshal(data, &policy); err != nil {
+		return err
+	}
+	if target.Policy != nil || len(newFields) > 0 {
+		target.Policy = &policy
+	}
+	return nil
+}

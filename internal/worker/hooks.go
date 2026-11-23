@@ -23,11 +23,15 @@ type DeploymentHooks struct {
 	Assertions  *DeploymentAssertions `json:"assertions,omitempty"`
 }
 
+func (hooks *DeploymentHooks) Enabled() bool {
+	return hooks != nil && (hooks.Before != nil || hooks.After != nil || len(hooks.BeforeSteps) > 0 || hooks.Assertions != nil)
+}
+
 func validateHooks(hooks *DeploymentHooks, kind string) error {
 	if hooks == nil {
 		return nil
 	}
-	if kind == "job" && (hooks.Before != nil || hooks.After != nil || len(hooks.BeforeSteps) > 0 || hooks.Assertions != nil) {
+	if kind == "job" && hooks.Enabled() {
 		return errors.New("deployment hooks require a service resource")
 	}
 	for _, hook := range []*DeploymentHook{hooks.Before, hooks.After} {

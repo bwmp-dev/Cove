@@ -38,6 +38,13 @@ type Probe struct {
 	BackblazeB2         bool         `json:"backblaze_b2"`
 	BackupRetention     bool         `json:"backup_retention"`
 	Telemetry           bool         `json:"telemetry"`
+	RouteProtocol       int          `json:"route_protocol"`
+	CPUAutoscale        bool         `json:"cpu_autoscale"`
+	IdleSleep           bool         `json:"idle_sleep"`
+	Suspensions         bool         `json:"suspensions"`
+	UnhealthyRestart    bool         `json:"unhealthy_restart"`
+	JobRuns             bool         `json:"job_runs"`
+	Rollouts            bool         `json:"rollouts"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
 	GuardedHooks        bool         `json:"guarded_hooks"`
 	Previews            bool         `json:"previews"`
@@ -59,6 +66,9 @@ type Probe struct {
 	SharedNetworks      bool         `json:"shared_networks"`
 	PrivateLinks        bool         `json:"private_links"`
 	LiveRoutes          bool         `json:"live_routes"`
+	RoutePolicies       bool         `json:"route_policies"`
+	ImageLifecycle      bool         `json:"image_lifecycle"`
+	BuildPublish        bool         `json:"build_publish"`
 	Protocol            int          `json:"protocol"`
 	OS                  string       `json:"os"`
 	Arch                string       `json:"arch"`
@@ -97,6 +107,26 @@ func Inspect(ctx context.Context) Probe {
 	p.MountMetrics = runtime.GOOS == "linux"
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
+	p.RoutePolicies = true
+	if runtime.GOOS == "linux" {
+		p.RouteProtocol = 2
+	}
+	p.Rollouts = true
+	p.CPUAutoscale = true
+	p.JobRuns = true
+	p.UnhealthyRestart = true
+	p.Suspensions = true
+	p.IdleSleep = runtime.GOOS == "linux"
+	if _, err := exec.CommandContext(ctx, "docker", "buildx", "version").Output(); err == nil {
+		if help, err := exec.CommandContext(ctx, "docker", "compose", "build", "--help").Output(); err == nil {
+			if push, err := exec.CommandContext(ctx, "docker", "push", "--help").Output(); err == nil {
+				p.BuildPublish = strings.Contains(string(help), "--builder") && strings.Contains(string(push), "--platform")
+			}
+		}
+		if help, err := exec.CommandContext(ctx, "docker", "compose", "pull", "--help").Output(); err == nil {
+			p.ImageLifecycle = strings.Contains(string(help), "--policy") && strings.Contains(string(help), "--ignore-buildable")
+		}
+	}
 	if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Output(); err == nil {
 		p.Docker = strings.TrimSpace(string(out))
 	}

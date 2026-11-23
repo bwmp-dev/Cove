@@ -109,7 +109,11 @@ func (s *Server) projectGitOps(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "GitOps drift unavailable", 503)
 			return
 		}
-		changes = projectConfigurationChanges(current, manifest)
+		changes, err = projectConfigurationChanges(current, manifest)
+		if err != nil {
+			http.Error(w, "GitOps route protections are ambiguous; review route settings", 409)
+			return
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	respond(w, 200, map[string]any{"connected": true, "source": input, "last_revision": revision, "last_error": lastError, "draft_id": draft, "synced_at": synced, "drift": changes})
@@ -180,7 +184,11 @@ func (s *Server) syncProjectGitOps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project configuration unavailable", 503)
 		return
 	}
-	changes := projectConfigurationChanges(current, manifest)
+	changes, err := projectConfigurationChanges(current, manifest)
+	if err != nil {
+		http.Error(w, "GitOps route protections are ambiguous; review route settings", 409)
+		return
+	}
 	draft := ""
 	if len(changes) > 0 {
 		input, err := json.Marshal(map[string]string{"content": response.SourceFiles.Files[selectedPath]})

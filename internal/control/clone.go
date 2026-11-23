@@ -163,6 +163,7 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "configuration unavailable", 500)
 			return
 		}
+		config.Autoscale = nil
 		config.Routes = nil
 		config.Backup = nil
 		config.Private = nil

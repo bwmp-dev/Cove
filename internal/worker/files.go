@@ -126,6 +126,13 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 	e.active[workload] = true
 	e.mu.Unlock()
 	defer func() { e.mu.Lock(); delete(e.active, workload); e.mu.Unlock() }()
+	if r.Action == "write" || r.Action == "delete" {
+		if _, pending, err := e.pendingRollout(workload); err != nil {
+			return nil, err
+		} else if pending != nil && pending.Phase == "waiting" {
+			return nil, errors.New("promote or abort the staged rollout before changing its files")
+		}
+	}
 	operationContext := ctx
 	// Keep accepted mutations under the workload guard even if their caller disconnects.
 	if r.Action == "write" || r.Action == "delete" {
@@ -137,8 +144,8 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 	if err != nil {
 		return nil, errors.New("could not inspect resource containers")
 	}
-	if len(containers) > 32 {
-		return nil, errors.New("file browsing supports at most 32 containers per resource")
+	if len(containers) > MaxResourceContainers {
+		return nil, errors.New("file browsing supports at most 128 containers per resource")
 	}
 	result := &FileResponse{Targets: []FileTarget{}, Entries: []FileEntry{}, MaxBytes: MaxFileBytes}
 	volumes := map[string]bool{}

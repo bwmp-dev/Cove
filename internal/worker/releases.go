@@ -22,17 +22,37 @@ func unmarshalCompose(data []byte, target any) error {
 
 // Escape resolved literal dollars before Compose reads the snapshot a second time.
 func literalCompose(value any) any {
+	next := composeDollars(value, "$", "$$")
+	if config, ok := next.(map[string]any); ok {
+		services, _ := config["services"].(map[string]any)
+		for _, raw := range services {
+			service, _ := raw.(map[string]any)
+			deploy, _ := service["deploy"].(map[string]any)
+			// Compose emits this empty default, then warns on re-reading it as a Swarm setting.
+			if placement, ok := deploy["placement"].(map[string]any); ok && len(placement) == 0 {
+				delete(deploy, "placement")
+			}
+		}
+	}
+	return next
+}
+
+func decodeResolvedCompose(data []byte, config *map[string]any) error {
+	return unmarshalCompose(data, config)
+}
+
+func composeDollars(value any, from, to string) any {
 	switch value := value.(type) {
 	case string:
-		return strings.ReplaceAll(value, "$", "$$")
+		return strings.ReplaceAll(value, from, to)
 	case []any:
 		for i, v := range value {
-			value[i] = literalCompose(v)
+			value[i] = composeDollars(v, from, to)
 		}
 		return value
 	case map[string]any:
 		for k, v := range value {
-			value[k] = literalCompose(v)
+			value[k] = composeDollars(v, from, to)
 		}
 		return value
 	default:
@@ -238,8 +258,5 @@ func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args
 		return deployedState{}, err
 	}
 	state.Revision = j.Operation.Revision
-	if err = writeJSON(filepath.Join(snapshots, r.ID+".json"), state); err != nil {
-		return deployedState{}, err
-	}
 	return state, nil
 }

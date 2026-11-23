@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 type NodeMetrics struct {
@@ -81,11 +83,22 @@ type ContainerMetrics struct {
 }
 
 func (e *Engine) HealthContainers(ctx context.Context, workload string) ([]Container, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	containers, err := e.Containers(ctx, workload)
 	if err != nil {
 		return nil, err
 	}
+	if err = e.inspectContainerStates(ctx, containers); err != nil {
+		return nil, err
+	}
+	if len(containers) == 0 {
+		return containers, nil
+	}
 	data, err := os.ReadFile(filepath.Join(e.Root, "workloads", workload, "current.json"))
+	if os.IsNotExist(err) {
+		return containers, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -99,19 +112,26 @@ func (e *Engine) HealthContainers(ctx context.Context, workload string) ([]Conta
 	}
 	var config struct {
 		Services map[string]struct {
-			DependsOn map[string]struct {
-				Condition string `json:"condition"`
-			} `json:"depends_on"`
-		} `json:"services"`
+			DependsOn any `yaml:"depends_on"`
+			Labels    any `yaml:"labels"`
+		} `yaml:"services"`
 	}
-	if err = json.Unmarshal(data, &config); err != nil {
+	if err = yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
 	completed := map[string]bool{}
 	for _, service := range config.Services {
-		for name, dependency := range service.DependsOn {
-			if dependency.Condition == "service_completed_successfully" {
-				completed[name] = true
+		dependencies, _ := service.DependsOn.(map[string]any)
+		for name, raw := range dependencies {
+			dependency, _ := raw.(map[string]any)
+			if dependency["condition"] == "service_completed_successfully" {
+				labels, _ := config.Services[name].Labels.(map[string]any)
+				logical, _ := labels["dev.cove.service"].(string)
+				if serviceIdentifier.MatchString(logical) {
+					completed[logical] = true
+				} else {
+					completed[name] = true
+				}
 			}
 		}
 	}
@@ -122,12 +142,7 @@ func (e *Engine) HealthContainers(ctx context.Context, workload string) ([]Conta
 		if container.State != "exited" {
 			continue
 		}
-		details, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "com.docker.compose.service"}} {{.State.ExitCode}}`, container.ID)
-		if err != nil {
-			return nil, err
-		}
-		fields := strings.Fields(details)
-		if len(fields) == 2 && completed[fields[0]] && fields[1] == "0" {
+		if completed[container.Service] && container.ExitCode != nil && *container.ExitCode == 0 {
 			containers[i].ExpectedCompleted = true
 		}
 	}

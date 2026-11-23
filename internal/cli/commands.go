@@ -29,16 +29,17 @@ func execute(ctx context.Context, api *client.Client, args []string, o options) 
 	case "deploy":
 		flags := commandFlags("deploy", o)
 		wait := flags.Bool("wait", true, "wait for terminal deployment state")
+		pullLatest := flags.Bool("pull-latest", false, "pull referenced image tags before deploying")
 		reason := flags.String("reason", "", "optional audited deployment reason")
 		timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 1 || *timeout < time.Second || *timeout > 24*time.Hour {
-			return usage("deploy [--wait=false] [--timeout 10m] RESOURCE")
+			return usage("deploy [--wait=false] [--pull-latest] [--reason TEXT] [--timeout 10m] RESOURCE")
 		}
 		var operation map[string]any
-		if err := api.Do(ctx, "POST", "/workloads/"+pathID(flags.Arg(0))+"/operations", map[string]string{"action": "deploy", "reason": *reason}, &operation); err != nil {
+		if err := api.Do(ctx, "POST", "/workloads/"+pathID(flags.Arg(0))+"/operations", map[string]any{"action": "deploy", "reason": *reason, "pull_latest": *pullLatest}, &operation); err != nil {
 			return err
 		}
 		if *wait {

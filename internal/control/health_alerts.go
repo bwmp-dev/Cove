@@ -261,7 +261,7 @@ func (s *Server) nodeHealth(ctx context.Context, id, state string, p *worker.Pro
 }
 
 func (s *Server) checkResourceHealth(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,manually_stopped FROM workloads w WHERE kind='service' AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
+	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)) FROM workloads w WHERE kind='service' AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
 	if err != nil {
 		return err
 	}
@@ -301,20 +301,27 @@ func (s *Server) checkResourceHealth(ctx context.Context) error {
 		if rpcErr != nil || response.Error != "" {
 			continue
 		}
+		idleState := "awake"
+		if response.Suspension != nil && response.Suspension.Reason == "idle" && response.Suspension.Phase != "awake" {
+			idleState = "asleep"
+		}
+		if _, err = s.DB.Exec(ctx, `WITH changed AS (UPDATE workloads SET observed_idle_state=$2 WHERE id=$1 AND observed_idle_state IS DISTINCT FROM $2 RETURNING team_id) INSERT INTO audit_events(actor,action,subject,status,team_id,details) SELECT 'runtime-observer','idle state observed',$1,200,team_id,jsonb_build_object('state',$2::text) FROM changed`, i.id, idleState); err != nil {
+			return err
+		}
 		bad := len(response.Containers) == 0
 		for _, container := range response.Containers {
-			if !container.ExpectedCompleted && (container.State != "running" || strings.Contains(container.Status, "(unhealthy)")) {
+			if !container.ExpectedCompleted && (container.State != "running" || container.Health == "unhealthy" || strings.Contains(container.Status, "(unhealthy)")) {
 				bad = true
 			}
 		}
 		// An operator may have stopped or redeployed it while the SSH read was in flight.
 		var suppressed bool
-		if err = s.DB.QueryRow(ctx, `SELECT manually_stopped OR EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) FROM workloads w WHERE id=$1`, i.id).Scan(&suppressed); errors.Is(err, pgx.ErrNoRows) {
+		if err = s.DB.QueryRow(ctx, `SELECT manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id) OR EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) FROM workloads w WHERE id=$1`, i.id).Scan(&suppressed); errors.Is(err, pgx.ErrNoRows) {
 			continue
 		} else if err != nil {
 			return err
 		}
-		if suppressed {
+		if suppressed || response.Suspension != nil && (response.Suspension.Reason == "idle" || response.Suspension.Reason == "manual_stop") && response.Suspension.Phase != "awake" {
 			continue
 		}
 		if err = s.recordHealth(ctx, i.team, "resource_unhealthy", i.id, "Resource stopped unexpectedly or unhealthy: "+i.name, bad); err != nil {

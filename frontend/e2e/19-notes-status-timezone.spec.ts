@@ -112,7 +112,7 @@ test("encrypted notes, revocable public status page and display time zones", asy
   await page.goto("/account");
   const account = page.getByRole("region", { name: "Time zone", exact: true });
   await expect(account.getByText("Times currently show in America/New_York.", { exact: false })).toBeVisible();
-  await expect(account.getByText("Cron expressions and scheduled backups always run in UTC.", { exact: false })).toBeVisible();
+  await expect(account.getByText("Scheduled backups run in UTC. Scheduled jobs and deployment windows use the time zone saved with each one.", { exact: false })).toBeVisible();
   await expect(account.getByText("UTC", { exact: true }).filter({ visible: true })).toBeVisible();
   await chooseValue(account.getByLabel("Display time zone", { exact: true }), "Asia/Tokyo");
   await account.getByRole("button", { name: "Save time zone", exact: true }).click();

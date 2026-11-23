@@ -1,4 +1,5 @@
 import type { EnvironmentPreview, PlannedResource, PreviewPlan, PreviewRecipe, PreviewResourcePolicy, PreviewStage, PreviewState, RecipeView, VariableMode } from "../api/previews";
+import type { Workload } from "../api/types";
 import type { Tone } from "./nodes";
 
 export const previewStates: Record<PreviewState, { tone: Tone; label: string }> = {
@@ -20,6 +21,11 @@ export const stageLabels: Record<PreviewStage, string> = {
   ready: "Running",
   remove: "Removing",
 };
+
+// Legacy pull request previews set preview_source_id; resources in an environment preview set environment_preview_id.
+export function isManagedPreview(workload: Pick<Workload, "preview_source_id" | "environment_preview_id">) {
+  return Boolean(workload.preview_source_id || workload.environment_preview_id);
+}
 
 export function shortRevision(revision: string) {
   return revision ? revision.slice(0, 7) : "";

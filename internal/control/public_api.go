@@ -22,10 +22,12 @@ type apiNameInput struct {
 	Name string `json:"name"`
 }
 type apiOperationInput struct {
-	Reason   string `json:"reason,omitempty"`
-	Action   string `json:"action"`
-	Release  string `json:"release,omitempty"`
-	BackupID string `json:"backup_id,omitempty"`
+	Reason     string               `json:"reason,omitempty"`
+	Action     string               `json:"action"`
+	Release    string               `json:"release,omitempty"`
+	BackupID   string               `json:"backup_id,omitempty"`
+	PullLatest bool                 `json:"pull_latest,omitempty"`
+	Build      *worker.BuildOptions `json:"build,omitempty"`
 }
 type apiID struct {
 	ID string `json:"id"`
@@ -115,7 +117,19 @@ func (s *Server) publicRoutes() []publicRoute {
 		{"PUT", "/workloads/{id}/routes", "workloads:write", "Replace public routes using normal ingress reconciliation", struct {
 			Routes []worker.Route `json:"routes"`
 		}{}, map[string]any{}, 200, s.updateRoutes},
-		{"POST", "/workloads/{id}/operations", "workloads:operate", "Queue an operation; restore/drill additionally require workloads:restore", apiOperationInput{}, apiID{}, 202, s.queueOperation},
+		{"POST", "/workloads/{id}/operations", "workloads:operate", "Queue an operation, including pull_latest deploy, rollout_promote/abort, image_check and build; restore/drill additionally require workloads:restore, build requires Edit configuration and Read secrets", apiOperationInput{}, apiID{}, 202, s.queueOperation},
+		{"GET", "/workloads/{id}/autoscale-policy", "workloads:read", "Read CPU replica autoscaling policy and state", nil, map[string]any{}, 200, s.autoscalePolicy},
+		{"PUT", "/workloads/{id}/autoscale-policy", "workloads:write", "Set CPU replica autoscaling policy; queued scaling deploys use normal admission", worker.AutoscalePolicy{}, map[string]any{}, 200, s.autoscalePolicy},
+		{"GET", "/workloads/{id}/idle-policy", "workloads:read", "Read idle sleep policy", nil, worker.IdlePolicy{}, 200, s.idlePolicy},
+		{"PUT", "/workloads/{id}/idle-policy", "workloads:write", "Set idle sleep policy without deploying", worker.IdlePolicy{}, map[string]any{}, 202, s.idlePolicy},
+		{"GET", "/workloads/{id}/restart-policy", "workloads:read", "Read unhealthy-container restart policy", nil, map[string]any{}, 200, s.unhealthyRestartPolicy},
+		{"PUT", "/workloads/{id}/restart-policy", "workloads:write", "Set unhealthy-container restart policy", struct {
+			Enabled bool `json:"enabled"`
+		}{}, map[string]any{}, 200, s.unhealthyRestartPolicy},
+		{"GET", "/environments/{id}/suspension", "projects:read", "Read environment pause and resume state", nil, map[string]any{}, 200, s.environmentSuspension},
+		{"PUT", "/environments/{id}/suspension", "workloads:operate", "Pause or resume retained environment containers; recovery resumes do not deploy new releases", struct {
+			Paused bool `json:"paused"`
+		}{}, map[string]any{}, 202, s.environmentSuspension},
 		{"GET", "/workloads/{id}/configuration-diff", "workloads:read", "Compare saved configuration with the last successful deployment declaration; secret values are omitted", nil, map[string]any{}, 200, s.workloadConfigurationDiff},
 		{"GET", "/workloads/{id}/drift", "workloads:read", "Inspect runtime configuration changes since the last successful Cove operation without returning values", nil, worker.DriftReport{}, 200, s.workloadDrift},
 		{"GET", "/workloads/{id}/compose-bundle", "workloads:read", "Read ordered Compose selection metadata without file contents", nil, map[string]any{}, 200, s.composeBundle},

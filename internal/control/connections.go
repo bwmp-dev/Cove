@@ -475,6 +475,48 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			}
 		}
 	}
+	if err := checkRouteProtocol(ctx, s.DB, r.Workload, r.Routes); err != nil {
+		return err
+	}
+	if r.Rollout != nil && r.Rollout.Strategy == "disabled" {
+		r.Rollout = nil
+	}
+	if r.Rollout != nil || r.Action == "rollout_promote" || r.Action == "rollout_abort" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'rollouts')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before using deployment rollouts")
+		}
+	}
+	if r.Action == "build" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'build_publish')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before building images")
+		}
+	}
+	if r.PullLatest || r.Action == "image_check" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before using image lifecycle operations")
+		}
+	}
+	if r.Action == "deploy" && worker.HasRoutePolicies(r.Routes) {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'route_policies')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before applying route policies")
+		}
+	}
 	if r.Action == "deploy" && r.Hooks != nil && (len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil) {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'guarded_hooks')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
@@ -605,16 +647,23 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	if r.InfrastructurePrepared {
 		return nil
 	}
+	if r.Kind == "job" && r.Action == "deploy" && r.Job == nil {
+		options, err := jobExecutionOptions(ctx, s.DB, r.Workload)
+		if err != nil {
+			return err
+		}
+		r.Job = options
+	}
 	var team string
 	if err := s.DB.QueryRow(ctx, "SELECT team_id FROM workloads WHERE id=$1", r.Workload).Scan(&team); err != nil {
 		return err
 	}
-	if r.Action == "deploy" {
+	if r.Action == "deploy" || r.Action == "build" {
 		if err := s.resolveDeploymentVariables(ctx, r); err != nil {
 			return err
 		}
 	}
-	if r.Action == "deploy" && r.Registry == nil {
+	if (r.Action == "deploy" || r.Action == "image_check" || r.Action == "build") && r.Registry == nil {
 		var id string
 		err := s.DB.QueryRow(ctx, `SELECT connection_id FROM workload_connections WHERE workload_id=$1 AND kind='registry'`, r.Workload).Scan(&id)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -627,6 +676,9 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			}
 			r.Registry = c.Registry
 		}
+	}
+	if r.Action == "build" && r.Registry == nil {
+		return errors.New("connect a registry before building images")
 	}
 	if r.Backup != nil && r.Backup.StorageID != "" {
 		c, err := s.readConnection(ctx, r.Backup.StorageID, team, "storage")

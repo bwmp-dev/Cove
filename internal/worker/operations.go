@@ -30,10 +30,20 @@ type Request struct {
 	ComposeBundle          *ComposeBundle    `json:"compose_bundle,omitempty"`
 	BuiltinDefaults        map[string]string `json:"builtin_defaults,omitempty"`
 	OutboundProxy          *outbound.Config  `json:"outbound_proxy,omitempty"`
+	resolvedPublicBuiltins map[string]string
+	resolvedSecrets        []string
 	snapshotMounts         []backupMount
 	snapshotCheck          func(context.Context) error
 	volumeMethod           string
 	snapshotFallback       string
+	Scale                  *CPUScaleOptions         `json:"scale,omitempty"`
+	Idle                   *IdlePolicy              `json:"idle,omitempty"`
+	Suspension             *SuspensionOptions       `json:"suspension,omitempty"`
+	ResumeSuspended        bool                     `json:"resume_suspended,omitempty"`
+	Job                    *JobOptions              `json:"job,omitempty"`
+	Rollout                *RolloutOptions          `json:"rollout,omitempty"`
+	Build                  *BuildOptions            `json:"build,omitempty"`
+	PullLatest             bool                     `json:"pull_latest,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
@@ -60,22 +70,32 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
-	ID         string         `json:"id"`
-	Workload   string         `json:"workload"`
-	Action     string         `json:"action"`
-	State      string         `json:"state"`
-	CreatedAt  time.Time      `json:"created_at"`
-	FinishedAt *time.Time     `json:"finished_at,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	Revision   string         `json:"revision,omitempty"`
-	Preview    *PreviewReport `json:"environment_preview,omitempty"`
+	Scale      *CPUScaleOptions  `json:"scale,omitempty"`
+	Suspension *SuspensionStatus `json:"suspension,omitempty"`
+	Job        *JobResult        `json:"job,omitempty"`
+	Rollout    *RolloutStatus    `json:"rollout,omitempty"`
+	Build      *BuildResult      `json:"build,omitempty"`
+	ImageCheck *ImageCheck       `json:"image_check,omitempty"`
+	ID         string            `json:"id"`
+	Workload   string            `json:"workload"`
+	Action     string            `json:"action"`
+	State      string            `json:"state"`
+	CreatedAt  time.Time         `json:"created_at"`
+	FinishedAt *time.Time        `json:"finished_at,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	Revision   string            `json:"revision,omitempty"`
+	Preview    *PreviewReport    `json:"environment_preview,omitempty"`
 }
 type journal struct {
-	CancelRequested bool         `json:"cancel_requested,omitempty"`
-	RouteChange     *routeChange `json:"route_change,omitempty"`
-	Operation       Operation    `json:"operation"`
-	Request         Request      `json:"request"`
-	Digest          string       `json:"digest"`
+	IdleChange       *idleChange       `json:"idle_change,omitempty"`
+	SuspensionChange *suspensionChange `json:"suspension_change,omitempty"`
+	JobRun           *jobRun           `json:"job_run,omitempty"`
+	RolloutChange    *rolloutChange    `json:"rollout_change,omitempty"`
+	CancelRequested  bool              `json:"cancel_requested,omitempty"`
+	RouteChange      *routeChange      `json:"route_change,omitempty"`
+	Operation        Operation         `json:"operation"`
+	Request          Request           `json:"request"`
+	Digest           string            `json:"digest"`
 }
 
 // routeChange is journaled by a route operation before it changes the proxy. Until Committed, the
@@ -88,12 +108,16 @@ type routeChange struct {
 // routeRecovery tracks a running route operation without an executor whose outcome must still be
 // settled from its journal: restored to the previous routes, or completed once committed.
 type routeRecovery struct {
-	workload string
-	state    string
-	next     time.Time
-	running  bool
+	activeSlot bool
+	workload   string
+	state      string
+	next       time.Time
+	running    bool
 }
 type deployedState struct {
+	Traffic           trafficState        `json:"traffic,omitempty"`
+	Generation        string              `json:"generation,omitempty"`
+	Rollout           *RolloutOptions     `json:"rollout,omitempty"`
 	AdditionalSecrets []string            `json:"additional_secrets,omitempty"`
 	PublicBuiltins    map[string]string   `json:"public_builtins,omitempty"`
 	Private           *PrivateNetwork     `json:"private,omitempty"`
@@ -105,6 +129,8 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	helperImageMu    sync.Mutex
+	idleMu           sync.Mutex
 	adoptionMu       sync.RWMutex
 	adoptedProjects  map[string]adoptedProject
 	execRunning      int
@@ -193,6 +219,35 @@ func ValidateRequest(r Request) error {
 			return err
 		}
 	}
+	if err := validateCPUScale(r); err != nil {
+		return err
+	}
+	if r.Idle != nil {
+		if r.Action != "idle_policy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("idle policies require a service outside previews")
+		}
+		if err := r.Idle.validate(); err != nil {
+			return err
+		}
+	}
+	if err := validateSuspensionRequest(r); err != nil {
+		return err
+	}
+	if r.ResumeSuspended && r.Action != "deploy" && r.Action != "start" && r.Action != "restart" && r.Action != "restore" {
+		return errors.New("resuming a suspension requires an explicit deploy, start, restart or restore")
+	}
+	if r.Job != nil && (r.Kind != "job" || r.Action != "deploy" || jobTimeout(r.Job) < 5 || jobTimeout(r.Job) > 86400) {
+		return errors.New("job execution settings require a job deployment and timeout from 5 to 86400 seconds")
+	}
+	if err := validateRollout(r); err != nil {
+		return err
+	}
+	if r.Build != nil && r.Action != "build" {
+		return errors.New("build options require a build operation")
+	}
+	if r.PullLatest && (r.Action != "deploy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || len(r.ImagePins) > 0) {
+		return errors.New("pull latest requires an unpinned service deployment")
+	}
 	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
 		return errors.New("preview deployment must use a pinned revision and isolated configuration")
 	}
@@ -261,7 +316,38 @@ func ValidateRequest(r Request) error {
 		if r.Preview && r.Source != nil && r.Source.InlineCompose {
 			return errors.New("previews require a repository Compose file")
 		}
+	case "build":
+		if r.Build == nil || !repositoryPath.MatchString(r.Build.Repository) || len(r.Build.Repository) > 128 || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("build requires a registry repository path outside managed previews")
+		}
+		if (r.Source == nil || r.Source.InlineCompose) && (len(r.Compose) == 0 || len(r.Compose) > 1024*1024) {
+			return errors.New("compose is required and must not exceed 1 MiB")
+		}
 	case "stop", "start", "restart":
+	case "suspend", "resume":
+	case "idle_policy":
+		if r.Idle == nil {
+			return errors.New("idle policy required")
+		}
+	case "idle_sleep", "idle_wake":
+		if r.Action == "idle_sleep" && (!strings.HasPrefix(r.ID, "idle-") || len(r.ID) > 59) || r.Action == "idle_wake" && !strings.HasPrefix(r.ID, "wake-idle-") {
+			return errors.New("invalid idle operation identity")
+		}
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("idle operations require a service")
+		}
+	case "restart_unhealthy":
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("health restarts require a service outside managed previews")
+		}
+	case "rollout_promote", "rollout_abort":
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("rollout actions require a service outside managed previews")
+		}
+	case "image_check":
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("image checks require a service outside managed previews")
+		}
 	case "routes":
 		if r.Kind == "job" {
 			return errors.New("only services can have routes")
@@ -305,10 +391,14 @@ func ValidateRequest(r Request) error {
 			return errors.New("reserved environment variable")
 		}
 	}
+	payload, err := json.Marshal(RPCRequest{Method: "submit_routes_v2", Request: &r})
+	if err != nil || len(payload) > rpcMessageLimit {
+		return errors.New("operation configuration exceeds the 2 MiB worker request limit")
+	}
 	return nil
 }
 func writeJSON(path string, value any) error {
-	data, err := json.Marshal(value)
+	data, err := marshalWorkerState(value)
 	if err != nil {
 		return err
 	}
@@ -371,7 +461,7 @@ func (e *Engine) submitLocked(r Request) (Operation, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return Operation{}, err
 	}
-	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC()}, Request: r, Digest: digest}
+	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC(), Scale: r.Scale}, Request: r, Digest: digest}
 	if err = writeJSON(e.path(r.ID), j); err != nil {
 		return Operation{}, err
 	}
@@ -429,6 +519,29 @@ func (e *Engine) Recover() error {
 		if err != nil {
 			return err
 		}
+		if j.Operation.State == "running" && (j.SuspensionChange != nil || j.IdleChange != nil) {
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
+			continue
+		}
+		if j.Operation.State == "running" && j.Request.Kind == "job" && j.Request.Action == "deploy" {
+			if j.JobRun == nil {
+				j.JobRun = &jobRun{Legacy: true, Started: j.Operation.CreatedAt, Deadline: j.Operation.CreatedAt.Add(30 * time.Minute)}
+			}
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
+			j.Operation.Error = "Recovering the existing job run; a second run will not start until it settles."
+			if err := writeJSON(e.path(id), j); err != nil {
+				return err
+			}
+			continue
+		}
+		if j.Operation.State == "running" && j.RolloutChange != nil {
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted"}
+			j.Operation.Error = "Deployment recovery is restoring or completing the journaled traffic switch."
+			if err = writeJSON(e.path(id), j); err != nil {
+				return err
+			}
+			continue
+		}
 		if j.Operation.State == "running" && j.RouteChange != nil {
 			// The proxy may already serve the new routes, so the outcome is settled by route recovery.
 			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted"}
@@ -441,6 +554,16 @@ func (e *Engine) Recover() error {
 			continue
 		}
 		if j.Operation.State == "running" {
+			if j.Request.Action == "build" {
+				cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
+				if err := e.recoverBuild(cleanup, j.Request.Workload); err != nil {
+					fmt.Fprintln(os.Stderr, "Interrupted build cache cleanup is pending:", err)
+				}
+				if err := e.cleanupBuildInputs(j.Request); err != nil {
+					fmt.Fprintln(os.Stderr, "Interrupted build input cleanup is pending:", err)
+				}
+				cancel()
+			}
 			if j.Request.GuardedDeploy != nil && *j.Request.GuardedDeploy {
 				cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				err := e.recoverCandidate(cleanup, filepath.Join(e.Root, "workloads", j.Request.Workload))
@@ -464,6 +587,9 @@ func (e *Engine) Recover() error {
 			j.Operation.State = "interrupted"
 			j.Operation.FinishedAt = &now
 			j.Operation.Error = "Worker restarted during execution; inspect workload before starting another operation."
+			if j.Request.Action == "build" {
+				j.Operation.Error = "Worker restarted during build; inspect registry artifacts before starting a new build."
+			}
 			if j.CancelRequested {
 				j.Operation.State = "cancelled"
 				j.Operation.Error = "Cancellation requested; inspect workload state."
@@ -491,6 +617,11 @@ func (e *Engine) Serve(ctx context.Context) error {
 	if err := e.recoverStorage(ctx); err != nil {
 		return err
 	}
+	closeWake, err := e.startIdleWake(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeWake()
 	if routes, err := e.loadIngress(); err != nil {
 		return err
 	} else if len(routes) > 0 && !e.trafficRecoveryPending() {
@@ -500,6 +631,7 @@ func (e *Engine) Serve(ctx context.Context) error {
 	}
 	jobs.Go(func() { e.cleanupLoop(ctx) })
 	jobs.Go(func() { e.linkLoop(ctx) })
+	jobs.Go(func() { e.idleLoop(ctx) })
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -540,7 +672,7 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 	sort.Slice(e.pending, func(i, j int) bool { return e.pending[i].CreatedAt.Before(e.pending[j].CreatedAt) })
 	remaining := make([]Operation, 0, len(e.pending))
 	for _, op := range e.pending {
-		if e.busy(op.Workload) || len(e.active) >= 4 {
+		if e.busy(op.Workload) || len(e.active)+e.recoveringWorkloadCount() >= 4 {
 			remaining = append(remaining, op)
 			continue
 		}
@@ -639,13 +771,17 @@ func (l *boundedLog) flush(final bool) error {
 	return err
 }
 func (e *Engine) execute(parent context.Context, j journal) {
-	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
+	budget := 30 * time.Minute
+	if j.Request.Kind == "job" && j.Request.Action == "deploy" {
+		budget += time.Duration(jobTimeout(j.Request.Job)) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	err := e.perform(ctx, j.Request)
 	baselineFailed := false
 	if err == nil && j.Request.Kind != "job" {
 		switch j.Request.Action {
-		case "deploy", "stop", "start", "restart", "rollback", "routes", "restore", "restore_copy":
+		case "deploy", "stop", "start", "restart", "rollback", "routes", "restore", "restore_copy", "rollout_promote", "rollout_abort", "resume", "restart_unhealthy":
 			record := j.Request.RecordDrift
 			if !record {
 				_, baselineErr := os.Stat(filepath.Join(e.Root, "workloads", j.Request.Workload, "drift.json"))
@@ -669,16 +805,30 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	committed := false
 	persisted, readErr := e.read(j.Request.ID)
 	if readErr == nil {
+		j.IdleChange = persisted.IdleChange
+		j.SuspensionChange, j.Operation.Suspension = persisted.SuspensionChange, persisted.Operation.Suspension
+		j.Operation.Job = persisted.Operation.Job
+		j.JobRun = persisted.JobRun
 		j.Operation.Revision = persisted.Operation.Revision
 		j.Operation.Preview = persisted.Operation.Preview
+		j.Operation.ImageCheck = persisted.Operation.ImageCheck
+		j.Operation.Rollout = persisted.Operation.Rollout
+		j.RolloutChange = persisted.RolloutChange
+		j.Operation.Build = persisted.Operation.Build
 		j.CancelRequested = persisted.CancelRequested
 		committed = persisted.RouteChange != nil && persisted.RouteChange.Committed
 	}
-	if errors.Is(err, errRoutesUnresolved) {
+	if errors.Is(err, errRoutesUnresolved) || errors.Is(err, errRolloutUnresolved) || errors.Is(err, errJobUnresolved) || errors.Is(err, errSuspensionUnresolved) {
 		// The operation stays running, which keeps its hostnames claimed until recovery settles it.
-		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed"}
+		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed", activeSlot: j.JobRun != nil || j.SuspensionChange != nil || j.IdleChange != nil}
 		if readErr == nil && !committed {
 			persisted.Operation.Error = routeRestoring
+			if j.JobRun != nil {
+				persisted.Operation.Error = "Waiting for the worker to confirm the existing job outcome and stop its containers."
+			}
+			if j.SuspensionChange != nil {
+				persisted.Operation.Error = "Waiting for the worker to confirm the suspension outcome."
+			}
 			readErr = writeJSON(e.path(j.Request.ID), persisted)
 		}
 		if readErr != nil {
@@ -716,6 +866,18 @@ func (e *Engine) execute(parent context.Context, j journal) {
 			j.Operation.Error = routeOutcome(j.Operation.State)
 		}
 	}
+	if j.RolloutChange != nil && (j.RolloutChange.Committed || j.RolloutChange.Staged) {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
+	}
+	if j.Operation.Job != nil && j.Operation.Job.TimedOut && j.Operation.State != "cancelled" {
+		j.Operation.State, j.Operation.Error = "failed", "Job exceeded its execution timeout; its containers were stopped."
+	}
+	if j.IdleChange == nil && j.SuspensionChange != nil && (j.SuspensionChange.ExposureCommitted || j.SuspensionChange.Action == "suspend" && j.SuspensionChange.Complete) && j.SuspensionChange.Failure == "" {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
+	}
+	if j.IdleChange != nil && j.IdleChange.Committed {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
+	}
 	if saveErr := writeJSON(e.path(j.Request.ID), j); saveErr != nil {
 		fmt.Fprintln(os.Stderr, "could not persist operation result:", saveErr)
 		select {
@@ -725,6 +887,12 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	}
 }
 func (e *Engine) perform(ctx context.Context, r Request) (result error) {
+	jobParent := ctx
+	if r.Kind == "job" && r.Action == "deploy" {
+		prepare, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		ctx = prepare
+	}
 	dir := filepath.Join(e.Root, "workloads", r.Workload)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -747,6 +915,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		r.Environment, publicBuiltins = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
 	}
 	env := []string{}
+	log.secrets = append(log.secrets, routeSecrets(r.Routes)...)
 	if r.OutboundProxy != nil {
 		env = append(env, r.OutboundProxy.Env()...)
 		log.secrets = append(log.secrets, r.OutboundProxy.Secrets()...)
@@ -760,9 +929,17 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			log.secrets = append(log.secrets, v)
 		}
 	}
-	if r.Registry != nil && r.Action == "deploy" {
+	if r.Registry != nil && (r.Action == "deploy" || r.Action == "image_check" || r.Action == "build") {
 		log.secrets = append(log.secrets, r.Registry.Password)
-		config, err := registryConfig(dir, r.Registry)
+		registryDir := dir
+		if r.Action == "build" {
+			registryDir = filepath.Join(e.Root, "build-auth", r.ID)
+			if err := os.MkdirAll(registryDir, 0700); err != nil {
+				return err
+			}
+			defer os.RemoveAll(registryDir)
+		}
+		config, err := registryConfig(registryDir, r.Registry)
 		if err != nil {
 			return err
 		}
@@ -785,6 +962,50 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			fmt.Fprintln(log, err)
 		}
 		return err
+	}
+	if r.Action == "image_check" {
+		err := e.performImageCheck(ctx, r, env, log)
+		if err != nil {
+			fmt.Fprintln(log, "Image check failed:", err)
+		}
+		return err
+	}
+	if r.Action == "build" {
+		r.resolvedPublicBuiltins = publicBuiltins
+		err := e.performBuild(ctx, r, dir, env, log)
+		if err != nil {
+			fmt.Fprintln(log, "Build failed:", err)
+		}
+		return err
+	}
+	if r.Action == "rollout_promote" || r.Action == "rollout_abort" {
+		if r.Action == "rollout_promote" {
+			state, err := e.readSuspension(r.Workload)
+			if err != nil {
+				return err
+			}
+			if state != nil && state.Phase != "awake" {
+				return errors.New("resume the suspended environment before promoting its rollout")
+			}
+		}
+		err := e.performRolloutAction(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "idle_policy" {
+		err := e.performIdlePolicy(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "idle_sleep" || r.Action == "idle_wake" {
+		return e.idleOperation(ctx, r, log)
+	}
+	if r.Action == "suspend" {
+		return e.performSuspension(ctx, r, false, log)
 	}
 	if r.Action == "restore_copy" {
 		return e.performRestoreCopy(ctx, r, log)
@@ -837,8 +1058,19 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if handled, err := e.suspensionGate(ctx, r, log); handled || err != nil {
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
 	if r.Action == "drill" {
 		return e.performDrill(ctx, r, log)
+	}
+	if _, pending, err := e.pendingRollout(r.Workload); err != nil {
+		return err
+	} else if pending != nil && pending.Phase == "waiting" && r.Action != "stop" && r.Action != "start" && r.Action != "restart" {
+		return errors.New("promote or abort the staged rollout before this operation")
 	}
 	if r.Action == "backup" || r.Action == "restore" {
 		err := e.performBackup(ctx, r, log)
@@ -850,7 +1082,23 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		return err
 	}
+	if r.Action == "restart_unhealthy" {
+		err := e.restartUnhealthy(ctx, r.Workload, log)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
 	if r.Action == "stop" {
+		if _, pending, err := e.pendingRollout(r.Workload); err != nil {
+			return err
+		} else if pending != nil && pending.Phase == "waiting" {
+			abort := r
+			abort.Action = "rollout_abort"
+			if err = e.performRolloutAction(ctx, abort, log); err != nil {
+				return err
+			}
+		}
 		containers, err := e.Containers(ctx, r.Workload)
 		if err != nil {
 			return err
@@ -865,7 +1113,16 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = append(args, container.ID)
 		}
-		return e.Run(ctx, dir, args, nil, log)
+		if err := e.Run(ctx, dir, args, nil, log); err != nil {
+			return err
+		}
+		return e.refreshTrafficIngress(ctx, r.Workload, log)
+	}
+	if r.Scale != nil {
+		r, err = e.prepareCPUScale(ctx, r)
+		if err != nil {
+			return err
+		}
 	}
 	composePath := filepath.Join(dir, "compose.yaml")
 	if r.Action == "deploy" {
@@ -947,6 +1204,47 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			if public, ok := release.PublicBuiltins[key]; !ok || public != value {
 				log.secrets = append(log.secrets, value)
 			}
+		}
+		if len(release.Traffic) > 0 || r.Rollout != nil {
+			raw, err := os.ReadFile(release.ComposePath)
+			if err != nil {
+				return err
+			}
+			var config map[string]any
+			if err = decodeResolvedCompose(raw, &config); err != nil {
+				return err
+			}
+			if err = restoreServiceNames(config, release.Traffic); err != nil {
+				return err
+			}
+			options := RolloutOptions{Strategy: "rolling", TimeoutSeconds: 120, DrainSeconds: 5, CanaryPercent: 10}
+			if r.Rollout != nil {
+				options = *r.Rollout
+			}
+			if release.Rollout != nil {
+				options = *release.Rollout
+			}
+			options.Strategy = "rolling"
+			if r.Scale != nil {
+				options.Replicas = mergedCPUReplicas(options.Replicas, r.Scale.Replicas)
+			}
+			r.Rollout = &options
+			r.Environment = release.Environment
+			r.resolvedPublicBuiltins, r.resolvedSecrets = release.PublicBuiltins, release.AdditionalSecrets
+			r.Hooks = nil
+			r.Source = nil
+			input := filepath.Join(dir, r.ID+".rollback-input.compose.json")
+			if err = writeJSON(input, literalCompose(config)); err != nil {
+				return err
+			}
+			err = e.performRollout(ctx, r, dir, []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", input}, env, log)
+			if err != nil {
+				fmt.Fprintln(log, err)
+			}
+			return err
+		}
+		if err = e.validateIdleCandidate(ctx, r, dir, []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}, env); err != nil {
+			return err
 		}
 		args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}
 		if err = e.Run(ctx, dir, args, env, log); err != nil {
@@ -1077,11 +1375,23 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
+		if err = e.validateIdleCandidate(ctx, r, dir, args, env); err != nil {
+			fmt.Fprintln(log, err)
+			return err
+		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), "config", "--quiet"), env, log); err != nil {
 			return err
 		}
-		e.warnDeploymentCapacity(ctx, dir, args, env, log)
-		if err = e.buildImages(ctx, dir, args, env, log); err != nil {
+		e.warnDeploymentCapacity(ctx, dir, args, env, log, r.Rollout)
+		if r.PullLatest {
+			if err = e.requireDockerProxy(ctx, r.OutboundProxy); err != nil {
+				return err
+			}
+			if err = e.Run(ctx, dir, append(append([]string{}, args...), "pull", "--ignore-buildable", "--policy", "always"), env, log); err != nil {
+				return err
+			}
+		}
+		if err = e.buildImages(ctx, dir, args, env, log, false); err != nil {
 			return err
 		}
 		if r.EnvironmentPreview != nil {
@@ -1094,6 +1404,18 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			if err = e.runBeforeHooks(ctx, dir, r.ID, args, env, r.Hooks, log); err != nil {
 				return err
 			}
+		}
+		traffic, err := e.loadTraffic(r.Workload)
+		if err != nil {
+			return err
+		}
+		if r.Kind != "job" && (r.Rollout != nil || len(traffic) > 0) {
+			r.resolvedPublicBuiltins, r.resolvedSecrets = publicBuiltins, bundleSecrets
+			err = e.performRollout(ctx, r, dir, args, env, log)
+			if err != nil {
+				fmt.Fprintln(log, err)
+			}
+			return err
 		}
 		up := []string{"up", "--detach", "--no-build", "--wait", "--wait-timeout", "120", "--remove-orphans"}
 		if r.GuardedDeploy != nil && *r.GuardedDeploy {
@@ -1113,7 +1435,11 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}()
 		}
 		if r.Kind == "job" {
-			up = []string{"up", "--no-build", "--abort-on-container-exit", "--exit-code-from", r.JobService, "--remove-orphans"}
+			err := e.performJob(ctx, jobParent, r, dir, args, env, log)
+			if err != nil {
+				fmt.Fprintln(log, err)
+			}
+			return err
 		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), up...), env, log); err != nil {
 			return err
@@ -1153,5 +1479,8 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		return nil
 	}
-	return e.Run(ctx, dir, append(args, r.Action), env, log)
+	if err := e.Run(ctx, dir, append(args, r.Action), env, log); err != nil {
+		return err
+	}
+	return e.refreshTrafficIngress(ctx, r.Workload, log)
 }

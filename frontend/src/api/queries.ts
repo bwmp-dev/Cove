@@ -1,6 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import { ApiError, request } from "./client";
-import type { AuthConfig, GitDeployKey, GitHubSourceConnection, Node, Operation, OperationLogs, TeamMembership, TeamPermission, Workload, WorkloadObservations, WorkloadRuntime, WorkloadSummary } from "./types";
+import type { AuthConfig, AutoscaleState, GitDeployKey, GitHubSourceConnection, IdlePolicy, Node, Operation, OperationLogs, RestartPolicy, TeamMembership, TeamPermission, Workload, WorkloadImages, WorkloadObservations, WorkloadRuntime, WorkloadSummary } from "./types";
 import { isActive } from "../lib/operations";
 import { rememberTeam } from "../lib/team";
 
@@ -9,6 +9,7 @@ export const keys = {
   authConfig: ["auth-config"] as const,
   nodes: ["nodes"] as const,
   projects: ["projects"] as const,
+  environmentSuspension: (id: string) => ["environments", id, "suspension"] as const,
   workloads: ["workloads"] as const,
   workload: (id: string) => ["workloads", id] as const,
   workloadRuntime: (id: string) => ["workloads", id, "runtime"] as const,
@@ -16,6 +17,10 @@ export const keys = {
   gitDeployKey: (id: string) => ["workloads", id, "git-deploy-key"] as const,
   workloadOwner: (id: string) => ["workloads", id, "owner"] as const,
   workloadObservations: (id: string) => ["workloads", id, "observations"] as const,
+  workloadImages: (id: string) => ["workloads", id, "images"] as const,
+  restartPolicy: (id: string) => ["workloads", id, "restart-policy"] as const,
+  idlePolicy: (id: string) => ["workloads", id, "idle-policy"] as const,
+  autoscalePolicy: (id: string) => ["workloads", id, "autoscale-policy"] as const,
   operations: ["operations"] as const,
   operationLogs: (id: string) => ["operations", id, "logs"] as const,
 };
@@ -149,6 +154,29 @@ export const workloadObservationsQuery = (id: string) =>
     retry: false,
   });
 
+// The panel's health monitor checks about once a minute, so status refreshes on the same cadence.
+export const restartPolicyQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.restartPolicy(id),
+    queryFn: ({ signal }) => request<RestartPolicy>("GET", `/api/workloads/${encodeURIComponent(id)}/restart-policy`, undefined, signal),
+    refetchInterval: 60_000,
+  });
+
+// The saved policy changes only when an idle_policy operation succeeds, so the newest successful one is part of the key.
+export const idlePolicyQuery = (id: string, applied: string | null) =>
+  queryOptions({
+    queryKey: [...keys.idlePolicy(id), applied] as const,
+    queryFn: ({ signal }) => request<IdlePolicy>("GET", `/api/workloads/${encodeURIComponent(id)}/idle-policy`, undefined, signal),
+  });
+
+// The panel samples about once a minute, so polling at half that keeps the shown sample and status current.
+export const autoscalePolicyQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.autoscalePolicy(id),
+    queryFn: ({ signal }) => request<AutoscaleState>("GET", `/api/workloads/${encodeURIComponent(id)}/autoscale-policy`, undefined, signal),
+    refetchInterval: 30_000,
+  });
+
 export const workloadLogsQuery = (id: string) =>
   queryOptions({
     queryKey: keys.workloadLogs(id),
@@ -157,4 +185,18 @@ export const workloadLogsQuery = (id: string) =>
     staleTime: 0,
     gcTime: 0,
     retry: false,
+  });
+
+export const workloadRegistryQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["resource-registry", id] as const,
+    queryFn: ({ signal }) => request<{ registry_id: string }>("GET", `/api/workloads/${id}/registry`, undefined, signal),
+  });
+
+// Cached results only; the API never contacts a registry on read. The key includes the newest finished
+// check, deploy or rollback so a completed check or a new deployment refreshes the result.
+export const workloadImagesQuery = (id: string, refresh: string | null) =>
+  queryOptions({
+    queryKey: [...keys.workloadImages(id), refresh] as const,
+    queryFn: ({ signal }) => request<WorkloadImages>("GET", `/api/workloads/${encodeURIComponent(id)}/images`, undefined, signal),
   });
