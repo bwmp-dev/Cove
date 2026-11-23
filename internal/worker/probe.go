@@ -61,7 +61,7 @@ func Inspect(ctx context.Context) Probe {
 	p.IngressExposures = runtime.GOOS == "linux"
 	p.RoutePolicies = true
 	if runtime.GOOS == "linux" {
-		p.RouteProtocol = 5
+		p.RouteProtocol = 6
 	}
 	p.Rollouts = true
 	p.CPUAutoscale = true

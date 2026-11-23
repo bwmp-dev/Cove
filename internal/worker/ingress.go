@@ -19,9 +19,10 @@ import (
 )
 
 type Route struct {
-	Domain  string `json:"domain"`
-	Service string `json:"service"`
-	Port    int    `json:"port"`
+	Protocol string `json:"protocol,omitempty"`
+	Domain   string `json:"domain"`
+	Service  string `json:"service"`
+	Port     int    `json:"port"`
 	// Auth is an htpasswd bcrypt entry; when set the proxy requires it before forwarding.
 	Auth   string       `json:"auth,omitempty"`
 	Policy *RoutePolicy `json:"policy,omitempty"`
@@ -33,11 +34,22 @@ var domainLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func ValidateRoutes(routes []Route, kind string) error {
 	if len(routes) > 32 || (kind == "job" && len(routes) > 0) {
-		return errors.New("only services can have routes, with at most 32 hostnames")
+		return errors.New("only services can have routes, with at most 32 routes")
 	}
 	seen := map[string]bool{}
 	certificates := map[string]string{}
 	for _, route := range routes {
+		if route.protocol() != "http" {
+			if err := validateTransportRoute(route); err != nil {
+				return err
+			}
+			key := "listener/" + route.listener()
+			if seen[key] {
+				return errors.New("a dedicated listener can have only one route")
+			}
+			seen[key] = true
+			continue
+		}
 		key := route.Domain + "/" + route.pathPrefix()
 		if len(route.Domain) > 253 || !strings.Contains(route.Domain, ".") || seen[key] || !serviceIdentifier.MatchString(route.Service) || route.Port < 1 || route.Port > 65535 || (route.Auth != "" && !routeAuth.MatchString(route.Auth)) {
 			return errors.New("invalid or duplicate route hostname, service or port")
@@ -100,6 +112,10 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 			return "", err
 		}
 		for _, route := range list {
+			if route.IsTransportRoute() {
+				config.addRoute(workload, route)
+				continue
+			}
 			if owner := owners[route.Domain]; owner != "" && owner != workload {
 				return "", errors.New("hostname already belongs to another workload")
 			}
@@ -114,9 +130,12 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 			}
 		}
 	}
+	if err := validateTransportOwners(routes); err != nil {
+		return "", err
+	}
 	config.addPrivateDenials(routes)
 	// Traefik rejects empty nested maps as standalone configuration elements.
-	if len(config.HTTP.Routers) == 0 {
+	if config.empty() {
 		return "{}", nil
 	}
 	data, err := json.Marshal(config)
@@ -151,17 +170,16 @@ type ingressService struct {
 }
 
 type ingressLoadBalancer struct {
-	Servers []map[string]any `json:"servers"`
-	Sticky  map[string]any   `json:"sticky,omitempty"`
+	ServersTransport string           `json:"serversTransport,omitempty"`
+	Servers          []map[string]any `json:"servers"`
+	Sticky           map[string]any   `json:"sticky,omitempty"`
 }
 
 type dynamicIngress struct {
-	TLS  *ingressTLS `json:"tls,omitempty"`
-	HTTP struct {
-		Routers     map[string]ingressRouter     `json:"routers,omitempty"`
-		Services    map[string]ingressService    `json:"services,omitempty"`
-		Middlewares map[string]ingressMiddleware `json:"middlewares,omitempty"`
-	} `json:"http"`
+	TLS  *ingressTLS             `json:"tls,omitempty"`
+	HTTP ingressHTTP             `json:"http"`
+	TCP  *ingressTransportConfig `json:"tcp,omitempty"`
+	UDP  *ingressTransportConfig `json:"udp,omitempty"`
 }
 
 func newIngressConfig() dynamicIngress {
@@ -343,7 +361,7 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	if err := e.ensureIngress(ctx, out); err != nil {
 		return err
 	}
-	if err := e.validatePrivateIngress(ctx, routes); err != nil {
+	if err := e.validateManagedRouteIngress(ctx, routes); err != nil {
 		return err
 	}
 	config, err := e.ingressTraffic(ctx, routes, out)
@@ -424,32 +442,35 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 			}
 		}
 	}
-	path := filepath.Join(e.Root, "ingress.traefik.yaml")
-	if err = os.WriteFile(path, []byte(config), 0600); err != nil {
-		return err
-	}
-	if err = e.Run(ctx, e.Root, []string{"docker", "cp", path, "cove-ingress:/data/routes.next"}, nil, out); err != nil {
-		return err
-	}
-	if err = e.Run(ctx, e.Root, []string{"docker", "start", "cove-ingress"}, nil, out); err != nil {
-		return err
-	}
-	if err = e.Run(ctx, e.Root, []string{"docker", "exec", "cove-ingress", "sh", "-ec", "mkdir -p /data/dynamic; mv /data/routes.next /data/dynamic/routes.yaml"}, nil, out); err != nil {
+	confirmTransports, err := e.needsTransportConfirmation(routes)
+	if err != nil {
 		return err
 	}
 	var desired dynamicIngress
 	if err = json.Unmarshal([]byte(config), &desired); err != nil {
 		return err
 	}
+	if err = e.retireUDPIngress(ctx, desired, out); err != nil {
+		return err
+	}
+	if err = e.publishIngress(ctx, config, out); err != nil {
+		return err
+	}
 	var certificateErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		current, readErr := e.output(ctx, "docker", "exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers")
 		if readErr == nil && ingressAccepted(current, desired) {
-			certificateErr = e.validatePrivateIngress(ctx, routes)
+			certificateErr = e.confirmTransportIngress(ctx, desired, confirmTransports)
+			if certificateErr == nil {
+				certificateErr = e.validateManagedRouteIngress(ctx, routes)
+			}
 			if certificateErr == nil {
 				certificateErr = e.confirmRouteCertificates(ctx, routes)
 			}
 			if certificateErr == nil {
+				if err := e.clearIngressTransition(); err != nil {
+					return err
+				}
 				return e.pruneRouteAuxiliary(ctx, desired, out)
 			}
 		}

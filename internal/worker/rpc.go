@@ -273,7 +273,7 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5":
+	case "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
 		}
@@ -292,6 +292,9 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 		if RouteProtocol(r.Request.Routes) >= 5 {
 			expected = "submit_routes_v5"
+		}
+		if RouteProtocol(r.Request.Routes) >= 6 {
+			expected = "submit_routes_v6"
 		}
 		if r.Method != expected {
 			return RPCResponse{Error: "request requires its dedicated submission method"}

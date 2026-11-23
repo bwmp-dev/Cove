@@ -1,7 +1,7 @@
 import type { Listener } from "../api/ingress-listeners";
 import type { RouteVisibility } from "../api/types";
 import { describedBy } from "../lib/styles";
-import { isPrivateVisibility, listenerBindings, visibilityNames, type PolicyDraft, type RouteRow } from "../lib/workload-form";
+import { isPrivateVisibility, listenerBindings, privateRanges, visibilityNames, type PolicyDraft, type RouteRow } from "../lib/workload-form";
 import { Select } from "./Select";
 import { Field, QueryError } from "./ui";
 
@@ -14,14 +14,13 @@ export interface ListenerChoices {
   retry: () => void;
   retrying: boolean;
   nodeName: string;
+  // Links to the node's Proxy page, where instance administrators manage listeners; omitted while the node is unknown.
+  nodeId?: string;
+  // The node could not be read, so routeProtocol is unknown because of a failure rather than still loading.
+  nodeReadFailed: boolean;
 }
 
 type Change = (patch: Partial<Pick<PolicyDraft, "visibility" | "listener">>) => void;
-
-const privateRanges: Record<"lan" | "tailscale", string> = {
-  lan: "private IPv4 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or private IPv6 addresses outside Tailscale's range",
-  tailscale: "Tailscale addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48)",
-};
 
 function visibilityHint(visibility: PolicyDraft["visibility"], choices: ListenerChoices | undefined) {
   const current = isPrivateVisibility(visibility);
@@ -30,7 +29,7 @@ function visibilityHint(visibility: PolicyDraft["visibility"], choices: Listener
       ? "Saved as a private route. Private listeners can be chosen once the resource exists, on its Domains page."
       : "Public serves this hostname on the node's public HTTP and HTTPS ports. To serve it only on a LAN or Tailscale listener, create the resource first, then set its visibility on the Domains page.";
   }
-  if (choices.routeProtocol === undefined) return "Checking whether the worker on this node supports private routes.";
+  if (choices.routeProtocol === undefined) return choices.nodeReadFailed ? "Private routes can be changed once the worker capabilities of this node can be read." : "Checking whether the worker on this node supports private routes.";
   if (choices.routeProtocol < 5) {
     return current
       ? "Private routes need a newer worker on this node. The saved setting is kept but cannot be changed here, and switching to Public is also checked against the worker. Upgrade it and verify the node again."

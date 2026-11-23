@@ -1,7 +1,7 @@
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
 import type { Route, RoutePolicy } from "../api/types";
-import { cidrList, draftUsesExtensions, emptyPolicy, isPrivateVisibility, isWildcardHostname, routeLimits, visibilitySummary, routesNeedProtocol4, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
+import { cidrList, draftUsesExtensions, draftUsesTimeouts, emptyPolicy, isPrivateVisibility, isWildcardHostname, routeLimits, timeoutLimits, visibilitySummary, routesNeedProtocol4, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type TimeoutDraft, type UpstreamRow } from "../lib/workload-form";
 import { describedBy, inputClass } from "../lib/styles";
 import { CertificateSourceField, UploadedCertificatePicker, type CertificateChoices } from "./RouteCertificatePicker";
 import { RouteExtensionFields } from "./RouteExtensions";
@@ -19,10 +19,11 @@ const noErrors: Record<string, string> = {};
 // the resource's stored certificates; omitted where none can exist yet, such as the create form. routeProtocol: the
 // node worker's route protocol, undefined while unknown; 4 adds wildcard hostnames and the proxy default certificate.
 // listeners: the node's managed listeners for private routes; omitted where they cannot be chosen yet, such as the
-// create form.
-export function RouteEditor({ routes, errors = noErrors, policies, extensions, routeProtocol, saved = noRoutes, certificates, listeners, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; routeProtocol?: number; saved?: Route[]; certificates?: CertificateChoices; listeners?: ListenerChoices; onChange: (routes: RouteRow[]) => void }) {
+// create form. capacity: how many HTTP routes fit beside the resource's TCP and UDP routes.
+export function RouteEditor({ routes, errors = noErrors, policies, extensions, routeProtocol, saved = noRoutes, certificates, listeners, capacity = routeLimits.routes, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; routeProtocol?: number; saved?: Route[]; certificates?: CertificateChoices; listeners?: ListenerChoices; capacity?: number; onChange: (routes: RouteRow[]) => void }) {
   const id = useId();
   const protocol4 = routeProtocol === undefined ? undefined : routeProtocol >= 4;
+  const protocol6 = routeProtocol === undefined ? undefined : routeProtocol >= 6;
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   function update(key: string, patch: Partial<RouteRow>) {
     onChange(routes.map((route) => (route.id === key ? { ...route, ...patch } : route)));
@@ -38,28 +39,8 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, r
   }
   return (
     <div className="space-y-3">
-      {policies === false && (
-        <Notice tone={routesUsePolicies(routes) ? "warn" : "info"} title="Advanced routing needs a newer worker">
-          Path prefixes, headers, IP allowlists, redirects and extra upstreams are not available on this node yet. Upgrade the worker on the node, then verify the node again.
-          {routesUsePolicies(routes) && " Existing advanced settings are kept, but saving them is rejected until the worker supports them."}
-        </Notice>
-      )}
-      {policies === true && extensions === false && (
-        <Notice tone={routesUseExtensions(routes) ? "warn" : "info"} title="Maintenance, error pages and forward-auth need a newer worker">
-          The worker on this node cannot apply them. Upgrade it, then verify the node again.
-          {routesUseExtensions(routes) && " Saved settings are shown under Advanced routing but cannot be changed, and saving is rejected while any remain. Remove them to save other route changes to this worker."}
-        </Notice>
-      )}
-      {protocol4 === false && routesNeedProtocol4(routes) && (
-        <Notice tone="warn" title="Wildcard hostnames and the proxy default certificate need a newer worker">
-          The worker on this node cannot apply them. They are kept as saved, but saving is rejected while any remain. Upgrade the worker and verify the node again, or change those routes to Let&apos;s Encrypt or a stored certificate for an exact hostname to save other changes.
-        </Notice>
-      )}
-      {routeProtocol !== undefined && routeProtocol < 5 && routes.some((route) => isPrivateVisibility(route.policy?.visibility)) && (
-        <Notice tone="warn" title="Private routes need a newer worker">
-          The worker on this node cannot apply LAN or Tailscale visibility. Saved private settings are kept, but saving is rejected until the worker is upgraded and the node verified again. Switching a route to Public is also checked against the worker.
-        </Notice>
-      )}
+      <WorkerNotices routes={routes} policies={policies} extensions={extensions} />
+      <ProtocolNotices routes={routes} routeProtocol={routeProtocol} />
       {routes.length > 0 && (
         <ul aria-label="Routes" className="space-y-3">
           {routes.map((route, index) => {
@@ -153,6 +134,7 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, r
                           errors={errors}
                           certificates={certificates}
                           protocol4={protocol4}
+                          protocol6={protocol6}
                           listeners={listeners}
                           savedVisibility={saved.find((item) => item.domain === route.domain.trim().toLowerCase())?.policy?.visibility}
                           onChange={(patch) => update(route.id, { policy: { ...(route.policy ?? emptyPolicy()), ...patch } })}
@@ -177,11 +159,55 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, r
           })}
         </ul>
       )}
-      <Button disabled={routes.length >= 32} onClick={() => onChange([...routes, { id: crypto.randomUUID(), domain: "", service: "", port: 80 }])}>
+      <Button disabled={routes.length >= capacity} onClick={() => onChange([...routes, { id: crypto.randomUUID(), domain: "", service: "", port: 80 }])}>
         <Plus aria-hidden className="size-3.5" />
         Add route
       </Button>
     </div>
+  );
+}
+
+// Explains settings the node's worker cannot apply; saved ones are kept for the control plane to judge.
+function WorkerNotices({ routes, policies, extensions }: { routes: RouteRow[]; policies?: boolean; extensions?: boolean }) {
+  return (
+    <>
+      {policies === false && (
+        <Notice tone={routesUsePolicies(routes) ? "warn" : "info"} title="Advanced routing needs a newer worker">
+          Path prefixes, headers, IP allowlists, redirects and extra upstreams are not available on this node yet. Upgrade the worker on the node, then verify the node again.
+          {routesUsePolicies(routes) && " Existing advanced settings are kept, but saving them is rejected until the worker supports them."}
+        </Notice>
+      )}
+      {policies === true && extensions === false && (
+        <Notice tone={routesUseExtensions(routes) ? "warn" : "info"} title="Maintenance, error pages and forward-auth need a newer worker">
+          The worker on this node cannot apply them. Upgrade it, then verify the node again.
+          {routesUseExtensions(routes) && " Saved settings are shown under Advanced routing but cannot be changed, and saving is rejected while any remain. Remove them to save other route changes to this worker."}
+        </Notice>
+      )}
+    </>
+  );
+}
+
+// Route protocol 4 adds wildcard hostnames and the proxy default certificate, 5 private routes and 6 upstream timeouts.
+function ProtocolNotices({ routes, routeProtocol }: { routes: RouteRow[]; routeProtocol?: number }) {
+  if (routeProtocol === undefined) return null;
+  return (
+    <>
+      {routeProtocol < 4 && routesNeedProtocol4(routes) && (
+        <Notice tone="warn" title="Wildcard hostnames and the proxy default certificate need a newer worker">
+          The worker on this node cannot apply them. They are kept as saved, but saving is rejected while any remain. Upgrade the worker and verify the node again, or change those routes to Let&apos;s Encrypt or a stored certificate for an exact hostname to save other changes.
+        </Notice>
+      )}
+      {routeProtocol < 5 && routes.some((route) => isPrivateVisibility(route.policy?.visibility)) && (
+        <Notice tone="warn" title="Private routes need a newer worker">
+          The worker on this node cannot apply LAN or Tailscale visibility. Saved private settings are kept, but saving is rejected until the worker is upgraded and the node verified again. Switching a route to Public is also checked against the worker.
+        </Notice>
+      )}
+      {routeProtocol < 6 && routes.some((route) => draftUsesTimeouts(route.policy)) && (
+        <Notice tone="warn" title="Upstream timeouts need a newer worker">
+          The worker on this node cannot apply them. Saved timeouts are kept and can be cleared, but saving them is rejected until the worker is upgraded and the node verified again.
+        </Notice>
+      )}
+    </>
   );
 }
 
@@ -210,11 +236,12 @@ function policySummary(policy: PolicyDraft) {
   if (policy.sticky) parts.push("sticky sessions");
   if (policy.certificateSource === "default") parts.push("proxy default certificate");
   if (policy.certificateSource === "uploaded") parts.push("stored certificate");
+  if (draftUsesTimeouts(policy)) parts.push("upstream timeouts");
   if (isPrivateVisibility(policy.visibility)) parts.unshift(policy.visibility === "lan" ? "LAN only" : "Tailscale only");
   return parts.length > 0 ? parts.join(", ") : "Not configured";
 }
 
-function PolicyFields({ id, route, policy, errors, certificates, protocol4, listeners, savedVisibility, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; certificates?: CertificateChoices; protocol4?: boolean; listeners?: ListenerChoices; savedVisibility?: RoutePolicy["visibility"]; onChange: (patch: Partial<PolicyDraft>) => void }) {
+function PolicyFields({ id, route, policy, errors, certificates, protocol4, protocol6, listeners, savedVisibility, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; certificates?: CertificateChoices; protocol4?: boolean; protocol6?: boolean; listeners?: ListenerChoices; savedVisibility?: RoutePolicy["visibility"]; onChange: (patch: Partial<PolicyDraft>) => void }) {
   const pathError = errors[`${route.id}.path`];
   const redirectError = errors[`${route.id}.redirect`];
   const cidrError = errors[`${route.id}.cidr`];
@@ -312,7 +339,58 @@ function PolicyFields({ id, route, policy, errors, certificates, protocol4, list
           onChange={(event) => onChange({ sticky: event.target.checked })}
         />
       </div>
+
+      <TimeoutFields id={`${id}-timeouts`} routeId={route.id} timeouts={policy.timeouts} protocol6={protocol6} errors={errors} onChange={(timeouts) => onChange({ timeouts })} />
     </div>
+  );
+}
+
+const timeoutFields = [
+  { key: "dial", label: "Upstream connection timeout", hint: `Time allowed to open a connection to the service. Up to ${timeoutLimits.dial} seconds.` },
+  { key: "header", label: "Response header timeout", hint: `Time allowed for the service to send response headers after receiving the request. Up to ${timeoutLimits.header} seconds.` },
+  { key: "idle", label: "Idle pooled connection timeout", hint: `How long an unused keep-alive connection to the service stays open for reuse. It does not limit active WebSocket connections. Up to ${timeoutLimits.idle} seconds.` },
+] as const;
+
+// Positive overrides only: an empty or zero field keeps the proxy default, which is not unlimited. Unless the worker is
+// confirmed to apply timeouts, saved values stay editable so they can be cleared, and empty fields stay disabled.
+function TimeoutFields({ id, routeId, timeouts, protocol6, errors, onChange }: { id: string; routeId: string; timeouts: TimeoutDraft; protocol6?: boolean; errors: Record<string, string>; onChange: (timeouts: TimeoutDraft) => void }) {
+  const capabilityError = errors[`${routeId}.timeouts`];
+  const description = `${id}-description`;
+  return (
+    <fieldset className="min-w-0 space-y-3" aria-describedby={description}>
+      <legend className="text-[13px] font-medium text-fg">Upstream timeouts</legend>
+      <p id={description} className="-mt-2 text-xs text-fg-muted">
+        Seconds. Leave empty or 0 to keep the proxy default. WebSocket and other HTTP upgrades work automatically; no Upgrade headers need to be set.
+        {protocol6 === false && " Setting new timeouts needs a newer worker on this node."}
+        {protocol6 === undefined && " New timeouts can be set once the worker capabilities of the node are known."}
+      </p>
+      <div className="grid gap-4 sm:grid-cols-3">
+        {timeoutFields.map((field) => {
+          const fieldId = `${id}-${field.key}`;
+          const error = errors[`${routeId}.timeouts.${field.key}`];
+          return (
+            <Field key={field.key} id={fieldId} label={field.label} optional error={error} hint={field.hint}>
+              <input
+                id={fieldId}
+                className={`${inputClass} font-mono tabular-nums`}
+                type="number"
+                inputMode="numeric"
+                min={0}
+                max={timeoutLimits[field.key]}
+                step={1}
+                placeholder="Default"
+                value={timeouts[field.key]}
+                disabled={protocol6 !== true && timeouts[field.key] === ""}
+                onChange={(event) => onChange({ ...timeouts, [field.key]: event.target.value })}
+                aria-invalid={error ? true : undefined}
+                aria-describedby={describedBy(fieldId, error, true)}
+              />
+            </Field>
+          );
+        })}
+      </div>
+      {capabilityError && <p className="text-xs text-bad">{capabilityError}</p>}
+    </fieldset>
   );
 }
 
@@ -367,7 +445,8 @@ function HeaderRows({ id, title, description, rows, errorKey, errors, onChange }
   );
 }
 
-function UpstreamRows({ id, route, rows, errors, onChange }: { id: string; route: RouteRow; rows: UpstreamRow[]; errors: Record<string, string>; onChange: (rows: UpstreamRow[]) => void }) {
+// route: the HTTP or TCP/UDP route whose primary target the rows share traffic with; errors are keyed by its id.
+export function UpstreamRows({ id, route, rows, errors, onChange }: { id: string; route: Pick<RouteRow, "id" | "service" | "port">; rows: UpstreamRow[]; errors: Record<string, string>; onChange: (rows: UpstreamRow[]) => void }) {
   const limitError = errors[`${route.id}.upstreams`];
   const primary = route.service.trim() ? `${route.service.trim()}:${Number.isNaN(route.port) ? "" : route.port}` : "the service above";
   return (

@@ -599,9 +599,13 @@ func (e *Engine) Serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	pendingRouteTransition, err := e.loadIngressTransition()
+	if err != nil {
+		return err
+	}
 	if routes, err := e.loadIngress(); err != nil {
 		return err
-	} else if len(routes) > 0 || pendingCertificates {
+	} else if len(routes) > 0 || pendingCertificates || pendingRouteTransition != nil {
 		if err = e.syncIngress(ctx, routes, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "Ingress recovery failed; worker remains available for repairs:", err)
 		}

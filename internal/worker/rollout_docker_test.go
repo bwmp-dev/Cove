@@ -22,6 +22,20 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 4 && os.Args[1] == "transport-route-probe" {
+		if err := runTransportRouteProbe(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) == 3 && os.Args[1] == "transport-route-fixture" {
+		if err := runTransportRouteFixture(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if (len(os.Args) == 7 || len(os.Args) == 8) && os.Args[1] == "private-route-probe" {
 		if err := runPrivateRouteTestProbe(); err != nil {
 			fmt.Fprintln(os.Stderr, err)

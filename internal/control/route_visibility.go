@@ -27,7 +27,7 @@ func (s *Server) routeListeners(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if response.Exposures == nil {
-		http.Error(w, "upgrade and verify the worker before selecting private route listeners", 409)
+		http.Error(w, "upgrade and verify the worker before using these route features", 409)
 		return
 	}
 	listeners := response.Exposures.Settings.Listeners
@@ -114,10 +114,10 @@ func (s *Server) checkIngressListenerClaims(ctx context.Context, tx pgx.Tx, node
 	return nil
 }
 
-func (s *Server) checkPrivateRouteSelection(w http.ResponseWriter, r *http.Request, node string, routes []worker.Route) bool {
+func (s *Server) checkRouteListenerSelection(w http.ResponseWriter, r *http.Request, node string, routes []worker.Route) bool {
 	private := false
 	for _, route := range routes {
-		if route.Policy != nil && (route.Policy.Visibility == "lan" || route.Policy.Visibility == "tailscale") {
+		if route.IsTransportRoute() || route.Policy != nil && (route.Policy.Visibility == "lan" || route.Policy.Visibility == "tailscale" || route.Policy.Timeouts != nil) {
 			private = true
 		}
 	}
@@ -129,13 +129,22 @@ func (s *Server) checkPrivateRouteSelection(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "worker capabilities unavailable", 503)
 		return false
 	}
-	if version < 5 {
-		http.Error(w, "upgrade and verify the worker before selecting private route listeners", 409)
+	if version < worker.RouteProtocol(routes) {
+		http.Error(w, "upgrade and verify the worker before selecting these route features", 409)
 		return false
+	}
+	managed := false
+	for _, route := range routes {
+		if route.IsTransportRoute() || route.Policy != nil && (route.Policy.Visibility == "lan" || route.Policy.Visibility == "tailscale") {
+			managed = true
+		}
+	}
+	if !managed {
+		return true
 	}
 	response, err := s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: "ingress_exposures"})
 	if err != nil || response.Exposures == nil {
-		http.Error(w, "route listeners unavailable; verify the node before saving private routes", 409)
+		http.Error(w, "route listeners unavailable; verify the node before saving listener routes", 409)
 		return false
 	}
 	if err := worker.ValidateRouteListeners(routes, response.Exposures.Settings); err != nil {

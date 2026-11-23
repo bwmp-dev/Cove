@@ -109,10 +109,10 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if !s.checkRouteClaims(w, r.Context(), tx, id, in.Routes) {
+	if !s.checkRouteClaims(w, r.Context(), tx, id, in.NodeID, in.Routes) {
 		return
 	}
-	if !s.checkPrivateRouteSelection(w, r, in.NodeID, in.Routes) {
+	if !s.checkRouteListenerSelection(w, r, in.NodeID, in.Routes) {
 		return
 	}
 	cpu, memory := configuredUsage(in)
@@ -692,6 +692,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if worker.RouteProtocol(request.Routes) >= 5 {
 		method = "submit_routes_v5"
+	}
+	if worker.RouteProtocol(request.Routes) >= 6 {
+		method = "submit_routes_v6"
 	}
 	if cancelRequested {
 		method = "cancel"

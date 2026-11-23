@@ -14,6 +14,7 @@ import { ActionMenu } from "./ActionMenu";
 import { Checkbox } from "./Checkbox";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { CertificateValidity } from "./RouteCertificates";
+import { isTransportRoute } from "../lib/route-transports";
 import { Select } from "./Select";
 import { OperationStateLabel, StatusLabel } from "./status";
 import { Button, Field, LoadingRows, Notice, QueryError, Section, Spinner, SwitchField } from "./ui";
@@ -585,7 +586,8 @@ function ZoneField({ id, zones, zone, value, error, onChange }: { id: string; zo
 }
 
 function HostnamesField({ id, value, error, routes, zone, onChange }: { id: string; value: string; error?: string; routes: Route[]; zone?: CertificateZone; onChange: (hostnames: string) => void }) {
-  const routeHosts = [...new Set(routes.map((route) => route.domain))].filter((domain) => inZone(domain, zone));
+  // TCP and UDP routes have no hostname.
+  const routeHosts = [...new Set(routes.filter((route) => !isTransportRoute(route)).map((route) => route.domain))].filter((domain) => inZone(domain, zone));
   const noHosts = zone ? `No saved route hostnames are in ${zone.domain}` : "This resource has no saved routes";
   return (
     <div className="min-w-0 space-y-1.5">

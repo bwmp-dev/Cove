@@ -243,7 +243,20 @@ export interface RoutePolicy {
   // back to public sends "public" with a null listener.
   visibility?: RouteVisibility;
   listener?: string | null;
+  // Route protocol 6, HTTP routes only. Whole seconds; an omitted or zero field keeps the proxy default. Kept like the
+  // extensions above while omitted; null clears saved timeouts.
+  timeouts?: RouteTimeouts | null;
 }
+
+export interface RouteTimeouts {
+  dial_seconds?: number;
+  response_header_seconds?: number;
+  idle_connection_seconds?: number;
+}
+
+// "tcp" and "udp" routes (route protocol 6) have an empty domain and forward raw bytes from one dedicated managed
+// listener; their policy holds only listener, visibility, upstreams and, for TCP, ip_allow_list. Omitted means HTTP.
+export type RouteProtocolName = "http" | "tcp" | "udp";
 
 export type RouteVisibility = "public" | "lan" | "tailscale";
 
@@ -335,6 +348,8 @@ export interface CertificateChallengeList {
 }
 
 export interface Route {
+  protocol?: RouteProtocolName;
+  // Empty for TCP and UDP routes.
   domain: string;
   service: string;
   port: number;

@@ -26,6 +26,11 @@ type routeCertificateProbe struct {
 
 func RouteProtocol(routes []Route) int {
 	for _, route := range routes {
+		if route.IsTransportRoute() || route.Policy != nil && route.Policy.Timeouts != nil {
+			return 6
+		}
+	}
+	for _, route := range routes {
 		if route.Policy != nil && (route.Policy.Visibility != "" || route.Policy.Listener != "") {
 			return 5
 		}

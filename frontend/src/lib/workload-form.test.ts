@@ -555,3 +555,61 @@ describe("private route visibility", () => {
     expect(refreshCertificateErrors(shown, rows, [], [], 5, listeners)).toEqual({});
   });
 });
+
+describe("HTTP upstream timeouts", () => {
+  const timed: Route = { domain: "app.example.com", service: "web", port: 80, policy: { timeouts: { dial_seconds: 5, idle_connection_seconds: 120 } } };
+  const plainRoute: Route = { domain: "app.example.com", service: "web", port: 80 };
+  const policyOf = (rows: RouteRow[]) => rows[0]?.policy as PolicyDraft;
+
+  it("keeps legacy routes without timeouts in their legacy shape", () => {
+    const rows = routeRows([plainRoute]);
+    expect(sameRoutes(rows, [plainRoute])).toBe(true);
+    expect(validateRoutes(rows, [plainRoute], [], 6).routes).toEqual([plainRoute]);
+  });
+
+  it("keeps an explicit http protocol unchanged and saves it back", () => {
+    const explicit: Route = { ...plainRoute, protocol: "http" };
+    const rows = routeRows([explicit]);
+    expect(sameRoutes(rows, [explicit])).toBe(true);
+    expect(validateRoutes(rows, [explicit], [], 6).routes).toEqual([explicit]);
+    expect(routeRows([plainRoute])[0]).not.toHaveProperty("protocol");
+  });
+
+  it("round-trips saved timeouts and sends only positive overrides", () => {
+    const rows = routeRows([timed]);
+    expect(sameRoutes(rows, [timed])).toBe(true);
+    expect(validateRoutes(rows, [timed], [], 6).routes).toEqual([timed]);
+    policyOf(rows).timeouts = { dial: "0", header: "30", idle: "" };
+    expect(validateRoutes(rows, [timed], [], 6).routes).toEqual([{ ...plainRoute, policy: { timeouts: { response_header_seconds: 30 } } }]);
+  });
+
+  it("clears saved timeouts with an explicit null, also on a route removed and added again", () => {
+    const rows = routeRows([timed]);
+    policyOf(rows).timeouts = { dial: "", header: "", idle: "0" };
+    expect(validateRoutes(rows, [timed], [], 6).routes).toEqual([{ ...plainRoute, policy: { timeouts: null } }]);
+    const readded: RouteRow[] = [{ id: "r2", domain: "app.example.com", service: "web", port: 80 }];
+    expect(validateRoutes(readded, [timed], [], 6).routes).toEqual([{ ...plainRoute, policy: { timeouts: null } }]);
+  });
+
+  it("validates whole seconds within the worker's limits", () => {
+    const rows = routeRows([plainRoute]);
+    const id = rows[0]?.id ?? "";
+    rows[0] = { ...rows[0]!, policy: { ...emptyPolicy(), timeouts: { dial: "601", header: "1.5", idle: "3601" } } };
+    expect(validateRoutes(rows, [], [], 6).errors).toEqual({ [`${id}.timeouts.dial`]: "Enter whole seconds from 0 to 600.", [`${id}.timeouts.header`]: "Enter whole seconds from 0 to 600.", [`${id}.timeouts.idle`]: "Enter whole seconds from 0 to 3600." });
+    rows[0] = { ...rows[0], policy: { ...emptyPolicy(), timeouts: { dial: "600", header: "600", idle: "3600" } } };
+    expect(validateRoutes(rows, [], [], 6).errors).toEqual({});
+  });
+
+  it.each([
+    [5, /need a newer worker/],
+    [undefined, /once the worker capabilities of the node are known/],
+  ])("rejects new timeouts on route protocol %s but keeps saved ones and allows clearing them", (protocol, message) => {
+    const added = routeRows([plainRoute]);
+    added[0] = { ...added[0]!, policy: { ...emptyPolicy(), timeouts: { dial: "5", header: "", idle: "" } } };
+    expect(validateRoutes(added, [plainRoute], [], protocol).errors[`${added[0].id}.timeouts`]).toMatch(message);
+    expect(validateRoutes(routeRows([timed]), [timed], [], protocol).errors).toEqual({});
+    const cleared = routeRows([timed]);
+    policyOf(cleared).timeouts = { dial: "", header: "", idle: "" };
+    expect(validateRoutes(cleared, [timed], [], protocol).routes).toEqual([{ ...plainRoute, policy: { timeouts: null } }]);
+  });
+});

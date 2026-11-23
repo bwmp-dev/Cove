@@ -24,7 +24,7 @@ func validateAutoscale(config workloadInput) error {
 	if !policy.Enabled {
 		return nil
 	}
-	if config.Kind == "job" || config.Rollout == nil || config.Rollout.Strategy != "rolling" || len(config.Routes) == 0 || config.Private != nil || config.Hooks.Enabled() {
+	if config.Kind == "job" || config.Rollout == nil || config.Rollout.Strategy != "rolling" || len(config.Routes) == 0 || worker.HasTransportRoutes(config.Routes) || config.Private != nil || config.Hooks.Enabled() {
 		return errors.New("CPU scaling requires a rolling HTTP service without private networking or deployment hooks")
 	}
 	maximum := map[string]int{}

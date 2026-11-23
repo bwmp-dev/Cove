@@ -1,5 +1,5 @@
 import type { Listener } from "../api/ingress-listeners";
-import type { GitSourceInput, Route, RouteCertificate, RouteForwardAuth, RoutePolicy, RouteVisibility, Workload, WorkloadInput, WorkloadKind } from "../api/types";
+import type { GitSourceInput, Route, RouteCertificate, RouteForwardAuth, RoutePolicy, RouteTimeouts, RouteVisibility, Workload, WorkloadInput, WorkloadKind } from "../api/types";
 import { ownershipProblem, wildcardCovers } from "./certificates";
 import { formatBinding, listenerName } from "./ingress-listeners";
 import type { ResourceDraft } from "./templates";
@@ -258,10 +258,19 @@ export interface PolicyDraft {
   visibility: "" | RouteVisibility;
   // The managed listener of a private route; kept as loaded even when the node's listeners cannot be read.
   listener: string;
+  timeouts: TimeoutDraft;
+}
+
+// Upstream timeouts in seconds as typed; empty or 0 keeps the proxy default.
+export interface TimeoutDraft {
+  dial: string;
+  header: string;
+  idle: string;
 }
 
 export interface RouteRow {
   id: string;
+  protocol?: "http";
   domain: string;
   service: string;
   port: number;
@@ -269,7 +278,8 @@ export interface RouteRow {
   policy?: PolicyDraft;
 }
 
-export const routeLimits = { headers: 32, cidrs: 64, upstreams: 15 } as const;
+export const routeLimits = { headers: 32, cidrs: 64, upstreams: 15, routes: 32 } as const;
+export const timeoutLimits = { dial: 600, header: 600, idle: 3600 } as const;
 export const routePageLimits = { pageBytes: 16_384, totalBytes: 65_536, errorPages: 8, authHeaders: 32, authCookies: 16, authURL: 2048 } as const;
 
 export function emptyForwardAuth(): ForwardAuthDraft {
@@ -277,7 +287,16 @@ export function emptyForwardAuth(): ForwardAuthDraft {
 }
 
 export function emptyPolicy(): PolicyDraft {
-  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", certificateId: "", upstreams: [], sticky: false, visibility: "", listener: "" };
+  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", certificateId: "", upstreams: [], sticky: false, visibility: "", listener: "", timeouts: emptyTimeouts() };
+}
+
+export function emptyTimeouts(): TimeoutDraft {
+  return { dial: "", header: "", idle: "" };
+}
+
+function timeoutDraft(timeouts: RouteTimeouts | null | undefined): TimeoutDraft {
+  const text = (value: number | undefined) => (value ? String(value) : "");
+  return { dial: text(timeouts?.dial_seconds), header: text(timeouts?.response_header_seconds), idle: text(timeouts?.idle_connection_seconds) };
 }
 
 function headerRows(headers: Record<string, string> | undefined): HeaderRow[] {
@@ -315,11 +334,14 @@ function policyDraft(policy: RoutePolicy): PolicyDraft {
     sticky: policy.sticky ?? false,
     visibility: policy.visibility ?? "",
     listener: policy.listener ?? "",
+    timeouts: timeoutDraft(policy.timeouts),
   };
 }
 
+// HTTP routes only; TCP and UDP routes are edited as TransportRows. An explicit "http" protocol is kept so a route saved
+// through the API compares and saves unchanged, while one without it keeps the legacy shape.
 export function routeRows(routes: Route[] | undefined): RouteRow[] {
-  return (routes ?? []).map(({ policy, ...route }) => ({ ...route, id: crypto.randomUUID(), ...(policy ? { policy: policyDraft(policy) } : {}) }));
+  return (routes ?? []).map(({ protocol, policy, domain, service, port, auth }) => ({ id: crypto.randomUUID(), ...(protocol === "http" ? { protocol } : {}), domain, service, port, ...(auth ? { auth } : {}), ...(policy ? { policy: policyDraft(policy) } : {}) }));
 }
 
 export function cidrList(text: string) {
@@ -376,11 +398,28 @@ function policyOf(draft: PolicyDraft): RoutePolicy | undefined {
   if (draft.sticky) policy.sticky = true;
   if (draft.visibility) policy.visibility = draft.visibility;
   if (isPrivateVisibility(draft.visibility)) policy.listener = draft.listener;
+  const timeouts = timeoutsOf(draft.timeouts);
+  if (timeouts) policy.timeouts = timeouts;
   return Object.keys(policy).length > 0 ? policy : undefined;
+}
+
+// Only positive whole numbers are sent; invalid text is reported by validateRoutes before saving.
+function timeoutsOf(draft: TimeoutDraft): RouteTimeouts | undefined {
+  const timeouts: RouteTimeouts = {};
+  const seconds = (text: string) => (/^[0-9]+$/.test(text.trim()) ? Number(text.trim()) : 0);
+  if (seconds(draft.dial) > 0) timeouts.dial_seconds = seconds(draft.dial);
+  if (seconds(draft.header) > 0) timeouts.response_header_seconds = seconds(draft.header);
+  if (seconds(draft.idle) > 0) timeouts.idle_connection_seconds = seconds(draft.idle);
+  return Object.keys(timeouts).length > 0 ? timeouts : undefined;
+}
+
+export function draftUsesTimeouts(draft: PolicyDraft | undefined) {
+  return draft !== undefined && timeoutsOf(draft.timeouts) !== undefined;
 }
 
 function routeOf(row: RouteRow): Route {
   const route: Route = { domain: row.domain.trim().toLowerCase(), service: row.service.trim(), port: row.port };
+  if (row.protocol) route.protocol = row.protocol;
   if (row.auth) route.auth = row.auth;
   const policy = row.policy && policyOf(row.policy);
   if (policy) route.policy = policy;
@@ -409,14 +448,15 @@ const extensionFields = ["maintenance", "error_pages", "forward_auth"] as const;
 // that was deleted and added again, must be sent as null. It also keeps a saved stored certificate or proxy default
 // choice while both certificate_source and certificate_id are omitted, so that selection is cleared with a null
 // certificate_id. A saved private visibility is kept the same way, so a hostname switched back to public names
-// "public" with a null listener. Routes on hostnames without saved extensions, certificate choices or privacy keep the
-// shape older workers accept.
+// "public" with a null listener, and saved upstream timeouts are cleared with null. Routes on hostnames without saved
+// extensions, certificate choices, privacy or timeouts keep the shape older workers accept.
 function withRemovals(route: Route, saved: Route[]): Route {
   const matches = saved.filter((item) => item.domain === route.domain);
   const removed = extensionFields.filter((field) => route.policy?.[field] === undefined && matches.some((item) => item.policy?.[field] != null));
   const certificateRemoved = route.policy?.certificate_source === undefined && matches.some((item) => item.policy?.certificate_id || item.policy?.certificate_source === "default");
   const privacyRemoved = route.policy?.visibility === undefined && matches.some((item) => isPrivateVisibility(item.policy?.visibility) || item.policy?.listener);
-  if (removed.length === 0 && !certificateRemoved && !privacyRemoved) return route;
+  const timeoutsRemoved = route.policy?.timeouts === undefined && matches.some((item) => item.policy?.timeouts != null);
+  if (removed.length === 0 && !certificateRemoved && !privacyRemoved && !timeoutsRemoved) return route;
   const policy: RoutePolicy = { ...route.policy };
   for (const field of removed) policy[field] = null;
   if (certificateRemoved) policy.certificate_id = null;
@@ -424,6 +464,7 @@ function withRemovals(route: Route, saved: Route[]): Route {
     policy.visibility = "public";
     policy.listener = null;
   }
+  if (timeoutsRemoved) policy.timeouts = null;
   return { ...route, policy };
 }
 
@@ -631,19 +672,39 @@ function policyErrors(row: RouteRow, domain: string, service: string, errors: Re
     if (rows.length > routeLimits.headers) errors[`${row.id}.${key}`] = `Use at most ${routeLimits.headers} headers.`;
     headerErrors(rows, `${row.id}.${key}`, draft.securityHeaders, errors);
   }
-  const cidrs = cidrList(draft.ipAllowList);
-  const invalid = cidrs.find((cidr) => !isCIDR(cidr));
-  if (cidrs.length > routeLimits.cidrs) errors[`${row.id}.cidr`] = `Use at most ${routeLimits.cidrs} ranges.`;
-  else if (invalid) errors[`${row.id}.cidr`] = `${invalid} is not an IPv4 or IPv6 CIDR range such as 10.0.0.0/8.`;
-  if (draft.upstreams.length > routeLimits.upstreams) errors[`${row.id}.upstreams`] = `Use at most ${routeLimits.upstreams} additional upstreams.`;
-  const targets = new Set([`${service}:${row.port}`]);
-  for (const target of draft.upstreams) {
+  cidrErrors(row.id, draft.ipAllowList, errors);
+  upstreamErrors(row.id, service, row.port, draft.upstreams, errors);
+  timeoutErrors(row.id, draft.timeouts, errors);
+}
+
+export function isComposeService(value: string) {
+  return composeService.test(value);
+}
+
+export function upstreamErrors(key: string, service: string, port: number, upstreams: UpstreamRow[], errors: Record<string, string>) {
+  if (upstreams.length > routeLimits.upstreams) errors[`${key}.upstreams`] = `Use at most ${routeLimits.upstreams} additional upstreams.`;
+  const targets = new Set([`${service}:${port}`]);
+  for (const target of upstreams) {
     const name = target.service.trim();
-    const field = `${row.id}.upstream.${target.id}`;
+    const field = `${key}.upstream.${target.id}`;
     if (!composeService.test(name)) errors[field] = "Enter the Compose service name.";
     else if (!Number.isInteger(target.port) || target.port < 1 || target.port > 65535) errors[field] = "Use a container port from 1 to 65535.";
     else if (targets.has(`${name}:${target.port}`)) errors[field] = "This service and port is already a target of the route.";
     targets.add(`${name}:${target.port}`);
+  }
+}
+
+export function cidrErrors(key: string, text: string, errors: Record<string, string>) {
+  const cidrs = cidrList(text);
+  const invalid = cidrs.find((cidr) => !isCIDR(cidr));
+  if (cidrs.length > routeLimits.cidrs) errors[`${key}.cidr`] = `Use at most ${routeLimits.cidrs} ranges.`;
+  else if (invalid) errors[`${key}.cidr`] = `${invalid} is not an IPv4 or IPv6 CIDR range such as 10.0.0.0/8.`;
+}
+
+function timeoutErrors(key: string, draft: TimeoutDraft, errors: Record<string, string>) {
+  for (const [field, max] of [["dial", timeoutLimits.dial], ["header", timeoutLimits.header], ["idle", timeoutLimits.idle]] as const) {
+    const text = draft[field].trim();
+    if (text !== "" && (!/^[0-9]+$/.test(text) || Number(text) > max)) errors[`${key}.timeouts.${field}`] = `Enter whole seconds from 0 to ${max}.`;
   }
 }
 
@@ -720,6 +781,12 @@ function wildcardErrors(rows: RouteRow[], routes: Route[], errors: Record<string
 
 export const visibilityNames: Record<RouteVisibility, string> = { public: "Public", lan: "LAN", tailscale: "Tailscale" };
 
+// The source ranges the proxy accepts on LAN and Tailscale listeners, for HTTP routes and TCP routes alike.
+export const privateRanges: Record<"lan" | "tailscale", string> = {
+  lan: "private IPv4 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or private IPv6 addresses outside Tailscale's range",
+  tailscale: "Tailscale addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48)",
+};
+
 export function listenerBindings(listener: Listener) {
   return listener.bindings.length > 0 ? listener.bindings.map(formatBinding).join(", ") : "no bindings";
 }
@@ -778,6 +845,20 @@ function visibilityErrors(rows: RouteRow[], routes: Route[], saved: Route[], rou
   });
 }
 
+// Upstream timeouts need route protocol 6, so they are refused while it is unknown too. Timeouts saved on the same
+// hostname and path are kept for the control plane to judge; clearing them is always allowed.
+function timeoutProtocolErrors(rows: RouteRow[], routes: Route[], saved: Route[], routeProtocol: number | undefined, errors: Record<string, string>) {
+  if (routeProtocol !== undefined && routeProtocol >= 6) return;
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    const timeouts = route?.policy?.timeouts;
+    if (!route || !timeouts) return;
+    const unchanged = saved.some((item) => item.domain === route.domain && (item.policy?.path_prefix ?? "") === (route.policy?.path_prefix ?? "") && JSON.stringify(canonical(item.policy?.timeouts ?? null)) === JSON.stringify(canonical(timeouts)));
+    if (unchanged) return;
+    errors[`${row.id}.timeouts`] = routeProtocol === undefined ? "Upstream timeouts can be set once the worker capabilities of the node are known. Clear them or try again later." : "Upstream timeouts need a newer worker on this node. Upgrade it and verify the node again, or clear them.";
+  });
+}
+
 // Whether the routes use anything that needs route protocol 4: a wildcard hostname or the proxy default certificate.
 export function routesNeedProtocol4(rows: RouteRow[]) {
   return rows.some((row) => isWildcardHostname(row.domain.trim()) || row.policy?.certificateSource === "default");
@@ -808,6 +889,7 @@ export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificat
   protocolErrors(rows, routes, saved, routeProtocol, errors);
   wildcardErrors(rows, routes, errors);
   visibilityErrors(rows, routes, saved, routeProtocol, listeners, errors);
+  timeoutProtocolErrors(rows, routes, saved, routeProtocol, errors);
   return Object.keys(errors).length > 0 ? { errors } : { routes: routes.map((route) => withRemovals(route, saved)), errors };
 }
 
@@ -826,7 +908,7 @@ export function refreshCertificateErrors(errors: Record<string, string>, rows: R
   return next;
 }
 
-function canonical(value: unknown): unknown {
+export function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === "object") {
     return Object.fromEntries(

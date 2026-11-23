@@ -35,7 +35,7 @@ import { errorMessage, isStatus } from "../api/client";
 import { useCancelOperation, useQueueOperation } from "../api/mutations";
 import { projectsQuery, useAssignEnvironment, type Project } from "../api/projects";
 import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
-import type { Operation, WorkerOperation, Workload } from "../api/types";
+import type { Operation, Route, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeleteResource } from "../components/DeleteResource";
@@ -57,6 +57,7 @@ import { actionLabels, activeOperation, allowedActions, isActive, isSuspensionAc
 import { holdBlocks, holdReason, type EnvironmentHold } from "../lib/suspension";
 import { idleBlocks, type IdleHold } from "../lib/idle";
 import { resultSummary } from "../lib/rollouts";
+import { isTransportRoute, transportSummary } from "../lib/route-transports";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -268,6 +269,26 @@ function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: s
   };
 }
 
+// The first HTTP hostname links to the site; a resource with only TCP and UDP routes names its first listener instead,
+// because raw routes have no URL.
+function HeaderRoute({ routes }: { routes: Route[] }) {
+  const first = routes.find((route) => !isTransportRoute(route)) ?? routes[0];
+  if (!first) return null;
+  const more = routes.length > 1 && <span className="text-fg-subtle"> +{routes.length - 1}</span>;
+  return (
+    <span>
+      {isTransportRoute(first) ? (
+        <span className="break-words">{transportSummary(first)}</span>
+      ) : (
+        <a href={`https://${first.domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
+          {first.domain}
+        </a>
+      )}
+      {more}
+    </span>
+  );
+}
+
 function ResourceHeader({ workload }: { workload: Workload }) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const nodes = useQuery(nodesQuery);
@@ -334,14 +355,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
                 <RelativeTime value={latest.created_at} className="text-fg-subtle" />
               </span>
             )}
-            {workload.routes?.[0] && (
-              <span key="domain">
-                <a href={`https://${workload.routes[0].domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
-                  {workload.routes[0].domain}
-                </a>
-                {workload.routes.length > 1 && <span className="text-fg-subtle"> +{workload.routes.length - 1}</span>}
-              </span>
-            )}
+            {workload.routes?.length ? <HeaderRoute key="domain" routes={workload.routes} /> : null}
             {workload.manually_stopped && (
               <span key="stopped" className="text-warn">
                 Manually stopped, automatic deployments paused
@@ -636,11 +650,17 @@ export function ResourceOverview() {
                     term: "Domains",
                     value: workload.routes?.length ? (
                       <div className="space-y-1">
-                        {workload.routes.map((item) => (
-                          <a key={item.domain} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
-                            {item.domain}
-                          </a>
-                        ))}
+                        {workload.routes.map((item) =>
+                          isTransportRoute(item) ? (
+                            <span key={`${item.protocol}-${item.policy?.listener ?? ""}`} className="block break-words">
+                              {transportSummary(item)}
+                            </span>
+                          ) : (
+                            <a key={`${item.domain}${item.policy?.path_prefix ?? ""}`} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
+                              {item.domain}
+                            </a>
+                          ),
+                        )}
                       </div>
                     ) : (
                       <Link to="/resources/$resourceId/domains" params={{ resourceId: workload.id }} className="rounded text-fg-muted underline underline-offset-4 hover:text-fg">

@@ -81,7 +81,7 @@ func privateRouteRanges(visibility string) []string {
 }
 
 func (r Route) privateRoute() bool {
-	return r.Policy != nil && (r.Policy.Visibility == "lan" || r.Policy.Visibility == "tailscale")
+	return !r.IsTransportRoute() && r.Policy != nil && (r.Policy.Visibility == "lan" || r.Policy.Visibility == "tailscale")
 }
 
 func validatePrivateRoute(r Route) error {
@@ -109,7 +109,13 @@ func validatePrivateRoute(r Route) error {
 
 func validateRouteVisibilities(routes []Route) error {
 	for i, route := range routes {
+		if route.IsTransportRoute() {
+			continue
+		}
 		for _, other := range routes[i+1:] {
+			if other.IsTransportRoute() {
+				continue
+			}
 			if !RouteDomainsOverlap(route.Domain, other.Domain) {
 				continue
 			}
@@ -163,15 +169,15 @@ func ValidateRouteListeners(routes []Route, settings IngressExposureSettings) er
 		if route.Policy != nil {
 			visibility, listener = route.Policy.Visibility, route.Policy.Listener
 		}
-		if err := validateRouteListener("http", visibility, listener, settings); err != nil {
+		if err := validateRouteListener(route.protocol(), visibility, listener, settings); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (e *Engine) validatePrivateIngress(ctx context.Context, routes map[string][]Route) error {
-	if len(privateRouteGuards(routes)) == 0 {
+func (e *Engine) validateManagedRouteIngress(ctx context.Context, routes map[string][]Route) error {
+	if len(privateRouteGuards(routes)) == 0 && len(transportRouteReferences(routes)) == 0 {
 		return nil
 	}
 	settings, err := e.loadIngressExposures()
@@ -223,14 +229,18 @@ func (e *Engine) validatePrivateIngress(ctx context.Context, routes map[string][
 	}
 	for _, list := range routes {
 		for _, route := range list {
-			if !route.privateRoute() {
+			if !route.privateRoute() && !route.IsTransportRoute() {
 				continue
 			}
 			for _, listener := range settings.Settings.Listeners {
 				if listener.ID != route.Policy.Listener {
 					continue
 				}
-				current := host.PortBindings[strconv.Itoa(settings.Ports[listener.ID])+"/tcp"]
+				protocol := "tcp"
+				if listener.Protocol == "udp" {
+					protocol = "udp"
+				}
+				current := host.PortBindings[strconv.Itoa(settings.Ports[listener.ID])+"/"+protocol]
 				expected := map[string]bool{}
 				for _, binding := range listener.Bindings {
 					expected[binding.Address+"/"+strconv.Itoa(binding.Port)] = true
@@ -273,6 +283,7 @@ func (e *Engine) validatePrivateIngress(ctx context.Context, routes map[string][
 		return err
 	}
 	owned := map[string]ingressRouter{}
+	var previousConfig dynamicIngress
 	guards := privateRouteGuards(previous)
 	for name, guard := range privateRouteGuards(routes) {
 		guards[name] = guard
@@ -281,20 +292,29 @@ func (e *Engine) validatePrivateIngress(ctx context.Context, routes map[string][
 	file, err := os.Open(filepath.Join(e.Root, "ingress.traefik.yaml"))
 	if err == nil {
 		defer file.Close()
-		var previous dynamicIngress
-		if err := json.NewDecoder(file).Decode(&previous); err != nil {
+		if err := json.NewDecoder(file).Decode(&previousConfig); err != nil {
 			return errors.New("previous private-host reservations are unreadable")
-		}
-		for name, router := range previous.HTTP.Routers {
-			owned[name] = router
-			if strings.HasPrefix(name, "cove-route-deny-") {
-				guards[name] = router
-			}
 		}
 	} else if !os.IsNotExist(err) {
 		return errors.New("previous private-host reservations are unavailable")
 	}
-	return validatePrivateLiveData(data, guards, owned)
+	checkpoint, err := e.loadIngressTransition()
+	if err != nil {
+		return err
+	}
+	mergeIngressOwnership(&previousConfig, checkpoint)
+	for name, router := range previousConfig.HTTP.Routers {
+		owned[name] = router
+		if strings.HasPrefix(name, "cove-route-deny-") {
+			guards[name] = router
+		}
+	}
+	if len(privateRouteGuards(routes)) > 0 {
+		if err := validatePrivateLiveData(data, guards, owned); err != nil {
+			return err
+		}
+	}
+	return validateTransportLiveData(data, transportRouteReferences(routes), previousConfig)
 }
 
 func (e *Engine) validatePendingRouteListeners(settings IngressExposureSettings) error {

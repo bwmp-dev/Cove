@@ -319,7 +319,9 @@ func (e *Engine) customContext(ctx context.Context, proxy proxyInfo, files []pro
 	}
 	for _, list := range routes {
 		for _, route := range list {
-			c.Domains = append(c.Domains, route.Domain)
+			if !route.IsTransportRoute() {
+				c.Domains = append(c.Domains, route.Domain)
+			}
 		}
 	}
 	if proxy.PanelDomain != "" && proxy.PanelDomain != "<no value>" {
@@ -410,6 +412,9 @@ func (e *Engine) ChangeIngressConfig(ctx context.Context, r IngressConfigRequest
 		return refused("unavailable", "managed route inventory is unreadable")
 	}
 	if r.Content != nil {
+		if err := validateTransportCustomConfig(*r.Content, transportRouteReferences(routes)); err != nil {
+			return refused("invalid", err.Error())
+		}
 		if err := validatePrivateCustomConfig(*r.Content, len(privateRouteGuards(routes)) > 0); err != nil {
 			return refused("invalid", err.Error())
 		}
@@ -910,6 +915,9 @@ func (e *Engine) customHostConflict(previous, desired []Route) error {
 	}
 	sort.Strings(names)
 	for _, route := range desired {
+		if route.IsTransportRoute() {
+			continue
+		}
 		if slices.ContainsFunc(previous, func(owned Route) bool { return owned.Domain == route.Domain }) {
 			continue
 		}
