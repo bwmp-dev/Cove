@@ -25,7 +25,7 @@ Cove is a custom, lightweight deployment control plane, not a wrapper around ano
 3. Dashboard, projects/environments, Git automation, local workloads, and routing.
 4. Database and volume backups, tested restores, dedicated build nodes, and Coolify migration.
 
-Initial workers target Linux with systemd and OpenSSH. Other platforms and jump hosts are later work. A node with Docker access is a privileged infrastructure identity even when its SSH command is restricted.
+Workers target Linux amd64/arm64 with systemd and OpenSSH; automatic installers cover Ubuntu/Debian and supported EL distributions. Single-hop bastions use independently pinned SSH identities. A node with Docker access is a privileged infrastructure identity even when its SSH command is restricted.
 
 ## Implemented release scope
 

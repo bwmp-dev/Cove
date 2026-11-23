@@ -3,6 +3,13 @@ set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run this installer as root.' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Linux is required.' >&2; exit 1; }
 command -v systemctl >/dev/null || { echo 'systemd is required.' >&2; exit 1; }
+if [ -f /etc/os-release ]; then . /etc/os-release; fi
+case "${ID:-}" in
+ ubuntu|debian) manager=apt; docker_distribution=$ID; ssh_service=ssh ;;
+ rhel) manager=dnf; docker_distribution=rhel; ssh_service=sshd ;;
+ almalinux|rocky|centos) manager=dnf; docker_distribution=centos; ssh_service=sshd ;;
+ *) manager=manual; docker_distribution=; ssh_service=sshd ;;
+esac
 command -v flock >/dev/null || { echo 'Install util-linux (flock) before retrying.' >&2; exit 1; }
 exec 9>/run/cove-worker-update.lock
 flock -n 9 || { echo 'A worker update is already running; retry later.' >&2; exit 1; }
@@ -18,21 +25,48 @@ if [ -f /etc/cove/node-id ] && [ "$(cat /etc/cove/node-id)" != '{{.ID}}' ]; then
  echo 'This machine belongs to another node enrollment.' >&2; exit 1
 fi
 echo 'Preparing Cove worker: Docker/Compose, dedicated SSH account, and worker executable.'
-if ! command -v jq >/dev/null || ! command -v git >/dev/null || ! command -v sshd >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+if ! command -v curl >/dev/null || ! command -v jq >/dev/null || ! command -v git >/dev/null || ! command -v sshd >/dev/null || ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+ if [ "$manager" = apt ]; then
  command -v apt-get >/dev/null || { echo 'Install Docker Compose v2, Docker Buildx, OpenSSH, curl, and jq before retrying on this distribution.' >&2; exit 1; }
  apt-get update
  apt-get install -y --no-upgrade ca-certificates curl jq openssh-server git
- if ! command -v docker >/dev/null; then apt-get install -y docker.io; fi
- if ! docker compose version >/dev/null 2>&1; then
-  if apt-cache show docker-compose-v2 >/dev/null 2>&1; then apt-get install -y docker-compose-v2
-  elif apt-cache show docker-compose-plugin >/dev/null 2>&1; then apt-get install -y docker-compose-plugin
-  else echo 'Install Docker Compose v2 for this distribution and rerun.' >&2; exit 1; fi
+ if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+  if ! apt-cache show docker-compose-plugin >/dev/null 2>&1 || ! apt-cache show docker-buildx-plugin >/dev/null 2>&1 || { ! command -v docker >/dev/null && ! apt-cache show docker-ce >/dev/null 2>&1; }; then
+  install -d -m 0755 /etc/apt/keyrings
+  if [ ! -e /etc/apt/keyrings/cove-docker.asc ]; then
+   curl --fail --silent --show-error --proto '=https' --tlsv1.2 "https://download.docker.com/linux/$docker_distribution/gpg" -o /etc/apt/keyrings/cove-docker.asc
+   chmod 0644 /etc/apt/keyrings/cove-docker.asc
+  fi
+  codename=${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}
+  [ -n "$codename" ] || { echo 'Distribution codename unavailable.' >&2; exit 1; }
+  if [ ! -e /etc/apt/sources.list.d/cove-docker.list ]; then
+   printf 'deb [arch=%s signed-by=/etc/apt/keyrings/cove-docker.asc] https://download.docker.com/linux/%s %s stable\n' "$(dpkg --print-architecture)" "$docker_distribution" "$codename" > /etc/apt/sources.list.d/cove-docker.list
+  fi
+  apt-get update
+  fi
+  if command -v docker >/dev/null; then
+   apt-get install -y --no-upgrade docker-buildx-plugin docker-compose-plugin
+  else
+   apt-get install -y --no-upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  fi
  fi
- # Git sources build with a dedicated Buildx builder; distribution Docker packages ship it separately.
- if ! docker buildx version >/dev/null 2>&1; then
-  if apt-cache show docker-buildx >/dev/null 2>&1; then apt-get install -y --no-upgrade docker-buildx
-  elif apt-cache show docker-buildx-plugin >/dev/null 2>&1; then apt-get install -y --no-upgrade docker-buildx-plugin
-  else echo 'Install Docker Buildx for this distribution and rerun.' >&2; exit 1; fi
+ elif [ "$manager" = dnf ]; then
+  command -v dnf >/dev/null || { echo 'DNF is required.' >&2; exit 1; }
+  case "${VERSION_ID%%.*}" in 9|10) ;; *) echo 'Automatic RPM installation requires EL 9 or 10.' >&2; exit 1 ;; esac
+  dnf install -y ca-certificates jq openssh-server git util-linux shadow-utils dnf-plugins-core
+  if ! command -v curl >/dev/null; then dnf install -y curl; fi
+  if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+   if [ ! -e /etc/yum.repos.d/docker-ce.repo ]; then
+    dnf config-manager --add-repo "https://download.docker.com/linux/$docker_distribution/docker-ce.repo"
+   fi
+   if command -v docker >/dev/null; then
+    dnf install -y docker-buildx-plugin docker-compose-plugin
+   else
+    dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+   fi
+  fi
+ else
+  echo 'Install Docker Compose v2, Docker Buildx, OpenSSH, curl, Git and jq before retrying on this distribution.' >&2; exit 1
  fi
 fi
 install -d -m 700 /etc/cove
@@ -44,7 +78,7 @@ getent group docker >/dev/null || groupadd --system docker
 usermod -aG docker cove
 systemctl start docker
 ssh-keygen -A
-if ! systemctl is-active --quiet ssh && ! systemctl is-active --quiet sshd; then systemctl start ssh; fi
+if ! systemctl is-active --quiet ssh && ! systemctl is-active --quiet sshd; then systemctl start "$ssh_service"; fi
 scratch=$(mktemp -d)
 drained=false
 replaced=false
@@ -107,6 +141,17 @@ mv -f /usr/local/bin/cove-worker.new /usr/local/bin/cove-worker
 install -d -m 700 -o cove -g cove /var/lib/cove/.ssh
 printf '%s\n' 'restrict,command="/usr/local/bin/cove-worker rpc" {{.PublicKey}}' > "$scratch/authorized_keys"
 install -m 600 -o cove -g cove "$scratch/authorized_keys" /var/lib/cove/.ssh/authorized_keys
+if command -v selinuxenabled >/dev/null && selinuxenabled; then
+ if ! command -v semanage >/dev/null || ! command -v restorecon >/dev/null || ! command -v matchpathcon >/dev/null; then
+  [ "$manager" = dnf ] || { echo 'Install SELinux policy tools before retrying.' >&2; exit 1; }
+  dnf install -y policycoreutils-python-utils
+ fi
+ case "$(matchpathcon -n /var/lib/cove/.ssh/authorized_keys)" in
+  *:ssh_home_t:*) ;;
+  *) semanage fcontext -a -t ssh_home_t '/var/lib/cove/.ssh(/.*)?' ;;
+ esac
+ restorecon -RF /var/lib/cove/.ssh /usr/local/bin/cove-worker
+fi
 cat > /etc/systemd/system/cove-worker.service <<'SERVICE'
 [Unit]
 Description=Cove worker

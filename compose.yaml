@@ -55,8 +55,8 @@ services:
       - 80:80
       - 443:443
     volumes:
-      - ./deploy/traefik.yaml:/etc/traefik/traefik.yaml:ro
-      - ./deploy/traefik-panel.yaml:/etc/traefik/panel.yaml:ro
+      - ./deploy/traefik.yaml:/etc/traefik/traefik.yaml:ro,Z
+      - ./deploy/traefik-panel.yaml:/etc/traefik/panel.yaml:ro,Z
       - certificates:/data
     depends_on:
       - cove
