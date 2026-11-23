@@ -1,6 +1,5 @@
 """Exercise panel snapshots and recovery inside a disposable isolated Docker daemon."""
 import os
-import io
 from pathlib import Path
 import secrets
 import subprocess
@@ -24,8 +23,7 @@ def main():
             env=os.environ | {'GOOS': 'linux', 'GOARCH': 'amd64', 'CGO_ENABLED': '0'})
         historical = Path(temporary) / 'old-source'
         historical.mkdir()
-        archive = run('git', 'archive', 'bec8ceb7284b78282a1753bb390eda348fac8583', 'cmd', 'internal', 'go.mod', 'go.sum', stdout=subprocess.PIPE).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as contents:
+        with tarfile.open(ROOT / 'scripts/testdata/panel-recovery/previous-panel.tar.gz', 'r:gz') as contents:
             contents.extractall(historical, filter='data')
         old_binary = Path(temporary) / 'cove-old'
         subprocess.run(['go', 'build', '-o', str(old_binary), './cmd/cove'], cwd=historical, check=True,

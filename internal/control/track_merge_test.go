@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -151,13 +151,31 @@ func TestMergedSchemaFreshAndBothUpgradePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, ref := range []string{"", "aef07fd9cd3a905599fccb98bb51d9d8fe6a8e32", "d09be3ce5e1d98e5dfba90a62cf78ee3e79332a0", "1cc37b32636f2ed374ace5b8f5eeffff9a53b21b", "4c30c1ebaef9a09b7b14cfbad92036501e84c08c", "e50327eb96832f9d012a549774c3228305fa6eaf", "c02877174627168a8f8c711bd8b857d63f41b421", "9388a48", "16af262", "fa9b0a9", "54a388d", "6ea25f3", "314bddb"} {
-		t.Run(ref, func(t *testing.T) {
+	const directory = "testdata/schema"
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := []string{""}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			snapshots = append(snapshots, entry.Name())
+		}
+	}
+	if len(snapshots) == 1 {
+		t.Fatal("no upgrade schema snapshots found")
+	}
+	for _, snapshot := range snapshots {
+		name := snapshot
+		if name == "" {
+			name = "fresh"
+		}
+		t.Run(name, func(t *testing.T) {
 			db := openTestDatabase(t, database)
-			if ref != "" {
-				old, err := exec.Command("git", "show", ref+":internal/control/schema.sql").Output()
+			if snapshot != "" {
+				old, err := os.ReadFile(filepath.Join(directory, snapshot))
 				if err != nil {
-					t.Fatal("read pinned schema", err)
+					t.Fatal("read schema snapshot", err)
 				}
 				if _, err = db.Exec(t.Context(), string(old)); err != nil {
 					t.Fatal(err)
@@ -175,7 +193,7 @@ func TestMergedSchemaFreshAndBothUpgradePaths(t *testing.T) {
 			if err := db.QueryRow(t.Context(), `SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name=ANY(ARRAY['access_tokens','team_roles','account_totp','configuration_drafts','template_repositories','project_status_shares'])`).Scan(&count); err != nil || count != 6 {
 				t.Fatal("missing merged tables", count, err)
 			}
-			if ref != "" {
+			if snapshot != "" {
 				var name string
 				if err := db.QueryRow(t.Context(), `SELECT name FROM projects WHERE id='upgrade-sentinel'`).Scan(&name); err != nil || name != "Preserved" {
 					t.Fatal("upgrade lost data", name, err)
