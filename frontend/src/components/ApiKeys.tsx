@@ -12,7 +12,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { CopyButton } from "./CopyButton";
 import { StatusLabel } from "./status";
 import { Button, Field, LoadingRows, Notice, QueryError } from "./ui";
-import { ChoiceGroup } from "./WorkloadForm";
+import { ChoiceGroup } from "./ChoiceGroup";
 
 const levelLabels: Record<ApiScopeLevel, { title: string; description: string }> = {
   1: { title: "Read", description: "Needs viewer access." },

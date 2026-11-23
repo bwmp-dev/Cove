@@ -11,12 +11,14 @@ import {
   Container,
   FileClock,
   FileCode,
+  FolderOpen,
   Gauge,
   GitPullRequest,
   Globe,
   History,
   KeyRound,
   LayoutDashboard,
+  ChartLine,
   Network,
   Play,
   RotateCcw,
@@ -39,22 +41,27 @@ import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queri
 import { ResourceExec } from "../components/ResourceExec";
 import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
+import { useCapacityGate } from "../components/CapacityCheck";
 import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { DeployReview } from "../components/DeployReview";
 import { ReasonField } from "../components/ReasonField";
 import { DeleteResource } from "../components/DeleteResource";
+import { LiveLogs } from "../components/LiveLogs";
+import { LogHistory } from "../components/LogHistory";
 import { LogViewer } from "../components/LogViewer";
 import { OperationResultNotice } from "../components/OperationResultNotice";
+import { WorkloadMetricHistory } from "../components/MetricHistory";
 import { OperationsTable } from "../components/OperationsTable";
 import { Notes } from "../components/Notes";
 import { RelativeTime } from "../components/RelativeTime";
-import { ContainerLogs, RuntimeContainers } from "../components/Runtime";
+import { RouteTraffic } from "../components/RouteTraffic";
+import { RuntimeContainers } from "../components/Runtime";
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
-import { can, currentTeam, managesTeam } from "../lib/permissions";
+import { backupRights, can, currentTeam, managesTeam } from "../lib/permissions";
 import { useSession } from "../lib/session";
 import { actionLabels, activeOperation, allowedActions, isActive, reasonError, stateLabels, workerResult, workloadKind } from "../lib/operations";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
@@ -197,7 +204,9 @@ function useResourceActions(workload: Workload) {
   const [confirmDeploy, setConfirmDeploy] = useState(false);
   const kind = workloadKind(workload.kind);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
-  const blocked = !online || Boolean(active) || queue.isPending || operations.isPending;
+  // The capacity check runs first; a passed or skipped check opens the deployment review, which still asks for a reason.
+  const capacity = useCapacityGate({ workloadId: workload.id, actionLabel: kind === "job" ? "Deploy and run" : "Deploy", onDeploy: () => setConfirmDeploy(true) });
+  const blocked = !online || Boolean(active) || queue.isPending || operations.isPending || capacity.checking;
   const statusId = useId();
   const deployLabel = kind === "job" ? "Deploy and run" : actionLabels.deploy;
   const queuedAction = queue.variables?.action;
@@ -208,7 +217,7 @@ function useResourceActions(workload: Workload) {
         <div className="flex flex-wrap items-center gap-2">
           {allowedActions(kind).filter(action => !workload.preview_source_id || action === "stop").map((action) => {
             const Icon = actionIcons[action];
-            const pending = queue.isPending && queuedAction === action;
+            const pending = (queue.isPending && queuedAction === action) || (action === "deploy" && capacity.checking);
             const label = action === "deploy" ? deployLabel : actionLabels[action];
             return (
               <Button
@@ -217,7 +226,7 @@ function useResourceActions(workload: Workload) {
                 disabled={blocked}
                 aria-describedby={active ? statusId : undefined}
                 pending={pending}
-                onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? setConfirmDeploy(true) : queue.mutate({ action }))}
+                onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? capacity.start() : queue.mutate({ action }))}
               >
                 {!pending && <Icon aria-hidden className="size-3.5" />}
                 {label}
@@ -230,6 +239,7 @@ function useResourceActions(workload: Workload) {
     ),
     feedback: (
       <>
+        {capacity.dialog}
         <DeployDialog
           open={confirmDeploy}
           label={deployLabel}
@@ -444,6 +454,7 @@ export function WorkloadPage() {
 type ResourcePath =
   | "/resources/$resourceId"
   | "/resources/$resourceId/logs"
+  | "/resources/$resourceId/metrics"
   | "/resources/$resourceId/operations"
   | "/resources/$resourceId/limits"
   | "/resources/$resourceId/general"
@@ -453,6 +464,7 @@ type ResourcePath =
   | "/resources/$resourceId/networking"
   | "/resources/$resourceId/registry"
   | "/resources/$resourceId/backups"
+  | "/resources/$resourceId/files"
   | "/resources/$resourceId/preflight"
   | "/resources/$resourceId/schedule"
   | "/resources/$resourceId/hooks"
@@ -471,13 +483,15 @@ interface ResourceSection {
 }
 
 // Grouped by what the visitor is doing: watching the resource, configuring what runs, controlling releases, or managing its data and lifecycle.
-function resourceSections(workload: Workload): { label: string; links: ResourceSection[] }[] {
+// File access is limited to instance administrators, like the node terminal; the control plane enforces this too.
+function resourceSections(workload: Workload, admin: boolean): { label: string; links: ResourceSection[] }[] {
   const service = workloadKind(workload.kind) === "service";
   return [
     {
       label: "Monitor",
       links: [
         { to: "/resources/$resourceId", label: "Overview", icon: LayoutDashboard, exact: true },
+        { to: "/resources/$resourceId/metrics", label: "Metrics", icon: ChartLine },
         { to: "/resources/$resourceId/logs", label: "Logs", icon: ScrollText },
         { to: "/resources/$resourceId/operations", label: "Operations", icon: History },
         { to: "/resources/$resourceId/troubleshooting", label: "Troubleshooting", icon: Stethoscope },
@@ -510,6 +524,7 @@ function resourceSections(workload: Workload): { label: string; links: ResourceS
       label: "Manage",
       links: [
         ...(service ? [{ to: "/resources/$resourceId/backups" as const, label: "Backups", icon: Archive }] : []),
+        ...(admin ? [{ to: "/resources/$resourceId/files" as const, label: "Files", icon: FolderOpen }] : []),
         { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
       ],
     },
@@ -581,7 +596,7 @@ function MobileResourceNav({ workload, groups }: { workload: Workload; groups: {
 }
 
 function ResourceNav({ workload }: { workload: Workload }) {
-  const groups = resourceSections(workload);
+  const groups = resourceSections(workload, Boolean(useSession()?.is_admin));
   return (
     <>
       <MobileResourceNav workload={workload} groups={groups} />
@@ -680,10 +695,15 @@ export function ResourceLogs() {
   const workload = useResource();
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
   return (
     <>
-      <Section title="Container logs" description="Recent output from the resource's containers on the node.">
-        <ContainerLogs workloadId={workload.id} />
+      <Section title="Live tail" description="Output from every container, merged in timestamp order and read directly from the node. Kept only on this page, never stored by Cove.">
+        <LiveLogs workloadId={workload.id} supported={node ? Boolean(node.capabilities?.structured_logs) : undefined} />
+      </Section>
+      <Section title="Stored log history" description="Lines Cove collected from the containers and kept under the instance retention settings. Search and filters apply to all stored lines, 500 per page." flush>
+        <LogHistory workloadId={workload.id} />
       </Section>
       <Section title="Run a command" width="form" description="Run one bounded command in a running container of this resource, for example a migration or a status check. Only editors who can read secrets can run commands.">
         {can(workload.permissions, "edit") && can(workload.permissions, "read_secrets") ? (
@@ -692,6 +712,18 @@ export function ResourceLogs() {
           <p className="text-[13px] text-fg-muted">Your access to this resource does not include running commands. Ask a team administrator for editor access that includes reading secrets.</p>
         )}
       </Section>
+    </>
+  );
+}
+
+export function ResourceMetrics() {
+  const workload = useResource();
+  return (
+    <>
+      <Section title="Metric history" description="Container usage recorded by Cove, with deploys and rollbacks." flush>
+        <WorkloadMetricHistory workloadId={workload.id} />
+      </Section>
+      {workloadKind(workload.kind) !== "job" && <RouteTraffic workloadId={workload.id} />}
     </>
   );
 }
@@ -721,12 +753,14 @@ export function ResourceBackups() {
   const workload = useResource();
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
-    <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts. Containers stop briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} />
+    <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
+      <Backups workloadId={workload.id} busy={Boolean(active)} rights={backupRights(workload.permissions)} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} />
     </Section>
   );
 }

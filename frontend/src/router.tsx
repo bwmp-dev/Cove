@@ -48,6 +48,8 @@ const resetRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reset-
 const inviteRoute = createRoute({ getParentRoute: () => rootRoute, path: "/invite", component: lazyRouteComponent(() => import("./routes/auth"), "InvitationPage") });
 // Public status page for an opted-in project share link; it needs no session and sits outside the authenticated app.
 const sharedStatusRoute = createRoute({ getParentRoute: () => rootRoute, path: "/shared/$share", component: lazyRouteComponent(() => import("./routes/shared-status"), "SharedStatusPage") });
+// Public project status pages sit outside the authenticated shell and never read the session.
+const statusRoute = createRoute({ getParentRoute: () => rootRoute, path: "/status/$slug", component: lazyRouteComponent(() => import("./routes/status"), "PublicStatusPage") });
 
 // The display zone is a private preference, so only the authenticated app requests it. Public pages such as shared
 // status links stay outside, where an expired cached session must not redirect a valid public link to sign-in.
@@ -115,6 +117,7 @@ const resourceBrowserRoute = createRoute({ getParentRoute: () => appRoute, path:
 const resourceRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources/$resourceId", component: lazyRouteComponent(() => import("./routes/workload-detail"), "WorkloadPage") });
 const resourceOverviewRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceOverview") });
 const resourceLogsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/logs", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceLogs") });
+const resourceMetricsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/metrics", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceMetrics") });
 const resourceOperationsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/operations", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceOperations") });
 // Configuration used to be one page; keep its address working for saved links.
 const resourceConfigurationRoute = createRoute({
@@ -140,6 +143,7 @@ const resourceEnvironmentRoute = createRoute({ getParentRoute: () => resourceRou
 const resourceNetworkingRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/networking", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceNetworking") });
 const resourceRegistryRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/registry", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceRegistryPage") });
 const resourceBackupsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/backups", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceBackups") });
+const resourceFilesRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/files", component: lazyRouteComponent(() => import("./routes/resource-files"), "ResourceFiles") });
 const resourceSettingsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/settings", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceSettings") });
 
 const nodesRoute = createRoute({ getParentRoute: () => appRoute, path: "/nodes", component: lazyRouteComponent(() => import("./routes/nodes"), "NodesPage") });
@@ -168,6 +172,7 @@ const routeTree = rootRoute.addChildren([
   resetRoute,
   inviteRoute,
   sharedStatusRoute,
+  statusRoute,
   appRoute.addChildren([
     indexRoute,
     dashboardRoute,
@@ -185,6 +190,7 @@ const routeTree = rootRoute.addChildren([
     resourceRoute.addChildren([
       resourceOverviewRoute,
       resourceLogsRoute,
+      resourceMetricsRoute,
       resourceOperationsRoute,
       resourceConfigurationRoute,
       resourceGeneralRoute,
@@ -203,6 +209,7 @@ const routeTree = rootRoute.addChildren([
       resourceNetworkingRoute,
       resourceRegistryRoute,
       resourceBackupsRoute,
+      resourceFilesRoute,
       resourceSettingsRoute,
     ]),
     nodesRoute,

@@ -98,6 +98,13 @@ test("deployment reasons, release comparison, team schedule and emergency overri
   await deployButton.focus();
   await page.keyboard.press("Enter");
   const deployDialog = page.getByRole("dialog", { name: "Deploy governance-app?" });
+  // The capacity check runs first and asks for an explicit choice when it cannot confirm every service.
+  const proceed = page.getByRole("dialog", { name: "Capacity before deploy" }).getByRole("button", { name: /^Deploy (anyway|without check)$/ });
+  await expect(proceed.or(deployDialog)).toBeVisible({ timeout: 60_000 });
+  if (await proceed.isVisible()) {
+    await proceed.focus();
+    await page.keyboard.press("Enter");
+  }
   await expect(deployDialog).toBeVisible();
   await deployDialog.getByLabel("Reason").fill("Initial governance deploy");
   await capture(page, testInfo, "governance-deploy-reason");

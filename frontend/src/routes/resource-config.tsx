@@ -11,6 +11,7 @@ import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
 import { BuiltinVariables, EnvironmentFileActions, SecretReferenceBuilder } from "../components/EnvironmentFile";
 import { DatabaseAccess } from "../components/DatabaseAccess";
+import { RightSizing } from "../components/RightSizing";
 import { GitHubSource } from "../components/GitHubApp";
 import { GitDeployKey } from "../components/GitDeployKey";
 import { GitProviderSource } from "../components/GitProviderSource";
@@ -23,6 +24,7 @@ import { providerSourceQuery } from "../api/git-providers";
 import { Networks } from "../components/Networks";
 import { PortBindings } from "../components/PortBindings";
 import { PrivateNetwork } from "../components/PrivateNetwork";
+import { ResourceOwner } from "../components/ResourceOwner";
 import { ResourceRegistry } from "../components/ResourceRegistry";
 import { RouteEditor } from "../components/RouteEditor";
 import { SaveBar, UnsavedChangesGuard } from "../components/SaveBar";
@@ -34,6 +36,7 @@ import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/op
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 import { createRow, formValues, isSSHRepository, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { UptimeChecks } from "../components/UptimeChecks";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -155,24 +158,33 @@ export function ResourceGeneral() {
   const nodes = useQuery(nodesQuery);
   const nodeName = nodes.data?.find((node) => node.id === workload.node_id)?.name ?? "Node";
   const kind = workloadKind(workload.kind);
-  if (!can(workload.permissions, "edit")) {
+  const editable = can(workload.permissions, "edit");
+  if (!editable) {
     return (
-      <Section width="form" title="General">
-        <div className="space-y-4">
-          <ViewOnly />
-          <DefinitionList
-            items={[
-              { term: "Name", value: workload.name },
-              { term: "Type", value: kind === "job" ? "Job: runs to completion on each deploy" : "Service: long-running" },
-              ...(kind === "job" ? [{ term: "Job service", value: <span className="font-mono text-xs">{workload.job_service}</span> }] : []),
-              { term: "Node", value: nodeName },
-            ]}
-          />
-        </div>
-      </Section>
+      <>
+        <Section width="form" title="General">
+          <div className="space-y-4">
+            <ViewOnly />
+            <DefinitionList
+              items={[
+                { term: "Name", value: workload.name },
+                { term: "Type", value: kind === "job" ? "Job: runs to completion on each deploy" : "Service: long-running" },
+                ...(kind === "job" ? [{ term: "Job service", value: <span className="font-mono text-xs">{workload.job_service}</span> }] : []),
+                { term: "Node", value: nodeName },
+              ]}
+            />
+          </div>
+        </Section>
+        <ResourceOwner id={workload.id} editable={false} />
+      </>
     );
   }
-  return <GeneralForm workload={workload} nodeName={nodeName} />;
+  return (
+    <>
+      <GeneralForm workload={workload} nodeName={nodeName} />
+      <ResourceOwner id={workload.id} editable />
+    </>
+  );
 }
 
 function GeneralForm({ workload, nodeName }: { workload: Workload; nodeName: string }) {
@@ -503,7 +515,12 @@ export function ResourceDomains() {
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Jobs cannot have domains">Domains route HTTPS traffic to long-running services. Change the resource type to a service first.</EmptyState>;
   }
-  return <DomainsPanel workload={workload} />;
+  return (
+    <>
+      <DomainsPanel workload={workload} />
+      <UptimeChecks workload={workload} />
+    </>
+  );
 }
 
 function DomainsPanel({ workload }: { workload: Workload }) {
@@ -680,7 +697,7 @@ export function ResourceRegistryPage() {
 
 export function ResourceLimits() {
   const workload = useResource();
-  return <LimitsForm key={JSON.stringify(workload.limits)} workload={workload} />;
+  return <><LimitsForm key={JSON.stringify(workload.limits)} workload={workload} /><RightSizing workloadId={workload.id} limits={workload.limits} /></>;
 }
 
 function LimitsForm({ workload }: { workload: Workload }) {

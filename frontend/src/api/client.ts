@@ -80,24 +80,35 @@ async function readErrorDetails(response: Response): Promise<unknown> {
   }
 }
 
-async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal, teamOverride?: string, anonymous = false): Promise<Response> {
+interface SendContext {
+  teamOverride?: string;
+  // Public pages (such as a shared status link) must not carry the visitor's session cookie or selected team.
+  anonymous?: boolean;
+}
+
+async function send(method: string, path: string, accept: string, body?: unknown, signal?: AbortSignal, context: SendContext = {}): Promise<Response> {
   const headers: Record<string, string> = { Accept: accept };
-  const team = anonymous ? null : (teamOverride ?? selectedTeam());
-  if (team) {
-    headers["X-Cove-Team"] = team;
-  }
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
+  }
+  return dispatch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal }, context);
+}
+
+async function dispatch(path: string, init: { method: string; headers: Record<string, string>; body?: BodyInit; signal?: AbortSignal }, context: SendContext = {}): Promise<Response> {
+  const headers = { ...init.headers };
+  const team = context.anonymous ? null : (context.teamOverride ?? selectedTeam());
+  if (team) {
+    headers["X-Cove-Team"] = team;
   }
   let response: Response;
   try {
     response = await fetch(withBasePath(path), {
-      method,
+      method: init.method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: anonymous ? "omit" : "same-origin",
+      body: init.body,
+      credentials: context.anonymous ? "omit" : "same-origin",
       cache: "no-store",
-      signal,
+      signal: init.signal,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -112,17 +123,7 @@ async function send(method: string, path: string, accept: string, body?: unknown
   return response;
 }
 
-export function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  return requestJSON<T>(method, path, body, signal);
-}
-
-// Reads another team's data, such as destinations for a transfer, without changing the selected team.
-export function requestForTeam<T>(team: string, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  return requestJSON<T>(method, path, body, signal, team);
-}
-
-async function requestJSON<T>(method: string, path: string, body: unknown, signal: AbortSignal | undefined, team?: string): Promise<T> {
-  const response = await send(method, path, "application/json", body, signal, team);
+async function readJson<T>(response: Response): Promise<T> {
   try {
     return (await response.json()) as T;
   } catch {
@@ -130,11 +131,30 @@ async function requestJSON<T>(method: string, path: string, body: unknown, signa
   }
 }
 
-// Public pages (such as a shared status link) must not carry the visitor's session cookie or selected team.
+export async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  return readJson<T>(await send(method, path, "application/json", body, signal));
+}
+
+// Reads another team's data, such as destinations for a transfer, without changing the selected team.
+export async function requestForTeam<T>(team: string, method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  return readJson<T>(await send(method, path, "application/json", body, signal, { teamOverride: team }));
+}
+
 export async function requestPublic<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await send("GET", path, "application/json", undefined, signal, undefined, true);
+  return readJson<T>(await send("GET", path, "application/json", undefined, signal, { anonymous: true }));
+}
+
+// Sends a file as the raw request body. The browser streams a File from disk, so it is never read into memory here.
+export async function uploadFile<T>(path: string, file: Blob, signal?: AbortSignal): Promise<T> {
+  const headers = { Accept: "application/json", "Content-Type": "application/octet-stream", "X-Cove-Size": String(file.size) };
+  return readJson<T>(await dispatch(path, { method: "POST", headers, body: file, signal }));
+}
+
+// Plain-text GET for exports, sent with the same session and team headers as JSON requests.
+export async function requestText(path: string, signal?: AbortSignal): Promise<string> {
+  const response = await send("GET", path, "text/plain", undefined, signal);
   try {
-    return (await response.json()) as T;
+    return await response.text();
   } catch {
     throw new ApiError(response.status, "The server returned an unreadable response.");
   }
@@ -147,6 +167,16 @@ export async function requestFile(method: string, path: string, body?: unknown):
   const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1]?.trim() ?? null;
   try {
     return { blob: await response.blob(), filename };
+  } catch {
+    throw new ApiError(response.status, "The server returned an unreadable response.");
+  }
+}
+
+// Binary GET for audited downloads, sent with the same session and team headers as JSON requests.
+export async function requestBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+  const response = await send("GET", path, "application/octet-stream", undefined, signal);
+  try {
+    return await response.blob();
   } catch {
     throw new ApiError(response.status, "The server returned an unreadable response.");
   }

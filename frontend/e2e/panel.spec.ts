@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
-import { expect, test, type Page, type TestInfo, type Locator } from "@playwright/test";
+import { createHash, randomBytes } from "node:crypto";
+import { expect, test, type Download, type Page, type TestInfo, type Locator } from "@playwright/test";
 import { spawn, execFileSync } from "node:child_process";
 
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
@@ -86,10 +87,14 @@ function proxyRouters() {
   return execFileSync("docker", ["exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers"], { encoding: "utf8" });
 }
 
-// Deploying from the resource header asks for confirmation with an optional reason.
+// Manual deploys check capacity first. Passing checks open the deployment review at once; otherwise the capacity
+// dialog needs an explicit choice. The review then asks for confirmation with an optional reason.
 async function deployFromHeader(page: Page) {
   await page.locator("main header").getByRole("button", { name: "Deploy", exact: true }).click();
+  const proceed = page.getByRole("dialog", { name: "Capacity before deploy" }).getByRole("button", { name: /^Deploy (anyway|without check)$/ });
   const dialog = page.getByRole("dialog", { name: /^Deploy .+\?$/ });
+  await expect(proceed.or(dialog)).toBeVisible({ timeout: 60_000 });
+  if (await proceed.isVisible()) await proceed.click();
   await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
   await expect(dialog).toBeHidden();
 }
@@ -167,6 +172,45 @@ test("first administrator setup and dashboard integration settings", async ({ pa
     sql(`UPDATE users SET email=NULL,name='Administrator',password_hash=decode('${previousHash}','hex') WHERE id='bootstrap'; DELETE FROM sessions WHERE user_id='bootstrap'; UPDATE control_settings SET setup_completed=true,registration_enabled=false,integration_settings=NULL`);
     if (membership === "0") sql("DELETE FROM team_members WHERE team_id='default' AND user_id='bootstrap'");
   }
+});
+
+test("panel recovery settings save locally and wait for the host timer", async ({ page }, testInfo) => {
+  await page.goto("/admin");
+  await signIn(page);
+  const status = page.locator("section", { has: page.getByRole("heading", { name: "Panel recovery", exact: true }) });
+  await expect(status.getByText("Host timer not connected", { exact: true })).toBeVisible();
+  await expect(status.getByText("sudo sh scripts/install-panel-recovery.sh /opt/cove", { exact: true })).toBeVisible();
+  await expect(status.getByRole("button", { name: "Back up now" })).toBeDisabled();
+  await expect(page.getByText("Snapshots appear here once the host timer is installed and has taken a backup.")).toBeVisible();
+  const refused = await page.request.post("/api/settings/panel-backup/actions", { data: { action: "backup" }, headers: { Origin: new URL(page.url()).origin } });
+  expect(refused.status()).toBe(409);
+
+  const form = page.locator("form", { has: page.getByRole("heading", { name: "Panel backup schedule", exact: true }) });
+  await form.getByLabel("Keep at least (snapshots)").fill("101");
+  await form.getByRole("button", { name: "Save changes" }).click();
+  await expect(form.getByText("Enter a whole number from 1 to 100.")).toBeVisible();
+  await expect(form.getByLabel("Keep at least (snapshots)")).toBeFocused();
+  await form.getByLabel("Keep at least (snapshots)").fill("5");
+  await form.getByLabel("Back up every (hours)").fill("12");
+  await form.getByRole("switch", { name: "Scheduled backups" }).check({ force: true });
+  await form.getByRole("button", { name: "Save changes" }).click();
+  await expect(form.getByText("Saved. The host uses these settings on its next check-in.")).toBeVisible();
+  await page.reload();
+  await expect(form.getByLabel("Keep at least (snapshots)")).toHaveValue("5");
+  await expect(form.getByLabel("Back up every (hours)")).toHaveValue("12");
+  await expect(form.getByRole("switch", { name: "Scheduled backups" })).toBeChecked();
+  const saved = await (await page.request.get("/api/settings/panel-backup")).json() as { config: Record<string, unknown>; password_set: boolean };
+  expect(saved.config).toEqual({ enabled: true, interval_hours: 12, keep_last: 5, keep_days: 30, max_bytes: 8589934592, storage_id: "" });
+  expect(saved.password_set).toBe(false);
+
+  for (const width of [390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectNoHorizontalScroll(page);
+    await status.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`panel-recovery-${width}.png`), fullPage: true });
+  }
+  const restored = await page.request.put("/api/settings/panel-backup", { data: { enabled: false, interval_hours: 24, keep_last: 7, keep_days: 30, max_bytes: 8589934592, storage_id: "" }, headers: { Origin: new URL(page.url()).origin } });
+  expect(restored.status()).toBe(200);
 });
 
 test("real session, enrollment, responsive navigation and logout", async ({ page }, testInfo) => {
@@ -817,6 +861,158 @@ test("restore drills verify copied volume data without restarting the resource",
 
 });
 
+// The harness worker's normal Docker volumes sit on a filesystem without snapshot support, so this covers the stopped fallback.
+test("filesystem snapshot check and backup fall back to the stopped method on an unsupported volume", async ({ page }, testInfo) => {
+  test.setTimeout(360_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Snapshot fallback project");
+  const url = await createResource(page, "snapshot-fallback-app");
+  const id = new URL(url).pathname.split("/")[2];
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  const yaml = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo original > /data/marker; sleep 3600']\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\nvolumes:\n  data: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await page.getByRole("switch", { name: "Use filesystem snapshots" }).check({ force: true });
+  const space = page.getByLabel("LVM snapshot space (MiB)", { exact: true });
+  await expect(space).toHaveValue("1024");
+  await space.fill("32");
+  await page.getByRole("button", { name: "Check volumes", exact: true }).click();
+  await expect(page.getByText("Enter a whole number from 64 to 65,536 MiB.", { exact: true })).toBeVisible();
+  await expect(space).toBeFocused();
+  await space.fill("512");
+
+  const previewResponse = page.waitForResponse(response => response.url().includes(`/api/workloads/${id}/backups/snapshot-preview`));
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Enter");
+  const previewed = await previewResponse;
+  expect(previewed.status(), await previewed.text()).toBe(200);
+  expect(previewed.headers()["cache-control"]).toBe("no-store");
+  expect(new URL(previewed.url()).searchParams.get("max_bytes")).toBe(String(512 * 1024 * 1024));
+  // The reason may be per mount (unsupported filesystem or missing host tools) or host-wide (no systemd manager); either is a 200 advisory result.
+  const preview = await previewed.json() as { available: boolean; reason?: string; mounts: { mount: string; available: boolean; reason?: string }[] };
+  expect(preview.available).toBe(false);
+  expect(preview.reason).toBeTruthy();
+  expect(preview.mounts.length).toBeGreaterThan(0);
+  await expect(page.getByText("Backups will use the stopped method", { exact: true })).toBeVisible();
+  await expect(page.getByText(preview.reason ?? "", { exact: true })).toBeVisible();
+  const checked = page.getByRole("list", { name: "Volumes checked" });
+  for (const mount of preview.mounts) {
+    await expect(checked).toContainText(mount.mount);
+    await expect(checked).toContainText(mount.available ? "Supported" : "Not supported");
+    if (mount.reason) await expect(checked).toContainText(mount.reason);
+  }
+  await capture(page, testInfo, "snapshot-fallback-preview");
+
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-snapshot-fallback-password");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByText(/Filesystem snapshot, stopped fallback/)).toBeVisible();
+  expect(await (await page.request.get(`/api/workloads/${id}/backup-policy`)).json()).toMatchObject({ backup: { volume_snapshot: { max_bytes: 512 * 1024 * 1024 } } });
+
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  let backup: { id: string; state: string } | undefined;
+  await expect.poll(async () => {
+    const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+    backup = operations.find(item => item.action === "backup");
+    return backup && !["queued", "running"].includes(backup.state);
+  }, { timeout: 180_000 }).toBe(true);
+  expect(backup?.state, await (await page.request.get(`/api/operations/${backup?.id}/logs`)).text()).toBe("succeeded");
+  const records = await (await page.request.get(`/api/workloads/${id}/backups`)).json() as { backups: { volume_method?: string; fallback_reason?: string; data_snapshot?: string }[] };
+  expect(records.backups[0]).toMatchObject({ volume_method: "stopped" });
+  expect(records.backups[0]?.fallback_reason).toBeTruthy();
+  await expect(page.getByText("Stopped containers", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(`Snapshots unavailable: ${records.backups[0]?.fallback_reason ?? ""}`, { exact: true })).toBeVisible();
+  await capture(page, testInfo, "snapshot-fallback-history");
+});
+
+test("Redis complete-instance backups verify, restore in place and restore as a new resource", async ({ page }, testInfo) => {
+  test.setTimeout(480_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Redis backup project");
+  const url = await createResource(page, "redis-backup-app");
+  const id = new URL(url).pathname.split("/")[2];
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // CodeMirror input is unreliable for exact YAML, so the Compose file is saved through the API.
+  const yaml = "services:\n  cache:\n    image: redis:7.4-alpine\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, redis-cli, ping]\n      interval: 1s\nvolumes:\n  data: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+  const container = containers(url).split("|")[0] ?? "";
+  const redis = (...args: string[]) => execFileSync("docker", ["exec", container, "redis-cli", ...args], { encoding: "utf8" }).trim();
+  expect(redis("SET", "marker", "original")).toBe("OK");
+  expect(redis("-n", "3", "SET", "other-db", "kept")).toBe("OK");
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await chooseOption(page.getByLabel("Backup method"), "redis");
+  await expect(page.getByLabel("Database name", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Complete instance: every logical database/)).toBeVisible();
+  await page.getByLabel("Database Compose service", { exact: true }).fill("cache");
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-redis-backup-password");
+  await page.getByLabel("Interval in hours", { exact: true }).fill("0");
+  await capture(page, testInfo, "redis-backup-policy");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit policy", exact: true })).toBeVisible();
+  expect(await (await page.request.get(`/api/workloads/${id}/backup-policy`)).json()).toMatchObject({ backup: { database: { engine: "redis", service: "cache", name: "all" } } });
+  await expect(page.getByText(/Redis complete instance \(cache\)/)).toBeVisible();
+
+  const finished = async (action: string, after: Set<string>) => {
+    let operation: { id: string; action: string; state: string } | undefined;
+    await expect.poll(async () => {
+      const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+      operation = operations.find(item => item.action === action && !after.has(item.id));
+      return operation && !["queued", "running"].includes(operation.state);
+    }, { timeout: 240_000 }).toBe(true);
+    expect(operation?.state, await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()).toBe("succeeded");
+  };
+  const seen = async () => new Set(((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as { id: string }[]).map(item => item.id));
+
+  let before = await seen();
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await finished("backup", before);
+  await expect(page.getByText("Redis complete instance", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/Database restore verified/)).toBeVisible();
+  const backups = await (await page.request.get(`/api/workloads/${id}/backups`)).json() as { backups: { verification?: string; database?: { engine: string; name: string } }[] };
+  expect(backups.backups[0]).toMatchObject({ verification: "database", database: { engine: "redis", name: "all" } });
+  await capture(page, testInfo, "redis-backups");
+
+  expect(redis("SET", "marker", "changed")).toBe("OK");
+  expect(redis("-n", "3", "DEL", "other-db")).toBe("1");
+  await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeEnabled({ timeout: 60_000 });
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "Restore Redis complete instance?" });
+  await expect(confirm.getByText(/pauses this resource's containers/)).toBeVisible();
+  await capture(page, testInfo, "redis-restore-confirm");
+  before = await seen();
+  await confirm.getByRole("button", { name: "Restore data", exact: true }).click();
+  await finished("restore", before);
+  const restored = containers(url).split("|")[0] ?? "";
+  const redisAfter = (...args: string[]) => execFileSync("docker", ["exec", restored, "redis-cli", ...args], { encoding: "utf8" }).trim();
+  await expect.poll(() => redisAfter("GET", "marker"), { timeout: 60_000 }).toBe("original");
+  expect(redisAfter("-n", "3", "GET", "other-db")).toBe("kept");
+
+  await page.goto(url);
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Restore as new resource", exact: true }).first().click();
+  const copy = page.getByRole("dialog", { name: "Restore as a separate resource" });
+  await expect(copy.getByText(/The complete Redis instance snapshot is restored into the database service/)).toBeVisible();
+  await expect(copy.getByText(/PostgreSQL ownership and grants/)).toHaveCount(0);
+  await copy.getByLabel("New resource name", { exact: true }).fill("Restored Redis copy");
+  await capture(page, testInfo, "redis-restore-copy-form");
+  await copy.getByRole("button", { name: "Restore separate resource", exact: true }).click();
+  const progress = copy.getByRole("link", { name: "View restore progress", exact: true });
+  await expect(progress).toBeVisible();
+  const operationID = (await progress.getAttribute("href"))?.split("/")[2];
+  await expect.poll(async () => (await (await page.request.get(`/api/operations/${operationID}`)).json() as { state: string }).state, { timeout: 240_000 }).toMatch(/succeeded|failed/);
+  const result = await (await page.request.get(`/api/operations/${operationID}`)).json() as { state: string };
+  expect(result.state, await (await page.request.get(`/api/operations/${operationID}/logs`)).text()).toBe("succeeded");
+});
+
 test("resource bindings, hooks and promotion keep target configuration", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   await page.goto("/projects"); await signIn(page);
@@ -1146,6 +1342,323 @@ test("environment graph creates, applies and revokes a private connection on the
   await page.unroute("**/api/projects/*/connections*");
 });
 
+test("Redis backups download as a verified RDB, import back through the panel and restore", async ({ page }, testInfo) => {
+  test.setTimeout(600_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "Backup transfer project");
+  const url = await createResource(page, "transfer-redis");
+  const id = new URL(url).pathname.split("/")[2];
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // CodeMirror input is unreliable for exact YAML, so the Compose file is saved through the API.
+  const yaml = "services:\n  cache:\n    image: redis:7.4-alpine\n    volumes: [data:/data]\n    healthcheck:\n      test: [CMD, redis-cli, ping]\n      interval: 1s\nvolumes:\n  data: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await page.reload();
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+  const redis = (args: string[], input?: string) => execFileSync("docker", ["exec", "-i", containers(url).split("|")[0] ?? "", "redis-cli", ...args], { encoding: "utf8", input }).trim();
+  const payload = randomBytes(24 * 1024).toString("hex");
+  expect(redis(["-x", "SET", "payload"], payload)).toBe("OK");
+  expect(redis(["SET", "marker", "original"])).toBe("OK");
+
+  const finished = async (action: string, after: Set<string>) => {
+    let operation: { id: string; action: string; state: string } | undefined;
+    await expect.poll(async () => {
+      const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+      operation = operations.find(item => item.action === action && !after.has(item.id));
+      return operation && !["queued", "running"].includes(operation.state);
+    }, { timeout: 240_000 }).toBe(true);
+    expect(operation?.state, await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()).toBe("succeeded");
+  };
+  const seen = async () => new Set(((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as { id: string }[]).map(item => item.id));
+  const backupIds = async () => ((await (await page.request.get(`/api/workloads/${id}/backups`)).json()) as { backups: { id: string }[] }).backups.map(item => item.id);
+
+  // Administrators see the instance-wide transfer limit; saving sends an exact byte count.
+  await page.goto("/admin");
+  const transfers = page.locator("form").filter({ has: page.getByRole("heading", { name: "Backup transfers", exact: true }) });
+  const limit = transfers.getByLabel("Largest backup (MiB)", { exact: true });
+  await expect(limit).toHaveValue("1024");
+  await limit.fill("2048");
+  await transfers.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.getByText("Saved. New transfers use this limit.", { exact: true })).toBeVisible();
+  expect(await (await page.request.get("/api/settings/transfer-limits")).json()).toMatchObject({ backup_bytes: 2048 * 1024 * 1024 });
+  await page.getByRole("heading", { name: "Backup transfers", exact: true }).scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "backup-transfer-settings");
+
+  await page.goto(url);
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await chooseOption(page.getByLabel("Backup method"), "redis");
+  await page.getByLabel("Database Compose service", { exact: true }).fill("cache");
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-redis-transfer-password");
+  await page.getByLabel("Interval in hours", { exact: true }).fill("0");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Import dump", exact: true })).toBeVisible();
+  let before = await seen();
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await finished("backup", before);
+  const [original] = await backupIds();
+  await expect(page.getByRole("button", { name: "Download", exact: true })).toBeEnabled({ timeout: 60_000 });
+
+  // The download is a plain link: the browser streams it to disk from a new tab.
+  await page.getByRole("button", { name: "Download", exact: true }).click();
+  const warning = page.getByRole("dialog", { name: "Download unencrypted backup?" });
+  await expect(warning.getByText(/Redis complete instance dump/)).toBeVisible();
+  await expect(warning.getByText(`cove-backup-${original}.rdb`, { exact: true })).toBeVisible();
+  await capture(page, testInfo, "backup-download-warning");
+  // Chromium may attribute a download that opened in a new tab to either the tab or its opener.
+  const downloaded = new Promise<Download>((resolve, reject) => {
+    page.once("download", resolve);
+    page.context().once("page", (popup) => popup.once("download", resolve));
+    setTimeout(() => reject(new Error("No download started")), 60_000);
+  });
+  await warning.getByRole("link", { name: "Download", exact: true }).click();
+  const download = await downloaded;
+  expect(download.suggestedFilename()).toBe(`cove-backup-${original}.rdb`);
+  const directory = mkdtempSync(join(tmpdir(), "cove-transfer-"));
+  try {
+    const file = join(directory, download.suggestedFilename());
+    await download.saveAs(file);
+    const bytes = readFileSync(file);
+    expect(bytes.length).toBeGreaterThan(32 * 1024);
+    expect(bytes.subarray(0, 5).toString()).toBe("REDIS");
+    const direct = await page.request.get(`/api/workloads/${id}/backups/${original}/download`);
+    expect(direct.headers()["cache-control"]).toBe("no-store");
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(direct.headers()["x-cove-sha256"]);
+
+    expect(redis(["SET", "marker", "changed"])).toBe("OK");
+    expect(redis(["DEL", "payload"])).toBe("1");
+
+    // An invalid dump publishes nothing and leaves the running database alone.
+    await page.getByRole("button", { name: "Import dump", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Import database dump" });
+    await expect(dialog.getByText("Accepted file: Redis RDB snapshot", { exact: true })).toBeVisible();
+    const input = dialog.getByLabel("Dump file", { exact: true });
+    await expect(input).toBeEnabled();
+    await input.setInputFiles({ name: "not-a-dump.rdb", mimeType: "application/octet-stream", buffer: Buffer.from("this is not an RDB snapshot\n".repeat(64)) });
+    await dialog.getByRole("button", { name: "Import and verify", exact: true }).click();
+    await expect(dialog.getByText("Import failed", { exact: true })).toBeVisible({ timeout: 240_000 });
+    await capture(page, testInfo, "backup-import-failed");
+    expect(await backupIds()).toEqual([original]);
+    expect(redis(["GET", "marker"])).toBe("changed");
+
+    await input.setInputFiles(file);
+    await dialog.getByRole("button", { name: "Import and verify", exact: true }).click();
+    await expect(dialog.getByText("Uploading and verifying", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Verified backup stored", { exact: true })).toBeVisible({ timeout: 240_000 });
+    await expect(dialog.getByText(createHash("sha256").update(bytes).digest("hex"), { exact: true })).toBeVisible();
+    expect(redis(["GET", "marker"])).toBe("changed");
+    await expect(dialog.getByRole("button", { name: "Restore this backup…", exact: true })).toBeVisible({ timeout: 60_000 });
+    await capture(page, testInfo, "backup-import-verified");
+    const ids = await backupIds();
+    expect(ids).toHaveLength(2);
+    const imported = ids.find(item => item !== original);
+
+    await dialog.getByRole("button", { name: "Restore this backup…", exact: true }).click();
+    const confirm = page.getByRole("dialog", { name: "Restore Redis complete instance?" });
+    await expect(confirm.getByText(/saves a safety backup/)).toBeVisible();
+    before = await seen();
+    const restoreRequest = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith(`/api/workloads/${id}/operations`));
+    await confirm.getByRole("button", { name: "Restore data", exact: true }).click();
+    expect((await restoreRequest).postDataJSON()).toEqual({ action: "restore", backup_id: imported });
+    await finished("restore", before);
+    await expect.poll(() => redis(["GET", "marker"]), { timeout: 60_000 }).toBe("original");
+    expect(redis(["GET", "payload"])).toBe(payload);
+    await page.reload();
+    await capture(page, testInfo, "backup-transfer-list");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("administrators browse, edit, download and delete container files on the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  await page.goto("/projects");
+  await signIn(page);
+  await createProject(page, "Files project");
+  const url = await createResource(page, "files-service");
+  // This test covers Files, not Compose editor input, so store the exact Compose text before deploying.
+  const id = new URL(url).pathname.split("/")[2];
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: compose("files-service") } })).status()).toBe(200);
+  await page.reload();
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true }).click();
+  const files = page.getByRole("region", { name: "Files", exact: true });
+  await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+  const root = files.getByRole("list", { name: "Contents of /" });
+  await expect(root.getByRole("button", { name: "tmp", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(root.getByRole("button", { name: "proc", exact: true })).toHaveCount(0);
+  await root.getByRole("button", { name: "tmp", exact: true }).click();
+  await expect(files.getByRole("list", { name: "Contents of /tmp" }).or(files.getByText("This folder is empty.", { exact: true }))).toBeVisible();
+
+  await files.getByRole("button", { name: "New file", exact: true }).click();
+  const create = page.getByRole("dialog", { name: "New file" });
+  await create.getByLabel("File name", { exact: true }).fill("cove-browser.txt");
+  await create.getByRole("button", { name: "Create file", exact: true }).click();
+  const editor = page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true });
+  await expect(editor).toHaveValue("");
+  await editor.fill("hello from the browser\n");
+  await page.getByRole("button", { name: "Save file", exact: true }).click();
+  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await editor.fill("second revision\n");
+  await page.getByRole("button", { name: "Save file", exact: true }).click();
+  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "resource-files");
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download", exact: true }).click();
+  const saved = await download;
+  expect(saved.suggestedFilename()).toBe("cove-browser.txt");
+  expect(readFileSync(await saved.path(), "utf8")).toBe("second revision\n");
+  expect(page.url()).not.toContain("cove-browser");
+  expect(await page.evaluate(() => JSON.stringify({ ...window.localStorage }) + JSON.stringify({ ...window.sessionStorage }))).not.toContain("second revision");
+
+  await page.getByRole("button", { name: "Delete cove-browser.txt", exact: true }).click();
+  const remove = page.getByRole("dialog", { name: "Delete cove-browser.txt?" });
+  await expect(remove).toContainText("/tmp/cove-browser.txt");
+  await remove.getByRole("button", { name: "Delete file", exact: true }).click();
+  await expect(page.getByText("Deleted cove-browser.txt.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true })).toHaveCount(0);
+});
+
+test("alert observations inspect a real service and certificate and container rules target it", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  await page.goto("/projects");
+  await signIn(page);
+  await createProject(page, "Alerts project");
+  const url = await createResource(page, "alerts-service");
+  const id = new URL(url).pathname.split("/")[2];
+  const hostname = `alerts-${Date.now()}.cove.test`;
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // Store exact Compose text and a route through the API; this test covers alerting, not editor input.
+  const restarting = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'echo alerts; sleep 300; echo stopped']\n    restart: unless-stopped\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: restarting, routes: [{ domain: hostname, service: "app", port: 8080 }] } })).status()).toBe(200);
+  await page.reload();
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+  const container = containers(url).split("|")[0] ?? "";
+  // Ending the main process outside a Cove operation makes Docker's restart policy restart the container.
+  execFileSync("docker", ["exec", container, "pkill", "sleep"]);
+  await expect.poll(() => execFileSync("docker", ["inspect", "--format", "{{.RestartCount}}", container], { encoding: "utf8" }).trim(), { timeout: 30_000 }).toBe("1");
+
+  await page.goto(`${url}/troubleshooting`);
+  const observations = page.getByRole("region", { name: "Alert observations", exact: true });
+  await expect(observations.getByText(/Not inspected yet/)).toBeVisible();
+  await observations.getByRole("button", { name: "Inspect", exact: true }).click();
+  await expect(observations.getByText(/^Inspected /)).toBeVisible({ timeout: 30_000 });
+  await expect(observations.getByRole("list", { name: "Inspected containers" }).getByText("Docker restart count 1", { exact: true })).toBeVisible();
+  await expect(observations.getByText("Automatic restarts", { exact: true })).toBeVisible();
+  const certificate = observations.getByRole("list", { name: "Inspected certificates" }).getByRole("listitem").filter({ hasText: hostname });
+  await expect(certificate.getByText(/^Unknown\./).or(certificate.getByText(/when inspected$/))).toBeVisible();
+  await observations.getByRole("button", { name: "Inspect again", exact: true }).click();
+  await expect(observations.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled({ timeout: 30_000 });
+  await capture(page, testInfo, "alert-observations");
+
+  await page.goto("/notifications");
+  await page.getByRole("button", { name: "Add notification", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Alert fixture webhook");
+  await page.getByLabel("Webhook URL", { exact: true }).fill("https://notify.example.com/alerts-fixture");
+  await page.getByLabel("Enable notifications", { exact: true }).uncheck();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Alert fixture webhook", exact: true })).toBeVisible();
+  const rules = page.getByRole("region", { name: "Threshold rules", exact: true });
+  await rules.getByRole("button", { name: "New rule", exact: true }).click();
+  await rules.getByLabel("Name", { exact: true }).fill("Certificate expiring");
+  await chooseOption(rules.getByLabel("Metric", { exact: true }), "certificate");
+  await chooseOption(rules.getByLabel("Service", { exact: true }), id ?? "");
+  await chooseOption(rules.getByLabel("Domain", { exact: true }), hostname);
+  await rules.getByLabel("Threshold (days)", { exact: true }).fill("14");
+  await rules.getByRole("checkbox", { name: /Alert fixture webhook/ }).check();
+  await capture(page, testInfo, "certificate-rule-form");
+  await rules.getByRole("button", { name: "Create rule", exact: true }).click();
+  const list = rules.getByRole("list", { name: "Threshold rules" });
+  await expect(list.getByText(new RegExp(String.raw`^Certificate expiry for ${hostname.replaceAll(".", String.raw`\.`)} at or below 14 days for 5 minutes on alerts-service \(Alerts project / [^)]+\) · repeats at most every 1 hour$`))).toBeVisible();
+  await rules.getByRole("button", { name: "New rule", exact: true }).click();
+  await rules.getByLabel("Name", { exact: true }).fill("Restart loop");
+  await chooseOption(rules.getByLabel("Metric", { exact: true }), "restarts");
+  await chooseOption(rules.getByLabel("Service", { exact: true }), id ?? "");
+  await rules.getByLabel("Threshold (events)", { exact: true }).fill("2.5");
+  await rules.getByRole("checkbox", { name: /Alert fixture webhook/ }).check();
+  await rules.getByRole("button", { name: "Create rule", exact: true }).click();
+  await expect(rules.getByText("Enter a whole number from 1 to 1000.", { exact: true })).toBeVisible();
+  await rules.getByLabel("Threshold (events)", { exact: true }).fill("3");
+  await rules.getByRole("button", { name: "Create rule", exact: true }).click();
+  await expect(list.getByText(/^Container restarts at or above 3 in ten minutes for 5 minutes on alerts-service \(Alerts project \/ [^)]+\) · repeats at most every 1 hour$/)).toBeVisible();
+  await capture(page, testInfo, "resource-threshold-rules");
+  for (const name of ["Certificate expiring", "Restart loop"]) {
+    await rules.getByRole("button", { name: `Delete ${name}`, exact: true }).click();
+    await page.getByRole("dialog", { name: `Delete ${name}?` }).getByRole("button", { name: "Delete rule", exact: true }).click();
+    await expect(rules.getByText(name, { exact: true })).toHaveCount(0);
+  }
+});
+
+test("merged live logs, capacity before deploy, right-sizing and cost estimates on the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  await page.goto("/projects");
+  await signIn(page);
+  await createProject(page, "Operations project");
+  const url = await createResource(page, "operations-service");
+  const id = new URL(url).pathname.split("/")[2];
+  const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string; project_id: string };
+  // Exact Compose text through the API; the sidecar has no limits, so capacity cannot be fully confirmed.
+  const services = "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'while true; do echo app-tick; sleep 1; done']\n  sidecar:\n    image: busybox:1.37\n    command: [sh, -c, 'while true; do echo sidecar-tick; sleep 1; done']\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: services, limits: { app: { cpus: 0.1, memory_mb: 32 } } } })).status()).toBe(200);
+  await page.reload();
+
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  const capacity = page.getByRole("dialog", { name: "Capacity before deploy" });
+  const proceed = capacity.getByRole("button", { name: /^Deploy (anyway|without check)$/ });
+  await expect(proceed).toBeVisible({ timeout: 60_000 });
+  await expect(capacity.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  await capture(page, testInfo, "capacity-before-deploy");
+  await proceed.click();
+  const review = page.getByRole("dialog", { name: "Deploy operations-service?" });
+  await review.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(review).toBeHidden();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+
+  await page.goto(`${url}/logs`);
+  const live = page.getByRole("region", { name: "Live log lines", exact: true });
+  await expect(live.getByText("app-tick", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  await expect(live.getByText("sidecar-tick", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect(page.getByText(/^Paused\./)).toBeVisible();
+  await chooseOption(page.getByRole("combobox", { name: "Container", exact: true }).first(), { index: 1 });
+  await expect(live.getByText("app-tick", { exact: true }).first().or(live.getByText("sidecar-tick", { exact: true }).first())).toBeVisible();
+  await capture(page, testInfo, "live-logs");
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+
+  await page.goto(`${url}/limits`);
+  await expect(page.getByRole("heading", { name: "Right-sizing suggestions", exact: true })).toBeVisible();
+  await expect(page.getByText(/No per-service usage history yet|distinct hours?/).first()).toBeVisible({ timeout: 30_000 });
+  await capture(page, testInfo, "right-sizing");
+
+  await page.goto(`${url}/preflight`);
+  await page.getByRole("button", { name: "Check capacity", exact: true }).click();
+  await expect(page.getByText(/^Inspection snapshot\. Checks compare/)).toBeVisible({ timeout: 60_000 });
+
+  await page.goto(`/nodes/${resource.node_id}`);
+  const price = page.getByRole("region", { name: "Node price", exact: true });
+  await price.getByLabel("Currency", { exact: true }).fill("eur");
+  await price.getByLabel("Monthly price", { exact: true }).fill("12.505");
+  await price.getByRole("button", { name: "Save price", exact: true }).click();
+  await expect(price.getByText("EUR uses at most 2 decimal places.", { exact: true })).toBeVisible();
+  await price.getByLabel("Monthly price", { exact: true }).fill("12.50");
+  await price.getByRole("button", { name: "Save price", exact: true }).click();
+  await expect(price.getByText("Price saved", { exact: true })).toBeVisible();
+  await expect(price.getByText(/EUR\s12\.50/)).toBeVisible();
+  await capture(page, testInfo, "node-price");
+
+  await page.goto(`/projects/${resource.project_id}`);
+  const costs = page.getByRole("region", { name: "Estimated monthly cost", exact: true });
+  await expect(costs.getByText(/^Project total:/)).toBeVisible();
+  await expect(costs.getByText(/EUR\s\d/).first()).toBeVisible();
+  await capture(page, testInfo, "project-costs");
+});
+
 test("every page adapts to phone tablet laptop and wide desktop", async ({ page, browser }, testInfo) => {
   test.setTimeout(300_000);
   await page.goto("/projects");
@@ -1161,7 +1674,7 @@ test("every page adapts to phone tablet laptop and wide desktop", async ({ page,
   await page.route("**/api/cloudflare/connections/sample-connection/zones", route => route.fulfill({ json: [{ id: "a".repeat(32), name: "example.com" }, { id: "b".repeat(32), name: "a-long-domain-name-for-responsive-testing.example.net" }] }));
   await page.route("**/api/cloudflare", route => route.fulfill({ json: [{ zone_id: "a".repeat(32), domain: "example.com", can_manage: true, enabled: true, proxied: false, nodes: {}, shares: [{ team_id: "default", domains: ["app.example.com", "*.staging.example.com"] }] }] }));
   const paths = ["/dashboard", "/projects", projectURL, `${projectURL}/environments/${environmentID}`, "/resources", "/resources/new", "/nodes", "/nodes/new", `/nodes/${resource.node_id}`, `/nodes/${resource.node_id}/proxy`, "/operations", "/terminal", "/integrations", "/registries", "/storage", "/notifications", "/team", "/tokens", "/audit", "/account", "/users", "/admin",
-    ...["", "logs", "operations", "general", "source", "domains", "environment", "networking", "registry", "backups", "settings", "limits", "configuration-history", "preflight", "deployment-safety", "previews", "hooks", "schedule", "promotion", "troubleshooting"].map(section => `${resourceURL}/${section}`)];
+    ...["", "logs", "operations", "general", "source", "domains", "environment", "networking", "registry", "backups", "files", "settings", "limits", "configuration-history", "preflight", "deployment-safety", "previews", "hooks", "schedule", "promotion", "troubleshooting"].map(section => `${resourceURL}/${section}`)];
   const operations = await (await page.request.get("/api/operations")).json() as { id: string }[];
   if (operations[0]) paths.push(`/operations/${operations[0].id}`);
   else {

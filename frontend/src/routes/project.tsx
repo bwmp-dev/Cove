@@ -17,6 +17,8 @@ import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { PlacementRow } from "../components/EnvironmentList";
 import { Notes } from "../components/Notes";
 import { PinButton } from "../components/PinButton";
+import { ProjectCosts } from "../components/ProjectCosts";
+import { StatusPageSettings } from "../components/StatusPageSettings";
 import { Breadcrumbs, Button, EmptyState, Field, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section, SectionGrid, TabNav } from "../components/ui";
 import { canCompareEnvironments, canExportConfiguration, countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
@@ -391,6 +393,8 @@ export function ProjectOverview() {
           <DeploymentPolicy scope="project" id={project.id} />
         </SectionGrid>
       )}
+      {can(project.permissions, "read") && <ProjectCosts projectId={project.id} />}
+      {editable && <StatusPageSettings projectId={project.id} />}
       {can(project.permissions, "read") && <DependencyMap projectId={project.id} />}
       {can(project.permissions, "read") && <Notes key={project.id} scope="project" id={project.id} canEdit={editable} />}
     </>
@@ -447,6 +451,7 @@ export function EnvironmentPage() {
           <DeploymentPolicy scope="environment" id={environment.id} />
         </SectionGrid>
       )}
+      {can(project.permissions, "read") && <ProjectCosts projectId={project.id} environmentId={environment.id} />}
     </Fragment>
   );
 }

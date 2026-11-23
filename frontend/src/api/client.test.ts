@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rememberTeam } from "../lib/team";
-import { ApiError, enrolmentRequiredMessage, request, requestFile, requestForTeam, requestPublic } from "./client";
+import { backupDownloadUrl } from "./backup-transfers";
+import { ApiError, enrolmentRequiredMessage, request, requestFile, requestForTeam, requestPublic, uploadFile } from "./client";
 
 function respond(status: number, body: string, type: string, headers: Record<string, string> = {}) {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(body, { status, headers: { "content-type": type, ...headers } }))));
@@ -128,9 +129,29 @@ describe("requests under a panel prefix", () => {
     await client.request("GET", "/api/session");
     await client.request("POST", "/auth/login", {});
     await client.requestPublic("/api/public/projects/token");
+    await client.requestPublic("/api/status/shop");
     await client.requestFile("POST", "/api/projects/p/configuration/export", {});
+    await client.uploadFile("/api/workloads/w1/backups/import", new Blob(["a"]));
+    await client.requestText("/api/workloads/w1/log-history?download=1");
+    await client.requestBlob("/api/workloads/w1/files/download?kind=volume");
     const paths = (vi.mocked(fetch).mock.calls as [string, RequestInit][]).map(([path]) => path);
-    expect(paths).toEqual(["/control/cove/api/session", "/control/cove/auth/login", "/control/cove/api/public/projects/token", "/control/cove/api/projects/p/configuration/export"]);
+    expect(paths).toEqual([
+      "/control/cove/api/session",
+      "/control/cove/auth/login",
+      "/control/cove/api/public/projects/token",
+      "/control/cove/api/status/shop",
+      "/control/cove/api/projects/p/configuration/export",
+      "/control/cove/api/workloads/w1/backups/import",
+      "/control/cove/api/workloads/w1/log-history?download=1",
+      "/control/cove/api/workloads/w1/files/download?kind=volume",
+    ]);
+  });
+
+  it("prefixes browser-handled backup download links", async () => {
+    document.head.insertAdjacentHTML("afterbegin", '<meta name="cove-base-path" content="/control/cove">');
+    vi.resetModules();
+    const transfers = await import("./backup-transfers");
+    expect(transfers.backupDownloadUrl("w1", "b1")).toBe("/control/cove/api/workloads/w1/backups/b1/download");
   });
 
   it.each(["/api", "/projects"])("prefixes requests under %s even when the path starts with it", async (base) => {
@@ -142,5 +163,37 @@ describe("requests under a panel prefix", () => {
     await client.request("GET", "/api/projects");
     const paths = (vi.mocked(fetch).mock.calls as [string, RequestInit][]).map(([path]) => path);
     expect(paths).toEqual([`${base}/api/session`, `${base}/api/projects`]);
+  });
+});
+
+describe("uploadFile", () => {
+  it("sends the file itself as the body with its size and the team, not JSON", async () => {
+    respond(201, '{"backup_id":"b1","size":5,"sha256":"aa","verified":true}', "application/json");
+    rememberTeam("team-b");
+    const file = new File(["hello"], "dump.rdb");
+    await expect(uploadFile("/api/workloads/w1/backups/import", file)).resolves.toMatchObject({ backup_id: "b1" });
+    const [path, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(path).toBe("/api/workloads/w1/backups/import");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(file);
+    expect(init.credentials).toBe("same-origin");
+    expect(headers.get("content-type")).toBe("application/octet-stream");
+    expect(headers.get("x-cove-size")).toBe("5");
+    expect(headers.get("x-cove-team")).toBe("team-b");
+    expect(headers.get("authorization")).toBeNull();
+  });
+
+  it("reports the server's refusal like other requests", async () => {
+    respond(413, "dump exceeds the configured backup transfer limit", "text/plain");
+    await expect(uploadFile("/x", new Blob(["a"]))).rejects.toMatchObject({ status: 413, message: "Dump exceeds the configured backup transfer limit" });
+  });
+});
+
+describe("backupDownloadUrl", () => {
+  it("is a same-origin path that adds only the selected team as context", () => {
+    expect(backupDownloadUrl("w1", "b 1")).toBe("/api/workloads/w1/backups/b%201/download");
+    rememberTeam("team-b");
+    expect(backupDownloadUrl("w1", "b1")).toBe("/api/workloads/w1/backups/b1/download?team_id=team-b");
   });
 });

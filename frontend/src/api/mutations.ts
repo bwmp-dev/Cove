@@ -156,3 +156,11 @@ export function usePortBindings(workloadId: string) {
     },
   });
 }
+
+export function useUpdateWorkloadOwner(id: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (userID: string) => request<{ ok: boolean }>("PUT", `/api/workloads/${encodeURIComponent(id)}/owner`, { user_id: userID }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.workloadOwner(id) }),
+  });
+}

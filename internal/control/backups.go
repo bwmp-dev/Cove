@@ -11,6 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+func (s *Server) requireBackupConfigurationAccess(w http.ResponseWriter, r *http.Request, kind, id string) bool {
+	return s.requirePermission(w, r, kind, id, "manage_backups") && s.requirePermission(w, r, kind, id, "edit_configuration") && s.requirePermission(w, r, kind, id, "read_secrets")
+}
+
 func (s *Server) getBackupPolicy(w http.ResponseWriter, r *http.Request) {
 	var encrypted []byte
 	err := s.DB.QueryRow(r.Context(), "SELECT configuration FROM workloads WHERE id=$1", r.PathValue("id")).Scan(&encrypted)
@@ -44,6 +48,9 @@ func (s *Server) getBackupPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setBackupPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requireBackupConfigurationAccess(w, r, "workload", r.PathValue("id")) {
+		return
+	}
 	var in struct {
 		Backup *worker.BackupConfig `json:"backup"`
 	}
@@ -73,10 +80,43 @@ func (s *Server) setBackupPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Backup != nil {
+		if in.Backup.VolumeSnapshot != nil {
+			var capable bool
+			if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'filesystem_snapshots')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.PathValue("id")).Scan(&capable); err != nil {
+				http.Error(w, "worker capabilities unavailable", 503)
+				return
+			}
+			if !capable {
+				http.Error(w, "upgrade and verify this worker before configuring filesystem snapshots", 409)
+				return
+			}
+		}
+		if in.Backup.KeepDaily > 0 || in.Backup.KeepWeekly > 0 || in.Backup.KeepMonthly > 0 {
+			var capable bool
+			if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'backup_retention')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.PathValue("id")).Scan(&capable); err != nil {
+				http.Error(w, "worker capabilities unavailable", 503)
+				return
+			}
+			if !capable {
+				http.Error(w, "upgrade and verify this worker before configuring daily, weekly or monthly retention", 409)
+				return
+			}
+		}
 		if in.Backup.Database != nil {
 			var capable bool
 			if err = tx.QueryRow(r.Context(), "SELECT COALESCE((n.capabilities->>'logical_backups')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1", r.PathValue("id")).Scan(&capable); err != nil || !capable {
 				http.Error(w, "upgrade and verify this worker before configuring logical backups", 409)
+				return
+			}
+		}
+		if in.Backup.Database != nil && (in.Backup.Database.Engine == "mongodb" || in.Backup.Database.Engine == "redis" || in.Backup.Database.Engine == "valkey") {
+			var capable bool
+			if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'extended_logical_backups')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.PathValue("id")).Scan(&capable); err != nil {
+				http.Error(w, "worker capabilities unavailable", 503)
+				return
+			}
+			if !capable {
+				http.Error(w, "upgrade and verify this worker before configuring MongoDB, Redis or Valkey backups", 409)
 				return
 			}
 		}

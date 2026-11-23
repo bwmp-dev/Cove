@@ -30,6 +30,13 @@ export function canManageIntegrations(session: Session | null | undefined) {
   return editorPermissions.every((permission) => hasTeamPermission(session, permission));
 }
 
+// Notification channels and log forwarders stay with team owners, admins and instance administrators. Their
+// endpoints and tokens are secrets, so changing or testing them also needs team-wide Edit configuration and Read secrets.
+export function canManageTeamDestinations(session: Session | null | undefined) {
+  if (!session?.is_admin && !managesTeam(currentTeam(session))) return false;
+  return hasTeamPermission(session, "edit_configuration") && hasTeamPermission(session, "read_secrets");
+}
+
 // Owners, admins and instance administrators manage every member; a team-wide manage_members grant delegates
 // managing ordinary members only.
 export type MemberManagement = "full" | "delegated" | "none";
@@ -76,7 +83,7 @@ export const permissionLabels: Record<string, { label: string; description: stri
   read_secrets: { label: "Read secrets", description: "Read environment variables, credentials and other secret configuration." },
   operate: { label: "Operate", description: "Deploy, start, stop, restart, roll back and cancel operations." },
   edit_configuration: { label: "Edit configuration", description: "Create, configure and delete resources." },
-  manage_backups: { label: "Manage backups", description: "Run backups and change backup policies. Restores and drills also need Edit configuration." },
+  manage_backups: { label: "Manage backups", description: "Run backups and change backup policies. Restores and drills also need Edit configuration; changing a backup policy also needs Edit configuration and Read secrets." },
   manage_members: { label: "Manage members", description: "Invite and edit members and their grants. Applies only to team-wide grants, and never to owners or admins." },
 };
 
@@ -92,6 +99,15 @@ export function setPermission(permissions: readonly string[], permission: string
   if (enabled) next.add(permission);
   else next.delete(permission);
   return catalogue.filter((item) => next.has(item));
+}
+
+// A backup policy's destination and encryption decide where secret-equivalent data is exported, so changing it
+// needs Read secrets on top of Manage backups and Edit configuration.
+export function backupRights(permissions: readonly Permission[] | undefined) {
+  const manage = can(permissions, "manage_backups");
+  const edit = can(permissions, "edit_configuration");
+  const secrets = can(permissions, "read_secrets");
+  return { backup: manage, configure: manage && edit && secrets, restore: manage && edit, download: manage && secrets, import: manage && secrets && edit };
 }
 
 export interface RoleDraftErrors {
@@ -114,6 +130,9 @@ export function roleCaveats(permissions: readonly string[], editor: readonly str
   const caveats: string[] = [];
   if (permissions.includes("manage_backups") && !permissions.includes("edit_configuration")) {
     caveats.push("Can run backups but not restores or drills, which also need Edit configuration.");
+  }
+  if (permissions.includes("manage_backups") && permissions.includes("edit_configuration") && !permissions.includes("read_secrets")) {
+    caveats.push("Cannot change backup policies, which also need Read secrets because the destination and encryption control where data is exported.");
   }
   const missing = editor.filter((item) => !permissions.includes(item));
   if (permissions.includes("edit_configuration") && missing.length > 0) {

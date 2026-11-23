@@ -1,6 +1,7 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { authConfigQuery } from "./queries";
+import { telemetryKeys } from "./telemetry";
 import { settingsQuery } from "./teams";
 
 export interface InstanceIntegrations {
@@ -115,7 +116,12 @@ export function useUpdateAuditExport() {
   return useMutation({
     gcTime: 0,
     mutationFn: (input: AuditExportConfiguration & { webhook_secret?: string }) => request<AuditExportSettings>("PUT", "/api/settings/audit-export", input),
-    onSuccess: (settings) => client.setQueryData(auditExportQuery.queryKey, settings),
+    onSuccess: (settings) => {
+      client.setQueryData(auditExportQuery.queryKey, settings);
+      // The retention period is also Telemetry retention's audit days.
+      void client.invalidateQueries({ queryKey: telemetryKeys.retention });
+      void client.invalidateQueries({ queryKey: telemetryKeys.storageUsage });
+    },
   });
 }
 

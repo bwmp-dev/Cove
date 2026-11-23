@@ -162,6 +162,12 @@ def drain(compose):
     raise RuntimeError("Worker is still busy; update cancelled.")
 
 
+def pre_update_snapshot(installation, lock):
+    script = Path(__file__).with_name('panel-recovery.py')
+    run([sys.executable, str(script), 'before-update', '--installation', str(installation),
+         '--lock-fd', str(lock.fileno())], pass_fds=(lock.fileno(),))
+
+
 def update(installation, version, offline_images=None, confirm_downgrade=False):
     import fcntl
 
@@ -171,6 +177,8 @@ def update(installation, version, offline_images=None, confirm_downgrade=False):
     # Keep concurrent invocations from replacing each other's recovery state.
     with open(".cove-update.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if Path('.cove-panel-recovery/updates-paused.json').exists():
+            raise RuntimeError('Panel recovery paused updates; review the restored panel and explicitly resume updates in Settings.')
         compose = ["docker", "compose"]
         config = json.loads(run([*compose, "config", "--format", "json"],
                                 capture_output=True, text=True).stdout)
@@ -208,6 +216,7 @@ def update(installation, version, offline_images=None, confirm_downgrade=False):
         if all(previous[service]["image"] == config["services"][service]["image"] for service in services):
             print(f"Already running {version}; no update needed.")
             return
+        pre_update_snapshot(installation, lock)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         backup = Path(".cove-updates", stamp).resolve()
         backup.mkdir(parents=True, mode=0o700)

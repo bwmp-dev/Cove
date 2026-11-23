@@ -49,6 +49,15 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	if in.Backup != nil {
+		kind, id := "project", in.ProjectID
+		if in.EnvironmentID != "" {
+			kind, id = "environment", in.EnvironmentID
+		}
+		if !s.requireBackupConfigurationAccess(w, r, kind, id) {
+			return
+		}
+	}
 	if in.Backup != nil && (in.Backup.Remote != nil || in.Backup.StorageID != "" || in.Backup.Database != nil) {
 		http.Error(w, "use the backup policy endpoint to configure logical backups or a storage location", 400)
 		return
@@ -411,6 +420,13 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	}()
 	timer := time.NewTicker(3 * time.Second)
 	defer timer.Stop()
+	telemetryContext, stopTelemetry := context.WithCancel(ctx)
+	telemetryDone := make(chan error, 3)
+	var telemetryJobs sync.WaitGroup
+	for _, run := range []func(context.Context) error{s.runUptimeChecks, s.runLogForwards, s.runTrafficCollection} {
+		telemetryJobs.Go(func() { telemetryDone <- run(telemetryContext) })
+	}
+	defer func() { stopTelemetry(); telemetryJobs.Wait() }()
 	dnsContext, stopDNS := context.WithCancel(ctx)
 	dnsDone := make(chan error, 1)
 	go func() { dnsDone <- s.runDNS(dnsContext) }()
@@ -473,6 +489,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if time.Now().After(nextHealthCheck) {
+			if err := s.collectTelemetry(ctx); err != nil && ctx.Err() == nil {
+				return err
+			}
 			if err := s.checkBackupHealth(ctx); err != nil && ctx.Err() == nil {
 				return err
 			}
@@ -492,6 +511,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		}
 		select {
 		case err := <-gitOpsDone:
+			if err != nil {
+				return err
+			}
+		case err := <-telemetryDone:
 			return err
 		case <-ctx.Done():
 			return nil

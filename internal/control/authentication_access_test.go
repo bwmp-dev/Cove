@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"cove/internal/outbound"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
@@ -164,6 +165,7 @@ func TestAuditExportIntegration(t *testing.T) {
 			t.Fatal(e)
 		}
 		mac := hmac.New(sha256.New, []byte(strings.Repeat("x", 32)))
+		mac.Write([]byte(r.Header.Get("X-Cove-Timestamp") + "."))
 		mac.Write(body)
 		if r.Header.Get("X-Cove-Signature") != "sha256="+hex.EncodeToString(mac.Sum(nil)) || r.Header.Get("X-Cove-Delivery") == "" {
 			t.Fatal("unsigned delivery")
@@ -329,7 +331,8 @@ func TestAuditSyslogFraming(t *testing.T) {
 		}
 		received <- string(body)
 	}()
-	s := &Server{}
+	s := &Server{outboundState: &outboundProxyState{}}
+	s.outboundState.value.Store(&outbound.Config{})
 	if err = s.deliverAudit(context.Background(), auditExportConfig{Syslog: listener.Addr().String()}, "syslog", 123, []byte(`{"id":1}`)); err != nil {
 		t.Fatal(err)
 	}

@@ -43,7 +43,7 @@ elif name == "curl":
         prefix = "https://raw.githubusercontent.com/bwmp-dev/Cove/" + "a" * 40 + "/"
         assert url.startswith(prefix), url
         relative = url.removeprefix(prefix)
-        assert relative in ["compose.yaml", "deploy/traefik.yaml", "deploy/traefik-panel.yaml", "scripts/configure.sh", "scripts/update-panel.py", "scripts/install-auto-update.sh"]
+        assert relative in ["compose.yaml", "deploy/traefik.yaml", "deploy/traefik-panel.yaml", "scripts/configure.sh", "scripts/update-panel.py", "scripts/install-auto-update.sh", "scripts/install-panel-recovery.sh", "scripts/panel-recovery.py", "scripts/backup-panel.py"]
         content = (pathlib.Path(os.environ["SOURCE"]) / relative).read_text()
         content = content.replace("/usr/local/lib/cove", str(root / "lib"))
         content = content.replace("/etc/systemd/system", str(root / "units"))
@@ -142,6 +142,12 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(["docker", "compose", "up", "-d", "--no-build", "--wait", "--wait-timeout", "180"], self.calls())
         self.assertIn(["systemctl", "enable", "--now", "cove-panel-update.timer"], self.calls())
         self.assertIn("--latest --installation", (self.root / "units/cove-panel-update.service").read_text())
+        self.assertIn(["systemctl", "enable", "--now", "cove-panel-recovery.timer"], self.calls())
+        self.assertIn("panel-recovery.py tick --installation", (self.root / "units/cove-panel-recovery.service").read_text())
+        for filename in ["install-panel-recovery.sh", "panel-recovery.py", "backup-panel.py"]:
+            self.assertTrue((self.root / "installation/scripts" / filename).is_file(), filename)
+        for filename in ["panel-recovery.py", "backup-panel.py"]:
+            self.assertTrue((self.root / "lib" / filename).is_file(), filename)
         compose = (self.root / "installation/compose.yaml").read_text()
         self.assertIn("postgres://cove:${POSTGRES_PASSWORD}@database:5432/cove", compose)
         self.assertNotIn("COVE_SMTP", compose)

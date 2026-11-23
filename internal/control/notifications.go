@@ -63,25 +63,36 @@ func publicWebhookTransport(config ...outbound.Config) *http.Transport {
 }
 
 func (s *Server) sendNotification(ctx context.Context, c *notificationConfig, event map[string]string) error {
-	var payload any = event
-	message := event["message"]
-	switch c.Provider {
-	case "discord":
-		payload = map[string]any{"content": message, "allowed_mentions": map[string]any{"parse": []string{}}}
-	case "slack":
-		payload = map[string]any{"text": message, "mrkdwn": false, "unfurl_links": false, "unfurl_media": false}
+	if c.Provider == "email" {
+		mailer, err := s.mailer(ctx)
+		if err != nil || mailer == nil {
+			return errors.New("notification SMTP unavailable")
+		}
+		subject := event["subject"]
+		if subject == "" {
+			subject = "Cove notification"
+		}
+		if err := mailer(ctx, c.Email, subject, event["message"]); err != nil {
+			return errors.New("notification email delivery failed")
+		}
+		return nil
 	}
+	endpoint, method, payload, headers := notificationRequest(c, event)
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return err
+		return errors.New("invalid notification request")
 	}
+	req.Header = headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Cove")
 	req.Header.Set("X-Cove-Delivery", event["delivery_id"])
+	if c.Provider == "webhook" && c.SigningSecret != "" {
+		signCoveWebhook(req, c.SigningSecret, data)
+	}
 	config, err := s.outboundConfig(ctx)
 	if err != nil {
 		return errors.New("outbound configuration unavailable")
@@ -143,8 +154,8 @@ func (s *Server) dispatchNotifications(ctx context.Context) error {
 }
 
 func (s *Server) deliverNotification(ctx context.Context, operation, connection string, attempt int) error {
-	var team, name, action, state string
-	err := s.DB.QueryRow(ctx, `SELECT w.team_id,w.name,o.action,o.state FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1`, operation).Scan(&team, &name, &action, &state)
+	var team, name, action, state, subject string
+	err := s.DB.QueryRow(ctx, `SELECT w.team_id,w.name,o.action,o.state,w.id FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1`, operation).Scan(&team, &name, &action, &state, &subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -161,10 +172,19 @@ func (s *Server) deliverNotification(ctx context.Context, operation, connection 
 	status := "sent"
 	message := ""
 	n := c.Notification
-	if !n.Enabled || state == "succeeded" && !n.Success || state != "succeeded" && !n.Failure {
+	if n.Owner {
+		n.Email, err = s.notificationOwnerEmail(ctx, team, subject)
+		if err != nil {
+			return err
+		}
+	}
+	if !notificationMatches(n, operationEvent(action, state)) || n.Owner && n.Email == "" {
 		status = "skipped"
 	} else {
 		event := map[string]string{"delivery_id": operation + ":" + connection, "event": "operation." + state, "operation_id": operation, "resource": name, "action": action, "state": state, "url": s.PublicURL + "/operations/" + operation, "message": "Cove: " + action + " " + state + " for " + name + ". " + s.PublicURL + "/operations/" + operation}
+		if len(n.Events) > 0 {
+			event["event"] = operationEvent(action, state)
+		}
 		if err = s.sendNotification(ctx, n, event); err != nil {
 			message = err.Error()
 			status = "pending"

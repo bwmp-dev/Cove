@@ -133,9 +133,9 @@ func (s *Server) syncProjectGitOps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "another GitOps sync is running", 409)
 		return
 	}
-	var workload, selectedPath, oldDraft string
+	var workload, selectedPath, oldDraft, oldRevision string
 	var automatic bool
-	if err = tx.QueryRow(ctx, `SELECT workload_id,path,automatic,COALESCE(last_draft_id,'') FROM configuration_gitops WHERE project_id=$1 AND team_id=$2 FOR UPDATE`, project, team).Scan(&workload, &selectedPath, &automatic, &oldDraft); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT workload_id,path,automatic,COALESCE(last_draft_id,''),last_revision FROM configuration_gitops WHERE project_id=$1 AND team_id=$2 FOR UPDATE`, project, team).Scan(&workload, &selectedPath, &automatic, &oldDraft, &oldRevision); err != nil {
 		http.Error(w, "connect a GitOps source first", 404)
 		return
 	}
@@ -212,7 +212,7 @@ func (s *Server) syncProjectGitOps(w http.ResponseWriter, r *http.Request) {
 	if _, err = tx.Exec(ctx, `UPDATE configuration_gitops SET last_revision=$2,desired_payload=$3,last_draft_id=NULLIF($4,''),last_error='',synced_at=now(),next_scan_at=now()+interval '1 minute' WHERE project_id=$1`, project, response.SourceFiles.Revision, sealed, draft); err == nil && oldDraft != "" && oldDraft != draft {
 		_, err = tx.Exec(ctx, `DELETE FROM configuration_drafts WHERE id=$1 AND project_id=$2 AND applied_at IS NULL`, oldDraft, project)
 	}
-	if err == nil {
+	if err == nil && draft != "" && (oldDraft == "" || oldRevision != response.SourceFiles.Revision) {
 		_, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,'GitOps diff staged',$2,200,$3)`, "user "+actor(r).ID, project, team)
 	}
 	if err == nil {

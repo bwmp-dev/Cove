@@ -14,6 +14,20 @@ function absoluteFormat(timeZone: string | undefined) {
   return format;
 }
 
+const displayFormats = new Map<string, Intl.DateTimeFormat>();
+
+// Compact timestamps for dense lists and chart axes. Pass the zone from useDisplayTimeZone so the text follows the
+// display preference once it loads.
+export function formatTime(time: number, options: Intl.DateTimeFormatOptions, timeZone = getDisplayTimeZone()) {
+  const key = `${timeZone ?? ""}|${JSON.stringify(options)}`;
+  let format = displayFormats.get(key);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en", { ...options, timeZone });
+    displayFormats.set(key, format);
+  }
+  return format.format(time);
+}
+
 const units: [Intl.RelativeTimeFormatUnit, number][] = [
   ["day", 86_400_000],
   ["hour", 3_600_000],

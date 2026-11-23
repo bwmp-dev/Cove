@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"cove/internal/outbound"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -578,7 +579,7 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
-func SMTPMailer(host, port, user, password, from string) (func(context.Context, string, string, string) error, error) {
+func SMTPMailer(host, port, user, password, from string, selected ...outbound.Config) (func(context.Context, string, string, string) error, error) {
 	if host == "" && port == "" && user == "" && password == "" && from == "" {
 		return nil, nil
 	}
@@ -590,8 +591,16 @@ func SMTPMailer(host, port, user, password, from string) (func(context.Context, 
 		if _, valid := normalizeEmail(to); !valid || strings.ContainsAny(subject, "\r\n") {
 			return errors.New("invalid email headers")
 		}
-		dialer := net.Dialer{Timeout: 15 * time.Second}
-		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+		proxy := outbound.Environment()
+		if len(selected) > 0 {
+			proxy = selected[0]
+		}
+		address := net.JoinHostPort(host, port)
+		via, err := proxy.For("https", address)
+		if err != nil {
+			return err
+		}
+		conn, err := outbound.Tunnel(ctx, via, "tcp", address)
 		if err != nil {
 			return err
 		}

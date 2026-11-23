@@ -30,6 +30,10 @@ WITH visible AS (
  SELECT 'workload',w.name,p.name||COALESCE(' / '||e.name,''),'/resources/'||w.id FROM workloads w JOIN projects p ON p.id=w.project_id LEFT JOIN environments e ON e.id=w.environment_id
  WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0)
  UNION ALL
+ SELECT 'page',w.name||' · '||section.label,p.name,'/resources/'||w.id||'/'||section.path FROM workloads w JOIN projects p ON p.id=w.project_id
+ CROSS JOIN (VALUES ('logs','Logs'),('metrics','Metrics'),('backups','Backups'),('troubleshooting','Troubleshooting'),('files','Files')) section(path,label)
+ WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0) AND (section.path<>'files' OR $3)
+ UNION ALL
  SELECT 'node',n.name,n.state,CASE WHEN $3 THEN '/nodes/'||n.id ELSE '/nodes' END FROM nodes n
  WHERE $3 OR EXISTS(SELECT 1 FROM team_nodes t WHERE t.node_id=n.id AND t.team_id=$2)
  UNION ALL
@@ -71,9 +75,11 @@ ORDER BY CASE kind WHEN 'workload' THEN 0 WHEN 'project' THEN 1 WHEN 'environmen
 	}
 	if s.teamAdmin(r, p.Team) {
 		pages = append(pages, searchResult{"page", "Notifications", "Manage", "/notifications"}, searchResult{"page", "Audit log", "Manage", "/audit"})
+		pages = append(pages, searchResult{"page", "Log forwarding", "Notifications", "/notifications"}, searchResult{"page", "Threshold rules", "Notifications", "/notifications"})
 	}
 	if p.Admin {
 		pages = append(pages, searchResult{"page", "Settings", "Administration", "/admin"}, searchResult{"page", "Users", "Administration", "/users"}, searchResult{"page", "Terminal", "Administration", "/terminal"})
+		pages = append(pages, searchResult{"page", "Panel backup and recovery", "Settings", "/admin"}, searchResult{"page", "Telemetry retention", "Settings", "/admin"}, searchResult{"page", "Prometheus export", "Settings", "/admin"})
 	}
 	for _, page := range pages {
 		if strings.Contains(strings.ToLower(page.Name), strings.ToLower(query)) {

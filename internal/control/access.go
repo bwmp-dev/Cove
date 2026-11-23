@@ -288,9 +288,18 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == "GET" {
 			return true
 		}
-		return s.teamAdmin(r, p.Team) || deny()
+		if !s.teamAdmin(r, p.Team) {
+			return deny()
+		}
+		return s.requirePermission(w, r, "team", "", "edit_configuration") && s.requirePermission(w, r, "team", "", "read_secrets")
 	case strings.HasPrefix(path, "/api/notifications"):
-		return s.teamAdmin(r, p.Team) || deny()
+		if !s.teamAdmin(r, p.Team) {
+			return deny()
+		}
+		if r.Method == "GET" {
+			return s.requirePermission(w, r, "team", "", "view")
+		}
+		return s.requirePermission(w, r, "team", "", "edit_configuration") && s.requirePermission(w, r, "team", "", "read_secrets")
 	case strings.HasPrefix(path, "/api/terminal") || strings.HasPrefix(path, "/api/github/app"):
 		if !p.Admin {
 			return deny()
@@ -311,11 +320,31 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case strings.HasPrefix(path, "/api/account/") || path == "/api/session" || path == "/api/account" || path == "/api/password" || path == "/api/teams":
 		return true
+	case path == "/api/settings/metrics-token":
+		if !p.Admin {
+			return deny()
+		}
+		if r.Method == "GET" {
+			return s.requirePermission(w, r, "team", "", "view")
+		}
+		return s.requirePermission(w, r, "team", "", "read_secrets")
+	case strings.HasPrefix(path, "/api/settings/panel-backup"):
+		if !p.Admin {
+			return deny()
+		}
+		if r.Method == "GET" {
+			return s.requirePermission(w, r, "team", "", "view")
+		}
+		return s.requirePermission(w, r, "team", "", "manage_backups") && s.requirePermission(w, r, "team", "", "edit_configuration") && s.requirePermission(w, r, "team", "", "read_secrets")
 	case strings.HasPrefix(path, "/api/users") || (path == "/api/settings" || strings.HasPrefix(path, "/api/settings/")) || path == "/api/updates":
 		if !p.Admin {
 			return deny()
 		}
-		return true
+		permission := "view"
+		if r.Method != "GET" {
+			permission = "edit_configuration"
+		}
+		return s.requirePermission(w, r, "team", "", permission)
 	case strings.HasPrefix(path, "/api/teams/"):
 		if !s.teamAdmin(r, id) {
 			if !strings.Contains(path, "/members") && !strings.Contains(path, "/invitations") && !(r.Method == "GET" && path == "/api/teams/"+id+"/roles") {
@@ -337,7 +366,11 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		if !p.Admin {
 			return deny()
 		}
-		return true
+		permission := "view"
+		if r.Method != "GET" {
+			permission = "edit_configuration"
+		}
+		return s.requirePermission(w, r, "team", "", permission)
 	case path == "/api/private-connections" || strings.HasPrefix(path, "/api/private-connections/"):
 		// Handlers check access to both endpoints of the connection.
 		return true
@@ -369,11 +402,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case strings.HasPrefix(path, "/api/projects/") && (strings.HasSuffix(path, "/configuration") || strings.HasSuffix(path, "/configuration/gitops")) && r.Method == "GET":
 		return s.requireAccess(w, r, "project", id, 1)
+	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/costs") && r.Method == "GET":
+		return s.requireAccess(w, r, "project", id, 1)
 	case strings.HasPrefix(path, "/api/projects/"):
 		if strings.HasSuffix(path, "/configuration/export") {
 			return true
 		}
-		if strings.HasSuffix(path, "/status-share") || strings.Contains(path, "/configuration/drafts") {
+		if strings.HasSuffix(path, "/status-share") || strings.HasSuffix(path, "/status-page") || strings.Contains(path, "/configuration/drafts") {
 			return s.requirePermission(w, r, "project", id, "edit_configuration")
 		}
 		if r.Method == "GET" && r.Context().Value(apiRouteKey{}) != nil {
@@ -499,6 +534,22 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		}
 		if !s.requireAccess(w, r, "workload", id, needed) {
 			return false
+		}
+		if strings.Contains(path, "/files") {
+			if !p.Admin {
+				return deny()
+			}
+			if !s.requirePermission(w, r, "workload", id, "read_secrets") {
+				return false
+			}
+		}
+		if strings.HasSuffix(path, "/backups/snapshot-preview") || strings.Contains(path, "/backups/") && (strings.HasSuffix(path, "/download") || strings.HasSuffix(path, "/import") || strings.HasSuffix(path, "/import-s3")) {
+			if !s.requirePermission(w, r, "workload", id, "manage_backups") {
+				return false
+			}
+			if !strings.HasSuffix(path, "/snapshot-preview") && !s.requirePermission(w, r, "workload", id, "read_secrets") {
+				return false
+			}
 		}
 		if r.Method != "GET" && !s.requireAdoptionComplete(w, r, id) {
 			return false

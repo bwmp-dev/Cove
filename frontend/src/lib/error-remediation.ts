@@ -21,11 +21,41 @@ function troubleshooting(resourceId: string | null, fallback: Remediation["link"
 // (internal/control); anything not listed here keeps its original text without a suggestion.
 const rules: Rule[] = [
   {
+    matches: (message) => message.startsWith("file access failed; check target ownership"),
+    remediation: (resourceId) => ({
+      fix: "Reload the folder or file so you work on its current revision and owner, then try again. If it keeps failing, check the worker's tools and the resource's containers.",
+      link: troubleshooting(resourceId, { label: "Open nodes", href: "/nodes" }),
+    }),
+  },
+  {
+    matches: (message) => message.startsWith("snapshot inspection unavailable"),
+    remediation: (resourceId) => ({
+      fix: "Check that the worker has the filesystem snapshot tools and privileges it needs and that the resource is deployed, or choose the stopped volume snapshot.",
+      link: troubleshooting(resourceId, { label: "Open nodes", href: "/nodes" }),
+    }),
+  },
+  {
+    matches: (message) => /^wait for active operations and upgrade and verify|^verify an upgraded worker and wait for active operations/.test(message),
+    remediation: () => ({ fix: "Wait for running operations to finish. If it still fails, upgrade the worker from its node page and verify the node.", link: { label: "Open nodes", href: "/nodes" } }),
+  },
+  {
+    matches: (message) => /^backup transfer (slots|readers) are busy/.test(message),
+    remediation: () => ({ fix: "Other backup downloads or imports are using every transfer slot. Try again once one finishes." }),
+  },
+  {
+    matches: (message) => message === "dump exceeds the configured backup transfer limit",
+    remediation: () => ({ fix: "Choose a smaller dump, or ask an instance administrator to raise the backup transfer limit in Settings." }),
+  },
+  {
+    matches: (message) => message === "finish the pending panel recovery action first" || message === "another panel recovery action is pending",
+    remediation: () => ({ fix: "Wait for the pending panel recovery action to finish; Panel recovery in Settings shows its progress." }),
+  },
+  {
     matches: (message) => message.startsWith("upgrade and verify "),
     remediation: () => ({ fix: "Upgrade the worker from its node page, then verify the node.", link: { label: "Open nodes", href: "/nodes" } }),
   },
   {
-    matches: (message) => /wait for the active operation|already has an active operation|worker or resource is busy/.test(message),
+    matches: (message) => /wait for the active operation|wait for active operations before|already has an active operation|worker or resource is busy/.test(message),
     remediation: (resourceId) => ({
       fix: "Wait for the running operation to finish, then try again.",
       link: resourceId ? { label: "Open resource operations", href: `/resources/${resourceId}/operations` } : { label: "Open operations", href: "/operations" },

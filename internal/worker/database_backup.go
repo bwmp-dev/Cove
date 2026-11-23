@@ -23,8 +23,11 @@ func validateDatabaseBackup(d *DatabaseBackup) error {
 	if d == nil {
 		return nil
 	}
-	if d.Engine != "postgresql" && d.Engine != "mariadb" {
-		return errors.New("logical backups support PostgreSQL and MariaDB; use consistent volume backups for other engines")
+	if d.Engine != "postgresql" && d.Engine != "mariadb" && !extendedDatabase(d.Engine) {
+		return errors.New("select PostgreSQL, MariaDB, MongoDB, Redis or Valkey")
+	}
+	if extendedDatabase(d.Engine) && d.Name != "all" {
+		return errors.New("MongoDB, Redis and Valkey snapshots include the complete instance; select all databases")
 	}
 	if !serviceIdentifier.MatchString(d.Service) || !environmentIdentifier.MatchString(d.Name) || len(d.Name) > 63 {
 		return errors.New("database service and a database name of 1-63 letters, digits or underscores are required")

@@ -24,6 +24,20 @@ type Probe struct {
 	OutboundProxy       bool         `json:"outbound_proxy"`
 	ReleaseDiff         bool         `json:"release_diff"`
 	BinarySHA256        string       `json:"binary_sha256"`
+	FilesystemSnapshots bool         `json:"filesystem_snapshots"`
+	BackupTransfers     bool         `json:"backup_transfers"`
+	StreamedBackups     bool         `json:"extended_logical_backups"`
+	TrafficLogs         bool         `json:"traffic_logs"`
+	CapacityAdvice      bool         `json:"capacity_advice"`
+	StructuredLogs      bool         `json:"structured_logs"`
+	ScheduledCleanup    bool         `json:"scheduled_cleanup"`
+	JournalRetention    bool         `json:"journal_retention"`
+	MountMetrics        bool         `json:"mount_metrics"`
+	AlertObservations   bool         `json:"alert_observations"`
+	FileBrowser         bool         `json:"file_browser"`
+	BackblazeB2         bool         `json:"backblaze_b2"`
+	BackupRetention     bool         `json:"backup_retention"`
+	Telemetry           bool         `json:"telemetry"`
 	EnvironmentPreviews bool         `json:"environment_previews"`
 	GuardedHooks        bool         `json:"guarded_hooks"`
 	Previews            bool         `json:"previews"`
@@ -67,6 +81,20 @@ func Inspect(ctx context.Context) Probe {
 	p.Previews = true
 	p.Imports = true
 	p.Adoption = true
+	p.Telemetry = true
+	p.BackupRetention = true
+	p.StreamedBackups = true
+	p.BackupTransfers = true
+	p.FilesystemSnapshots = runtime.GOOS == "linux"
+	p.BackblazeB2 = true
+	p.FileBrowser = true
+	p.CapacityAdvice = true
+	p.TrafficLogs = runtime.GOOS == "linux"
+	p.StructuredLogs = true
+	p.AlertObservations = true
+	p.ScheduledCleanup = true
+	p.JournalRetention = true
+	p.MountMetrics = runtime.GOOS == "linux"
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Output(); err == nil {

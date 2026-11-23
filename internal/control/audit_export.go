@@ -3,10 +3,8 @@ package control
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
+	"cove/internal/outbound"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,10 +102,8 @@ func (s *Server) deliverAudit(ctx context.Context, c auditExportConfig, destinat
 		if err != nil {
 			return err
 		}
-		mac := hmac.New(sha256.New, []byte(c.Secret))
-		mac.Write(payload)
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("X-Cove-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		signCoveWebhook(request, c.Secret, payload)
 		request.Header.Set("X-Cove-Delivery", strconv.FormatInt(id, 10))
 		config, err := s.outboundConfig(ctx)
 		if err != nil {
@@ -130,22 +126,37 @@ func (s *Server) deliverAudit(ctx context.Context, c auditExportConfig, destinat
 		}
 		return nil
 	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	var connection net.Conn
-	var err error
+	config, err := s.outboundConfig(ctx)
+	if err != nil {
+		return errors.New("outbound configuration unavailable")
+	}
+	scheme := "http"
+	if c.TLS {
+		scheme = "https"
+	}
+	proxy, err := config.For(scheme, c.Syslog)
+	if err != nil {
+		return errors.New("audit syslog proxy settings unavailable")
+	}
+	connection, err := outbound.Tunnel(ctx, proxy, "tcp", c.Syslog)
+	if err != nil {
+		return errors.New("audit syslog connection failed")
+	}
+	defer connection.Close()
 	if c.TLS {
 		host, _, e := net.SplitHostPort(c.Syslog)
 		if e != nil {
 			return e
 		}
-		connection, err = (&tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}}).DialContext(ctx, "tcp", c.Syslog)
-	} else {
-		connection, err = dialer.DialContext(ctx, "tcp", c.Syslog)
+		secured := tls.Client(connection, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+		if err = secured.HandshakeContext(ctx); err != nil {
+			return errors.New("audit syslog TLS connection failed")
+		}
+		connection = secured
 	}
 	if err != nil {
 		return errors.New("audit syslog connection failed")
 	}
-	defer connection.Close()
 	if err = connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return err
 	}
@@ -197,6 +208,11 @@ func (s *Server) dispatchAuditExport(ctx context.Context) error {
 	if err = s.deliverAudit(deliveryCtx, c, destination, id, payload); err == nil {
 		_, err = tx.Exec(ctx, "DELETE FROM audit_deliveries WHERE id=$1", id)
 	} else {
+		if attempts == 0 {
+			if _, queueErr := tx.Exec(ctx, `SELECT cove_queue_channel_event('audit_export.failed','Audit export delivery failed. Its durable queue will retry.',NULL,'','audit-export:'||$1::bigint::text)`, id); queueErr != nil {
+				return queueErr
+			}
+		}
 		delay := time.Duration(1<<min(attempts, 10)) * time.Second
 		_, err = tx.Exec(ctx, "UPDATE audit_deliveries SET attempts=attempts+1,next_attempt_at=$2 WHERE id=$1", id, time.Now().Add(delay))
 	}

@@ -1,3 +1,4 @@
+import { BackupTransferLimit } from "../components/BackupTransferLimit";
 import { InstanceIntegrations } from "../components/InstanceIntegrations";
 import { McpSettings } from "../components/McpSettings";
 import { AuditExport, InstanceSecondFactor, SignInProviders } from "../components/InstanceSecurity";
@@ -7,6 +8,9 @@ import { TemplateRepositories } from "../components/TemplateRepositories";
 import { SecurityPosture } from "../components/SecurityPosture";
 import { LoginHistory, loginHistoryDescription } from "../components/LoginHistory";
 import { useResetSecondFactor } from "../api/security";
+import { MetricsExport } from "../components/MetricsExport";
+import { PanelRecovery } from "../components/PanelRecovery";
+import { OperationRetentionPasses, StorageUsage, TelemetryRetention } from "../components/TelemetryRetention";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -351,7 +355,7 @@ export function AdminPage() {
   }
   return (
     <>
-      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, security, panel access, MCP, outbound proxy, template sources, audit export and update settings for this Cove instance." />
+      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, security, panel access, MCP, outbound proxy, template sources, audit export, update, panel recovery, backup transfer and data retention settings for this Cove instance." />
       <SecurityPosture />
       <Section title="Sign-in" width="form">
         <SignInSettings />
@@ -367,6 +371,12 @@ export function AdminPage() {
       <TemplateRepositories scope={{ kind: "instance" }} />
       <AuditExport />
       <Section title="Updates" width="form"><UpdateChannel /></Section>
+      <PanelRecovery />
+      <BackupTransferLimit />
+      <TelemetryRetention />
+      <MetricsExport />
+      <StorageUsage />
+      <OperationRetentionPasses />
     </>
   );
 }

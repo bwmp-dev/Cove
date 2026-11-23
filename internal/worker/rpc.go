@@ -16,58 +16,70 @@ import (
 )
 
 type RPCRequest struct {
-	Diff      *ReleaseComparisonRequest `json:"release_comparison,omitempty"`
-	Proxy     *outbound.Config          `json:"outbound_proxy,omitempty"`
-	Adoption  *AdoptionRequest          `json:"adoption,omitempty"`
-	Exec      *ExecRequest              `json:"exec,omitempty"`
-	Links     *LinkConfig               `json:"links,omitempty"`
-	Ingress   *IngressConfigRequest     `json:"ingress,omitempty"`
-	Tunnel    *TunnelRequest            `json:"tunnel,omitempty"`
-	Promotion *PromotionExport          `json:"promotion,omitempty"`
-	Registry  *Registry                 `json:"registry,omitempty"`
-	Storage   *StorageLocation          `json:"storage,omitempty"`
-	Terminal  *TerminalRequest          `json:"terminal,omitempty"`
-	Method    string                    `json:"method"`
-	Request   *Request                  `json:"request,omitempty"`
-	ID        string                    `json:"id,omitempty"`
+	Diff           *ReleaseComparisonRequest `json:"release_comparison,omitempty"`
+	Proxy          *outbound.Config          `json:"outbound_proxy,omitempty"`
+	Adoption       *AdoptionRequest          `json:"adoption,omitempty"`
+	Exec           *ExecRequest              `json:"exec,omitempty"`
+	Links          *LinkConfig               `json:"links,omitempty"`
+	Ingress        *IngressConfigRequest     `json:"ingress,omitempty"`
+	Tunnel         *TunnelRequest            `json:"tunnel,omitempty"`
+	Promotion      *PromotionExport          `json:"promotion,omitempty"`
+	Registry       *Registry                 `json:"registry,omitempty"`
+	Storage        *StorageLocation          `json:"storage,omitempty"`
+	Terminal       *TerminalRequest          `json:"terminal,omitempty"`
+	Method         string                    `json:"method"`
+	Request        *Request                  `json:"request,omitempty"`
+	ID             string                    `json:"id,omitempty"`
+	Snapshot       *VolumeSnapshotConfig     `json:"snapshot,omitempty"`
+	Stream         *StreamRequest            `json:"stream,omitempty"`
+	TrafficControl *ProxyTrafficControl      `json:"traffic_control,omitempty"`
+	CleanupControl *CleanupControl           `json:"cleanup_control,omitempty"`
+	JournalPrune   *JournalPruneRequest      `json:"journal_prune,omitempty"`
+	Files          *FileRequest              `json:"files,omitempty"`
+	Telemetry      *TelemetryRequest         `json:"telemetry,omitempty"`
 }
 type RPCResponse struct {
-	Comparison      *ReleaseComparison   `json:"release_comparison,omitempty"`
-	Adopted         *AdoptionRequest     `json:"adopted,omitempty"`
-	ComposeProjects []ComposeProject     `json:"compose_projects,omitempty"`
-	Adoption        *AdoptionPlan        `json:"adoption,omitempty"`
-	ImportedCompose *ImportedCompose     `json:"imported_compose,omitempty"`
-	Drift           *DriftReport         `json:"drift,omitempty"`
-	SourceFiles     *SourceFiles         `json:"source_files,omitempty"`
-	Exec            *ExecResult          `json:"exec,omitempty"`
-	Links           *LinkStatus          `json:"links,omitempty"`
-	Ingress         *IngressConfigState  `json:"ingress,omitempty"`
-	IngressFile     *IngressConfigFile   `json:"ingress_file,omitempty"`
-	IngressResult   *IngressConfigResult `json:"ingress_result,omitempty"`
-	RestoreCopy     *RestoreCopy         `json:"restore_copy,omitempty"`
-	Images          map[string]string    `json:"images,omitempty"`
-	Inventory       *PreviewInventory    `json:"inventory,omitempty"`
-	Cleanup         *CleanupPreview      `json:"cleanup,omitempty"`
-	Preflight       *PreflightReport     `json:"preflight,omitempty"`
-	Terminal        *TerminalResponse    `json:"terminal,omitempty"`
-	Releases        []Release            `json:"releases,omitempty"`
-	Backups         []BackupRecord       `json:"backups,omitempty"`
-	Maintenance     *Maintenance         `json:"maintenance,omitempty"`
-	Probe           *Probe               `json:"probe,omitempty"`
-	Operation       *Operation           `json:"operation,omitempty"`
-	Logs            string               `json:"logs,omitempty"`
-	Error           string               `json:"error,omitempty"`
-	Containers      []Container          `json:"containers,omitempty"`
+	Comparison      *ReleaseComparison    `json:"release_comparison,omitempty"`
+	Adopted         *AdoptionRequest      `json:"adopted,omitempty"`
+	ComposeProjects []ComposeProject      `json:"compose_projects,omitempty"`
+	Adoption        *AdoptionPlan         `json:"adoption,omitempty"`
+	ImportedCompose *ImportedCompose      `json:"imported_compose,omitempty"`
+	Drift           *DriftReport          `json:"drift,omitempty"`
+	SourceFiles     *SourceFiles          `json:"source_files,omitempty"`
+	Exec            *ExecResult           `json:"exec,omitempty"`
+	Links           *LinkStatus           `json:"links,omitempty"`
+	Ingress         *IngressConfigState   `json:"ingress,omitempty"`
+	IngressFile     *IngressConfigFile    `json:"ingress_file,omitempty"`
+	IngressResult   *IngressConfigResult  `json:"ingress_result,omitempty"`
+	RestoreCopy     *RestoreCopy          `json:"restore_copy,omitempty"`
+	Images          map[string]string     `json:"images,omitempty"`
+	Inventory       *PreviewInventory     `json:"inventory,omitempty"`
+	Cleanup         *CleanupPreview       `json:"cleanup,omitempty"`
+	Preflight       *PreflightReport      `json:"preflight,omitempty"`
+	Terminal        *TerminalResponse     `json:"terminal,omitempty"`
+	Releases        []Release             `json:"releases,omitempty"`
+	Backups         []BackupRecord        `json:"backups,omitempty"`
+	Maintenance     *Maintenance          `json:"maintenance,omitempty"`
+	Probe           *Probe                `json:"probe,omitempty"`
+	Operation       *Operation            `json:"operation,omitempty"`
+	Logs            string                `json:"logs,omitempty"`
+	Error           string                `json:"error,omitempty"`
+	Containers      []Container           `json:"containers,omitempty"`
+	Snapshot        *SnapshotPreview      `json:"snapshot,omitempty"`
+	TrafficState    *ProxyTrafficState    `json:"traffic_state,omitempty"`
+	TrafficPlan     *ProxyTrafficPlan     `json:"traffic_plan,omitempty"`
+	Traffic         *TrafficReport        `json:"traffic,omitempty"`
+	CleanupState    *CleanupState         `json:"cleanup_state,omitempty"`
+	CleanupPlan     *CleanupPlan          `json:"cleanup_plan,omitempty"`
+	JournalPrune    *JournalPruneResult   `json:"journal_prune,omitempty"`
+	Observations    *WorkloadObservations `json:"observations,omitempty"`
+	Files           *FileResponse         `json:"files,omitempty"`
+	Telemetry       *Telemetry            `json:"telemetry,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
-	if r.Proxy != nil {
-		if r.Proxy.Validate() != nil {
-			return RPCResponse{Error: "invalid outbound proxy configuration"}
-		}
-		if err := writeJSON(filepath.Join(e.Root, "outbound-proxy.json"), r.Proxy); err != nil {
-			return RPCResponse{Error: "could not save outbound proxy configuration"}
-		}
+	if err := e.configureOutbound(r.Proxy); err != nil {
+		return RPCResponse{Error: err.Error()}
 	}
 	switch r.Method {
 	case "compose_adoption_status":
@@ -147,6 +159,92 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: "retained release comparison unavailable: " + err.Error()}
 		}
 		return RPCResponse{Comparison: comparison}
+	case "snapshot_preview":
+		if r.Snapshot == nil {
+			return RPCResponse{Error: "snapshot options required"}
+		}
+		preview, err := e.SnapshotPreview(ctx, r.ID, r.Snapshot.MaxBytes)
+		if err != nil {
+			return RPCResponse{Error: "snapshot inspection unavailable; check worker state, tools and privileges"}
+		}
+		return RPCResponse{Snapshot: &preview}
+	case "traffic_control":
+		if r.TrafficControl == nil {
+			return RPCResponse{Error: "traffic settings required"}
+		}
+		state, plan, err := e.ConfigureTraffic(ctx, *r.TrafficControl)
+		response := RPCResponse{TrafficState: state, TrafficPlan: plan}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
+	case "traffic":
+		if r.Telemetry == nil {
+			return RPCResponse{Error: "traffic cursor required"}
+		}
+		report, err := e.CollectTraffic(ctx, r.Telemetry.Since)
+		if err != nil {
+			return RPCResponse{Error: "traffic collection unavailable"}
+		}
+		return RPCResponse{Traffic: report}
+	case "cleanup_control":
+		if r.CleanupControl == nil {
+			return RPCResponse{Error: "cleanup request required"}
+		}
+		state, plan, err := e.CleanupPolicy(ctx, *r.CleanupControl)
+		if err != nil {
+			return RPCResponse{CleanupState: state, CleanupPlan: plan, Error: err.Error()}
+		}
+		return RPCResponse{CleanupState: state, CleanupPlan: plan}
+	case "prune_journals":
+		if r.JournalPrune == nil {
+			return RPCResponse{Error: "journal request required"}
+		}
+		result, err := e.PruneJournals(ctx, *r.JournalPrune)
+		if err != nil {
+			return RPCResponse{JournalPrune: result, Error: "journal pruning unavailable; worker busy or metadata unsafe"}
+		}
+		return RPCResponse{JournalPrune: result}
+
+	case "observations":
+		result, err := e.ObserveWorkload(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: "resource observations unavailable"}
+		}
+		return RPCResponse{Observations: result}
+	case "files":
+		if r.Files == nil {
+			return RPCResponse{Error: "file request required"}
+		}
+		result, err := e.FileOperation(ctx, r.ID, *r.Files)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Files: result}
+	case "capacity":
+		if r.Request == nil {
+			return RPCResponse{Error: "deployment request required"}
+		}
+		report := e.Capacity(ctx, *r.Request)
+		return RPCResponse{Preflight: &report}
+	case "live_logs":
+		if r.Telemetry == nil {
+			return RPCResponse{Error: "live log cursor required"}
+		}
+		report, err := e.CollectLiveLogs(ctx, r.ID, r.Telemetry.Since)
+		if err != nil {
+			return RPCResponse{Error: "live logs unavailable; check worker state or retry after other readers finish"}
+		}
+		return RPCResponse{Telemetry: report}
+	case "telemetry":
+		if r.Telemetry == nil {
+			return RPCResponse{Error: "telemetry request required"}
+		}
+		result, err := e.CollectTelemetry(ctx, r.ID, r.Telemetry.Since)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Telemetry: result}
 	case "link_identity":
 		fingerprint, err := e.LinkIdentity()
 		if err != nil {
@@ -344,6 +442,15 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 		return err
 	}
 	defer unlock()
+	recovery, cancelRecovery := context.WithTimeout(ctx, time.Minute)
+	err = e.recoverBackupTransfersOnStartup(recovery)
+	if err == nil {
+		err = e.recoverFilesystemSnapshots(recovery)
+	}
+	cancelRecovery()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
 		return err
 	}
@@ -375,11 +482,18 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 			http.NotFound(w, r)
 			return
 		}
-		var request RPCRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&request) != nil {
+		request, input, err := decodeRPCFrame(r.Body)
+		if err != nil {
 			http.Error(w, "invalid request", 400)
+			return
+		}
+		if request.Method == "stream" {
+			if err := e.configureOutbound(request.Proxy); err != nil {
+				w.Header().Set("Content-Type", "application/octet-stream")
+				_ = json.NewEncoder(w).Encode(StreamResponse{Error: err.Error()})
+				return
+			}
+			e.serveStream(w, r, request.Stream, input)
 			return
 		}
 		if timeout := RPCTimeout(request.Method); timeout > 30*time.Second {
@@ -413,9 +527,11 @@ func RPCTimeout(method string) time.Duration {
 		return 40 * time.Second
 	}
 	switch method {
+	case "stream":
+		return 30 * time.Minute
 	case "ingress_config_change":
 		return 5 * time.Minute
-	case "links_apply":
+	case "links_apply", "traffic_control":
 		return 4 * time.Minute
 	case "compose_plan", "compose_adopt", "source_files", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
 		return 3 * time.Minute
@@ -424,23 +540,25 @@ func RPCTimeout(method string) time.Duration {
 }
 
 func Proxy(ctx context.Context, socket string, in io.Reader, out io.Writer) error {
-	data, err := io.ReadAll(io.LimitReader(in, 2*1024*1024+1))
+	rpc, stream, err := decodeRPCFrame(in)
 	if err != nil {
 		return err
 	}
-	if len(data) > 2*1024*1024 {
-		return errors.New("request too large")
+	data, err := json.Marshal(rpc)
+	if err != nil {
+		return err
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
 	defer transport.CloseIdleConnections()
-	var rpc RPCRequest
-	if err = json.Unmarshal(data, &rpc); err != nil {
-		return err
-	}
+
 	client := &http.Client{Transport: transport, Timeout: RPCTimeout(rpc.Method)}
-	request, err := http.NewRequestWithContext(ctx, "POST", "http://worker/rpc", bytes.NewReader(data))
+	var body io.Reader = bytes.NewReader(data)
+	if rpc.Method == "stream" {
+		body = io.MultiReader(bytes.NewReader(append(data, '\n')), stream)
+	}
+	request, err := http.NewRequestWithContext(ctx, "POST", "http://worker/rpc", body)
 	if err != nil {
 		return err
 	}
@@ -452,6 +570,13 @@ func Proxy(ctx context.Context, socket string, in io.Reader, out io.Writer) erro
 	if response.StatusCode != 200 {
 		return errors.New("worker rejected request")
 	}
-	_, err = io.Copy(out, io.LimitReader(response.Body, 2*1024*1024))
+	limit := int64(2 << 20)
+	if rpc.Method == "stream" {
+		limit = MaxTransferBytes + (64 << 10)
+	}
+	n, err := io.Copy(out, io.LimitReader(response.Body, limit+1))
+	if err == nil && n > limit {
+		err = errors.New("worker response exceeds limit")
+	}
 	return err
 }

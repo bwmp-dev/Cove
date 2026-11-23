@@ -39,3 +39,13 @@ it("leaves unknown, network and non-API errors without a suggestion", () => {
   expect(remediationFor(new Error("upgrade and verify the worker"))).toBeNull();
   expect(remediationFor("permission denied")).toBeNull();
 });
+
+it("suggests fixes for operations refusals", () => {
+  expect(remediationFor(new ApiError(502, "File access failed; check target ownership, path, revision, permissions and required worker tools"), "/resources/abc123/files")?.link?.href).toBe("/resources/abc123/troubleshooting");
+  expect(remediationFor(new ApiError(502, "Snapshot inspection unavailable; check worker tools, privileges and deployment state"))?.fix).toMatch(/snapshot tools/);
+  expect(remediationFor(new ApiError(409, "Wait for active operations before file access"), "/resources/abc123/files")?.link?.href).toBe("/resources/abc123/operations");
+  expect(remediationFor(new ApiError(409, "Wait for active operations and upgrade and verify a ready worker with backup transfer support"))?.link?.href).toBe("/nodes");
+  expect(remediationFor(new ApiError(429, "Backup transfer slots are busy; retry later"))?.fix).toMatch(/transfer slot/);
+  expect(remediationFor(new ApiError(413, "Dump exceeds the configured backup transfer limit"))?.fix).toMatch(/transfer limit/);
+  expect(remediationFor(new ApiError(409, "Finish the pending panel recovery action first"))?.fix).toMatch(/Panel recovery/);
+});

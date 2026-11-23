@@ -6,7 +6,7 @@ import { githubConnectionQuery } from "../api/queries";
 import type { Workload } from "../api/types";
 import { describedBy, inputClass } from "../lib/styles";
 import { SaveBar, UnsavedChangesGuard } from "./SaveBar";
-import { ChoiceGroup, type Choice } from "./WorkloadForm";
+import { ChoiceGroup, type Choice } from "./ChoiceGroup";
 import { DefinitionList, Field, LoadingRows, Notice, QueryError, Section } from "./ui";
 
 const title = "Automatic trigger";

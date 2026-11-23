@@ -12,7 +12,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ('compose.yaml', 'compose.local.yaml', 'deploy/traefik.yaml', 'deploy/traefik-panel.yaml',
-          'scripts/configure.sh', 'scripts/update-panel.py', 'scripts/offline-bundle.py')
+          'scripts/configure.sh', 'scripts/update-panel.py', 'scripts/offline-bundle.py',
+          'scripts/install-auto-update.sh', 'scripts/install-panel-recovery.sh',
+          'scripts/panel-recovery.py', 'scripts/backup-panel.py')
 
 
 def run(args, **kwargs):

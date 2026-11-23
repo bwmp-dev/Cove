@@ -113,7 +113,7 @@ class UpdateTests(unittest.TestCase):
 
             previous = Path.cwd()
             try:
-                with patch.object(updater, "verify_image"), patch.object(updater, "run", side_effect=run), patch.dict("sys.modules", {"fcntl": types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
+                with patch.object(updater, "verify_image"), patch.object(updater, "pre_update_snapshot") as pre_snapshot, patch.object(updater, "run", side_effect=run), patch.dict("sys.modules", {"fcntl": types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
                     if failure:
                         with self.assertRaises(subprocess.CalledProcessError):
                             updater.update(root, "v1.2.3", {name: "sha256:" + "b" * 64 for name in ("cove", "worker")} if offline else None)
@@ -121,6 +121,7 @@ class UpdateTests(unittest.TestCase):
                         updater.update(root, "v1.2.3", {name: "sha256:" + "b" * 64 for name in ("cove", "worker")} if offline else None)
             finally:
                 os.chdir(previous)
+            self.assertEqual(pre_snapshot.call_count, 0 if unchanged else 1)
             if unchanged:
                 self.assertFalse((root / ".cove-updates").exists())
                 self.assertFalse(any("up" in call for call in calls))
@@ -164,6 +165,49 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(updater.release_images("v1.2.3")["cove"], "ghcr.io/bwmp-dev/cove:v1.2.3")
         self.assertTrue(updater.release_images("sha-" + "a" * 40)["worker"].endswith("a" * 40))
 
+    def test_paused_recovery_blocks_updates_before_docker_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.cove-panel-recovery').mkdir()
+            (root / '.cove-panel-recovery/updates-paused.json').write_text('{}')
+            previous = Path.cwd()
+            try:
+                with patch.object(updater, 'run') as run, patch.dict('sys.modules', {'fcntl': types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
+                    with self.assertRaises(RuntimeError):
+                        updater.update(root, 'v1.2.3')
+                    run.assert_not_called()
+            finally:
+                os.chdir(previous)
+
+    def test_snapshot_failure_blocks_database_and_container_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.env').write_text('COVE_VERSION=v1.0.0\n')
+            calls = []
+
+            def execute(args, **kwargs):
+                calls.append(args)
+                if 'config' in args:
+                    output = json.dumps({'services': {'cove': {'image': 'old'}, 'database': {'image': 'postgres:17-alpine'}}})
+                elif 'ps' in args:
+                    output = 'old-container'
+                elif 'inspect' in args:
+                    output = 'sha256:new' if 'image' in args else 'sha256:old'
+                else:
+                    output = ''
+                return subprocess.CompletedProcess(args, 0, stdout=output)
+
+            previous = Path.cwd()
+            try:
+                with patch.object(updater, 'verify_image'), patch.object(updater, 'image_labels', return_value={'org.opencontainers.image.version':'v1.2.3','io.cove.schema-sha256':'a'*64}), patch.object(updater, 'run', side_effect=execute), patch.object(updater, 'pre_update_snapshot', side_effect=RuntimeError('verification failed')), patch.dict('sys.modules', {'fcntl': types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
+                    with self.assertRaises(RuntimeError):
+                        updater.update(root, 'v1.2.3')
+            finally:
+                os.chdir(previous)
+            self.assertFalse(any('up' in call or 'pg_dump' in call or 'rpc' in call for call in calls))
+            self.assertEqual((root / '.env').read_text(), 'COVE_VERSION=v1.0.0\n')
+            self.assertFalse((root / '.cove-updates').exists())
+
     @patch.object(updater.time, "sleep")
     @patch.object(updater, "rpc")
     def test_drain_waits_for_operations(self, rpc, sleep):
@@ -177,6 +221,33 @@ class UpdateTests(unittest.TestCase):
     def test_rejects_failed_drain(self, rpc):
         with self.assertRaises(RuntimeError):
             updater.drain([])
+
+
+    def test_release_rejection_precedes_snapshot_and_restarts(self):
+        for boundary in ("signature", "downgrade"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                original = "COVE_VERSION=v1.0.0\n"
+                (root / ".env").write_text(original)
+                calls = []
+                def execute(args, **kwargs):
+                    calls.append(args)
+                    if "config" in args:
+                        value = json.dumps({"services": {"cove": {"image": "old"}, "database": {"image": "postgres:17-alpine"}}})
+                    else:
+                        value = "sha256:fixture"
+                    return subprocess.CompletedProcess(args, 0, stdout=value)
+                previous = Path.cwd()
+                try:
+                    with patch.object(updater, "run", side_effect=execute), patch.object(updater, "verify_image", side_effect=RuntimeError("signature refused") if boundary == "signature" else None), patch.object(updater, "enforce_update_order", side_effect=RuntimeError("downgrade refused") if boundary == "downgrade" else None), patch.object(updater, "image_labels", return_value={}), patch.object(updater, "pre_update_snapshot") as snapshot, patch.dict("sys.modules", {"fcntl": types.SimpleNamespace(flock=lambda *args: None, LOCK_EX=1, LOCK_NB=2)}):
+                        with self.assertRaises(RuntimeError):
+                            updater.update(root, "v1.2.3")
+                        snapshot.assert_not_called()
+                finally:
+                    os.chdir(previous)
+                self.assertEqual((root / ".env").read_text(), original)
+                self.assertFalse((root / ".cove-updates").exists())
+                self.assertFalse(any("up" in call or "pg_dump" in call or "rpc" in call for call in calls))
 
 
 if __name__ == "__main__":

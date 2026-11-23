@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -78,5 +79,37 @@ func inspectMetrics(ctx context.Context, root string) *NodeMetrics {
 	}
 	sample.DiskTotal = disk.Blocks * uint64(disk.Bsize)
 	sample.DiskAvailable = disk.Bavail * uint64(disk.Bsize)
+	if rx, tx, ok := networkCounters(); ok {
+		sample.NetworkRX = &rx
+		sample.NetworkTX = &tx
+	}
+	sample.Mounts, sample.MountsLimited = inspectMounts()
+	sample.CPUs = runtime.NumCPU()
 	return sample
+}
+
+func networkCounters() (uint64, uint64, bool) {
+	data, err := os.ReadFile("/proc/net/dev")
+	if err != nil {
+		return 0, 0, false
+	}
+	var rx, tx uint64
+	for _, line := range strings.Split(string(data), "\n") {
+		name, counters, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(name) == "lo" {
+			continue
+		}
+		fields := strings.Fields(counters)
+		if len(fields) < 16 {
+			return 0, 0, false
+		}
+		received, e1 := strconv.ParseUint(fields[0], 10, 64)
+		sent, e2 := strconv.ParseUint(fields[8], 10, 64)
+		if e1 != nil || e2 != nil {
+			return 0, 0, false
+		}
+		rx += received
+		tx += sent
+	}
+	return rx, tx, true
 }

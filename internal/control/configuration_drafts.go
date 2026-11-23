@@ -298,6 +298,9 @@ func (s *Server) applyConfigurationDraft(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `UPDATE configuration_drafts SET applied_at=now(),operation_ids=$2 WHERE id=$1`, id, operations); err == nil {
+		_, err = tx.Exec(r.Context(), `INSERT INTO audit_events(actor,action,subject,status,team_id,details) VALUES($1,'configuration applied',$2,200,$3,jsonb_build_object('draft_id',$4::text))`, actor(r).ID, project, actor(r).Team, id)
+	}
+	if err == nil {
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {

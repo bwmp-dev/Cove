@@ -172,6 +172,22 @@ func (e *Engine) ingressArgs() ([]string, error) {
 	} else if e.ACMERoot != "" {
 		return nil, errors.New("ACME root requires a custom ACME directory")
 	}
+	traffic, err := e.trafficSettings()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]any, len(args))
+	for i, arg := range args {
+		values[i] = arg
+	}
+	configured, err := trafficCommand(values, traffic)
+	if err != nil {
+		return nil, err
+	}
+	args = args[:0]
+	for _, arg := range configured {
+		args = append(args, arg.(string))
+	}
 	return args, nil
 }
 
@@ -205,7 +221,7 @@ func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		create := []string{"docker", "create", "--name", "cove-ingress", "--label", "cove.managed=ingress", "--restart", "unless-stopped", "--network", "cove-ingress", "--security-opt", "no-new-privileges:true"}
+		create := []string{"docker", "create", "--name", "cove-ingress", "--label", "cove.managed=ingress", "--restart", "unless-stopped", "--network", "cove-ingress", "--security-opt", "no-new-privileges:true", "--log-driver", "json-file", "--log-opt", "max-size=4m", "--log-opt", "max-file=3"}
 		if !mode.Staged {
 			create = append(create, "-p", "80:80", "-p", "443:443")
 		}
@@ -231,6 +247,13 @@ func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if !strings.HasPrefix(image, "traefik:") {
+		if imageDigest.MatchString(image) {
+			change, changeErr := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "cove.traffic-change"}}`, "cove-ingress")
+			_, parseErr := hex.DecodeString(change)
+			if changeErr == nil && len(change) == 32 && parseErr == nil {
+				return nil
+			}
+		}
 		return errors.New("existing ingress needs migration to Traefik before deploying routes")
 	}
 	return nil
@@ -608,6 +631,12 @@ func routeOutcome(state string) string {
 
 // busy reports whether the workload has an executing operation or an unsettled route change.
 func (e *Engine) busy(workload string) bool {
+	if e.trafficRecoveryPending() {
+		return true
+	}
+	if e.active[housekeepingWorkload] {
+		return true
+	}
 	if e.active[workload] {
 		return true
 	}

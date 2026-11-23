@@ -350,6 +350,12 @@ function AuditExportForm({ saved }: { saved: AuditExportSettings }) {
   const [tls, setTls] = useState<boolean>();
   const [revealSecret, setRevealSecret] = useState(false);
   const [errors, setErrors] = useState<AuditExportErrors>({});
+  const [retentionDays, setRetentionDays] = useState(saved.configuration.retention_days);
+  if (saved.configuration.retention_days !== retentionDays) {
+    // Telemetry retention saves the same period. Follow it so this form never sends the old value back.
+    setRetentionDays(saved.configuration.retention_days);
+    if (draft) setDraft({ ...draft, retention_days: String(saved.configuration.retention_days) });
+  }
   const value = draft ?? initial;
   const syslogTls = tls ?? saved.configuration.syslog_tls;
   const dirty = draft !== undefined || tls !== undefined;
@@ -412,7 +418,7 @@ function AuditExportForm({ saved }: { saved: AuditExportSettings }) {
               layout="row"
               label="Signing secret"
               optional={saved.webhook_secret_configured}
-              hint={`${saved.webhook_secret_configured ? "A secret is saved. Leave blank to keep it. " : ""}At least 32 bytes. Requests carry X-Cove-Signature: sha256=<HMAC of the body> and a stable X-Cove-Delivery ID to deduplicate.`}
+              hint={`${saved.webhook_secret_configured ? "A secret is saved. Leave blank to keep it. " : ""}At least 32 bytes. Requests carry X-Cove-Timestamp (Unix seconds), X-Cove-Signature: sha256=<HMAC of the timestamp, a dot and the body> and a stable X-Cove-Delivery ID to deduplicate.`}
               error={errors.webhook_secret}
             >
               <div className="space-y-2">
@@ -450,7 +456,7 @@ function AuditExportForm({ saved }: { saved: AuditExportSettings }) {
               checked={syslogTls}
               onChange={(event) => setTls(event.target.checked)}
             />
-            {text("retention_days", "Keep audit events for", "Days, from 1 to 3650. Events still waiting for delivery are kept until delivered.", { type: "number" })}
+            {text("retention_days", "Keep audit events for", "Days, from 1 to 3650. The same setting as Audit log in Telemetry retention; saving either changes both. Events still waiting for delivery are kept until delivered, so a backlog can grow stored audit data.", { type: "number" })}
           </SettingRows>
           {update.isError && <Notice tone="error" title="Could not save audit export">{errorMessage(update.error)}</Notice>}
         </fieldset>

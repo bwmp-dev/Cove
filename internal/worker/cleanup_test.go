@@ -1,51 +1,16 @@
 package worker
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
-
-func TestCleanupOwnershipAndFailure(t *testing.T) {
-	e, err := NewEngine(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var commands []string
-	e.Run = func(_ context.Context, _ string, args, env []string, out io.Writer) error {
-		commands = append(commands, strings.Join(args, " "))
-		if args[1] == "buildx" && !strings.Contains(strings.Join(env, " "), "BUILDX_CONFIG="+filepath.Join(e.Root, "buildx")) {
-			t.Fatal("shared builder configuration")
-		}
-		return nil
-	}
-	if err := e.cleanupBuilds(context.Background(), io.Discard); err != nil || len(commands) != 0 {
-		t.Fatal("legacy cache touched", err)
-	}
-	owner, err := e.buildOwner()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeJSON(filepath.Join(e.Root, "builder-ready.json"), true); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.cleanupBuilds(context.Background(), io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if len(commands) != 2 || commands[0] != "docker image prune --force --filter label=dev.cove.build-owner="+owner+" --filter until=168h" || commands[1] != "docker buildx prune --builder cove-"+owner+" --force --filter until=168h --keep-storage 2GB" {
-		t.Fatal(commands)
-	}
-	e.Run = func(context.Context, string, []string, []string, io.Writer) error {
-		return errors.New("docker unavailable")
-	}
-	if err := e.cleanupBuilds(context.Background(), io.Discard); err == nil {
-		t.Fatal("lost cleanup failure")
-	}
-}
 
 func TestBuildUsesOwnedBuilderAndLabels(t *testing.T) {
 	e, _ := NewEngine(t.TempDir())
@@ -133,22 +98,32 @@ func TestCleanupRealDocker(t *testing.T) {
 	if err := e.buildImages(ctx, e.Root, args, nil, os.Stderr); err != nil {
 		t.Fatal(err)
 	}
-	// Docker's containerd store ages imported images by import time, not SOURCE_DATE_EPOCH.
-	// Shorten only this disposable owner's image grace period to exercise real deletion.
+	// Override only the disposable image's reported import age; Docker records import time rather than SOURCE_DATE_EPOCH.
 	e.Run = func(ctx context.Context, dir string, args, env []string, out io.Writer) error {
-		args = append([]string{}, args...)
-		if len(args) > 2 && args[1] == "image" && args[2] == "prune" {
-			for i, arg := range args {
-				if arg == "until=168h" {
-					args[i] = "until=0s"
-				}
+		if len(args) > 4 && args[1] == "image" && args[2] == "inspect" && args[len(args)-1] == strings.TrimSpace(first) && strings.Contains(strings.Join(args, " "), `"created"`) {
+			var capture bytes.Buffer
+			if err := RunCommand(ctx, dir, args, env, &capture); err != nil {
+				return err
 			}
+			var metadata map[string]any
+			if err := json.Unmarshal(capture.Bytes(), &metadata); err != nil {
+				return err
+			}
+			metadata["created"] = time.Now().Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano)
+			metadata["tagged"] = metadata["created"]
+			return json.NewEncoder(out).Encode(metadata)
 		}
+
 		return RunCommand(ctx, dir, args, env, out)
 	}
-	if err := e.cleanupBuilds(ctx, os.Stderr); err != nil {
+	_, plan, err := e.CleanupPolicy(ctx, CleanupControl{Action: "preview"})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err = e.CleanupPolicy(ctx, CleanupControl{Action: "run", Revision: plan.Revision}); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := e.output(ctx, "docker", "image", "inspect", strings.TrimSpace(first)); err == nil {
 		t.Fatal("expired dangling image retained")
 	}

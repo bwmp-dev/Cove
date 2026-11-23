@@ -109,40 +109,12 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 	return e.Run(ctx, dir, buildArgs, buildEnv, out)
 }
 
-func (e *Engine) cleanupBuilds(ctx context.Context, out io.Writer) error {
-	e.buildMu.Lock()
-	defer e.buildMu.Unlock()
-	// Never create ownership state during cleanup or adopt legacy shared cache.
-	if _, err := os.Stat(filepath.Join(e.Root, "build-owner.json")); os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	owner, err := e.buildOwner()
-	if err != nil {
-		return err
-	}
-	// Without --all Docker retains tagged releases and images used by any container.
-	if err := e.Run(ctx, e.Root, []string{"docker", "image", "prune", "--force", "--filter", "label=dev.cove.build-owner=" + owner, "--filter", "until=168h"}, nil, out); err != nil {
-		return err
-	}
-	if _, err := os.Stat(filepath.Join(e.Root, "builder-ready.json")); os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	return e.Run(ctx, e.Root, []string{"docker", "buildx", "prune", "--builder", "cove-" + owner, "--force", "--filter", "until=168h", "--keep-storage", "2GB"}, []string{"BUILDX_CONFIG=" + filepath.Join(e.Root, "buildx")}, out)
-}
-
 func (e *Engine) cleanupLoop(ctx context.Context) {
-	ticker := time.NewTicker(6 * time.Hour)
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
-		cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		err := e.cleanupBuilds(cleanupCtx, os.Stderr)
-		cancel()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Cove build cleanup failed:", err)
+		if err := e.scheduledCleanup(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintln(os.Stderr, "Cove scheduled cleanup failed:", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -150,4 +122,50 @@ func (e *Engine) cleanupLoop(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+func (e *Engine) scheduledCleanup(ctx context.Context) error {
+	e.buildMu.Lock()
+	state, err := e.cleanupState()
+	e.buildMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if !state.Policy.Enabled || state.LastRun != nil && time.Since(*state.LastRun) < time.Duration(state.Policy.IntervalHours)*time.Hour {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	_, plan, err := e.CleanupPolicy(cleanupCtx, CleanupControl{Action: "preview"})
+	if err == nil && len(plan.Items) == 0 {
+		e.buildMu.Lock()
+		defer e.buildMu.Unlock()
+		current, err := e.cleanupState()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		current.LastRun = &now
+		current.LastError = ""
+		current.Removed = 0
+		current.EstimatedBytes = 0
+		return writeJSON(filepath.Join(e.Root, "cleanup-policy.json"), current)
+	}
+	if err == nil {
+		_, _, err = e.CleanupPolicy(cleanupCtx, CleanupControl{Action: "run", Revision: plan.Revision})
+	}
+	if err != nil {
+		e.buildMu.Lock()
+		defer e.buildMu.Unlock()
+		current, readErr := e.cleanupState()
+		if readErr != nil {
+			return readErr
+		}
+		now := time.Now().UTC()
+		current.LastRun = &now
+		current.LastError = "Scheduled cleanup deferred or failed; inspect and preview before retry."
+		if saveErr := writeJSON(filepath.Join(e.Root, "cleanup-policy.json"), current); saveErr != nil {
+			return saveErr
+		}
+	}
+	return err
 }

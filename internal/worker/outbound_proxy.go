@@ -25,6 +25,19 @@ func readOutboundConfig(root string) (*outbound.Config, error) {
 	return &config, nil
 }
 
+func (e *Engine) configureOutbound(config *outbound.Config) error {
+	if config == nil {
+		return nil
+	}
+	if config.Validate() != nil {
+		return errors.New("invalid outbound proxy configuration")
+	}
+	if err := writeJSON(filepath.Join(e.Root, "outbound-proxy.json"), config); err != nil {
+		return errors.New("could not save outbound proxy configuration")
+	}
+	return nil
+}
+
 func configuredRunner(root string) CommandRunner {
 	return func(ctx context.Context, dir string, args, environment []string, out io.Writer) error {
 		config, err := readOutboundConfig(root)

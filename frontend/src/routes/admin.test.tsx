@@ -40,6 +40,12 @@ function mockUpdates(updates: Record<string, unknown>, put?: (body: unknown) => 
     const security = securityResponse(path);
     if (security) return security;
     if (path === "/api/updates" && method === "PUT") return put ? put(body) : Promise.resolve({ ...updates, channel: (body as { channel: string }).channel });
+    if (path === "/api/settings/retention") return Promise.resolve({ metric_rows: 200000, metric_bytes: 268435456, log_rows: 200000, log_bytes: 134217728, log_days: 7, audit_days: 90, raw_days: 1, hour_days: 30, day_days: 365, operation_rows: 100000, operation_days: 90 });
+    if (path === "/api/settings/operation-retention") return Promise.resolve([]);
+    if (path === "/api/storage-locations") return Promise.resolve([]);
+    if (path === "/api/settings/panel-backup") return Promise.resolve({ config: { enabled: false, interval_hours: 24, keep_last: 7, keep_days: 30, max_bytes: 8589934592, storage_id: "" }, password_set: false, agent_id: "", checked_at: null, last_error: "", updates_paused: false, pending_recovery: false, offsite_pending: false, public_origin: "https://cove.example.com", snapshots: [], jobs: [] });
+    if (path === "/api/settings/transfer-limits") return Promise.resolve({ backup_bytes: 1073741824, min_backup_bytes: 1048576, max_backup_bytes: 68719476736 });
+    if (path === "/api/settings/storage-usage") return Promise.resolve({ metrics: { rows: 0, bytes: 0, basis: "" }, logs: { rows: 0, bytes: 0, basis: "" }, audit: { rows: 0, bytes: 0, basis: "" }, operations: { rows: 0, bytes: 0, basis: "" } });
     return Promise.resolve(updates);
   });
 }

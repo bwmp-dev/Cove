@@ -10,6 +10,7 @@ const entityPaths = [
   new RegExp(`^/projects/${segment}$`),
   new RegExp(`^/projects/${segment}/environments/${segment}$`),
   new RegExp(`^/resources/${segment}$`),
+  new RegExp(`^/resources/${segment}/(logs|metrics|troubleshooting|backups|files)$`),
   new RegExp(`^/nodes/${segment}$`),
   new RegExp(`^/operations/${segment}$`),
 ];

@@ -134,6 +134,13 @@ func (s *Server) publicRoutes() []publicRoute {
 		{"GET", "/workloads/{id}/logs", "logs:read", "Read a bounded container log snapshot; poll to follow", nil, struct {
 			Logs string `json:"logs"`
 		}{}, 200, s.workloadLogs},
+		{"GET", "/workloads/{id}/metrics", "workloads:read", "Read bounded retained resource metrics; optional range query: hour, day, week, month or year", nil, map[string]any{}, 200, s.metricHistory},
+		{"GET", "/workloads/{id}/log-history", "logs:read", "Read bounded retained redacted logs with optional query filters", nil, map[string]any{}, 200, s.logHistory},
+		{"GET", "/workloads/{id}/logs/live", "logs:read", "Read a bounded redacted live-log batch; poll to follow", nil, map[string]any{}, 200, s.workloadLiveLogs},
+		{"GET", "/workloads/{id}/traffic", "workloads:read", "Read bounded resource route traffic aggregates", nil, map[string]any{}, 200, s.workloadTraffic},
+		{"GET", "/workloads/{id}/uptime", "workloads:read", "Read configured route check observations", nil, []uptimeCheck{}, 200, s.uptimeChecks},
+		{"GET", "/workloads/{id}/sizing", "workloads:read", "Read observed sizing advice without changing limits", nil, map[string]any{}, 200, s.workloadSizing},
+		{"GET", "/projects/{id}/costs", "projects:read", "Read allocation-based cost estimates for accessible resources", nil, map[string]any{}, 200, s.projectCosts},
 		{"GET", "/operations", "workloads:read", "List up to 100 accessible operations; optional workload_id query filter", nil, []map[string]any{}, 200, s.listOperations},
 		{"GET", "/operations/{id}", "workloads:read", "Read an operation", nil, operationView{}, 200, s.getOperation},
 		{"GET", "/operations/{id}/logs", "logs:read", "Read bounded operation logs", nil, struct {
@@ -264,6 +271,12 @@ func (s *Server) openAPIDocument() map[string]any {
 			for _, name := range []string{"from", "to"} {
 				params = append(params, map[string]any{"name": name, "in": "query", "required": true, "schema": map[string]any{"type": "string"}})
 			}
+		}
+		optionalQueries := map[string][]string{
+			"/workloads/{id}/metrics": {"range"}, "/workloads/{id}/log-history": {"q", "container", "before", "before_id"}, "/workloads/{id}/logs/live": {"since"}, "/workloads/{id}/traffic": {"range"},
+		}
+		for _, name := range optionalQueries[route.Path] {
+			params = append(params, map[string]any{"name": name, "in": "query", "required": false, "schema": map[string]any{"type": "string"}})
 		}
 		operation["parameters"] = params
 		if route.Input != nil {

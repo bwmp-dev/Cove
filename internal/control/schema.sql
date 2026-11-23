@@ -1129,3 +1129,184 @@ CREATE OR REPLACE FUNCTION cove_deployment_approval() RETURNS trigger LANGUAGE p
  END IF;
  RETURN NEW;
 END $$;
+ALTER TABLE health_deliveries ADD COLUMN IF NOT EXISTS alert_key text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS health_deliveries_incident_pending ON health_deliveries(connection_id,alert_key,created_at,id) WHERE state='pending';
+
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS owner_user_id text;
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='workloads_owner_member' AND conrelid='workloads'::regclass) THEN
+  ALTER TABLE workloads ADD CONSTRAINT workloads_owner_member FOREIGN KEY(team_id,owner_user_id) REFERENCES team_members(team_id,user_id) ON DELETE SET NULL (owner_user_id);
+ END IF;
+END $$;
+ALTER TABLE health_deliveries ADD COLUMN IF NOT EXISTS subject_id text NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS threshold_rules (
+ id text PRIMARY KEY, team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ name text NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+ metric text NOT NULL CHECK(metric IN ('cpu','memory','disk')),
+ threshold double precision NOT NULL CHECK(threshold>0 AND threshold<=100),
+ confirmation_seconds integer NOT NULL CHECK(confirmation_seconds BETWEEN 60 AND 3600),
+ repeat_seconds integer NOT NULL CHECK(repeat_seconds BETWEEN 300 AND 604800),
+ channel_ids text[] NOT NULL CHECK(cardinality(channel_ids) BETWEEN 1 AND 32)
+);
+CREATE INDEX IF NOT EXISTS threshold_rules_node ON threshold_rules(node_id);
+
+CREATE TABLE IF NOT EXISTS telemetry_settings (
+ id integer PRIMARY KEY CHECK(id=1), configuration jsonb NOT NULL
+);
+INSERT INTO telemetry_settings(id,configuration) VALUES(1,'{"metric_rows":200000,"metric_bytes":268435456,"log_rows":200000,"log_bytes":134217728,"log_days":7,"audit_days":90,"raw_days":1,"hour_days":30,"day_days":365}') ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS metric_samples (
+ id bigserial PRIMARY KEY, node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ workload_id text REFERENCES workloads(id) ON DELETE CASCADE, series text NOT NULL,
+ tier text NOT NULL CHECK(tier IN ('minute','hour','day')), bucket timestamptz NOT NULL,
+ sampled_at timestamptz NOT NULL, payload jsonb NOT NULL CHECK(octet_length(payload::text)<=32768)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS metric_samples_series ON metric_samples(node_id,COALESCE(workload_id,''),series,tier,bucket);
+CREATE INDEX IF NOT EXISTS metric_samples_recent ON metric_samples(sampled_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS workload_log_entries (
+ id text PRIMARY KEY, workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ container_id text NOT NULL, container text NOT NULL, timestamp timestamptz NOT NULL,
+ message text NOT NULL CHECK(octet_length(message)<=8192), clipped boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS workload_logs_recent ON workload_log_entries(timestamp DESC,id DESC);
+CREATE INDEX IF NOT EXISTS workload_logs_resource ON workload_log_entries(workload_id,timestamp DESC,id DESC);
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_since timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_checked_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_limited boolean NOT NULL DEFAULT false;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_error text NOT NULL DEFAULT '';
+
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS workload_id text REFERENCES workloads(id) ON DELETE CASCADE;
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS domain text NOT NULL DEFAULT '';
+ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_metric_check;
+ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_metric_check CHECK(metric IN ('cpu','memory','disk','certificate','restarts','oom','crashes','uptime'));
+ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_threshold_check;
+ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_threshold_check CHECK(threshold>0 AND threshold<=100000);
+CREATE INDEX IF NOT EXISTS threshold_rules_workload ON threshold_rules(workload_id) WHERE workload_id IS NOT NULL;
+
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS mount_path text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS operation_retention_runs (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ checked_at timestamptz NOT NULL,
+ error text NOT NULL DEFAULT '',
+ pruned integer NOT NULL DEFAULT 0,
+ protected integer NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS node_costs (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ monthly_minor bigint NOT NULL CHECK(monthly_minor BETWEEN 0 AND 100000000000),
+ currency text NOT NULL CHECK(currency ~ '^[A-Z]{3}$')
+);
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS metrics_token_hash bytea;
+CREATE TABLE IF NOT EXISTS log_forwarders (
+ id text PRIMARY KEY,team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ name text NOT NULL,enabled boolean NOT NULL,configuration bytea NOT NULL,
+ last_success timestamptz,last_error text NOT NULL DEFAULT '',sent_entries bigint NOT NULL DEFAULT 0,
+ dropped_entries bigint NOT NULL DEFAULT 0,UNIQUE(team_id,name)
+);
+CREATE TABLE IF NOT EXISTS log_forward_deliveries (
+ id text PRIMARY KEY,forwarder_id text NOT NULL REFERENCES log_forwarders(id) ON DELETE CASCADE,
+ payload bytea NOT NULL CHECK(octet_length(payload)<=524288),entries integer NOT NULL CHECK(entries BETWEEN 1 AND 100),
+ attempts integer NOT NULL DEFAULT 0,next_attempt timestamptz NOT NULL DEFAULT now(),created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS log_forward_due ON log_forward_deliveries(next_attempt,created_at);
+CREATE TABLE IF NOT EXISTS route_checks (
+ id text PRIMARY KEY,workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,domain text NOT NULL,path text NOT NULL,
+ enabled boolean NOT NULL,interval_seconds integer NOT NULL CHECK(interval_seconds BETWEEN 60 AND 86400),
+ timeout_seconds integer NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 10),expected_min integer NOT NULL,expected_max integer NOT NULL,
+ public_label text NOT NULL DEFAULT '',next_check_at timestamptz NOT NULL DEFAULT now(),checked_at timestamptz,
+ last_up boolean,last_status integer,latency_ms double precision,last_error text NOT NULL DEFAULT '',
+ consecutive_failures integer NOT NULL DEFAULT 0,version integer NOT NULL DEFAULT 1,UNIQUE(workload_id,domain)
+);
+CREATE INDEX IF NOT EXISTS route_checks_due ON route_checks(next_check_at) WHERE enabled;
+CREATE TABLE IF NOT EXISTS route_check_results (
+ id bigserial PRIMARY KEY,check_id text NOT NULL REFERENCES route_checks(id) ON DELETE CASCADE,
+ checked_at timestamptz NOT NULL,up boolean NOT NULL,status integer NOT NULL,latency_ms double precision NOT NULL
+);
+CREATE INDEX IF NOT EXISTS route_check_history ON route_check_results(check_id,checked_at DESC);
+CREATE INDEX IF NOT EXISTS route_check_result_age ON route_check_results(checked_at);
+CREATE TABLE IF NOT EXISTS project_status_pages (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,enabled boolean NOT NULL DEFAULT false,
+ title text NOT NULL,slug text NOT NULL UNIQUE CHECK(length(slug)=64)
+);
+CREATE TABLE IF NOT EXISTS traffic_collection (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,cursor_at timestamptz,checked_at timestamptz,
+ available boolean NOT NULL DEFAULT false,limited boolean NOT NULL DEFAULT false,last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS route_traffic (
+ id text PRIMARY KEY,workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,domain text NOT NULL,timestamp timestamptz NOT NULL,
+ status integer NOT NULL,bytes bigint NOT NULL,duration_ms double precision NOT NULL,client_ip text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS route_traffic_recent ON route_traffic(timestamp DESC,id DESC);
+CREATE INDEX IF NOT EXISTS route_traffic_resource ON route_traffic(workload_id,timestamp DESC);
+
+-- Backup transfer bounds.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS backup_transfer_bytes bigint NOT NULL DEFAULT 1073741824 CHECK (backup_transfer_bytes BETWEEN 1048576 AND 68719476736);
+
+-- Host-driven panel backups and recovery.
+CREATE TABLE IF NOT EXISTS panel_recovery (
+ id integer PRIMARY KEY CHECK(id=1),configuration bytea,
+ agent_id text NOT NULL DEFAULT '',checked_at timestamptz,last_scheduled_at timestamptz,
+ updates_paused boolean NOT NULL DEFAULT false,last_error text NOT NULL DEFAULT '',pending_recovery boolean NOT NULL DEFAULT false,pending_remote_job text NOT NULL DEFAULT '',
+ snapshots jsonb NOT NULL DEFAULT '[]' CHECK(jsonb_typeof(snapshots)='array' AND jsonb_array_length(snapshots)<=102)
+);
+INSERT INTO panel_recovery(id) VALUES(1) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS panel_recovery_jobs (
+ id text PRIMARY KEY,actor_id text NOT NULL,action text NOT NULL CHECK(action IN ('backup','restore','resume_updates')),
+ snapshot_id text NOT NULL DEFAULT '',state text NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','succeeded','failed')),
+ requested_at timestamptz NOT NULL DEFAULT now(),finished_at timestamptz,last_error text NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_panel_recovery_job ON panel_recovery_jobs((true)) WHERE state IN ('queued','running');
+CREATE INDEX IF NOT EXISTS panel_recovery_history ON panel_recovery_jobs(requested_at DESC,id DESC);
+
+-- Metrics service capabilities are revalidated against their issuing administrator.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS metrics_token_creator_id text REFERENCES users(id) ON DELETE SET NULL;
+
+-- Route safe audit outcomes through the existing channel delivery queue.
+CREATE OR REPLACE FUNCTION cove_queue_channel_event(event_name text, event_message text, source_team text, resource text, delivery text, affected_user text DEFAULT '') RETURNS void LANGUAGE sql AS $$
+ INSERT INTO health_deliveries(id,team_id,connection_id,event,message,alert_key,subject_id)
+ SELECT delivery||':'||c.id,c.team_id,c.id,event_name,event_message,delivery,resource
+ FROM infrastructure_connections c WHERE c.kind='notification' AND
+ ((source_team IS NOT NULL AND c.team_id=source_team) OR
+ (source_team IS NULL AND affected_user<>'' AND EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=c.team_id AND m.user_id=affected_user)) OR
+ (source_team IS NULL AND affected_user='' AND EXISTS(SELECT 1 FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=c.team_id AND u.is_admin AND NOT u.disabled)))
+ ON CONFLICT(id) DO NOTHING;
+$$;
+CREATE OR REPLACE FUNCTION cove_notify_audit_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE event_name text; event_message text; affected text:=''; resource text:=''; source_team text:=NEW.team_id;
+BEGIN
+ IF NEW.action='authentication lockout' THEN event_name='security.lockout'; event_message='An account authentication lockout occurred.'; affected=NEW.actor;
+ ELSIF NEW.action='account new device' THEN event_name='security.new_device'; event_message='An account signed in from a new browser. Review account login history.'; affected=NEW.actor;
+ ELSIF NEW.action='DELETE /api/users/{id}/second-factor' AND NEW.status<300 THEN event_name='security.second_factor_reset'; event_message='An administrator reset an account second factor.'; affected=NEW.subject; source_team=NULL;
+ ELSIF NEW.action='emergency deployment override' AND NEW.status<300 THEN event_name='deployment.freeze_override'; event_message='An administrator overrode deployment policy. Review the audit log.';
+ ELSIF NEW.actor='deploy hook' AND NEW.action='accepted delivery' THEN event_name='deploy_hook.accepted'; event_message='A deploy hook delivery was accepted. Deployment policy still applies.';
+ ELSIF NEW.actor='deploy hook' AND NEW.status>=400 THEN event_name='deploy_hook.failed'; event_message='A deploy hook delivery was refused. Review its audit event.';
+ ELSIF NEW.action='GitOps diff staged' THEN event_name='gitops.drift'; event_message='GitOps compared its source with saved configuration. Review its configuration diff.';
+ ELSIF NEW.action='configuration applied' AND NEW.status<300 THEN
+  IF EXISTS(SELECT 1 FROM configuration_gitops g WHERE g.project_id=NEW.subject AND g.last_draft_id=NEW.details->>'draft_id') THEN event_name='gitops.applied'; ELSE event_name='configuration.applied'; END IF;
+  event_message='Reviewed project configuration was saved. This did not deploy resources.';
+ ELSIF NEW.action LIKE 'POST /api/projects/{id}/imports%' THEN
+  IF NEW.status<300 THEN event_name='import.reviewed'; event_message='An importer prepared a review. The source system was not changed.'; ELSE event_name='import.failed'; event_message='An importer request was refused. Review the audit log.'; END IF;
+ ELSIF NEW.action='resource.adopt' THEN event_name='adoption.succeeded'; event_message='A reviewed resource was adopted without restarting containers.';
+ ELSIF NEW.action LIKE 'POST /api/nodes/{id}/adoptions%' AND NEW.status>=400 THEN event_name='adoption.failed'; event_message='A Compose adoption request did not finish. Reload its review before retrying.';
+ ELSE RETURN NEW;
+ END IF;
+ SELECT id INTO resource FROM workloads WHERE id=NEW.subject AND team_id=NEW.team_id;
+ PERFORM cove_queue_channel_event(event_name,event_message,source_team,COALESCE(resource,''),'audit:'||NEW.id,affected);
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_audit_notifications ON audit_events;
+CREATE TRIGGER cove_audit_notifications AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION cove_notify_audit_outcome();
+CREATE OR REPLACE FUNCTION cove_audit_lockout() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.locked_until>now() AND (TG_OP='INSERT' OR OLD.locked_until<=now()) THEN
+  INSERT INTO audit_events(actor,action,subject,status) VALUES(CASE WHEN NEW.key LIKE 'account:%' THEN substring(NEW.key from 9) ELSE '' END,'authentication lockout','',429);
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_lockout_notification ON authentication_failures;
+CREATE TRIGGER cove_lockout_notification AFTER INSERT OR UPDATE ON authentication_failures FOR EACH ROW EXECUTE FUNCTION cove_audit_lockout();

@@ -186,6 +186,8 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		}
 		if in.Backup == nil {
 			in.Backup = old.Backup
+		} else if !s.requireBackupConfigurationAccess(w, r, "workload", r.PathValue("id")) {
+			return
 		}
 		in.Private = old.Private
 		if in.Limits == nil {

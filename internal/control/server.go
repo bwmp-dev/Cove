@@ -48,6 +48,7 @@ type Server struct {
 	workerRPC     func(context.Context, string, worker.RPCRequest) (worker.RPCResponse, error)
 	templateFetch func(context.Context, string, string, string) ([]byte, string, error)
 	secretCommand secretCommandFunc
+	workerStream  func(context.Context, string, worker.RPCRequest, io.Reader, func(worker.StreamResponse, io.Reader) error) error
 }
 
 func (s *Server) Init(ctx context.Context) error {
@@ -193,6 +194,25 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle(method+" /api/teams/{id}/second-factor", s.admin(http.HandlerFunc(s.secondFactorPolicy)))
 	}
 
+	s.registerPanelRecovery(mux)
+	mux.HandleFunc("GET /metrics", s.prometheus)
+	mux.HandleFunc("GET /api/status/{slug}", s.publicStatusPage)
+	for _, pattern := range []string{"GET /api/settings/metrics-token", "POST /api/settings/metrics-token", "DELETE /api/settings/metrics-token"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.metricsToken)))
+	}
+	for _, pattern := range []string{"GET /api/notifications/forwarders", "POST /api/notifications/forwarders", "PUT /api/notifications/forwarders/{id}", "DELETE /api/notifications/forwarders/{id}", "POST /api/notifications/forwarders/{id}/test"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.logForwarders)))
+	}
+	for _, pattern := range []string{"GET /api/workloads/{id}/uptime", "POST /api/workloads/{id}/uptime", "PUT /api/workloads/{id}/uptime/{check}", "DELETE /api/workloads/{id}/uptime/{check}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.uptimeChecks)))
+	}
+	for _, pattern := range []string{"GET /api/projects/{id}/status-page", "PUT /api/projects/{id}/status-page"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.statusPageSettings)))
+	}
+	for _, pattern := range []string{"GET /api/nodes/{id}/traffic", "POST /api/nodes/{id}/traffic"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.nodeTraffic)))
+	}
+	mux.Handle("GET /api/workloads/{id}/traffic", s.admin(http.HandlerFunc(s.workloadTraffic)))
 	for _, pattern := range []string{"GET /api/cloudflare/connections", "POST /api/cloudflare/connections", "PUT /api/cloudflare/connections/{connection}/credentials"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.cloudflareAccounts)))
 	}
@@ -302,6 +322,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/notifications/health-history", s.admin(http.HandlerFunc(s.healthDeliveryHistory)))
 	mux.Handle("GET /api/notifications/health", s.admin(http.HandlerFunc(s.healthAlerts)))
 	mux.Handle("GET /api/nodes", s.admin(http.HandlerFunc(s.listNodes)))
+	mux.Handle("GET /api/nodes/{id}/cleanup-policy", s.admin(http.HandlerFunc(s.nodeCleanupControl)))
+	mux.Handle("PUT /api/nodes/{id}/cleanup-policy", s.admin(http.HandlerFunc(s.nodeCleanupControl)))
+	mux.Handle("POST /api/nodes/{id}/cleanup-plan", s.admin(http.HandlerFunc(s.nodeCleanupControl)))
+	mux.Handle("POST /api/nodes/{id}/cleanup-run", s.admin(http.HandlerFunc(s.nodeCleanupControl)))
+	mux.Handle("GET /api/notifications/mounts", s.admin(http.HandlerFunc(s.notificationMounts)))
+	mux.Handle("GET /api/settings/operation-retention", s.admin(http.HandlerFunc(s.operationRetentionStatus)))
+	mux.Handle("POST /api/settings/operation-retention/run", s.admin(http.HandlerFunc(s.operationRetentionStatus)))
 	mux.Handle("GET /api/nodes/{id}/cleanup-preview", s.admin(http.HandlerFunc(s.cleanupPreview)))
 	mux.Handle("POST /api/nodes/{id}/verify", s.admin(http.HandlerFunc(s.verifyNode)))
 	mux.Handle("PUT /api/nodes/{id}", s.admin(http.HandlerFunc(s.updateNode)))
@@ -340,8 +367,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/workloads/{id}/runtime", s.admin(http.HandlerFunc(s.workloadRuntime)))
 	mux.Handle("GET /api/workloads/{id}/logs", s.admin(http.HandlerFunc(s.workloadLogs)))
 	mux.Handle("GET /api/workloads/{id}/backups", s.admin(http.HandlerFunc(s.workloadBackups)))
+	mux.HandleFunc("GET /api/workloads/{id}/backups/{backup}/download", s.nativeBackupDownload)
+	mux.Handle("POST /api/workloads/{id}/backups/import", s.admin(http.HandlerFunc(s.importBackupDump)))
+	mux.Handle("POST /api/workloads/{id}/backups/import-s3", s.admin(http.HandlerFunc(s.importBackupDump)))
+	mux.Handle("GET /api/settings/transfer-limits", s.admin(http.HandlerFunc(s.transferLimits)))
+	mux.Handle("GET /api/workloads/{id}/backups/transfer-limits", s.admin(http.HandlerFunc(s.transferLimits)))
+	mux.Handle("PUT /api/settings/transfer-limits", s.admin(http.HandlerFunc(s.transferLimits)))
 	mux.Handle("GET /api/workloads/{id}/releases", s.admin(http.HandlerFunc(s.workloadReleases)))
 	mux.Handle("GET /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.getBackupPolicy)))
+	mux.Handle("GET /api/workloads/{id}/backups/snapshot-preview", s.admin(http.HandlerFunc(s.backupSnapshotPreview)))
 	mux.Handle("PUT /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.setBackupPolicy)))
 	mux.Handle("GET /api/workloads/{id}/webhook", s.admin(http.HandlerFunc(s.getWebhook)))
 	mux.Handle("POST /api/workloads/{id}/webhook", s.admin(http.HandlerFunc(s.createWebhook)))
@@ -427,6 +461,32 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST "+prefix+"/{id}/test", s.admin(http.HandlerFunc(s.testConnection)))
 	}
 	mux.Handle("GET /api/notifications/history", s.admin(http.HandlerFunc(s.notificationHistory)))
+	mux.Handle("GET /api/notifications/events", s.admin(http.HandlerFunc(s.notificationCatalogue)))
+	mux.Handle("GET /api/workloads/{id}/metrics", s.admin(http.HandlerFunc(s.metricHistory)))
+	mux.Handle("GET /api/nodes/{id}/metrics", s.admin(http.HandlerFunc(s.metricHistory)))
+	mux.Handle("GET /api/workloads/{id}/log-history", s.admin(http.HandlerFunc(s.logHistory)))
+	mux.Handle("GET /api/settings/retention", s.admin(http.HandlerFunc(s.telemetryRetention)))
+	mux.Handle("PUT /api/settings/retention", s.admin(http.HandlerFunc(s.telemetryRetention)))
+	mux.Handle("GET /api/settings/storage-usage", s.admin(http.HandlerFunc(s.telemetryStorageUsage)))
+	mux.Handle("GET /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
+	mux.Handle("POST /api/notifications/rules", s.admin(http.HandlerFunc(s.thresholdRules)))
+	mux.Handle("DELETE /api/notifications/rules/{id}", s.admin(http.HandlerFunc(s.thresholdRules)))
+	mux.Handle("GET /api/workloads/{id}/owner", s.admin(http.HandlerFunc(s.workloadOwner)))
+	mux.Handle("GET /api/workloads/{id}/capacity", s.admin(http.HandlerFunc(s.workloadCapacity)))
+	mux.Handle("GET /api/workloads/{id}/sizing", s.admin(http.HandlerFunc(s.workloadSizing)))
+	mux.Handle("GET /api/workloads/{id}/logs/live", s.admin(http.HandlerFunc(s.workloadLiveLogs)))
+	mux.Handle("GET /api/nodes/{id}/cost", s.admin(http.HandlerFunc(s.nodeCost)))
+	mux.Handle("PUT /api/nodes/{id}/cost", s.admin(http.HandlerFunc(s.nodeCost)))
+	mux.Handle("GET /api/projects/{id}/costs", s.admin(http.HandlerFunc(s.projectCosts)))
+	mux.Handle("GET /api/workloads/{id}/observations", s.admin(http.HandlerFunc(s.workloadObservations)))
+	mux.Handle("GET /api/workloads/{id}/files", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("GET /api/workloads/{id}/files/targets", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("GET /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("GET /api/workloads/{id}/files/download", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("PUT /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("POST /api/workloads/{id}/files/upload", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("DELETE /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("PUT /api/workloads/{id}/owner", s.admin(http.HandlerFunc(s.workloadOwner)))
 	mux.Handle("GET /api/workloads/{id}/registry", s.admin(http.HandlerFunc(s.resourceRegistry)))
 	mux.Handle("PUT /api/workloads/{id}/registry", s.admin(http.HandlerFunc(s.resourceRegistry)))
 	mux.Handle("POST /api/terminal", s.admin(http.HandlerFunc(s.terminalOpen)))

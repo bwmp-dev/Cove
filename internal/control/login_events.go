@@ -126,16 +126,21 @@ func (s *Server) recordLogin(r *http.Request, user string, success bool, method,
 	if s.DB.QueryRow(ctx, "SELECT COALESCE(email,'') FROM users WHERE id=$1 AND email_verified", user).Scan(&email) != nil || email == "" {
 		return
 	}
-	sendMail, err := s.mailer(ctx)
+	if _, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status) VALUES($1,'account new device','',200)`, user); err != nil {
+		slog.Error("sign-in notification event could not be persisted")
+	}
+	mailer, err := s.mailer(ctx)
 	if err != nil {
 		slog.Error("sign-in email settings unavailable")
 		return
 	}
-	if sendMail != nil {
-		if err = sendMail(ctx, email, "New sign-in to Cove", "Your account signed in from a new browser.\nAddress: "+address+"\nBrowser: "+sessionUserAgent(r)+"\nIf this was not you, reset your password and revoke your sessions."); err != nil {
-			slog.Error("sign-in email delivery failed")
-		}
+	if mailer == nil {
+		return
 	}
+	if err = s.sendNotification(ctx, &notificationConfig{Provider: "email", Email: email}, map[string]string{"event": "security.new_device", "subject": "New sign-in to Cove", "message": "Your account signed in from a new browser.\nAddress: " + address + "\nBrowser: " + sessionUserAgent(r) + "\nIf this was not you, reset your password and revoke your sessions."}); err != nil {
+		slog.Error("sign-in email delivery failed")
+	}
+
 }
 func (s *Server) loginHistory(w http.ResponseWriter, r *http.Request) {
 	user := actor(r).ID
