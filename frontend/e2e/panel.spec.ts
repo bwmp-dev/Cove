@@ -2133,6 +2133,129 @@ test("every page adapts to phone tablet laptop and wide desktop", async ({ page,
   } finally { await publicPage.close(); }
 });
 
+test("SSH bastion lifecycle, pinned host alerts and worker key rotation on the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(420_000);
+  const worker = process.env.COVE_BROWSER_WORKER ?? "";
+  if (!/^cove-browser-[a-f0-9]+-worker$/.test(worker)) throw new Error("Isolated browser worker required");
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const authorizedKeys = () => execFileSync("docker", ["exec", worker, "cat", "/var/lib/cove/.ssh/authorized_keys"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+  // Read through docker exec, the fixture's trusted console, never from an SSH handshake.
+  const hostKey = execFileSync("docker", ["exec", worker, "cat", "/etc/ssh/ssh_host_ed25519_key.pub"], { encoding: "utf8" }).trim();
+  const bastionName = `e2e-jump-${randomBytes(3).toString("hex")}`;
+
+  await page.goto("/nodes"); await signIn(page);
+  const events = await (await page.request.get("/api/notifications/events")).json() as string[];
+  expect(events).toEqual(expect.arrayContaining(["host_key_changed.alert", "host_key_changed.recovered"]));
+  const bastions = page.getByRole("region", { name: "SSH bastions" });
+  await expect(bastions.getByText(/No bastions/)).toBeVisible();
+  await bastions.getByRole("button", { name: "Add bastion", exact: true }).click();
+  const create = page.getByRole("dialog", { name: "Add bastion" });
+  await create.getByLabel("Name", { exact: true }).fill(bastionName);
+  await create.getByLabel("SSH address", { exact: true }).fill("worker");
+  await create.getByLabel("Forwarding user", { exact: true }).fill("cove-jump");
+  await create.getByLabel("Verified bastion host public key", { exact: true }).fill(`worker ${hostKey}`);
+  await create.getByRole("button", { name: "Add bastion", exact: true }).click();
+  await expect(create.getByText(/known_hosts line/)).toBeVisible();
+  await create.getByLabel("Verified bastion host public key", { exact: true }).fill(hostKey);
+  await create.getByRole("button", { name: "Add bastion", exact: true }).click();
+  await expect(create).toBeHidden();
+  await expect(bastions.getByText("Generated public key", { exact: true })).toBeVisible();
+  await expect(bastions.getByText(/PermitOpen none/)).toBeVisible();
+  const saved = (await (await page.request.get("/api/bastions")).json() as { id: string; name: string; public_key: string; fingerprint: string }[]).find((item) => item.name === bastionName);
+  if (!saved) throw new Error("Created bastion missing from the API");
+  await expect(bastions.getByText(saved.public_key, { exact: true }).first()).toBeVisible();
+  await expect(bastions.getByText(saved.fingerprint).first()).toBeVisible();
+  await expect(page.getByText(/PRIVATE KEY/)).toHaveCount(0);
+  await capture(page, testInfo, "bastions");
+
+  await page.getByRole("link", { name: "ready-browser-worker", exact: true }).click();
+  const nodeId = new URL(page.url()).pathname.split("/")[2] ?? "";
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(nodeId)) throw new Error("Unexpected node URL");
+  const ssh = page.getByRole("region", { name: "SSH connection" });
+  await chooseOption(ssh.getByLabel("Connect through", { exact: true }), saved.id);
+  await expect(ssh.getByText(/must permit forwarding to worker:22/)).toBeVisible();
+  await ssh.getByRole("button", { name: "Save route", exact: true }).click();
+  await expect(ssh.getByText("Route saved", { exact: true })).toBeVisible();
+  expect(await (await page.request.get(`/api/nodes/${nodeId}/bastion`)).json()).toEqual({ bastion_id: saved.id, host_key_error: "" });
+
+  await page.goto("/nodes");
+  await bastions.getByRole("button", { name: new RegExp(`^${bastionName} `) }).click();
+  await expect(bastions.getByText(/PermitOpen worker:22/)).toBeVisible();
+  await expect(bastions.getByText(`restrict,port-forwarding,permitopen="worker:22",command="/bin/false" ${saved.public_key}`, { exact: true })).toBeVisible();
+  await bastions.getByRole("button", { name: `Delete ${bastionName}`, exact: true }).click();
+  const blocked = page.getByRole("dialog", { name: `Delete ${bastionName}?` });
+  await expect(blocked.getByText("Nodes still use this bastion", { exact: true })).toBeVisible();
+  await expect(blocked.getByRole("button", { name: "Delete bastion", exact: true })).toBeDisabled();
+  await blocked.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // Back to the direct route; the real worker must verify with its unchanged pin.
+  await page.getByRole("link", { name: "ready-browser-worker", exact: true }).click();
+  await chooseOption(ssh.getByLabel("Connect through", { exact: true }), "");
+  await ssh.getByRole("button", { name: "Save route", exact: true }).click();
+  await expect(ssh.getByText("Route saved", { exact: true })).toBeVisible();
+  await page.locator("main header").getByRole("button", { name: "Verify", exact: true }).click();
+  await expect(page.getByText("Verification finished: Ready", { exact: true })).toBeVisible({ timeout: 60_000 });
+
+  const before = authorizedKeys();
+  expect(before).toHaveLength(1);
+  await expect(ssh.getByText("Not rotated", { exact: true })).toBeVisible();
+  await ssh.getByRole("button", { name: "Rotate key", exact: true }).click();
+  const rotate = page.getByRole("dialog", { name: "Rotate this node's SSH key?" });
+  await expect(rotate.getByText(/never removes the old key before the new one is saved/)).toBeVisible();
+  await rotate.getByRole("button", { name: "Rotate key", exact: true }).click();
+  try {
+    await expect(ssh.getByText("Rotated", { exact: true })).toBeVisible({ timeout: 240_000 });
+  } catch (error) {
+    // Read-only evidence from this run's own fixture containers, kept with the test output.
+    const panel = worker.replace(/-worker$/, "-panel");
+    const command = (...args: string[]) => { const result = spawnSync("docker", args, { encoding: "utf8" }); return `$ docker ${args.join(" ")}\n${result.stdout}${result.stderr}`; };
+    writeFileSync(testInfo.outputPath("rotation-diagnostics.txt"), [
+      `identity ${JSON.stringify(await (await page.request.get(`/api/nodes/${nodeId}/identity`)).json())}`,
+      `node ${JSON.stringify((await (await page.request.get("/api/nodes")).json() as { id: string }[]).find((item) => item.id === nodeId))}`,
+      command("exec", worker, "ls", "-ln", "/var/lib/cove/.ssh"),
+      command("exec", worker, "cat", "/var/lib/cove/.ssh/authorized_keys"),
+      command("logs", "--tail", "200", worker),
+      command("logs", "--tail", "300", panel),
+    ].join("\n"));
+    throw error;
+  }
+  const after = authorizedKeys();
+  expect(after).toHaveLength(1);
+  expect(after[0]).not.toEqual(before[0]);
+  expect(after[0]).toMatch(/^restrict,command="[^"]+" ssh-ed25519 /);
+  expect(execFileSync("docker", ["exec", worker, "cat", "/etc/ssh/ssh_host_ed25519_key.pub"], { encoding: "utf8" }).trim()).toEqual(hostKey);
+  await page.locator("main header").getByRole("button", { name: "Verify", exact: true }).click();
+  await expect(page.getByText("Verification finished: Ready", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/PRIVATE KEY/)).toHaveCount(0);
+  await capture(page, testInfo, "node-ssh-rotated");
+
+  // Mismatch, switched and failure states come from intercepted responses so no saved pin or key changes.
+  await page.route(`**/api/nodes/${nodeId}/bastion`, (route) => route.fulfill({ json: { bastion_id: "", host_key_error: `worker host key mismatch: presented SHA256:Q2hhbmdlZEtleUZvckJyb3dzZXJUZXN0, pinned ${saved.fingerprint}` } }));
+  await page.route(`**/api/nodes/${nodeId}/identity`, (route) => route.request().method() === "GET"
+    ? route.fulfill({ json: { id: "f".repeat(32), state: "switched", error: "old key removal not yet confirmed: worker unreachable", updated_at: new Date().toISOString() } })
+    : route.fulfill({ status: 503, body: "identity rotation unavailable" }));
+  await page.reload();
+  await expect(ssh.getByText("SSH host identity mismatch", { exact: true })).toBeVisible();
+  await expect(ssh.getByText(/never accepts the key it observed/)).toBeVisible();
+  await expect(ssh.getByRole("button", { name: /accept|trust|replace/i })).toHaveCount(0);
+  await expect(ssh.getByText("Removing the old key", { exact: true })).toBeVisible();
+  await expect(ssh.getByText("Cleanup cannot be cancelled", { exact: true })).toBeVisible();
+  await expect(ssh.getByRole("button", { name: "Cancel rotation", exact: true })).toHaveCount(0);
+  await ssh.getByRole("button", { name: "Retry now", exact: true }).click();
+  await page.getByRole("dialog", { name: "Retry the pending step?" }).getByRole("button", { name: "Retry now", exact: true }).click();
+  await expect(ssh.getByText(/may or may not have been saved/)).toBeVisible();
+  await capture(page, testInfo, "node-ssh-mismatch-switched");
+  await page.unrouteAll({ behavior: "wait" });
+
+  await page.goto("/nodes");
+  await bastions.getByRole("button", { name: `Delete ${bastionName}`, exact: true }).click();
+  await page.getByRole("dialog", { name: `Delete ${bastionName}?` }).getByRole("button", { name: "Delete bastion", exact: true }).click();
+  await expect(bastions.getByText(/No bastions/)).toBeVisible();
+  expect(await (await page.request.get("/api/bastions")).json()).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test("administrator password rotation signs out every session", async ({ page }) => {
   await page.goto("/account");
   await signIn(page);

@@ -311,25 +311,22 @@ func (s *Server) nodeRPC(ctx context.Context, nodeID string, request worker.RPCR
 	if s.workerRPC != nil {
 		return s.workerRPC(ctx, nodeID, request)
 	}
-	var address, mode string
-	var host *string
-	var port int
-	var encrypted []byte
-	err := s.DB.QueryRow(ctx, "SELECT address,port,host_key,private_key,mode FROM nodes WHERE id=$1", nodeID).Scan(&address, &port, &host, &encrypted, &mode)
+	var mode string
+	err := s.DB.QueryRow(ctx, "SELECT mode FROM nodes WHERE id=$1", nodeID).Scan(&mode)
 	if err != nil {
 		return worker.RPCResponse{}, err
 	}
 	if mode == "local" {
 		return s.localRPC(ctx, request)
 	}
-	if host == nil {
-		return worker.RPCResponse{}, errors.New("node is not enrolled")
-	}
-	seed, err := unseal(s.Key, encrypted)
+	ctx, cancel := context.WithTimeout(ctx, worker.RPCTimeout(request.Method))
+	defer cancel()
+	client, err := s.openNodeSSH(ctx, nodeID, nil)
 	if err != nil {
 		return worker.RPCResponse{}, err
 	}
-	return callSSH(ctx, address, port, *host, seed, request)
+	defer client.Close()
+	return callSSHClient(client, request)
 }
 func (s *Server) operationLogs(w http.ResponseWriter, r *http.Request) {
 	var nodeID string
@@ -400,6 +397,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if err := s.dispatchOperations(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
+		if err := s.reconcileIdentities(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
 		if err := s.scheduleRestoreDrills(ctx); err != nil && ctx.Err() == nil {

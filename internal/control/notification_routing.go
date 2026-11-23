@@ -15,6 +15,7 @@ var notificationEvents = []string{
 	"node_unreachable.alert", "node_unreachable.recovered", "disk_low.alert", "disk_low.recovered",
 	"resource_unhealthy.alert", "resource_unhealthy.recovered", "backup_overdue.alert", "backup_overdue.recovered",
 	"threshold.alert", "threshold.recovered",
+	"host_key_changed.alert", "host_key_changed.recovered",
 }
 
 func operationEvent(action, state string) string {

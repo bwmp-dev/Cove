@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	SSHIdentity         bool         `json:"ssh_identity"`
 	FileTransfers       bool         `json:"file_transfers"`
 	PostgresPITR        bool         `json:"postgres_pitr"`
 	FilesystemSnapshots bool         `json:"filesystem_snapshots"`
@@ -70,6 +71,7 @@ func Inspect(ctx context.Context) Probe {
 	p.BackblazeB2 = true
 	p.FileBrowser = true
 	p.FileTransfers = true
+	p.SSHIdentity = runtime.GOOS == "linux"
 	p.CapacityAdvice = true
 	p.TrafficLogs = runtime.GOOS == "linux"
 	p.StructuredLogs = true

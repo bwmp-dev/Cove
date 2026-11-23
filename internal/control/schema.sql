@@ -819,3 +819,19 @@ CREATE INDEX IF NOT EXISTS workload_pitr_due ON workload_pitr(next_backup_at) WH
 
 -- Streamed resource file transfer bounds; the text editor remains independently bounded.
 ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS file_transfer_bytes bigint NOT NULL DEFAULT 67108864 CHECK(file_transfer_bytes BETWEEN 1048576 AND 1073741824);
+
+-- Separately pinned forwarding identities never relax a worker's restricted RPC key.
+CREATE TABLE IF NOT EXISTS ssh_bastions (
+ id text PRIMARY KEY,name text NOT NULL,address text NOT NULL,port integer NOT NULL CHECK(port BETWEEN 1 AND 65535),
+ login text NOT NULL,host_key text NOT NULL,public_key text NOT NULL,private_key bytea NOT NULL
+);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS bastion_id text REFERENCES ssh_bastions(id) ON DELETE RESTRICT;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS host_key_error text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS nodes_bastion ON nodes(bastion_id) WHERE bastion_id IS NOT NULL;
+
+-- One resumable SSH key change and last outcome per node, with sealed key material removed at completion.
+CREATE TABLE IF NOT EXISTS node_identity_rotations (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,id text NOT NULL,
+ phase text NOT NULL CHECK(phase IN ('queued','staged','switched','aborting','succeeded','cancelled')),
+ configuration bytea,last_error text NOT NULL DEFAULT '',next_attempt_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now()
+);

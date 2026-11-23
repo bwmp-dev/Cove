@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Identity       *IdentityRequest      `json:"identity,omitempty"`
 	Snapshot       *VolumeSnapshotConfig `json:"snapshot,omitempty"`
 	Stream         *StreamRequest        `json:"stream,omitempty"`
 	TrafficControl *ProxyTrafficControl  `json:"traffic_control,omitempty"`
@@ -34,6 +35,7 @@ type RPCRequest struct {
 	ID             string                `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Identity      *IdentityState        `json:"identity,omitempty"`
 	PITR          *PITRStatus           `json:"pitr,omitempty"`
 	Snapshot      *SnapshotPreview      `json:"snapshot,omitempty"`
 	TrafficState  *ProxyTrafficState    `json:"traffic_state,omitempty"`
@@ -144,6 +146,15 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: err.Error()}
 		}
 		return RPCResponse{Files: result}
+	case "identity":
+		if r.Identity == nil {
+			return RPCResponse{Error: "identity change required"}
+		}
+		result, err := e.ChangeIdentity(*r.Identity)
+		if err != nil {
+			return RPCResponse{Error: "SSH identity change failed; inspect its pending state and authorized key restrictions"}
+		}
+		return RPCResponse{Identity: result}
 	case "capacity":
 		if r.Request == nil {
 			return RPCResponse{Error: "deployment request required"}

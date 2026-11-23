@@ -29,11 +29,8 @@ func (s *Server) nodeStream(ctx context.Context, node string, request worker.RPC
 		defer stop()
 	}
 	body := io.MultiReader(bytes.NewReader(append(payload, '\n')), input)
-	var address, mode string
-	var host *string
-	var port int
-	var encrypted []byte
-	if err = s.DB.QueryRow(ctx, "SELECT address,port,host_key,private_key,mode FROM nodes WHERE id=$1", node).Scan(&address, &port, &host, &encrypted, &mode); err != nil {
+	var mode string
+	if err = s.DB.QueryRow(ctx, "SELECT mode FROM nodes WHERE id=$1", node).Scan(&mode); err != nil {
 		return err
 	}
 	if mode == "local" {
@@ -57,14 +54,7 @@ func (s *Server) nodeStream(ctx context.Context, node string, request worker.RPC
 		}
 		return errors.Join(err, <-finished)
 	}
-	if host == nil {
-		return errors.New("worker is not enrolled")
-	}
-	seed, err := unseal(s.Key, encrypted)
-	if err != nil {
-		return err
-	}
-	client, err := openSSH(ctx, address, port, *host, seed)
+	client, err := s.openNodeSSH(ctx, node, nil)
 	if err != nil {
 		return err
 	}

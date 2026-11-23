@@ -11,6 +11,7 @@ import { NodeStateLabel } from "../components/status";
 import { nodeStates } from "../lib/nodes";
 import { Button, EmptyState, LoadingRows, PageHeader, QueryError, Section } from "../components/ui";
 import { SharedNodeWarning } from "../components/Access";
+import { Bastions } from "../components/Bastions";
 import { countLabel } from "../lib/hierarchy";
 import { useSession } from "../lib/session";
 import { buttonClass, listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
@@ -208,6 +209,7 @@ export function NodesPage() {
           </Section>
         </>
       )}
+      {admin && <Bastions />}
     </>
   );
 }

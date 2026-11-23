@@ -35,6 +35,10 @@ func (s *Server) refreshNodes(ctx context.Context) error {
 	for _, n := range nodes {
 		group.Go(func() {
 			response, probeErr := s.nodeRPC(ctx, n.id, worker.RPCRequest{Method: "probe"})
+			if err := s.noteHostIdentity(ctx, n.id, probeErr); err != nil {
+				failures <- err
+				return
+			}
 			state := "unreachable"
 			if probeErr == nil && response.Probe != nil && response.Probe.Protocol == 1 {
 				state = "ssh_verified"

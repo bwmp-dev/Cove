@@ -331,6 +331,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/projects/{id}/costs", s.admin(http.HandlerFunc(s.projectCosts)))
 	mux.Handle("GET /api/workloads/{id}/observations", s.admin(http.HandlerFunc(s.workloadObservations)))
 	mux.Handle("GET /api/workloads/{id}/files", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("GET /api/bastions", s.admin(http.HandlerFunc(s.bastions)))
+	mux.Handle("GET /api/nodes/{id}/identity", s.admin(http.HandlerFunc(s.nodeIdentity)))
+	mux.Handle("POST /api/nodes/{id}/identity", s.admin(http.HandlerFunc(s.nodeIdentity)))
+	mux.Handle("POST /api/bastions", s.admin(http.HandlerFunc(s.bastions)))
+	mux.Handle("DELETE /api/bastions/{id}", s.admin(http.HandlerFunc(s.bastions)))
+	mux.Handle("GET /api/nodes/{id}/bastion", s.admin(http.HandlerFunc(s.nodeBastion)))
+	mux.Handle("PUT /api/nodes/{id}/bastion", s.admin(http.HandlerFunc(s.nodeBastion)))
 	mux.Handle("GET /api/workloads/{id}/files/targets", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("GET /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("GET /api/workloads/{id}/files/metadata", s.admin(http.HandlerFunc(s.workloadFiles)))
@@ -531,7 +538,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) enrollment(r *http.Request) (string, string, error) {
 	var id, pub string
-	err := s.DB.QueryRow(r.Context(), "SELECT n.id,n.public_key FROM enrollments e JOIN nodes n ON n.id=e.node_id WHERE e.token_hash=$1 AND e.consumed_at IS NULL AND e.expires_at>now()", tokenHash(bearer(r))).Scan(&id, &pub)
+	err := s.DB.QueryRow(r.Context(), "SELECT n.id,n.public_key FROM enrollments e JOIN nodes n ON n.id=e.node_id WHERE e.token_hash=$1 AND e.consumed_at IS NULL AND e.expires_at>now() AND NOT EXISTS(SELECT 1 FROM node_identity_rotations i WHERE i.node_id=n.id AND i.phase NOT IN ('succeeded','cancelled'))", tokenHash(bearer(r))).Scan(&id, &pub)
 	return id, pub, err
 }
 func (s *Server) install(w http.ResponseWriter, r *http.Request) {
@@ -648,6 +655,10 @@ func (s *Server) verifyNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, probeErr := s.nodeRPC(r.Context(), r.PathValue("id"), worker.RPCRequest{Method: "probe"})
+	if err := s.noteHostIdentity(r.Context(), r.PathValue("id"), probeErr); err != nil {
+		http.Error(w, "could not save host identity observation", 503)
+		return
+	}
 	var p worker.Probe
 	if response.Probe != nil && response.Probe.Protocol == 1 {
 		p = *response.Probe
