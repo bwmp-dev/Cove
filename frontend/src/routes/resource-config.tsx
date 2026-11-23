@@ -32,7 +32,7 @@ import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
-import { formValues, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { extensionSummary, formValues, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -604,16 +604,20 @@ function RouteList({ workload }: { workload: Workload }) {
   if (!workload.routes?.length) return <p className="text-[13px] text-fg-muted">No domains.</p>;
   return (
     <ul aria-label="Routes" className="divide-y divide-line rounded-md border border-line">
-      {workload.routes.map((route) => (
-        <li key={route.domain} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-2 text-[13px]">
-          <a className="break-all underline underline-offset-4" href={`https://${route.domain}`} target="_blank" rel="noreferrer">
-            {route.domain}
-          </a>
-          <span className="font-mono text-xs text-fg-muted">
-            {route.service}:{route.port}
-          </span>
-        </li>
-      ))}
+      {workload.routes.map((route) => {
+        const extensions = extensionSummary(route.policy);
+        return (
+          <li key={route.domain} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-2 text-[13px]">
+            <a className="break-all underline underline-offset-4" href={`https://${route.domain}`} target="_blank" rel="noreferrer">
+              {route.domain}
+            </a>
+            <span className="font-mono text-xs text-fg-muted">
+              {route.service}:{route.port}
+            </span>
+            {extensions.length > 0 && <span className="basis-full text-xs text-fg-muted">{extensions.join(", ")}</span>}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -642,7 +646,7 @@ function DomainsForm({ workload }: { workload: Workload }) {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = validateRoutes(rows);
+    const result = validateRoutes(rows, workload.routes);
     setErrors(result.errors);
     if (!result.routes) {
       focusFirstInvalid(event.currentTarget);
@@ -715,6 +719,8 @@ function DomainsForm({ workload }: { workload: Workload }) {
           routes={rows}
           errors={errors}
           policies={node ? Boolean(node.capabilities?.route_policies) : undefined}
+          extensions={node ? (node.capabilities?.route_protocol ?? 0) >= 2 : undefined}
+          saved={workload.routes}
           onChange={(next) => {
             save.reset();
             setApplying(null);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Route } from "../api/types";
-import { emptyPolicy, isCIDR, parseDotenv, routeRows, sameRoutes, validateComposePath, validateRepository, validateRoutes, validateWorkload, type RouteRow, type WorkloadFormValues } from "./workload-form";
+import { emptyForwardAuth, emptyPolicy, extensionSummary, isCIDR, parseDotenv, routeRows, sameRoutes, validateComposePath, validateRepository, validateRoutes, validateWorkload, type PolicyDraft, type RouteRow, type WorkloadFormValues } from "./workload-form";
 
 const base: WorkloadFormValues = {
   name: "web",
@@ -209,3 +209,91 @@ describe("route validation", () => {
   expect(validateWorkload(git, "edit").input?.source?.watch_paths).toEqual(["src/**", "!**/*.test.ts", "src/keep.test.ts"]);
   expect(validateWorkload({ ...git, watchPaths: "../secret" }, "edit").errors.watchPaths).toBeDefined();
  });
+
+describe("route maintenance, error pages and forward-auth", () => {
+  const extended: Route = {
+    domain: "app.example.com",
+    service: "web",
+    port: 8080,
+    policy: {
+      maintenance: { enabled: false, html: "<h1>Back soon</h1>" },
+      error_pages: { "404": "<h1>Not found</h1>", "502": "<h1>Unavailable</h1>" },
+      forward_auth: { service: "auth", port: 9091, path: "/api/verify?rd=1", response_headers: ["Remote-User", "Remote-Groups"], response_cookies: ["session"] },
+      certificate_source: "default",
+    },
+  };
+  const edit = (route: Route, patch: Partial<PolicyDraft>): RouteRow => {
+    const [row] = routeRows([route]) as [RouteRow];
+    return { ...row, policy: { ...(row.policy ?? emptyPolicy()), ...patch } };
+  };
+
+  it("round-trips saved settings without adding removals", () => {
+    const rows = routeRows([extended]);
+    expect(sameRoutes(rows, [extended])).toBe(true);
+    expect(validateRoutes(rows, [extended])).toEqual({ routes: [extended], errors: {} });
+    const url: Route = { domain: "app.example.com", service: "web", port: 80, policy: { forward_auth: { url: "https://auth.example.com/api/verify" }, maintenance: { enabled: false } } };
+    expect(validateRoutes(routeRows([url]), [url]).routes).toEqual([url]);
+  });
+
+  it("sends explicit nulls for every removed setting so the API does not keep them", () => {
+    const cleared = edit(extended, { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth() });
+    expect(sameRoutes([cleared], [extended])).toBe(false);
+    expect(validateRoutes([cleared], [extended]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { certificate_source: "default", maintenance: null, error_pages: null, forward_auth: null } }]);
+    const onlyAuth = edit(extended, { forwardAuth: emptyForwardAuth() });
+    expect(validateRoutes([onlyAuth], [extended]).routes?.[0]?.policy?.forward_auth).toBeNull();
+    expect(validateRoutes([onlyAuth], [extended]).routes?.[0]?.policy?.maintenance).toEqual({ enabled: false, html: "<h1>Back soon</h1>" });
+  });
+
+  it("also clears settings when a route is deleted and added again on the same hostname", () => {
+    const fresh: RouteRow = { id: "new", domain: "APP.example.com", service: "web", port: 8080 };
+    expect(validateRoutes([fresh], [extended]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080, policy: { maintenance: null, error_pages: null, forward_auth: null } }]);
+    // Unrelated hostnames and new resources keep the legacy shape older workers accept.
+    expect(validateRoutes([{ ...fresh, domain: "other.example.com" }], [extended]).routes).toEqual([{ domain: "other.example.com", service: "web", port: 8080 }]);
+    expect(validateRoutes([fresh]).routes).toEqual([{ domain: "app.example.com", service: "web", port: 8080 }]);
+  });
+
+  it("saves only the selected forward-auth mode", () => {
+    const [row] = routeRows([extended]) as [RouteRow];
+    const auth = row.policy?.forwardAuth ?? emptyForwardAuth();
+    const switched = edit(extended, { forwardAuth: { ...auth, mode: "url", url: " https://auth.example.com/verify " } });
+    expect(validateRoutes([switched]).routes?.[0]?.policy?.forward_auth).toEqual({ url: "https://auth.example.com/verify", response_headers: ["Remote-User", "Remote-Groups"], response_cookies: ["session"] });
+  });
+
+  it("reports invalid settings next to their fields", () => {
+    const auth = { ...emptyForwardAuth(), mode: "url" as const };
+    const cases: [Partial<PolicyDraft>, string][] = [
+      [{ forwardAuth: { ...auth, url: "http://auth.example.com" } }, "auth.url"],
+      [{ forwardAuth: { ...auth, url: "https://user:pw@auth.example.com" } }, "auth.url"],
+      [{ forwardAuth: { ...auth, url: "https://auth.example.com/#x" } }, "auth.url"],
+      [{ forwardAuth: { ...auth, url: "https://10.0.0.5/verify" } }, "auth.url"],
+      [{ forwardAuth: { ...auth, url: "https://[fd00::1]/verify" } }, "auth.url"],
+      [{ forwardAuth: { ...auth, url: "https://auth.example.com", responseHeaders: "X-Forwarded-User" } }, "auth.headers"],
+      [{ forwardAuth: { ...auth, url: "https://auth.example.com", responseHeaders: "Remote-User\nremote-user" } }, "auth.headers"],
+      [{ forwardAuth: { ...auth, url: "https://auth.example.com", responseHeaders: "Set-Cookie" } }, "auth.headers"],
+      [{ forwardAuth: { ...auth, url: "https://auth.example.com", responseHeaders: "Keep-Alive" } }, "auth.headers"],
+      [{ forwardAuth: { ...auth, url: "https://auth.example.com", responseHeaders: "X-Cove-Auth-Hop" } }, "auth.headers"],
+      [{ requestHeaders: [{ id: "h", name: "Proxy-Connection", value: "x" }] }, "request.h"],
+      [{ responseHeaders: [{ id: "h", name: "keep-alive", value: "x" }] }, "response.h"],
+      [{ forwardAuth: { ...auth, url: "https://auth.example.com", responseCookies: "session\nsession" } }, "auth.cookies"],
+      [{ forwardAuth: { ...auth, mode: "service", service: "auth", port: 70000 } }, "auth.service"],
+      [{ forwardAuth: { ...auth, mode: "service", service: "auth", port: 9091, path: "//evil" } }, "auth.path"],
+      [{ maintenance: { enabled: true, html: "é".repeat(8193) } }, "maintenance"],
+      [{ errorPages: Array.from({ length: 9 }, (_, index) => ({ id: `p${index}`, status: String(500 + index), html: "x" })) }, "pages"],
+      [{ errorPages: Array.from({ length: 5 }, (_, index) => ({ id: `p${index}`, status: String(500 + index), html: "x".repeat(16_000) })) }, "pages"],
+    ];
+    for (const [patch, key] of cases) {
+      const result = validateRoutes([{ id: "r", domain: "app.example.com", service: "web", port: 80, policy: { ...emptyPolicy(), ...patch } }]);
+      expect(result.errors, JSON.stringify(patch).slice(0, 80)).toHaveProperty(`r.${key}`);
+    }
+    const pages = validateRoutes([{ id: "r", domain: "app.example.com", service: "web", port: 80, policy: { ...emptyPolicy(), errorPages: [{ id: "a", status: "399", html: "x" }, { id: "b", status: "502", html: " " }, { id: "c", status: "404", html: "x" }, { id: "d", status: "404", html: "y" }] } }]);
+    expect(Object.keys(pages.errors).sort()).toEqual(["r.page.a", "r.page.b", "r.page.d"]);
+    const publicURL = validateRoutes([{ id: "r", domain: "app.example.com", service: "web", port: 80, policy: { ...emptyPolicy(), forwardAuth: { ...auth, url: "https://8.8.8.8/verify" } } }]);
+    expect(publicURL.errors).toEqual({});
+  });
+
+  it("names active settings in summaries", () => {
+    expect(extensionSummary(extended.policy)).toEqual(["forward-auth", "2 error pages"]);
+    expect(extensionSummary({ maintenance: { enabled: true } })).toEqual(["maintenance on"]);
+    expect(extensionSummary(undefined)).toEqual([]);
+  });
+});

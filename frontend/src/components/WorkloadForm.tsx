@@ -311,7 +311,13 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
             title="Routes"
             description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced."
           >
-            <RouteEditor routes={routes} errors={routeErrors} policies={selectedNode ? Boolean(selectedNode.capabilities?.route_policies) : undefined} onChange={setRoutes} />
+            <RouteEditor
+              routes={routes}
+              errors={routeErrors}
+              policies={selectedNode ? Boolean(selectedNode.capabilities?.route_policies) : undefined}
+              extensions={selectedNode ? (selectedNode.capabilities?.route_protocol ?? 0) >= 2 : undefined}
+              onChange={setRoutes}
+            />
           </FormSection>
         )}
 

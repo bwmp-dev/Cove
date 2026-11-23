@@ -667,6 +667,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if request.Scale != nil {
 		method = "submit_cpu_scale"
 	}
+	if worker.HasRouteExtensions(request.Routes) {
+		method = "submit_routes_v2"
+	}
 	if cancelRequested {
 		method = "cancel"
 	}

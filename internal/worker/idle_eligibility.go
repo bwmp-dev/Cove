@@ -8,6 +8,9 @@ import (
 )
 
 func idleComposeEligibility(config map[string]any, routes []Route, completed map[string]bool) error {
+	if err := idleAuthEligibility(routes); err != nil {
+		return err
+	}
 	observed := map[string]bool{}
 	for _, target := range routeTargets(routes) {
 		observed[target.Service] = true

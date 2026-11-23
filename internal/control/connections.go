@@ -354,6 +354,9 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if err := checkRouteProtocol(ctx, s.DB, r.Workload, r.Routes); err != nil {
+		return err
+	}
 	if r.Rollout != nil && r.Rollout.Strategy == "disabled" {
 		r.Rollout = nil
 	}

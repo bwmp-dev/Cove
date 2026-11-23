@@ -8,6 +8,8 @@ export interface Capabilities {
   terminal?: boolean;
   infrastructure?: boolean;
   route_policies?: boolean;
+  // 2 means the worker applies maintenance pages, custom error pages and forward-auth. Missing, 0 and 1 do not.
+  route_protocol?: number;
   // Docker Buildx is present, so the worker can check deployed images and pull before redeploying.
   image_lifecycle?: boolean;
   // Buildx, the Compose builder and pushing the local platform are available, so the worker can build and publish images.
@@ -203,7 +205,23 @@ export interface WorkloadInput {
 
 export interface RouteUpstream { service: string; port: number }
 
+export interface RouteMaintenance { enabled: boolean; html?: string }
+
+// Either a public HTTPS url, or a Compose service and port in the same resource with an optional path.
+export interface RouteForwardAuth {
+  url?: string;
+  service?: string;
+  port?: number;
+  path?: string;
+  response_headers?: string[];
+  response_cookies?: string[];
+}
+
+// The API keeps a saved maintenance, error_pages or forward_auth value when the field is omitted; null removes it.
 export interface RoutePolicy {
+  maintenance?: RouteMaintenance | null;
+  error_pages?: Record<string, string> | null;
+  forward_auth?: RouteForwardAuth | null;
   path_prefix?: string;
   request_headers?: Record<string, string>;
   response_headers?: Record<string, string>;

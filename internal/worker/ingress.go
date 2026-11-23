@@ -95,6 +95,8 @@ type ingressBasicAuth struct {
 	RemoveHeader bool     `json:"removeHeader"`
 }
 type ingressMiddleware struct {
+	ForwardAuth   map[string]any    `json:"forwardAuth,omitempty"`
+	Errors        map[string]any    `json:"errors,omitempty"`
 	BasicAuth     *ingressBasicAuth `json:"basicAuth,omitempty"`
 	Headers       map[string]any    `json:"headers,omitempty"`
 	IPAllowList   map[string]any    `json:"ipAllowList,omitempty"`
@@ -374,7 +376,7 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	for attempt := 0; attempt < 30; attempt++ {
 		current, readErr := e.output(ctx, "docker", "exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers")
 		if readErr == nil && ingressAccepted(current, desired) {
-			return nil
+			return e.pruneRouteAuxiliary(ctx, desired, out)
 		}
 		select {
 		case <-ctx.Done():

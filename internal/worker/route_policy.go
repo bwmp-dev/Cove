@@ -19,6 +19,9 @@ type RouteUpstream struct {
 }
 
 type RoutePolicy struct {
+	Maintenance       *RouteMaintenance `json:"maintenance,omitempty"`
+	ErrorPages        map[string]string `json:"error_pages,omitempty"`
+	ForwardAuth       *RouteForwardAuth `json:"forward_auth,omitempty"`
 	PathPrefix        string            `json:"path_prefix,omitempty"`
 	RequestHeaders    map[string]string `json:"request_headers,omitempty"`
 	ResponseHeaders   map[string]string `json:"response_headers,omitempty"`
@@ -50,6 +53,9 @@ var routePath = regexp.MustCompile(`^/[a-zA-Z0-9/_.~%+@:-]*$`)
 var headerName = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 func (r Route) validatePolicy() error {
+	if err := validateRouteExtensions(r.Policy); err != nil {
+		return err
+	}
 	p := r.Policy
 	if p == nil {
 		return nil
@@ -78,7 +84,7 @@ func (r Route) validatePolicy() error {
 				return errors.New("invalid or duplicate custom header")
 			}
 			// Proxy identity and hop-by-hop headers must remain under Traefik's control.
-			if key == "host" || key == "forwarded" || strings.HasPrefix(key, "x-forwarded-") || slices.Contains([]string{"connection", "upgrade", "transfer-encoding", "content-length", "te", "trailer", "proxy-authorization", "proxy-authenticate"}, key) {
+			if protectedRouteHeader(key) {
 				return errors.New("custom headers cannot override proxy identity or connection headers")
 			}
 			if p.SecurityHeaders && slices.Contains([]string{"strict-transport-security", "x-content-type-options", "x-frame-options", "referrer-policy"}, key) {
@@ -113,6 +119,9 @@ func routeTargets(routes []Route) []Route {
 	for _, r := range routes {
 		targets = append(targets, Route{Service: r.Service, Port: r.Port})
 		if r.Policy != nil {
+			if auth := r.Policy.ForwardAuth; auth != nil && auth.Service != "" {
+				targets = append(targets, Route{Service: auth.Service, Port: auth.Port})
+			}
 			for _, target := range r.Policy.Upstreams {
 				targets = append(targets, Route{Service: target.Service, Port: target.Port})
 			}
@@ -167,6 +176,11 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 		}
 		add("-headers", ingressMiddleware{Headers: headers})
 	}
+	base := routeAuxPlaceholder + "/routes/" + routeAuxKey(r)
+	if p.ForwardAuth != nil {
+		auth := p.ForwardAuth
+		add("-forward-auth", ingressMiddleware{ForwardAuth: map[string]any{"address": base + "/auth", "trustForwardHeader": false, "forwardBody": false, "maxResponseBodySize": 32768, "authRequestHeaders": []string{"Cookie", "Authorization", "Accept", "User-Agent", "X-Cove-Auth-Hop"}, "authResponseHeaders": auth.ResponseHeaders, "addAuthCookiesToResponse": auth.ResponseCookies}})
+	}
 	if p.RedirectHost != "" {
 		add("-redirect", ingressMiddleware{RedirectRegex: map[string]any{"regex": "^https?://" + regexp.QuoteMeta(r.Domain) + "(?::[0-9]+)?(.*)$", "replacement": "https://" + p.RedirectHost + "${1}", "permanent": p.RedirectPermanent}})
 	}
@@ -175,6 +189,20 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 	}
 	if p.Sticky {
 		service.LoadBalancer.Sticky = map[string]any{"cookie": map[string]any{"name": "cove_affinity_" + hex.EncodeToString(sum[:8]), "secure": true, "httpOnly": true, "sameSite": "lax"}}
+	}
+
+	if p.Maintenance != nil && p.Maintenance.Enabled {
+		service.LoadBalancer.Servers = []map[string]any{{"url": base + "/maintenance", "preservePath": true}}
+		service.LoadBalancer.Sticky = nil
+	} else if len(p.ErrorPages) > 0 {
+		pages := next + "-error-pages"
+		c.HTTP.Services[pages] = ingressService{LoadBalancer: &ingressLoadBalancer{Servers: []map[string]any{{"url": routeAuxPlaceholder + "/"}}}}
+		statuses := make([]string, 0, len(p.ErrorPages))
+		for code := range p.ErrorPages {
+			statuses = append(statuses, code)
+		}
+		slices.Sort(statuses)
+		add("-errors", ingressMiddleware{Errors: map[string]any{"status": statuses, "service": pages, "query": "/routes/" + routeAuxKey(r) + "/error/{status}", "errorRequestHeaders": []string{"Accept"}}})
 	}
 	c.HTTP.Routers[next], c.HTTP.Services[next] = router, service
 }

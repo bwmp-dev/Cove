@@ -1,15 +1,21 @@
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
-import { cidrList, emptyPolicy, routeLimits, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
+import type { Route } from "../api/types";
+import { cidrList, draftUsesExtensions, emptyPolicy, routeLimits, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
 import { describedBy, inputClass } from "../lib/styles";
+import { RouteExtensionFields } from "./RouteExtensions";
 import { Select } from "./Select";
 import { Button, Field, Notice, SwitchField } from "./ui";
 
 const label = "mb-1 block text-xs font-medium text-fg-muted";
+const noRoutes: Route[] = [];
+const noErrors: Record<string, string> = {};
 
 // policies: whether the target node's worker reports route policy support; undefined while unknown, which hides the
-// advanced controls. Saved policies are always kept, whether or not they can be edited here.
-export function RouteEditor({ routes, errors = {}, policies, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; onChange: (routes: RouteRow[]) => void }) {
+// advanced controls. Saved policies are always kept, whether or not they can be edited here. extensions: whether it
+// applies maintenance, error pages and forward-auth (route protocol 2); saved ones stay visible and removable when not.
+// saved: the routes the API has, so removing forward-auth from one of their hostnames can be called out.
+export function RouteEditor({ routes, errors = noErrors, policies, extensions, saved = noRoutes, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; saved?: Route[]; onChange: (routes: RouteRow[]) => void }) {
   const id = useId();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   function update(key: string, patch: Partial<RouteRow>) {
@@ -30,6 +36,12 @@ export function RouteEditor({ routes, errors = {}, policies, onChange }: { route
         <Notice tone={routesUsePolicies(routes) ? "warn" : "info"} title="Advanced routing needs a newer worker">
           Path prefixes, headers, IP allowlists, redirects and extra upstreams are not available on this node yet. Upgrade the worker on the node, then verify the node again.
           {routesUsePolicies(routes) && " Existing advanced settings are kept, but saving them is rejected until the worker supports them."}
+        </Notice>
+      )}
+      {policies === true && extensions === false && (
+        <Notice tone={routesUseExtensions(routes) ? "warn" : "info"} title="Maintenance, error pages and forward-auth need a newer worker">
+          The worker on this node cannot apply them. Upgrade it, then verify the node again.
+          {routesUseExtensions(routes) && " Saved settings are shown under Advanced routing but cannot be changed, and saving is rejected while any remain. Remove them to save other route changes to this worker."}
         </Notice>
       )}
       {routes.length > 0 && (
@@ -110,7 +122,7 @@ export function RouteEditor({ routes, errors = {}, policies, onChange }: { route
                       <ChevronDown aria-hidden className={`mt-px size-3.5 shrink-0 transition-transform ${open ? "" : "-rotate-90"}`} />
                       <span className="min-w-0">
                         Advanced routing
-                        {!open && route.policy && <span className="font-normal text-fg-subtle"> · {policySummary(route.policy)}</span>}
+                        {!open && route.policy && <span className="font-normal text-fg-subtle break-words"> · {policySummary(route.policy)}</span>}
                       </span>
                     </button>
                     {open && route.policy && (
@@ -122,6 +134,17 @@ export function RouteEditor({ routes, errors = {}, policies, onChange }: { route
                           errors={errors}
                           onChange={(patch) => update(route.id, { policy: { ...(route.policy ?? emptyPolicy()), ...patch } })}
                         />
+                        {extensions !== undefined && (extensions || draftUsesExtensions(route.policy)) && (
+                          <RouteExtensionFields
+                            id={`${id}-${index}`}
+                            route={route}
+                            policy={route.policy}
+                            errors={errors}
+                            editable={extensions}
+                            savedAuth={saved.some((item) => item.domain === route.domain.trim().toLowerCase() && item.policy?.forward_auth)}
+                            onChange={(patch) => update(route.id, { policy: { ...(route.policy ?? emptyPolicy()), ...patch } })}
+                          />
+                        )}
                       </div>
                     )}
                   </div>
@@ -141,6 +164,9 @@ export function RouteEditor({ routes, errors = {}, policies, onChange }: { route
 
 function policySummary(policy: PolicyDraft) {
   const parts: string[] = [];
+  if (policy.maintenance?.enabled) parts.push("maintenance on");
+  if (policy.forwardAuth.mode !== "off") parts.push("forward-auth");
+  if (policy.errorPages.length > 0) parts.push(policy.errorPages.length === 1 ? "1 error page" : `${policy.errorPages.length} error pages`);
   if (policy.pathPrefix.trim()) parts.push(`path ${policy.pathPrefix.trim()}`);
   if (policy.redirectHost.trim()) parts.push(`redirects to ${policy.redirectHost.trim()}`);
   const headers = policy.requestHeaders.length + policy.responseHeaders.length;

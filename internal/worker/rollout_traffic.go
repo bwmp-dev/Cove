@@ -170,6 +170,9 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 				before[name] = true
 			}
 			config.addRoute(workload, route)
+			if route.Policy != nil && route.Policy.Maintenance != nil && route.Policy.Maintenance.Enabled {
+				continue
+			}
 			if len(traffic) == 0 && suspension == nil && idle == nil {
 				continue
 			}
@@ -227,7 +230,7 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 							if !containerIdentity.MatchString(id) {
 								return "", errors.New("invalid traffic container")
 							}
-							address, err := e.attachTrafficContainer(ctx, workload, id, out)
+							address, err := e.attachTrafficContainer(ctx, workload, id, out, "")
 							if err != nil {
 								return "", err
 							}
@@ -255,6 +258,9 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 			config.HTTP.Routers[next] = router
 		}
 	}
+	if err := e.applyRouteAuxiliary(ctx, routes, &config, out); err != nil {
+		return "", err
+	}
 	if len(config.HTTP.Routers) == 0 {
 		return "{}", nil
 	}
@@ -277,7 +283,7 @@ func (e *Engine) refreshTrafficIngress(ctx context.Context, workload string, out
 	return e.applyIngress(ctx, workload, state.Routes, out)
 }
 
-func (e *Engine) attachTrafficContainer(ctx context.Context, workload, id string, out io.Writer) (string, error) {
+func (e *Engine) attachTrafficContainer(ctx context.Context, workload, id string, out io.Writer, alias string) (string, error) {
 	project, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "com.docker.compose.project"}}`, id)
 	if err != nil {
 		return "", err
@@ -298,7 +304,11 @@ func (e *Engine) attachTrafficContainer(ctx context.Context, workload, id string
 		return "", err
 	}
 	if attachment == "" {
-		if err = e.Run(ctx, e.Root, []string{"docker", "network", "connect", "cove-ingress", id}, nil, out); err != nil {
+		args := []string{"docker", "network", "connect"}
+		if alias != "" {
+			args = append(args, "--alias", alias)
+		}
+		if err = e.Run(ctx, e.Root, append(args, "cove-ingress", id), nil, out); err != nil {
 			return "", err
 		}
 	}

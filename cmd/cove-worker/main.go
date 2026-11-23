@@ -35,6 +35,8 @@ func main() {
 		reload := make(chan os.Signal, 1)
 		signal.Notify(reload, syscall.SIGHUP)
 		err = worker.RunLinkGateway(ctx, reload)
+	case "route-helper":
+		err = worker.RunRouteAuxiliary(ctx)
 	case "idle-gateway":
 		err = worker.RunIdleGateway(ctx)
 	case "probe":

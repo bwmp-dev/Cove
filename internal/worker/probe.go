@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	RouteProtocol       int          `json:"route_protocol"`
 	CPUAutoscale        bool         `json:"cpu_autoscale"`
 	IdleSleep           bool         `json:"idle_sleep"`
 	Suspensions         bool         `json:"suspensions"`
@@ -57,6 +58,9 @@ func Inspect(ctx context.Context) Probe {
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	p.RoutePolicies = true
+	if runtime.GOOS == "linux" {
+		p.RouteProtocol = 2
+	}
 	p.Rollouts = true
 	p.CPUAutoscale = true
 	p.JobRuns = true

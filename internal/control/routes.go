@@ -19,7 +19,8 @@ const routeClaimLock = 1129272902
 
 type routeInput struct {
 	worker.Route
-	Auth *string `json:"auth"`
+	Auth            *string `json:"auth"`
+	extensionFields map[string]json.RawMessage
 }
 
 func retainedRouteAuth(input []routeInput, previous []worker.Route) ([]worker.Route, error) {
@@ -31,7 +32,6 @@ func retainedRouteAuth(input []routeInput, previous []worker.Route) ([]worker.Ro
 		routes[i] = next.Route
 		if next.Auth != nil {
 			routes[i].Auth = *next.Auth
-			continue
 		}
 		prefix := ""
 		if next.Policy != nil {
@@ -55,10 +55,15 @@ func retainedRouteAuth(input []routeInput, previous []worker.Route) ([]worker.Ro
 		// GET hides password hashes. An omitted credential keeps the same route's protection,
 		// including a changed prefix when the hostname's previous credentials agree.
 		for j, old := range matches {
-			if j > 0 && old.Auth != routes[i].Auth {
+			if next.Auth == nil && j > 0 && old.Auth != routes[i].Auth {
 				return nil, errors.New("set authentication explicitly when changing a path on a hostname with different route credentials")
 			}
-			routes[i].Auth = old.Auth
+			if next.Auth == nil {
+				routes[i].Auth = old.Auth
+			}
+			if err := retainRouteExtensions(&routes[i], next, old, j > 0); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return routes, nil
@@ -237,6 +242,14 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err = checkRouteProtocol(r.Context(), tx, id, routes); err != nil {
+		if errors.Is(err, errRouteProtocolUnsupported) {
+			http.Error(w, err.Error(), 409)
+		} else {
+			http.Error(w, "worker capabilities unavailable", 503)
+		}
+		return
+	}
 	if worker.RoutesEqual(config.Routes, routes) {
 		respond(w, 200, map[string]string{"state": "unchanged"})
 		return
@@ -260,6 +273,10 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	if !attempted {
 		config.Routes = routes
+		if err = validateWorkload(config); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 		if data, err = json.Marshal(config); err == nil {
 			encrypted, err = seal(s.Key, data)
 		}

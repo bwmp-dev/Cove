@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const rpcMessageLimit = 2 * 1024 * 1024
+
 type RPCRequest struct {
 	Links     *LinkConfig           `json:"links,omitempty"`
 	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
@@ -238,12 +240,19 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit", "submit_cpu_scale":
+	case "submit", "submit_cpu_scale", "submit_routes_v2":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
 		}
-		if (r.Request.Scale != nil) != (r.Method == "submit_cpu_scale") {
-			return RPCResponse{Error: "CPU scaling requires its dedicated submission method"}
+		expected := "submit"
+		if r.Request.Scale != nil {
+			expected = "submit_cpu_scale"
+		}
+		if HasRouteExtensions(r.Request.Routes) {
+			expected = "submit_routes_v2"
+		}
+		if r.Method != expected {
+			return RPCResponse{Error: "request requires its dedicated submission method"}
 		}
 		op, err := e.Submit(*r.Request)
 		if err != nil {
@@ -307,7 +316,7 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 			return
 		}
 		var request RPCRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, rpcMessageLimit))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&request) != nil {
 			http.Error(w, "invalid request", 400)
@@ -352,11 +361,11 @@ func RPCTimeout(method string) time.Duration {
 }
 
 func Proxy(ctx context.Context, socket string, in io.Reader, out io.Writer) error {
-	data, err := io.ReadAll(io.LimitReader(in, 2*1024*1024+1))
+	data, err := io.ReadAll(io.LimitReader(in, rpcMessageLimit+1))
 	if err != nil {
 		return err
 	}
-	if len(data) > 2*1024*1024 {
+	if len(data) > rpcMessageLimit {
 		return errors.New("request too large")
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -380,6 +389,6 @@ func Proxy(ctx context.Context, socket string, in io.Reader, out io.Writer) erro
 	if response.StatusCode != 200 {
 		return errors.New("worker rejected request")
 	}
-	_, err = io.Copy(out, io.LimitReader(response.Body, 2*1024*1024))
+	_, err = io.Copy(out, io.LimitReader(response.Body, rpcMessageLimit))
 	return err
 }

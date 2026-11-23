@@ -351,10 +351,14 @@ func ValidateRequest(r Request) error {
 			return errors.New("reserved environment variable")
 		}
 	}
+	payload, err := json.Marshal(RPCRequest{Method: "submit_routes_v2", Request: &r})
+	if err != nil || len(payload) > rpcMessageLimit {
+		return errors.New("operation configuration exceeds the 2 MiB worker request limit")
+	}
 	return nil
 }
 func writeJSON(path string, value any) error {
-	data, err := json.Marshal(value)
+	data, err := marshalWorkerState(value)
 	if err != nil {
 		return err
 	}

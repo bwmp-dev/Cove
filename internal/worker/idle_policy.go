@@ -128,6 +128,9 @@ func (e *Engine) validateIdleRoutes(ctx context.Context, workload string, routes
 	if err != nil || policy == nil {
 		return err
 	}
+	if err := idleAuthEligibility(routes); err != nil {
+		return err
+	}
 	if len(routes) == 0 {
 		return errors.New("disable idle sleep before removing all managed routes")
 	}

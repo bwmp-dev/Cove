@@ -1,4 +1,4 @@
-import type { GitSourceInput, Route, RoutePolicy, Workload, WorkloadInput, WorkloadKind } from "../api/types";
+import type { GitSourceInput, Route, RouteForwardAuth, RoutePolicy, Workload, WorkloadInput, WorkloadKind } from "../api/types";
 import type { ResourceDraft } from "./templates";
 
 export interface EnvRow {
@@ -212,8 +212,32 @@ export interface UpstreamRow {
   port: number;
 }
 
+export interface ErrorPageRow {
+  id: string;
+  status: string;
+  html: string;
+}
+
+export type AuthMode = "off" | "url" | "service";
+
+// Fields of every mode are kept while editing so switching modes back does not lose what was typed; only the selected
+// mode's fields are saved. Header and cookie names are one per line.
+export interface ForwardAuthDraft {
+  mode: AuthMode;
+  url: string;
+  service: string;
+  port: number;
+  path: string;
+  responseHeaders: string;
+  responseCookies: string;
+}
+
 // Editable form of a route policy. Header maps and upstreams become rows so each one has its own field and error.
 export interface PolicyDraft {
+  // null when the route has no maintenance setting; a disabled object keeps its custom page for later.
+  maintenance: { enabled: boolean; html: string } | null;
+  errorPages: ErrorPageRow[];
+  forwardAuth: ForwardAuthDraft;
   pathPrefix: string;
   requestHeaders: HeaderRow[];
   responseHeaders: HeaderRow[];
@@ -237,17 +261,38 @@ export interface RouteRow {
 }
 
 export const routeLimits = { headers: 32, cidrs: 64, upstreams: 15 } as const;
+export const routePageLimits = { pageBytes: 16_384, totalBytes: 65_536, errorPages: 8, authHeaders: 32, authCookies: 16, authURL: 2048 } as const;
+
+export function emptyForwardAuth(): ForwardAuthDraft {
+  return { mode: "off", url: "", service: "", port: 80, path: "", responseHeaders: "", responseCookies: "" };
+}
 
 export function emptyPolicy(): PolicyDraft {
-  return { pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", upstreams: [], sticky: false };
+  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", upstreams: [], sticky: false };
 }
 
 function headerRows(headers: Record<string, string> | undefined): HeaderRow[] {
   return Object.entries(headers ?? {}).map(([name, value]) => ({ id: crypto.randomUUID(), name, value }));
 }
 
+function forwardAuthDraft(auth: RouteForwardAuth | null | undefined): ForwardAuthDraft {
+  if (!auth) return emptyForwardAuth();
+  return {
+    mode: auth.url ? "url" : "service",
+    url: auth.url ?? "",
+    service: auth.service ?? "",
+    port: auth.port ?? 80,
+    path: auth.path ?? "",
+    responseHeaders: (auth.response_headers ?? []).join("\n"),
+    responseCookies: (auth.response_cookies ?? []).join("\n"),
+  };
+}
+
 function policyDraft(policy: RoutePolicy): PolicyDraft {
   return {
+    maintenance: policy.maintenance ? { enabled: policy.maintenance.enabled, html: policy.maintenance.html ?? "" } : null,
+    errorPages: Object.entries(policy.error_pages ?? {}).map(([status, html]) => ({ id: crypto.randomUUID(), status, html })),
+    forwardAuth: forwardAuthDraft(policy.forward_auth),
     pathPrefix: policy.path_prefix ?? "",
     requestHeaders: headerRows(policy.request_headers),
     responseHeaders: headerRows(policy.response_headers),
@@ -273,9 +318,34 @@ function headerMap(rows: HeaderRow[]) {
   return Object.fromEntries(rows.map((row) => [row.name.trim(), row.value]));
 }
 
+export function nameList(text: string) {
+  return text.split(/[\s,]+/).filter(Boolean);
+}
+
+function forwardAuthOf(draft: ForwardAuthDraft): RouteForwardAuth | undefined {
+  if (draft.mode === "off") return undefined;
+  const auth: RouteForwardAuth = {};
+  if (draft.mode === "url") auth.url = draft.url.trim();
+  else {
+    auth.service = draft.service.trim();
+    auth.port = draft.port;
+    const path = draft.path.trim();
+    if (path) auth.path = path;
+  }
+  const headers = nameList(draft.responseHeaders);
+  const cookies = nameList(draft.responseCookies);
+  if (headers.length > 0) auth.response_headers = headers;
+  if (cookies.length > 0) auth.response_cookies = cookies;
+  return auth;
+}
+
 // Leaves out empty settings so a route without any policy keeps the legacy shape every worker accepts.
 function policyOf(draft: PolicyDraft): RoutePolicy | undefined {
   const policy: RoutePolicy = {};
+  if (draft.maintenance) policy.maintenance = draft.maintenance.html ? { enabled: draft.maintenance.enabled, html: draft.maintenance.html } : { enabled: draft.maintenance.enabled };
+  if (draft.errorPages.length > 0) policy.error_pages = Object.fromEntries(draft.errorPages.map((page) => [page.status.trim(), page.html]));
+  const auth = forwardAuthOf(draft.forwardAuth);
+  if (auth) policy.forward_auth = auth;
   const path = draft.pathPrefix.trim();
   const redirect = draft.redirectHost.trim().toLowerCase();
   const cidrs = cidrList(draft.ipAllowList);
@@ -306,6 +376,38 @@ export function routesUsePolicies(rows: RouteRow[]) {
   return rows.some((row) => row.policy !== undefined && policyOf(row.policy) !== undefined);
 }
 
+export function draftUsesExtensions(draft: PolicyDraft | undefined) {
+  return draft !== undefined && (draft.maintenance !== null || draft.errorPages.length > 0 || draft.forwardAuth.mode !== "off");
+}
+
+export function routesUseExtensions(rows: RouteRow[]) {
+  return rows.some((row) => draftUsesExtensions(row.policy));
+}
+
+const extensionFields = ["maintenance", "error_pages", "forward_auth"] as const;
+
+// The API keeps a saved extension when its field is omitted on the same hostname, so a removed one, or one on a route
+// that was deleted and added again, must be sent as null. Routes on hostnames without saved extensions keep the shape
+// older workers accept.
+function withRemovals(route: Route, saved: Route[]): Route {
+  const matches = saved.filter((item) => item.domain === route.domain);
+  const removed = extensionFields.filter((field) => route.policy?.[field] === undefined && matches.some((item) => item.policy?.[field] != null));
+  if (removed.length === 0) return route;
+  const policy: RoutePolicy = { ...route.policy };
+  for (const field of removed) policy[field] = null;
+  return { ...route, policy };
+}
+
+// Names a saved policy's maintenance, forward-auth and error pages for summaries; empty when none is set.
+export function extensionSummary(policy: RoutePolicy | undefined) {
+  const parts: string[] = [];
+  if (policy?.maintenance?.enabled) parts.push("maintenance on");
+  if (policy?.forward_auth) parts.push("forward-auth");
+  const pages = Object.keys(policy?.error_pages ?? {}).length;
+  if (pages > 0) parts.push(pages === 1 ? "1 error page" : `${pages} error pages`);
+  return parts;
+}
+
 const domainLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const composeService = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
 const routePath = /^\/[a-zA-Z0-9/_.~%+@:-]*$/;
@@ -317,7 +419,7 @@ function hasControlCharacter(value: string): boolean {
     return code < 32 || code === 127;
   });
 }
-const proxyHeaders = new Set(["host", "forwarded", "connection", "upgrade", "transfer-encoding", "content-length", "te", "trailer", "proxy-authorization", "proxy-authenticate"]);
+const proxyHeaders = new Set(["x-cove-auth-hop", "keep-alive", "proxy-connection", "host", "forwarded", "connection", "upgrade", "transfer-encoding", "content-length", "te", "trailer", "proxy-authorization", "proxy-authenticate"]);
 const presetHeaders = new Set(["strict-transport-security", "x-content-type-options", "x-frame-options", "referrer-policy"]);
 
 function isHostname(value: string) {
@@ -374,9 +476,114 @@ function headerErrors(rows: HeaderRow[], key: string, preset: boolean, errors: R
   }
 }
 
+function isPublicIPv4(value: string) {
+  const [a = 0, b = 0, c = 0] = value.split(".").map(Number);
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b < 128) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b < 32) return false;
+  if (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)))) return false;
+  if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false;
+  return !(a === 203 && b === 0 && c === 113);
+}
+
+// Mirrors the worker's check of literal addresses; hostnames are resolved and checked by the worker at connect time.
+function isPublicIPv6(value: string) {
+  const lower = value.toLowerCase();
+  if (lower.startsWith("::ffff:")) return true;
+  const first = parseInt(lower.split(":")[0] || "0", 16);
+  if (first < 0x2000 || first > 0x3fff || first === 0x2002) return false;
+  return !/^2001:0?db8:/.test(lower);
+}
+
+function authURLError(value: string) {
+  if (value === "") return "Enter the provider's HTTPS verification URL.";
+  if (value.length > routePageLimits.authURL || hasControlCharacter(value) || value.includes(" ")) return `Use a URL of at most ${routePageLimits.authURL} characters without spaces or control characters.`;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "Enter a full URL such as https://auth.example.com/api/verify.";
+  }
+  if (url.protocol !== "https:" || url.hostname === "") return "Use an https:// URL with a hostname.";
+  if (url.username || url.password || /^https:\/\/[^/?#]*@/i.test(value)) return "Remove the user name and password from the URL.";
+  if (value.includes("#")) return "Remove the #fragment from the URL.";
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if ((isIPv4(host) && !isPublicIPv4(host)) || (host.includes(":") && !isPublicIPv6(host))) {
+    return "Private and reserved addresses are refused. Choose an auth service in this resource, or expose the provider at its own authenticated HTTPS hostname.";
+  }
+  return null;
+}
+
+function authPathError(value: string) {
+  if (value === "") return null;
+  if (!value.startsWith("/") || value.startsWith("//")) return "Start the path with a single /.";
+  if (value.length > routePageLimits.authURL || hasControlCharacter(value) || value.includes(" ")) return `Use a path of at most ${routePageLimits.authURL} characters without spaces or control characters.`;
+  if (value.includes("#")) return "Remove the #fragment from the path.";
+  return null;
+}
+
+function nameListError(names: string[], kind: "header" | "cookie") {
+  const seen = new Set<string>();
+  for (const name of names) {
+    const key = kind === "header" ? name.toLowerCase() : name;
+    if (name.length > 128 || !headerName.test(name)) return `${name} is not a valid ${kind} name.`;
+    if (seen.has(key)) return `${name} is listed more than once.`;
+    if (kind === "header" && (key === "cookie" || key === "set-cookie")) return "List cookie names under response cookies instead of Cookie or Set-Cookie.";
+    if (kind === "header" && (proxyHeaders.has(key) || key.startsWith("x-forwarded-"))) return `The proxy controls ${name}.`;
+    seen.add(key);
+  }
+  return null;
+}
+
+function forwardAuthErrors(row: RouteRow, auth: ForwardAuthDraft, errors: Record<string, string>) {
+  if (auth.mode === "off") return;
+  if (auth.mode === "url") {
+    const error = authURLError(auth.url.trim());
+    if (error) errors[`${row.id}.auth.url`] = error;
+  } else {
+    if (!composeService.test(auth.service.trim())) errors[`${row.id}.auth.service`] = "Enter the Compose service that answers verification requests.";
+    else if (!Number.isInteger(auth.port) || auth.port < 1 || auth.port > 65535) errors[`${row.id}.auth.service`] = "Use a container port from 1 to 65535.";
+    const error = authPathError(auth.path.trim());
+    if (error) errors[`${row.id}.auth.path`] = error;
+  }
+  const headers = nameList(auth.responseHeaders);
+  const headerError = headers.length > routePageLimits.authHeaders ? `Use at most ${routePageLimits.authHeaders} headers.` : nameListError(headers, "header");
+  if (headerError) errors[`${row.id}.auth.headers`] = headerError;
+  const cookies = nameList(auth.responseCookies);
+  const cookieError = cookies.length > routePageLimits.authCookies ? `Use at most ${routePageLimits.authCookies} cookie names.` : nameListError(cookies, "cookie");
+  if (cookieError) errors[`${row.id}.auth.cookies`] = cookieError;
+}
+
+function pageErrors(row: RouteRow, draft: PolicyDraft, errors: Record<string, string>) {
+  if (draft.maintenance) {
+    const html = draft.maintenance.html;
+    if (html.includes("\0")) errors[`${row.id}.maintenance`] = "Remove the NUL characters from the page.";
+    else if (byteLength(html) > routePageLimits.pageBytes) errors[`${row.id}.maintenance`] = "Keep the page within 16 KiB.";
+  }
+  const seen = new Set<string>();
+  let total = 0;
+  for (const page of draft.errorPages) {
+    const status = page.status.trim();
+    const field = `${row.id}.page.${page.id}`;
+    const bytes = byteLength(page.html);
+    total += bytes;
+    if (!/^[45][0-9]{2}$/.test(status)) errors[field] = "Use an HTTP status from 400 to 599.";
+    else if (seen.has(status)) errors[field] = `Status ${status} already has a page.`;
+    else if (page.html.trim() === "") errors[field] = "Enter the HTML to show.";
+    else if (page.html.includes("\0")) errors[field] = "Remove the NUL characters from the page.";
+    else if (bytes > routePageLimits.pageBytes) errors[field] = "Keep each page within 16 KiB.";
+    seen.add(status);
+  }
+  if (draft.errorPages.length > routePageLimits.errorPages) errors[`${row.id}.pages`] = `Use at most ${routePageLimits.errorPages} error pages.`;
+  else if (total > routePageLimits.totalBytes) errors[`${row.id}.pages`] = "Keep all error pages of this route within 64 KiB together.";
+}
+
 function policyErrors(row: RouteRow, domain: string, service: string, errors: Record<string, string>) {
   const draft = row.policy;
   if (!draft) return;
+  pageErrors(row, draft, errors);
+  forwardAuthErrors(row, draft.forwardAuth, errors);
   const path = draft.pathPrefix.trim();
   if (path && (path.length > 1024 || !routePath.test(path))) errors[`${row.id}.path`] = "Start with / and use a URL path without a query string, spaces or wildcards.";
   const redirect = draft.redirectHost.trim().toLowerCase();
@@ -402,8 +609,9 @@ function policyErrors(row: RouteRow, domain: string, service: string, errors: Re
 }
 
 // Mirrors the worker's route validation so mistakes are reported next to the field before saving. Hostname, service
-// and port errors are keyed by the row id; policy errors by "<row id>.<field>".
-export function validateRoutes(rows: RouteRow[]): { routes?: Route[]; errors: Record<string, string> } {
+// and port errors are keyed by the row id; policy errors by "<row id>.<field>". Pass the saved routes when editing so
+// removed maintenance, error page and forward-auth settings are sent as explicit nulls.
+export function validateRoutes(rows: RouteRow[], saved: Route[] = []): { routes?: Route[]; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   const seen = new Set<string>();
   const routes = rows.map((row) => {
@@ -420,7 +628,7 @@ export function validateRoutes(rows: RouteRow[]): { routes?: Route[]; errors: Re
     policyErrors(row, domain, service, errors);
     return route;
   });
-  return Object.keys(errors).length > 0 ? { errors } : { routes, errors };
+  return Object.keys(errors).length > 0 ? { errors } : { routes: routes.map((route) => withRemovals(route, saved)), errors };
 }
 
 function canonical(value: unknown): unknown {
