@@ -5,6 +5,8 @@ export type NodeState = "pending" | "enrolled" | "unreachable" | "ssh_verified" 
 export interface MountMetric { path: string; filesystem: string; total: number; available: number; known: boolean; error?: string }
 export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number; network_rx?: number; network_tx?: number; cpus?: number; mounts?: MountMetric[] | null; mounts_limited?: boolean }
 export interface Capabilities {
+  // Protocol support for per-service GPU selections; it does not mean the host has a GPU.
+  gpu_assignments?: boolean;
   firewall?: boolean;
   host_maintenance?: boolean;
   metrics?: NodeMetrics;
@@ -117,6 +119,8 @@ export interface GitSourceInput extends GitSource {
 export type WorkloadKind = "service" | "job";
 
 export interface ServiceLimits { cpus: number; memory_mb: number }
+// Null or omitted gpus inherit Compose GPU requests, [] clears them, and IDs replace them. Resource defaults never carry gpus.
+export interface WorkloadServiceLimits extends ServiceLimits { gpus?: string[] | null }
 
 export interface DeploymentHook { service: string; command: string }
 export interface DeploymentAssertions {
@@ -131,7 +135,7 @@ export interface Workload {
   guarded_deploy?: boolean;
   file_secrets?: FileSecret[];
   hooks?: DeploymentHooks;
-  limits?: Record<string, ServiceLimits>;
+  limits?: Record<string, WorkloadServiceLimits>;
   manually_stopped: boolean;
   // True once a deploy or rollback has succeeded, so route changes apply without redeploying.
   deployed: boolean;
@@ -155,7 +159,7 @@ export interface WorkloadInput {
   guarded_deploy?: boolean;
   file_secrets?: FileSecret[];
   hooks?: DeploymentHooks;
-  limits?: Record<string, ServiceLimits>;
+  limits?: Record<string, WorkloadServiceLimits>;
   // Accepted on create only; placement changes go through the environment endpoint.
   project_id?: string;
   environment_id?: string;

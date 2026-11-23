@@ -25,6 +25,10 @@ func (s *Server) resourceDefaults(w http.ResponseWriter, r *http.Request) {
 		if !decode(w, r, &in) {
 			return
 		}
+		if in.GPUs != nil {
+			http.Error(w, "GPU selection is configured per service, not inherited", 400)
+			return
+		}
 		if err := worker.ValidateLimits(map[string]worker.ServiceLimits{"default": in}); err != nil {
 			http.Error(w, err.Error(), 400)
 			return

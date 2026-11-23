@@ -195,6 +195,9 @@ func ValidateRequest(r Request) error {
 		return err
 	}
 	if r.DefaultLimits != nil {
+		if r.DefaultLimits.GPUs != nil {
+			return errors.New("GPU selection cannot be inherited as a resource default")
+		}
 		if err := ValidateLimits(map[string]ServiceLimits{"default": *r.DefaultLimits}); err != nil {
 			return err
 		}

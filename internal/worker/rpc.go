@@ -37,6 +37,7 @@ type RPCRequest struct {
 	ID              string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	GPUs          *GPUInventory         `json:"gpus,omitempty"`
 	Firewall      *FirewallResult       `json:"firewall,omitempty"`
 	HostPatches   *HostPatchStatus      `json:"host_patches,omitempty"`
 	Identity      *IdentityState        `json:"identity,omitempty"`
@@ -73,6 +74,13 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "gpus":
+		state, err := e.GPUs(ctx)
+		response := RPCResponse{GPUs: state}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
 	case "firewall":
 		if r.Firewall == nil {
 			return RPCResponse{Error: "firewall options required"}
@@ -477,7 +485,7 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
 	switch method {
-	case "host_maintenance", "firewall":
+	case "host_maintenance", "firewall", "gpus":
 		return 90 * time.Second
 	case "stream":
 		return 30 * time.Minute

@@ -93,6 +93,8 @@ func (s *Server) Init(ctx context.Context) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerPanelRecovery(mux)
+	mux.Handle("GET /api/nodes/{id}/gpus", s.admin(http.HandlerFunc(s.gpuInventory)))
+	mux.Handle("GET /api/workloads/{id}/gpus", s.admin(http.HandlerFunc(s.gpuInventory)))
 	mux.Handle("GET /api/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
 	mux.Handle("PUT /api/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
 	mux.Handle("GET /api/environments/{id}/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))

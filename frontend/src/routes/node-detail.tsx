@@ -1,3 +1,4 @@
+import { NodeGPUs } from "../components/GPUs";
 import { NodeCloudOrigin } from "../components/NodeProviders";
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
@@ -218,6 +219,7 @@ function NodeDetail({ node }: { node: Node }) {
         {admin && <NodeUsage node={node} />}
         {admin && <HostSecurityUpdates node={node} />}
       {admin && <NodeFirewall node={node} />}
+      {admin && <NodeGPUs node={node} />}
         <Section title="Capabilities" description="Reported by the worker during the last verification.">
           <Capabilities node={node} />
         </Section>

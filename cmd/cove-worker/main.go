@@ -18,6 +18,8 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "host-gpus":
+		err = worker.RunHostGPUs(ctx, os.Stdin, os.Stdout)
 	case "host-firewall":
 		err = worker.RunHostFirewall(ctx, os.Stdin, os.Stdout)
 	case "firewall-revert":

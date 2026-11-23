@@ -404,6 +404,9 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if err := s.prepareGPUAssignments(ctx, r); err != nil {
+		return err
+	}
 	if err := s.prepareResourceDefaults(ctx, r); err != nil {
 		return err
 	}

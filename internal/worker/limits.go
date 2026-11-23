@@ -11,8 +11,9 @@ import (
 )
 
 type ServiceLimits struct {
-	CPUs     float64 `json:"cpus"`
-	MemoryMB int64   `json:"memory_mb"`
+	CPUs     float64   `json:"cpus"`
+	MemoryMB int64     `json:"memory_mb"`
+	GPUs     *[]string `json:"gpus,omitempty"`
 }
 
 func applyDefaultLimits(config map[string]any, defaults *ServiceLimits) error {
@@ -54,6 +55,9 @@ func ValidateLimits(limits map[string]ServiceLimits) error {
 		return errors.New("at most 64 service limits are allowed")
 	}
 	for service, limit := range limits {
+		if err := validateGPUSelection(limit.GPUs); err != nil {
+			return err
+		}
 		if !serviceIdentifier.MatchString(service) || math.IsNaN(limit.CPUs) || math.IsInf(limit.CPUs, 0) || limit.CPUs < 0 || limit.CPUs > 1024 || (limit.CPUs > 0 && limit.CPUs < 0.01) || limit.MemoryMB < 0 || limit.MemoryMB > 16777216 || (limit.MemoryMB > 0 && limit.MemoryMB < 6) {
 			return errors.New("limits require a service name, CPU between 0.01 and 1024, and memory between 6 and 16777216 MiB; zero inherits Compose")
 		}
@@ -100,11 +104,17 @@ func applyLimits(config map[string]any, limits map[string]ServiceLimits) error {
 			service["mem_limit"] = limit.MemoryMB * 1024 * 1024
 			caps["memory"] = strconv.FormatInt(limit.MemoryMB*1024*1024, 10)
 		}
+		if err := applyServiceGPUs(service, resources, limit.GPUs); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (e *Engine) prepareLimits(ctx context.Context, r Request, dir string, args, env []string, out io.Writer) (string, error) {
+	if err := e.validateGPUs(ctx, r.Limits); err != nil {
+		return "", err
+	}
 	resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	if err := e.Run(ctx, dir, append(append([]string{}, args...), "config", "--format", "json"), env, resolved); err != nil {
 		return "", err

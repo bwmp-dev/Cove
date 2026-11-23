@@ -2687,3 +2687,104 @@ test("host firewall inspects the real worker read-only and the browser never sen
   expect(blocked).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+// GPU inventory is only read from the real worker; the browser never deploys a GPU selection or changes host drivers.
+interface GPUInventoryReport { checked_at: string; devices: { id: string; name: string; driver: string; memory_mb: number | null; assignable: boolean; notice: string }[]; limited: boolean; notices: string[] }
+
+async function expectInventoryShown(section: Locator, response: Awaited<ReturnType<Page["waitForResponse"]>>, collapsed: boolean) {
+  if (response.status() !== 200) {
+    // A worker without native GPU tooling may refuse inspection; the page must show that refusal, not an empty inventory.
+    expect([409, 502]).toContain(response.status());
+    await expect(section.getByText(response.status() === 409 ? "The worker cannot inspect GPUs yet" : "GPU inspection failed on the node", { exact: true })).toBeVisible();
+    await expect(section.getByRole("list", { name: "Observed GPUs" })).toHaveCount(0);
+    return null;
+  }
+  expect(response.headers()["cache-control"]).toBe("no-store");
+  const inventory = await response.json() as GPUInventoryReport;
+  await expect(section.getByText(/^Inspected/)).toBeVisible();
+  if (inventory.devices.length === 0) {
+    await expect(section.getByText(/does not mean the host has no GPU hardware/).first()).toBeVisible();
+  } else {
+    if (collapsed) await section.getByText(/^Observed devices \(/).click();
+    await expect(section.getByRole("list", { name: "Observed GPUs" }).getByRole("listitem")).toHaveCount(inventory.devices.length);
+  }
+  for (const notice of inventory.notices) await expect(section.getByText(notice, { exact: true })).toBeVisible();
+  return inventory;
+}
+
+test("GPU inventory is inspected only on request and per-service GPU settings save without touching CPU or memory", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const inspections: string[] = [];
+  page.on("request", (request) => {
+    if (/\/api\/(nodes|workloads)\/[^/]+\/gpus$/.test(new URL(request.url()).pathname)) inspections.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  });
+
+  await page.goto("/nodes"); await signIn(page);
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; name: string; capabilities: { gpu_assignments?: boolean } | null }[];
+  const node = nodes.find((item) => item.name === "ready-browser-worker");
+  if (!node) throw new Error("Fixture worker node missing");
+  expect(node.capabilities?.gpu_assignments).toBe(true);
+
+  await page.goto(`/nodes/${node.id}`);
+  const nodeSection = page.getByRole("region", { name: "GPUs", exact: true });
+  await expect(nodeSection.getByText("Not inspected yet.", { exact: true })).toBeVisible();
+  expect(inspections).toEqual([]);
+  const nodeResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/nodes/${node.id}/gpus`, { timeout: 120_000 });
+  await nodeSection.getByRole("button", { name: "Inspect GPUs", exact: true }).click();
+  const nodeInventory = await expectInventoryShown(nodeSection, await nodeResponse, false);
+  testInfo.annotations.push({ type: "node-gpus", description: JSON.stringify(nodeInventory) });
+  await expect(nodeSection.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled();
+  await nodeSection.scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "gpus-node");
+
+  await createProject(page, "GPU project");
+  const resourceURL = await createResource(page, "gpu-service");
+  const workload = new URL(resourceURL).pathname.split("/")[2] ?? "";
+  const saved = async () => (await (await page.request.get(`/api/workloads/${workload}`)).json() as { limits?: Record<string, unknown> }).limits ?? {};
+  await page.goto(`${resourceURL}/limits`);
+  const gpus = page.getByRole("region", { name: "GPU assignments", exact: true });
+  const limits = page.getByRole("region", { name: "Resource limits", exact: true });
+  await expect(gpus.getByText("Every service inherits GPU requests from Compose.", { exact: true })).toBeVisible();
+  expect(inspections).toEqual([`GET /api/nodes/${node.id}/gpus`]);
+
+  const resourceResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/workloads/${workload}/gpus`, { timeout: 120_000 });
+  await gpus.getByRole("button", { name: "Inspect GPUs", exact: true }).click();
+  const resourceInventory = await expectInventoryShown(gpus, await resourceResponse, true);
+  testInfo.annotations.push({ type: "resource-gpus", description: JSON.stringify(resourceInventory) });
+
+  // Selecting devices without choosing any is refused in the browser and focuses the problem.
+  await gpus.getByRole("button", { name: "Add service GPU setting", exact: true }).click();
+  await gpus.getByLabel("Compose service", { exact: true }).fill("app");
+  await gpus.getByRole("button", { name: "Save GPU assignments", exact: true }).click();
+  await expect(gpus.getByText("Select at least one device, or choose No standard GPU requests.", { exact: true })).toBeVisible();
+  await expect(gpus.getByRole("radio", { name: /Select devices/ })).toBeFocused();
+  await capture(page, testInfo, "gpus-resource-invalid");
+
+  // No standard GPU requests is saved as an explicit empty list.
+  await gpus.getByRole("radio", { name: /No standard GPU requests/ }).check();
+  await gpus.getByRole("button", { name: "Save GPU assignments", exact: true }).click();
+  await expect(gpus.getByText("Saved. Changes apply on the next deploy.", { exact: true })).toBeVisible();
+  await expect.poll(saved).toEqual({ app: { cpus: 0, memory_mb: 0, gpus: [] } });
+
+  // Saving CPU for the same service keeps its GPU setting.
+  await limits.getByRole("button", { name: "Add service limit", exact: true }).click();
+  await limits.getByLabel("Compose service", { exact: true }).fill("app");
+  await limits.getByLabel("CPU cores", { exact: true }).fill("0.5");
+  await limits.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(saved).toEqual({ app: { cpus: 0.5, memory_mb: 0, gpus: [] } });
+  await page.reload();
+  await expect(gpus.getByRole("radio", { name: /No standard GPU requests/ })).toBeChecked();
+  await expect(limits.getByLabel("CPU cores", { exact: true })).toHaveValue("0.5");
+  await capture(page, testInfo, "gpus-resource-saved");
+
+  // Returning to Inherit Compose removes the GPU setting and keeps CPU.
+  await gpus.getByRole("radio", { name: /Inherit Compose/ }).check();
+  await gpus.getByRole("button", { name: "Save GPU assignments", exact: true }).click();
+  await expect.poll(saved).toEqual({ app: { cpus: 0.5, memory_mb: 0 } });
+
+  // Reloading never re-inspects on its own.
+  expect(inspections).toEqual([`GET /api/nodes/${node.id}/gpus`, `GET /api/workloads/${workload}/gpus`]);
+  expect(errors).toEqual([]);
+});

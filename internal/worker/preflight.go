@@ -112,6 +112,10 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 		add("Resource limits", "error", "Limits reference invalid or missing services.")
 		return report
 	}
+	if err = e.validateGPUs(ctx, r.Limits); err != nil {
+		add("GPU assignments", "error", err.Error())
+		return report
+	}
 	if err = validateFileSecretTargets(config, r); err != nil {
 		add("File secrets", "error", err.Error())
 		return report

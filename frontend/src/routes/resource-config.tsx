@@ -12,6 +12,8 @@ import { ResourceVariables } from "../components/ResourceVariables";
 import { DatabaseAccess } from "../components/DatabaseAccess";
 import { RightSizing } from "../components/RightSizing";
 import { ResourceDefaultsNote } from "../components/ResourceDefaults";
+import { ResourceGPUs } from "../components/GPUs";
+import { isGPUOnly, mergeCPULimits } from "../lib/gpus";
 import { GitHubSource } from "../components/GitHubApp";
 import { Networks } from "../components/Networks";
 import { PrivateNetwork } from "../components/PrivateNetwork";
@@ -661,21 +663,37 @@ export function ResourceRegistryPage() {
 
 export function ResourceLimits() {
   const workload = useResource();
-  return <><LimitsForm key={JSON.stringify(workload.limits)} workload={workload} /><RightSizing workloadId={workload.id} limits={workload.limits} /></>;
+  // Each form is keyed by its own fields, so saving one does not discard an unsaved draft in the other.
+  const cpuKey = JSON.stringify(Object.entries(workload.limits ?? {}).filter(([, limit]) => !isGPUOnly(limit)).map(([service, limit]) => [service, limit.cpus, limit.memory_mb]));
+  return <><LimitsForm key={cpuKey} workload={workload} /><GPUAssignments workload={workload} /><RightSizing workloadId={workload.id} limits={workload.limits} /></>;
+}
+
+function GPUAssignments({ workload }: { workload: Workload }) {
+  const update = useUpdateWorkload(workload.id);
+  const blocked = useSaveBlocked(workload.id);
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
+  function onSave(limits: NonNullable<WorkloadInput["limits"]>) {
+    const result = validateWorkload(formValues(workload), "edit");
+    if (!result.input) return;
+    result.input.limits = limits;
+    update.mutate(result.input);
+  }
+  return <ResourceGPUs workload={workload} node={node} editable={can(workload.permissions, "edit")} blockers={<SaveBlockers workload={workload} />} onSave={onSave} save={{ pending: update.isPending, blocked, saved: update.isSuccess, error: update.error, reset: update.reset }} />;
 }
 
 function LimitsForm({ workload }: { workload: Workload }) {
   const id = useId();
   const { update, save } = useSectionSave(workload);
   const blocked = useSaveBlocked(workload.id);
-  const initial = Object.entries(workload.limits ?? {}).map(([service, limit]) => ({ service, cpus: String(limit.cpus || ""), memory: String(limit.memory_mb || "") }));
+  const initial = Object.entries(workload.limits ?? {}).filter(([, limit]) => !isGPUOnly(limit)).map(([service, limit]) => ({ service, cpus: String(limit.cpus || ""), memory: String(limit.memory_mb || "") }));
   const [rows, setRows] = useState(initial);
   const [error, setError] = useState("");
   const editable = can(workload.permissions, "edit");
   const dirty = JSON.stringify(initial) !== JSON.stringify(rows);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const limits: NonNullable<WorkloadInput["limits"]> = {};
+    const limits: Record<string, { cpus: number; memory_mb: number }> = {};
     for (const row of rows) {
       const cpus = Number(row.cpus), memory = Number(row.memory);
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(row.service) || Object.hasOwn(limits, row.service) || !Number.isFinite(cpus) || cpus < 0 || cpus > 1024 || (cpus > 0 && cpus < 0.01) || !Number.isSafeInteger(memory) || memory < 0 || memory > 16777216 || (memory > 0 && memory < 6)) {
@@ -685,7 +703,7 @@ function LimitsForm({ workload }: { workload: Workload }) {
       limits[row.service] = { cpus, memory_mb: memory };
     }
     setError("");
-    save({}, event.currentTarget, undefined, (input) => { input.limits = limits; });
+    save({}, event.currentTarget, undefined, (input) => { input.limits = mergeCPULimits(workload.limits, limits); });
   }
   function change(index: number, key: "service" | "cpus" | "memory", value: string) {
     update.reset(); setRows((current) => current.map((row, position) => position === index ? { ...row, [key]: value } : row));
