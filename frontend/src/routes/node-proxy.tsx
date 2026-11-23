@@ -1,10 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { FilePlus2, Network, RotateCw } from "lucide-react";
 import { useState } from "react";
 import { nodesQuery } from "../api/queries";
 import { proxyConfigQuery, unsettled, type ProxyConfig } from "../api/proxy";
 import type { Node } from "../api/types";
+import { ManagedListeners } from "../components/ManagedListeners";
 import { ChangeOutcome, LastChange, ProxyFileEditor, ProxyFiles, StaticSettings } from "../components/ProxyConfig";
 import { Breadcrumbs, Button, EmptyState, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { useSession } from "../lib/session";
@@ -42,7 +43,7 @@ function ProxyNotices({ config }: { config: ProxyConfig }) {
   return (
     <div className="space-y-2 px-4 pt-5 sm:px-6" aria-live="polite">
       <Notice tone="warn" title="This proxy serves every team on this node">
-        Changes affect all resources routed through it. Cove checks each change in a separate Traefik instance, applies it without restarting the proxy, and restores the previous file if the live proxy does not load it.
+        Changes affect all resources routed through it. Cove checks each dynamic configuration file change in a separate Traefik instance, applies it without restarting the proxy, and restores the previous file if the live proxy does not load it. Listener changes below restart the proxy.
       </Notice>
       {config.unavailable && <Notice tone="error" title="The proxy cannot be managed">{config.unavailable}</Notice>}
       {config.blocked && <Notice tone="warn" title="Changes are paused">{config.blocked}</Notice>}
@@ -52,15 +53,16 @@ function ProxyNotices({ config }: { config: ProxyConfig }) {
   );
 }
 
-function ProxyConfiguration({ node }: { node: Node }) {
-  const config = useQuery(proxyConfigQuery(node.id));
+type ConfigQuery = UseQueryResult<ProxyConfig>;
+
+function DynamicConfiguration({ node, config }: { node: Node; config: ConfigQuery }) {
   // undefined is a new file; null closes the editor.
   const [editing, setEditing] = useState<string | undefined | null>(null);
 
   if (config.isPending) return <LoadingRows label="Loading proxy configuration" />;
   if (config.isError) {
     return (
-      <div className="px-4 py-5 sm:px-6">
+      <div className="px-4 pt-5 sm:px-6">
         <QueryError what="the proxy configuration" error={config.error} onRetry={() => void config.refetch()} retrying={config.isFetching} />
       </div>
     );
@@ -104,13 +106,24 @@ function ProxyConfiguration({ node }: { node: Node }) {
           onClose={(opened) => setEditing(opened ?? null)}
         />
       )}
+    </>
+  );
+}
 
-      {data.available && (
+// The listener section keeps one position whatever state the proxy configuration query is in, so loading,
+// refreshing or failing that query never remounts it and discards an unsaved listener draft or a reviewed plan.
+function ProxyConfiguration({ node }: { node: Node }) {
+  const config = useQuery(proxyConfigQuery(node.id));
+  return (
+    <>
+      <DynamicConfiguration node={node} config={config} />
+      <ManagedListeners node={node} />
+      {config.isSuccess && config.data.available && (
         <Section
           title="Static configuration"
-          description="Read from the running proxy. Entry points, published ports and certificate resolvers cannot be changed here: adding one requires recreating the proxy with new static settings, which Cove does not do from this page."
+          description="Read from the running proxy. Published ports, HTTP/3 and extra entry points are changed under Listeners and published ports, which recreates the proxy. Certificate resolvers cannot be changed here."
         >
-          <StaticSettings config={data} />
+          <StaticSettings config={config.data} />
         </Section>
       )}
     </>

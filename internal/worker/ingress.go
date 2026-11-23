@@ -241,6 +241,9 @@ func (e *Engine) output(ctx context.Context, args ...string) (string, error) {
 }
 
 func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
 	args, err := e.ingressArgs()
 	if err != nil {
 		return err
@@ -260,6 +263,19 @@ func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if id == "" {
+		state, err := e.loadIngressExposures()
+		if err != nil {
+			return err
+		}
+		client := e.ingressDockerClient()
+		restored, restoreErr := restoreSavedIngressProxy(ctx, client, state)
+		client.CloseIdleConnections()
+		if restoreErr != nil {
+			return restoreErr
+		}
+		if restored {
+			return nil
+		}
 		mode, err := e.ingressMode()
 		if err != nil {
 			return err
@@ -290,7 +306,10 @@ func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if !strings.HasPrefix(image, "traefik:") {
-		return errors.New("existing ingress needs migration to Traefik before deploying routes")
+		proxy, err := e.inspectProxy(ctx)
+		if err != nil || proxy.Image != image {
+			return errors.New("existing ingress needs migration to Traefik before deploying routes")
+		}
 	}
 	return nil
 }
@@ -311,6 +330,9 @@ func (e *Engine) loadIngress() (map[string][]Route, error) {
 }
 
 func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out io.Writer) error {
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
 	if _, err := ingressConfig(routes); err != nil {
 		return err
 	}
@@ -435,6 +457,9 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route, out io.Writer) error {
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
 	suspension, err := e.readSuspension(workload)
 	if err != nil {
 		return err
@@ -593,6 +618,9 @@ func (e *Engine) restorePrevious(ctx context.Context, workload string, previous 
 func (e *Engine) restoreRoutes(ctx context.Context, workload string, previous []Route, out io.Writer) error {
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
 	owned, err := e.loadIngress()
 	if err != nil {
 		return err

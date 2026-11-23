@@ -17,44 +17,77 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
-	Links     *LinkConfig           `json:"links,omitempty"`
-	Ingress   *IngressConfigRequest `json:"ingress,omitempty"`
-	Tunnel    *TunnelRequest        `json:"tunnel,omitempty"`
-	Promotion *PromotionExport      `json:"promotion,omitempty"`
-	Registry  *Registry             `json:"registry,omitempty"`
-	Storage   *StorageLocation      `json:"storage,omitempty"`
-	Terminal  *TerminalRequest      `json:"terminal,omitempty"`
-	Method    string                `json:"method"`
-	Request   *Request              `json:"request,omitempty"`
-	ID        string                `json:"id,omitempty"`
+	Exposures *IngressExposureRequest `json:"exposures,omitempty"`
+	Links     *LinkConfig             `json:"links,omitempty"`
+	Ingress   *IngressConfigRequest   `json:"ingress,omitempty"`
+	Tunnel    *TunnelRequest          `json:"tunnel,omitempty"`
+	Promotion *PromotionExport        `json:"promotion,omitempty"`
+	Registry  *Registry               `json:"registry,omitempty"`
+	Storage   *StorageLocation        `json:"storage,omitempty"`
+	Terminal  *TerminalRequest        `json:"terminal,omitempty"`
+	Method    string                  `json:"method"`
+	Request   *Request                `json:"request,omitempty"`
+	ID        string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
-	CPUScale      *CPUScaleObservation `json:"cpu_scale,omitempty"`
-	Idle          *IdleStatus          `json:"idle,omitempty"`
-	Rollout       *RolloutStatus       `json:"rollout,omitempty"`
-	Suspension    *SuspensionStatus    `json:"suspension,omitempty"`
-	Links         *LinkStatus          `json:"links,omitempty"`
-	Ingress       *IngressConfigState  `json:"ingress,omitempty"`
-	IngressFile   *IngressConfigFile   `json:"ingress_file,omitempty"`
-	IngressResult *IngressConfigResult `json:"ingress_result,omitempty"`
-	RestoreCopy   *RestoreCopy         `json:"restore_copy,omitempty"`
-	Images        map[string]string    `json:"images,omitempty"`
-	Inventory     *PreviewInventory    `json:"inventory,omitempty"`
-	Cleanup       *CleanupPreview      `json:"cleanup,omitempty"`
-	Preflight     *PreflightReport     `json:"preflight,omitempty"`
-	Terminal      *TerminalResponse    `json:"terminal,omitempty"`
-	Releases      []Release            `json:"releases,omitempty"`
-	Backups       []BackupRecord       `json:"backups,omitempty"`
-	Maintenance   *Maintenance         `json:"maintenance,omitempty"`
-	Probe         *Probe               `json:"probe,omitempty"`
-	Operation     *Operation           `json:"operation,omitempty"`
-	Logs          string               `json:"logs,omitempty"`
-	Error         string               `json:"error,omitempty"`
-	Containers    []Container          `json:"containers,omitempty"`
+	Exposures     *IngressExposureStatus `json:"exposures,omitempty"`
+	ExposurePlan  *IngressExposurePlan   `json:"exposure_plan,omitempty"`
+	CPUScale      *CPUScaleObservation   `json:"cpu_scale,omitempty"`
+	Idle          *IdleStatus            `json:"idle,omitempty"`
+	Rollout       *RolloutStatus         `json:"rollout,omitempty"`
+	Suspension    *SuspensionStatus      `json:"suspension,omitempty"`
+	Links         *LinkStatus            `json:"links,omitempty"`
+	Ingress       *IngressConfigState    `json:"ingress,omitempty"`
+	IngressFile   *IngressConfigFile     `json:"ingress_file,omitempty"`
+	IngressResult *IngressConfigResult   `json:"ingress_result,omitempty"`
+	RestoreCopy   *RestoreCopy           `json:"restore_copy,omitempty"`
+	Images        map[string]string      `json:"images,omitempty"`
+	Inventory     *PreviewInventory      `json:"inventory,omitempty"`
+	Cleanup       *CleanupPreview        `json:"cleanup,omitempty"`
+	Preflight     *PreflightReport       `json:"preflight,omitempty"`
+	Terminal      *TerminalResponse      `json:"terminal,omitempty"`
+	Releases      []Release              `json:"releases,omitempty"`
+	Backups       []BackupRecord         `json:"backups,omitempty"`
+	Maintenance   *Maintenance           `json:"maintenance,omitempty"`
+	Probe         *Probe                 `json:"probe,omitempty"`
+	Operation     *Operation             `json:"operation,omitempty"`
+	Logs          string                 `json:"logs,omitempty"`
+	Error         string                 `json:"error,omitempty"`
+	Containers    []Container            `json:"containers,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "ingress_exposures", "ingress_exposures_initialize":
+		var status IngressExposureStatus
+		var err error
+		if r.Method == "ingress_exposures_initialize" {
+			status, err = e.InitializeIngressExposures(ctx)
+		} else {
+			status, err = e.IngressExposures(ctx)
+		}
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Exposures: &status}
+	case "ingress_exposures_plan":
+		if r.Exposures == nil {
+			return RPCResponse{Error: "listener settings required"}
+		}
+		plan, err := e.PlanIngressExposures(ctx, r.Exposures.Settings)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{ExposurePlan: &plan}
+	case "ingress_exposures_apply":
+		if r.Exposures == nil {
+			return RPCResponse{Error: "reviewed listener plan required"}
+		}
+		status, err := e.ChangeIngressExposures(ctx, *r.Exposures)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Exposures: &status}
 	case "cpu_scale_sample":
 		sample, err := e.CPUScaleSample(ctx, r.ID)
 		if err != nil {
@@ -356,11 +389,11 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
 	switch method {
-	case "ingress_config_change":
+	case "ingress_config_change", "ingress_exposures_apply":
 		return 5 * time.Minute
 	case "links_apply":
 		return 4 * time.Minute
-	case "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
+	case "ingress_exposures_initialize", "ingress_exposures_plan", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
 		return 3 * time.Minute
 	}
 	return 30 * time.Second

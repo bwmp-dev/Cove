@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	IngressExposures    bool         `json:"ingress_exposures"`
 	RouteProtocol       int          `json:"route_protocol"`
 	CPUAutoscale        bool         `json:"cpu_autoscale"`
 	IdleSleep           bool         `json:"idle_sleep"`
@@ -57,6 +58,7 @@ func Inspect(ctx context.Context) Probe {
 	p.Previews = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
+	p.IngressExposures = runtime.GOOS == "linux"
 	p.RoutePolicies = true
 	if runtime.GOOS == "linux" {
 		p.RouteProtocol = 4

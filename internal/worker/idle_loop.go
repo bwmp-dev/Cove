@@ -155,7 +155,7 @@ func (e *Engine) wakeIdleEpisode(ctx context.Context, workload, episode string) 
 }
 
 func (e *Engine) idleAvailableLocked(workload string) bool {
-	if e.draining || e.busy(workload) {
+	if e.draining || e.proxyUnsettled || e.busy(workload) {
 		return false
 	}
 	background := 0

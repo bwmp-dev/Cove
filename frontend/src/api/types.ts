@@ -27,6 +27,8 @@ export interface Capabilities {
   idle_sleep?: boolean;
   // The worker reports per-service CPU samples, so the panel can scale rolling services between replica bounds.
   cpu_autoscale?: boolean;
+  // The worker can manage the shared proxy's public bindings, HTTP/3 and extra listeners. Only Linux workers report it.
+  ingress_exposures?: boolean;
   protocol: number;
   os: string;
   arch: string;

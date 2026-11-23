@@ -22,8 +22,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if len(os.Args) == 2 && os.Args[1] == "certificate-probe" {
-		file, err := os.Open("/config/probes.json")
+	if (len(os.Args) == 2 || len(os.Args) == 3) && os.Args[1] == "certificate-probe" {
+		path := "/config/probes.json"
+		if len(os.Args) == 3 {
+			path = os.Args[2]
+		}
+		file, err := os.Open(path)
 		if err == nil {
 			err = RunRouteCertificateProbe(context.Background(), file)
 			file.Close()

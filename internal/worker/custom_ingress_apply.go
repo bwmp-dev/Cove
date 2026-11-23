@@ -130,6 +130,9 @@ func (e *Engine) saveCustomIngress(state customIngressState) error {
 }
 
 func (e *Engine) ingressBlocked(state customIngressState) string {
+	if err := e.ingressExposureReady(); err != nil {
+		return err.Error()
+	}
 	e.mu.Lock()
 	draining := e.draining
 	e.mu.Unlock()

@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck")) {
+	if len(os.Args) != 2 && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "certificate-probe")) {
 		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|idle-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
@@ -37,7 +37,11 @@ func main() {
 		err = worker.RunLinkGateway(ctx, reload)
 	case "certificate-probe":
 		var file *os.File
-		file, err = os.Open("/config/probes.json")
+		path := "/config/probes.json"
+		if len(os.Args) == 3 {
+			path = os.Args[2]
+		}
+		file, err = os.Open(path)
 		if err == nil {
 			defer file.Close()
 			err = worker.RunRouteCertificateProbe(ctx, file)
