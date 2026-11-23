@@ -174,3 +174,6 @@ Structured route policy fields round-trip through the canonical manifest and Ter
 
 
 Git provider commit/deployment feedback treats a staged candidate as running until its traffic promotion succeeds. A successful abort or stop that aborts the candidate reports it inactive; failed decisions leave the report pending. GitHub App and other connected providers use the same outcome mapping.
+
+
+Managed database resources retain their typed descriptor in committed worker release snapshots and encrypted backups, so separate recovery cannot become a stateless service. Database maintenance shares deployment governance and unified grants; metadata-only bindings are distinct from password/URL secret reads. Base canonical imports generate credentials while existing-resource drafts preserve sealed settings. Online database backups reuse the operational dump/stream and restic paths; database version copies share the bounded native dump runner. Unresolved maintenance is protected from operation and worker-journal retention.

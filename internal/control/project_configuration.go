@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -140,6 +141,13 @@ func validateProjectConfiguration(manifest projectConfiguration) error {
 				policy.ForwardAuth = nil
 				config.Routes[i].Policy = &policy
 			}
+		}
+		if config.Database != nil && config.Environment == nil {
+			engine, ok := findDatabaseEngine(config.Database.Engine)
+			if !ok {
+				return errors.New("unsupported managed database engine")
+			}
+			config.Environment = map[string]string{engine.password: strings.Repeat("0", 64)}
 		}
 		if err := validateWorkload(config); err != nil {
 			return err
@@ -324,6 +332,8 @@ func (s *Server) readProjectConfiguration(ctx context.Context, tx pgx.Tx, team, 
 }
 
 func publicProjectConfiguration(manifest projectConfiguration, includeSecrets bool) projectConfiguration {
+	manifest.Resources = slices.Clone(manifest.Resources)
+	manifest.Environments = slices.Clone(manifest.Environments)
 	keys := func(values map[string]*string) []string {
 		names := make([]string, 0, len(values))
 		for name := range values {
@@ -351,6 +361,17 @@ func publicProjectConfiguration(manifest projectConfiguration, includeSecrets bo
 		}
 		sort.Strings(resource.VariableKeys)
 		config := &resource.Configuration
+		if config.Database != nil {
+			config.Database = databaseMetadata(config.Database)
+			config.Database.SettingsOperation = ""
+			environment := map[string]string{}
+			for name, value := range config.Environment {
+				if name != "COVE_DB_TLS_KEY" {
+					environment[name] = value
+				}
+			}
+			config.Environment = environment
+		}
 		if !includeSecrets {
 			config.Environment = nil
 			if config.ComposeBundle != nil && (len(config.ComposeBundle.Files) > 0 || len(config.ComposeBundle.Assets) > 0) {

@@ -15,11 +15,12 @@ import (
 )
 
 type RestoreCopy struct {
-	Source      string            `json:"source"`
-	Compose     string            `json:"compose"`
-	Environment map[string]string `json:"environment"`
-	Volumes     []string          `json:"volumes"`
-	Mounts      []backupMount     `json:"mounts"`
+	DatabaseMetadata json.RawMessage   `json:"database_metadata,omitempty"`
+	Source           string            `json:"source"`
+	Compose          string            `json:"compose"`
+	Environment      map[string]string `json:"environment"`
+	Volumes          []string          `json:"volumes"`
+	Mounts           []backupMount     `json:"mounts"`
 }
 
 func isolateRestore(config map[string]any, manifest backupManifest, target string) ([]string, []backupMount, error) {
@@ -186,7 +187,7 @@ func (e *Engine) PlanRestoreCopy(ctx context.Context, r Request, source string) 
 	if err != nil {
 		return nil, err
 	}
-	return &RestoreCopy{Source: source, Compose: string(raw), Environment: manifest.State.Environment, Volumes: volumes, Mounts: mounts}, nil
+	return &RestoreCopy{DatabaseMetadata: manifest.State.DatabaseMetadata, Source: source, Compose: string(raw), Environment: manifest.State.Environment, Volumes: volumes, Mounts: mounts}, nil
 }
 
 func (e *Engine) performRestoreCopy(ctx context.Context, r Request, out io.Writer) (result error) {

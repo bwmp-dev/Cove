@@ -135,7 +135,7 @@ func (e *Engine) PruneJournals(ctx context.Context, in JournalPruneRequest) (*Jo
 		if err != nil {
 			return nil, err
 		}
-		if j.Operation.FinishedAt == nil || j.RouteChange != nil && !j.RouteChange.Committed {
+		if j.Operation.FinishedAt == nil || j.RouteChange != nil && !j.RouteChange.Committed || j.Request.DatabaseMaintenance != nil && j.Operation.State != "succeeded" {
 			protected[j.Operation.ID] = true
 			data, _ := json.Marshal(j)
 			var value any

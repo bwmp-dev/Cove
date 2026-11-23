@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"cove/internal/outbound"
 	"cove/internal/worker"
 	"crypto/rand"
 	"encoding/hex"
@@ -26,6 +27,7 @@ type workloadInput struct {
 	ComposeBundle    *worker.ComposeBundle           `json:"compose_bundle,omitempty"`
 	Autoscale        *worker.AutoscalePolicy         `json:"autoscale,omitempty"`
 	Rollout          *worker.RolloutOptions          `json:"rollout,omitempty"`
+	Database         *databaseResource               `json:"database,omitempty"`
 	GuardedDeploy    *bool                           `json:"guarded_deploy,omitempty"`
 	FileSecrets      []worker.FileSecret             `json:"file_secrets,omitempty"`
 	Hooks            *worker.DeploymentHooks         `json:"hooks,omitempty"`
@@ -64,6 +66,7 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create the resource first, then configure CPU scaling", 400)
 		return
 	}
+	id := resourceID()
 	if in.Backup != nil && (in.Backup.Remote != nil || in.Backup.StorageID != "" || in.Backup.Database != nil) {
 		http.Error(w, "use the backup policy endpoint to configure logical backups or a storage location", 400)
 		return
@@ -74,6 +77,19 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Private != nil {
 		http.Error(w, "create the resource first, then configure private networking", 400)
+		return
+	}
+	if in.Kind == "database" {
+		if err := prepareDatabase(&in, id); err != nil {
+			status := 400
+			if errors.Is(err, errDatabaseTemplateChanged) {
+				status = 409
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+	} else if in.Database != nil {
+		http.Error(w, "database metadata requires the database resource kind", 400)
 		return
 	}
 	if err := validateWorkload(in); err != nil {
@@ -108,7 +124,6 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not protect configuration", 500)
 		return
 	}
-	id := resourceID()
 	interval := 0
 	if in.Backup != nil {
 		interval = in.Backup.IntervalHours
@@ -123,7 +138,7 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cpu, memory := configuredUsage(in)
-	_, err = tx.Exec(r.Context(), "INSERT INTO workloads(id,node_id,name,configuration,kind,backup_interval,next_backup_at,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(hours=>$6),NULLIF($7,''),$8,$9,$10,$11)", id, in.NodeID, in.Name, encrypted, in.Kind, interval, environmentID, actor(r).Team, projectID, cpu, memory)
+	_, err = tx.Exec(r.Context(), "INSERT INTO workloads(id,node_id,name,configuration,kind,backup_interval,next_backup_at,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(hours=>$6),NULLIF($7,''),$8,$9,$10,$11)", id, in.NodeID, in.Name, encrypted, resourceKind(in), interval, environmentID, actor(r).Team, projectID, cpu, memory)
 	if quotaError(w, err) {
 		return
 	}
@@ -131,6 +146,9 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	if errors.As(err, &constraint) && constraint.Code == "23503" {
 		http.Error(w, "the selected node, project, or environment changed; refresh and try again", 409)
 		return
+	}
+	if err == nil && in.Database != nil {
+		_, err = tx.Exec(r.Context(), "INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,'create database',$2,201,$3)", actor(r).ID, id, actor(r).Team)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -227,6 +245,19 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	var config workloadInput
 	if json.Unmarshal(data, &config) != nil {
 		http.Error(w, "configuration unavailable", 500)
+		return
+	}
+	if config.Database != nil && (in.Action == "rollback" || in.Action == "restore") {
+		http.Error(w, "managed databases require a separate recovery copy so retained credentials cannot replace the current credentials", 409)
+		return
+	}
+	var maintenanceBusy bool
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM database_maintenance WHERE (state IN ('pending','failed') AND workload_id=$1) OR (state='pending' AND source_id=$1)) OR EXISTS(SELECT 1 FROM object_buckets WHERE state='pending' AND (workload_id=$1 OR storage_resource_id=$1))`, r.PathValue("id")).Scan(&maintenanceBusy); err != nil {
+		http.Error(w, "maintenance state unavailable", 503)
+		return
+	}
+	if maintenanceBusy {
+		http.Error(w, "finish or retry database maintenance or bucket provisioning before queuing another operation", 409)
 		return
 	}
 	repair, err := environmentOperationGate(r.Context(), tx, r.PathValue("id"), in.Action)
@@ -468,6 +499,11 @@ func (s *Server) nodeRPC(ctx context.Context, nodeID string, request worker.RPCR
 	if proxyErr != nil {
 		return worker.RPCResponse{}, proxyErr
 	}
+	return s.nodeRPCUsing(ctx, s.DB, nodeID, request, proxy)
+}
+func (s *Server) nodeRPCUsing(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, nodeID string, request worker.RPCRequest, proxy outbound.Config) (worker.RPCResponse, error) {
 	if s.propagateOutbound(proxy) {
 		request.Proxy = &proxy
 	}
@@ -479,7 +515,7 @@ func (s *Server) nodeRPC(ctx context.Context, nodeID string, request worker.RPCR
 	var host *string
 	var port int
 	var encrypted []byte
-	err := s.DB.QueryRow(ctx, "SELECT address,port,host_key,private_key,mode,COALESCE((capabilities->>'outbound_proxy')::boolean,false) FROM nodes WHERE id=$1", nodeID).Scan(&address, &port, &host, &encrypted, &mode, &proxySupported)
+	err := db.QueryRow(ctx, "SELECT address,port,host_key,private_key,mode,COALESCE((capabilities->>'outbound_proxy')::boolean,false) FROM nodes WHERE id=$1", nodeID).Scan(&address, &port, &host, &encrypted, &mode, &proxySupported)
 	if err != nil {
 		return worker.RPCResponse{}, err
 	}
@@ -708,6 +744,26 @@ func (s *Server) dispatchOperations(ctx context.Context) error {
 	return nil
 }
 func (s *Server) processOperation(ctx context.Context, id, node string, payload []byte) error {
+	data, err := unseal(s.Key, payload)
+	if err != nil {
+		return s.failOperation(ctx, id, "Operation configuration could not be decrypted.")
+	}
+	var request worker.Request
+	if json.Unmarshal(data, &request) != nil {
+		return s.failOperation(ctx, id, "Operation configuration is invalid.")
+	}
+	var cancelRequested bool
+	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested FROM operations WHERE id=$1", id).Scan(&cancelRequested); err != nil {
+		return err
+	}
+	if request.DatabaseMaintenance == nil && !cancelRequested && s.databaseLocked(ctx, request.Workload) {
+		result, err := json.Marshal(map[string]string{"error": "Waiting for database maintenance or bucket provisioning.", "hold_reason": "Waiting for database maintenance or bucket provisioning."})
+		if err != nil {
+			return err
+		}
+		_, err = s.DB.Exec(ctx, "UPDATE operations SET result=$2,updated_at=now() WHERE id=$1", id, result)
+		return err
+	}
 	ready, dependencyErr := s.dependencyReady(ctx, id)
 	if dependencyErr != nil || !ready {
 		return dependencyErr
@@ -719,21 +775,8 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if !admitted {
 		return nil
 	}
-	data, err := unseal(s.Key, payload)
-	if err != nil {
-		return s.failOperation(ctx, id, "Operation configuration could not be decrypted.")
-	}
-	var request worker.Request
-	if json.Unmarshal(data, &request) != nil {
-		return s.failOperation(ctx, id, "Operation configuration is invalid.")
-	}
-	// Re-submission is safe only because the worker persists the immutable ID and input digest before acknowledging.
-	var cancelRequested bool
-	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested FROM operations WHERE id=$1", id).Scan(&cancelRequested); err != nil {
-		return err
-	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
-	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
+	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" && !(request.DatabaseMaintenance != nil && request.InfrastructurePrepared) {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
 			var resolution *variableResolutionError
 			if errors.As(err, &resolution) {
@@ -757,6 +800,30 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if cancelRequested {
 		method = "cancel"
+	}
+	if change := request.DatabaseMaintenance; change != nil {
+		request.DatabaseMaintenance = nil
+		change.Request = request
+		request.DatabaseMaintenance = change
+	}
+	if request.DatabaseMaintenance != nil {
+		var retry bool
+		if err = s.DB.QueryRow(ctx, "SELECT retry_requested FROM database_maintenance WHERE id=$1", id).Scan(&retry); err != nil {
+			return err
+		}
+		if retry {
+			if _, err = s.nodeRPC(ctx, node, worker.RPCRequest{Method: "database_retry", ID: id, Request: &request}); err != nil {
+				var rejected *RemoteError
+				if errors.As(err, &rejected) {
+					return s.finishDatabaseMaintenance(ctx, id, "failed", []byte(`{"error":"Worker rejected maintenance retry; check the worker and retained configuration."}`))
+				}
+				_, err = s.DB.Exec(ctx, "UPDATE operations SET updated_at=now() WHERE id=$1", id)
+				return err
+			}
+			if _, err = s.DB.Exec(ctx, "UPDATE database_maintenance SET retry_requested=false WHERE id=$1", id); err != nil {
+				return err
+			}
+		}
 	}
 	response, err := s.nodeRPC(ctx, node, worker.RPCRequest{Method: method, Request: &request})
 	if err != nil && cancelRequested {
@@ -819,6 +886,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if request.Action == "routes" && state == "succeeded" {
 		return s.commitRoutes(ctx, id, request, result)
+	}
+	if request.DatabaseMaintenance != nil {
+		return s.finishDatabaseMaintenance(ctx, id, state, result)
 	}
 	if rollout := response.Operation.Rollout; rollout != nil && rollout.Release != "" && rollout.Release != id && (rollout.Phase == "completed" || rollout.Phase == "aborted") {
 		tx, err := s.DB.Begin(ctx)

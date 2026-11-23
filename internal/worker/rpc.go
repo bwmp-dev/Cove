@@ -18,29 +18,32 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
-	Diff           *ReleaseComparisonRequest `json:"release_comparison,omitempty"`
-	Proxy          *outbound.Config          `json:"outbound_proxy,omitempty"`
-	Adoption       *AdoptionRequest          `json:"adoption,omitempty"`
-	Exec           *ExecRequest              `json:"exec,omitempty"`
-	Links          *LinkConfig               `json:"links,omitempty"`
-	Ingress        *IngressConfigRequest     `json:"ingress,omitempty"`
-	Tunnel         *TunnelRequest            `json:"tunnel,omitempty"`
-	Promotion      *PromotionExport          `json:"promotion,omitempty"`
-	Registry       *Registry                 `json:"registry,omitempty"`
-	Storage        *StorageLocation          `json:"storage,omitempty"`
-	Terminal       *TerminalRequest          `json:"terminal,omitempty"`
-	Method         string                    `json:"method"`
-	Request        *Request                  `json:"request,omitempty"`
-	ID             string                    `json:"id,omitempty"`
-	Snapshot       *VolumeSnapshotConfig     `json:"snapshot,omitempty"`
-	Stream         *StreamRequest            `json:"stream,omitempty"`
-	TrafficControl *ProxyTrafficControl      `json:"traffic_control,omitempty"`
-	CleanupControl *CleanupControl           `json:"cleanup_control,omitempty"`
-	JournalPrune   *JournalPruneRequest      `json:"journal_prune,omitempty"`
-	Files          *FileRequest              `json:"files,omitempty"`
-	Telemetry      *TelemetryRequest         `json:"telemetry,omitempty"`
+	Database       *DatabaseInspectionRequest `json:"database_inspection,omitempty"`
+	Bucket         *ObjectBucket              `json:"object_bucket,omitempty"`
+	Diff           *ReleaseComparisonRequest  `json:"release_comparison,omitempty"`
+	Proxy          *outbound.Config           `json:"outbound_proxy,omitempty"`
+	Adoption       *AdoptionRequest           `json:"adoption,omitempty"`
+	Exec           *ExecRequest               `json:"exec,omitempty"`
+	Links          *LinkConfig                `json:"links,omitempty"`
+	Ingress        *IngressConfigRequest      `json:"ingress,omitempty"`
+	Tunnel         *TunnelRequest             `json:"tunnel,omitempty"`
+	Promotion      *PromotionExport           `json:"promotion,omitempty"`
+	Registry       *Registry                  `json:"registry,omitempty"`
+	Storage        *StorageLocation           `json:"storage,omitempty"`
+	Terminal       *TerminalRequest           `json:"terminal,omitempty"`
+	Method         string                     `json:"method"`
+	Request        *Request                   `json:"request,omitempty"`
+	ID             string                     `json:"id,omitempty"`
+	Snapshot       *VolumeSnapshotConfig      `json:"snapshot,omitempty"`
+	Stream         *StreamRequest             `json:"stream,omitempty"`
+	TrafficControl *ProxyTrafficControl       `json:"traffic_control,omitempty"`
+	CleanupControl *CleanupControl            `json:"cleanup_control,omitempty"`
+	JournalPrune   *JournalPruneRequest       `json:"journal_prune,omitempty"`
+	Files          *FileRequest               `json:"files,omitempty"`
+	Telemetry      *TelemetryRequest          `json:"telemetry,omitempty"`
 }
 type RPCResponse struct {
+	Database        *DatabaseInspection   `json:"database_inspection,omitempty"`
 	Comparison      *ReleaseComparison    `json:"release_comparison,omitempty"`
 	Adopted         *AdoptionRequest      `json:"adopted,omitempty"`
 	ComposeProjects []ComposeProject      `json:"compose_projects,omitempty"`
@@ -156,6 +159,53 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 		return RPCResponse{Exec: &result}
 
+	case "database_discard":
+		if err := e.DiscardDatabaseCopy(ctx, r.ID); err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{}
+	case "database_inspection":
+		if r.Database == nil {
+			return RPCResponse{Error: "database inspection required"}
+		}
+		result, err := e.InspectDatabase(ctx, *r.Database)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Database: result}
+	case "object_bucket":
+		if r.Bucket == nil {
+			return RPCResponse{Error: "bucket request required"}
+		}
+		if err := e.ProvisionObjectBucket(ctx, *r.Bucket); err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{}
+	case "database_retry":
+		if r.Request == nil || r.Request.DatabaseMaintenance == nil || r.ID != r.Request.ID {
+			return RPCResponse{Error: "maintenance retry request required"}
+		}
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		op, err := e.submitLocked(*r.Request)
+		if err != nil {
+			return RPCResponse{Error: "maintenance retry input differs from its journal"}
+		}
+		if op.State != "failed" && op.State != "interrupted" {
+			return RPCResponse{Operation: &op}
+		}
+		j, err := e.read(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "maintenance journal unavailable"}
+		}
+		j.Operation.State = "queued"
+		j.Operation.Error = ""
+		j.Operation.FinishedAt = nil
+		if err = writeJSON(e.path(r.ID), j); err != nil {
+			return RPCResponse{Error: "could not persist maintenance retry"}
+		}
+		e.pending = append(e.pending, j.Operation)
+		return RPCResponse{Operation: &j.Operation}
 	case "release_comparison":
 		if r.Diff == nil {
 			return RPCResponse{Error: "release comparison required"}

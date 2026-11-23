@@ -17,7 +17,7 @@ import { GitProviderPicker } from "./GitProviderPicker";
 import { automaticDescription, emptySelection, reportingDescription, type ProviderRepository, type ProviderSelection, type ProviderSourceInput } from "../api/git-providers";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 
-function FormSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
+export function FormSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return (
     <section className="grid gap-x-8 gap-y-3 px-4 pt-5 sm:px-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
       <div>

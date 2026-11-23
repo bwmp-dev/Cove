@@ -174,7 +174,32 @@ func (s *Server) resolveSharedVariables(ctx context.Context, workload string, en
 					return ""
 				}
 				var ok bool
-				resolved, ok = config.Environment[sourceKey]
+				if config.Database != nil && !databaseExportKey(sourceKey) {
+					resolutionError = errSharedVariables
+					return ""
+				}
+				if config.Database != nil && databaseExportKey(sourceKey) {
+					var pending bool
+					resolutionError = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM database_maintenance WHERE (state IN ('pending','failed') AND workload_id=$1) OR (state='pending' AND source_id=$1))", source).Scan(&pending)
+					if resolutionError != nil || pending {
+						resolutionError = errSharedVariables
+						return ""
+					}
+					var locked bool
+					resolutionError = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM database_maintenance WHERE workload_id=$1 AND state IN ('pending','failed'))", source).Scan(&locked)
+					if resolutionError != nil || locked {
+						resolutionError = errSharedVariables
+						return ""
+					}
+					var values map[string]string
+					values, resolutionError = databaseExports(config, func(value string) (string, error) { return resolve(source, value, depth+1) })
+					if resolutionError != nil {
+						return ""
+					}
+					resolved, ok = values[sourceKey]
+				} else {
+					resolved, ok = config.Environment[sourceKey]
+				}
 				if !ok {
 					resolutionError = errSharedVariables
 					return ""

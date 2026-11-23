@@ -181,6 +181,9 @@ func (s *Server) exportProjectConfiguration(w http.ResponseWriter, r *http.Reque
 			values[name] = value
 		}
 		for name, value := range request.Environment {
+			if config.Database != nil && name == "COVE_DB_TLS_KEY" {
+				continue
+			}
 			values[name] = value
 		}
 		if existing := files[prefix+"/.env"]; strings.TrimSpace(existing) != "" {

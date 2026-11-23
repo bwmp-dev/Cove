@@ -6,11 +6,15 @@ import (
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 )
 
 func validateWorkload(in workloadInput) error {
+	if err := validateDatabaseResource(in); err != nil {
+		return err
+	}
 	if in.Source != nil && in.Source.SSHPrivateKey != "" {
 		return errors.New("SSH private keys are managed through the deploy key endpoint")
 	}
@@ -26,7 +30,7 @@ func validateWorkload(in workloadInput) error {
 	if strings.TrimSpace(in.Name) == "" || len(in.Name) > 120 {
 		return errors.New("a name of at most 120 characters is required")
 	}
-	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", ComposeBundle: in.ComposeBundle, Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy, Rollout: in.Rollout})
+	return worker.ValidateRequest(worker.Request{ManagedDatabase: in.Database != nil, ID: "validation", Workload: "validation", Action: "deploy", ComposeBundle: in.ComposeBundle, Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy, Rollout: in.Rollout})
 }
 func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	var encrypted []byte
@@ -54,6 +58,9 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	keys := []string{}
 	for key := range configuration.Environment {
 		keys = append(keys, key)
+	}
+	if configuration.Database != nil {
+		keys = databaseExportKeysFor(configuration.Database)
 	}
 	configuration.Environment = nil
 	sort.Strings(keys)
@@ -107,7 +114,7 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 		configuration.Routes[i].Auth = ""
 	}
 	configuration.Routes = routesWithoutSecrets(configuration.Routes)
-	respond(w, 200, workloadView{PendingAdoptionID: pendingAdoption, EnvironmentPaused: paused, Rollout: configuration.Rollout, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: configuration.Kind, JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: names, ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
+	respond(w, 200, workloadView{Database: databaseMetadata(configuration.Database), PendingAdoptionID: pendingAdoption, EnvironmentPaused: paused, Rollout: configuration.Rollout, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: resourceKind(configuration), JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: names, ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
 }
 func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -193,6 +200,17 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		var old workloadInput
 		if json.Unmarshal(data, &old) != nil {
 			http.Error(w, "configuration unavailable", 500)
+			return
+		}
+		if old.Database != nil {
+			if in.Database != nil || in.Compose != old.Compose || in.Source != nil || in.Kind == "job" || in.JobService != "" || len(in.EnvironmentPatch) > 0 || in.Environment != nil && !reflect.DeepEqual(in.Environment, old.Environment) || len(in.Routes) > 0 || in.Hooks != nil || len(in.FileSecrets) > 0 || in.Private != nil {
+				http.Error(w, "database engine, Compose and credentials are managed; create another database for a different version", 409)
+				return
+			}
+			in.Database, in.Kind = old.Database, "service"
+			in.FileSecrets = old.FileSecrets
+		} else if in.Database != nil || in.Kind == "database" {
+			http.Error(w, "create a database resource instead of converting an existing service", 400)
 			return
 		}
 		in.Routes, err = retainedRouteAuth(input.Routes, old.Routes)
@@ -295,7 +313,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cpu, memory := configuredUsage(in)
-	_, err = tx.Exec(r.Context(), "UPDATE workloads SET name=$1,configuration=$2,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END,job_pending_at=CASE WHEN $4='job' THEN job_pending_at ELSE NULL END,job_overlap_policy=CASE WHEN $4='job' THEN job_overlap_policy ELSE 'skip' END,job_timeout_seconds=CASE WHEN $4='job' THEN job_timeout_seconds ELSE 1800 END WHERE id=$3", in.Name, encrypted, r.PathValue("id"), in.Kind, cpu, memory)
+	_, err = tx.Exec(r.Context(), "UPDATE workloads SET name=$1,configuration=$2,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END,job_pending_at=CASE WHEN $4='job' THEN job_pending_at ELSE NULL END,job_overlap_policy=CASE WHEN $4='job' THEN job_overlap_policy ELSE 'skip' END,job_timeout_seconds=CASE WHEN $4='job' THEN job_timeout_seconds ELSE 1800 END WHERE id=$3", in.Name, encrypted, r.PathValue("id"), resourceKind(in), cpu, memory)
 	if quotaError(w, err) {
 		return
 	}

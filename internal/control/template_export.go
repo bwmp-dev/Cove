@@ -35,6 +35,10 @@ func (s *Server) saveWorkloadTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source configuration unavailable", 503)
 		return
 	}
+	if config.Database != nil {
+		http.Error(w, "create managed databases from their engine catalogue instead of exporting generated credentials and TLS settings", 409)
+		return
+	}
 	sourceRevision := ""
 	if config.Source != nil && !config.Source.InlineCompose {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(90 * time.Second))

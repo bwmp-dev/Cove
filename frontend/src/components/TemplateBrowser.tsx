@@ -18,6 +18,7 @@ import { Button, DefinitionList, Field, LoadingRows, MetaList, Notice, QueryErro
 interface TemplateBrowserProps {
   onUse: (draft: ResourceDraft) => void;
   onCustom: () => void;
+  onDatabase: () => void;
 }
 
 interface Filters {
@@ -28,7 +29,7 @@ interface Filters {
 
 const noFilters: Filters = { search: "", category: "", origin: "" };
 
-export function TemplateBrowser({ onUse, onCustom }: TemplateBrowserProps) {
+export function TemplateBrowser({ onUse, onCustom, onDatabase }: TemplateBrowserProps) {
   const catalogue = useQuery(templatesQuery);
   const [filters, setFilters] = useState<Filters>(noFilters);
   const [selected, setSelected] = useState<string | null>(null);
@@ -60,7 +61,12 @@ export function TemplateBrowser({ onUse, onCustom }: TemplateBrowserProps) {
     <Section
       title="Resource templates"
       description="Start from a reviewed Compose configuration, or bring your own. Choosing a template prepares a draft; nothing is created or deployed until you review it."
-      actions={<Button onClick={onCustom}>Custom Compose or Git</Button>}
+      actions={
+        <>
+          <Button onClick={onDatabase}>Managed database</Button>
+          <Button onClick={onCustom}>Custom Compose or Git</Button>
+        </>
+      }
       flush
     >
       {body}

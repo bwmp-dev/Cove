@@ -70,10 +70,11 @@ else exec mongodump --archive --oplog; fi`
 func (e *Engine) streamDatabaseSnapshot(ctx context.Context, r Request, container string, out io.Writer) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
+	args := []string{"docker", "exec", container, "timeout", "-k", "5", "1800", "sh", "-ec", extendedDumpCommand(r.Backup.Database.Engine)}
 	reader, writer := io.Pipe()
 	produced := make(chan error, 1)
 	go func() {
-		err := runInput(ctx, e.Root, []string{"docker", "exec", container, "timeout", "-k", "5", "1800", "sh", "-ec", extendedDumpCommand(r.Backup.Database.Engine)}, nil, nil, &sizeBoundWriter{Writer: writer, remaining: maxDatabaseDumpBytes})
+		err := runInput(ctx, e.Root, args, nil, nil, &sizeBoundWriter{Writer: writer, remaining: maxDatabaseDumpBytes})
 		writer.CloseWithError(err)
 		produced <- err
 	}()

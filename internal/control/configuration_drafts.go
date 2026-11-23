@@ -21,6 +21,26 @@ type configurationChange struct {
 }
 
 func mergeManifestResource(in, old workloadInput) (workloadInput, error) {
+	if old.Database != nil {
+		if in.Database != nil {
+			proposed, current := databaseMetadata(in.Database), databaseMetadata(old.Database)
+			proposed.SettingsOperation, current.SettingsOperation = "", ""
+			if !reflect.DeepEqual(proposed, current) {
+				return in, errors.New("use Database settings to change managed engine configuration")
+			}
+		}
+		if in.Compose != old.Compose || in.Source != nil || in.Kind == "job" || in.Hooks != nil || in.ComposeBundle != nil || in.Rollout != nil || in.Autoscale != nil {
+			return in, errors.New("managed database Compose and lifecycle settings cannot be changed in a draft")
+		}
+		if in.Environment != nil {
+			for name, value := range in.Environment {
+				if old.Environment[name] != value {
+					return in, errors.New("managed database credentials must be changed through Database settings")
+				}
+			}
+		}
+		in.Database, in.Kind, in.Environment, in.FileSecrets = old.Database, "service", old.Environment, old.FileSecrets
+	}
 	if in.Kind == "" {
 		in.Kind = "service"
 	}
@@ -365,12 +385,26 @@ func (s *Server) applyProjectConfiguration(w http.ResponseWriter, r *http.Reques
 		old, exists := oldResources[resource.Key]
 		config, mergeErr := mergeManifestResource(resource.Configuration, old.Configuration)
 		if mergeErr != nil {
-			return fail("route protections are ambiguous; review the route settings before applying", 409)
+			return fail(mergeErr.Error(), 409)
+		}
+		id := resourceID()
+		if config.Database != nil && !exists {
+			original := config
+			generated := workloadInput{Name: config.Name, NodeID: config.NodeID, Kind: "database", Database: &databaseResource{Engine: config.Database.Engine, Version: config.Database.Version, TemplateRevision: config.Database.TemplateRevision}, Limits: config.Limits}
+			if err = prepareDatabase(&generated, id); err != nil {
+				return fail("database declaration requires its current pinned template", 409)
+			}
+			expected, actual := *generated.Database, *original.Database
+			expected.Host, actual.Host = "", ""
+			actual.SettingsOperation = ""
+			if !reflect.DeepEqual(expected, actual) || original.Compose != generated.Compose {
+				return fail("create this database with its dedicated settings before importing pooler, extension or public-TLS configuration", 409)
+			}
+			config = generated
 		}
 		if err = validateWorkload(config); err != nil {
 			return fail("resource configuration is invalid: "+err.Error(), 400)
 		}
-		id := resourceID()
 		if exists {
 			err = tx.QueryRow(ctx, `SELECT w.id FROM workloads w LEFT JOIN configuration_resource_keys k ON k.workload_id=w.id WHERE w.project_id=$1 AND w.team_id=$2 AND COALESCE(k.key,w.id)=$3`, project, team, resource.Key).Scan(&id)
 			if err != nil {
@@ -458,9 +492,9 @@ func (s *Server) applyProjectConfiguration(w http.ResponseWriter, r *http.Reques
 		}
 		cpu, memory := configuredUsage(config)
 		if exists {
-			_, err = tx.Exec(ctx, `UPDATE workloads SET name=$2,configuration=$3,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END WHERE id=$1`, id, config.Name, sealed, config.Kind, cpu, memory)
+			_, err = tx.Exec(ctx, `UPDATE workloads SET name=$2,configuration=$3,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END WHERE id=$1`, id, config.Name, sealed, resourceKind(config), cpu, memory)
 		} else {
-			_, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,project_id,environment_id,team_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10)`, id, config.NodeID, config.Name, sealed, config.Kind, project, environments[resource.Environment], team, cpu, memory)
+			_, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,project_id,environment_id,team_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10)`, id, config.NodeID, config.Name, sealed, resourceKind(config), project, environments[resource.Environment], team, cpu, memory)
 		}
 		if quotaError(w, err) {
 			return nil, false

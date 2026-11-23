@@ -5,6 +5,8 @@ import { Link } from "@tanstack/react-router";
 import { errorMessage, request } from "../api/client";
 import { connectionsQuery } from "../api/connections";
 import { keys } from "../api/queries";
+import type { DatabaseResource } from "../api/types";
+import { engineName } from "../lib/databases";
 import { useOnline } from "../lib/hooks";
 import { backupDownloadUrl } from "../api/backup-transfers";
 import { backupScopeLabel, calendarRetention, downloadFileName, matchesPolicy, calendarTiers, databaseEngine, databaseEngines, INSTANCE_SCOPE_NAME, KEEP_LAST_MAX, parseSnapshotSpace, retentionSummary, SNAPSHOT_SPACE_NAME, SNAPSHOT_SWITCH_NAME, usesCalendarRetention, volumeMethodLabel, type CalendarRetention, type DatabaseBackup, type VolumeSnapshotPolicy } from "../lib/backups";
@@ -65,18 +67,24 @@ function DownloadDialog({ workloadId, snapshot, onClose }: { workloadId: string;
   </Dialog>;
 }
 
-function PolicyForm({ workloadId, initial, support, onClose }: { workloadId: string; initial: Policy | null; support: WorkerSupport; onClose: () => void }) {
+const managedLogicalEngines = new Set(["postgresql", "mariadb", "redis", "valkey"]);
+
+function PolicyForm({ workloadId, initial, support, onClose, database }: { workloadId: string; initial: Policy | null; support: WorkerSupport; onClose: () => void; database?: DatabaseResource }) {
   const client = useQueryClient();
   const online = useOnline();
   const locations = useQuery(connectionsQuery("storage-locations"));
   const [storage, setStorage] = useState(initial?.storage_id ?? "");
-  const [engine, setEngine] = useState(initial?.database?.engine ?? "");
+  // Managed databases offer only their own engine's online backup. The managed MongoDB template is a standalone server, which online
+  // archives cannot back up, so it falls back to volume snapshots with MySQL and ClickHouse.
+  const logical = database && managedLogicalEngines.has(database.engine) ? database.engine : "";
+  const [engine, setEngine] = useState(initial ? (initial.database?.engine ?? "") : logical);
   const [retentionError, setRetentionError] = useState<string>();
   const [engineError, setEngineError] = useState<string>();
   const [spaceError, setSpaceError] = useState<string>();
   const selected = databaseEngine(engine);
   const instanceScope = selected?.scope === "instance";
   const engineBlocked = instanceScope && support.instanceEngines === false;
+  const selectedLocation = locations.data?.find((item) => item.id === storage);
   const savedCalendar = calendarRetention(initial);
   const save = useMutation({
     gcTime: 0,
@@ -115,13 +123,15 @@ function PolicyForm({ workloadId, initial, support, onClose }: { workloadId: str
     save.mutate({ volume_snapshot: volumeSnapshot, database: engine ? { engine, service: text("db-service"), name: instanceScope ? INSTANCE_SCOPE_NAME : text("db-name") } : undefined, storage_id: storage, repository: text("repository").trim(), password: text("password"), access_key: text("access"), secret_key: text("secret"), keep_last: Number(text("keep")), ...calendar, interval_hours: Number(text("interval")), drill_interval_hours: Number(text("drill-interval")), ca_certificate: text("ca") });
   }
   return <form className="space-y-4" onSubmit={submit}>
-    <Field id="backup-mode" label="Backup method" error={engineError}><Select id="backup-mode" className={inputClass} value={engine} aria-invalid={engineError ? true : undefined} aria-describedby={engineError ? "backup-mode-error" : undefined} onChange={event => { setEngine(event.target.value); setEngineError(undefined); }}><option value="">Volume snapshot</option>{databaseEngines.map((item) => <option key={item.value} value={item.value}>{item.option}</option>)}</Select></Field>
+    <Field id="backup-mode" label="Backup method" error={engineError}><Select id="backup-mode" className={inputClass} value={engine} aria-invalid={engineError ? true : undefined} aria-describedby={engineError ? "backup-mode-error" : undefined} onChange={event => { setEngine(event.target.value); setEngineError(undefined); }}><option value="">Volume snapshot</option>{databaseEngines.filter((item) => !database || item.value === logical).map((item) => <option key={item.value} value={item.value}>{item.option}</option>)}</Select></Field>
+    {database && !logical && <p className="text-xs text-fg-muted">{engineName(database.engine)} uses consistent volume snapshots. Online backups are available for PostgreSQL, MariaDB, Redis and Valkey.</p>}
     {engineBlocked && <Notice tone="warn" title={`${selected.name} backups need an upgraded worker`}>Upgrade and verify {support.nodeName ?? "this resource's worker"} to back up MongoDB, Redis or Valkey online. Volume snapshots, PostgreSQL and MariaDB work on this worker.</Notice>}
     {!selected && <VolumeSnapshotSettings workloadId={workloadId} initial={initial?.volume_snapshot} supported={support.snapshots} nodeName={support.nodeName} spaceError={spaceError} onSpaceChange={() => setSpaceError(undefined)} />}
-    {selected && <><div className={instanceScope ? undefined : "grid gap-4 sm:grid-cols-2"}><Field id="backup-db-service" label="Database Compose service"><input id="backup-db-service" name="db-service" className={inputClass} defaultValue={initial?.database?.service} required /></Field>{!instanceScope && <Field id="backup-db-name" label="Database name"><input id="backup-db-name" name="db-name" className={inputClass} defaultValue={initial?.database?.name === INSTANCE_SCOPE_NAME ? "" : initial?.database?.name} required /></Field>}</div>
+    {selected && <><div className={instanceScope ? undefined : "grid gap-4 sm:grid-cols-2"}><Field id="backup-db-service" label="Database Compose service"><input id="backup-db-service" name="db-service" className={inputClass} defaultValue={initial?.database?.service ?? database?.service} readOnly={Boolean(database)} required /></Field>{!instanceScope && <Field id="backup-db-name" label="Database name"><input id="backup-db-name" name="db-name" className={inputClass} defaultValue={initial?.database?.name === INSTANCE_SCOPE_NAME ? "" : initial?.database?.name ?? (database ? "app" : undefined)} required /></Field>}</div>
     {instanceScope && <div className="min-w-0"><p className="text-[13px] font-medium text-fg">Backup scope</p><p className="mt-0.5 text-xs text-fg-muted">Complete instance: every {selected.value === "mongodb" ? "database" : "logical database"}. {selected.name} backups cannot be limited to one database.</p></div>}
     <EngineNotice engine={selected.value} /></>}
-    <Field id="backup-storage" label="Storage location"><Select id="backup-storage" className={inputClass} value={storage} onChange={(event) => setStorage(event.target.value)}><option value="">Local or custom S3 repository</option>{locations.data?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</Select></Field>
+    <Field id="backup-storage" label="Storage location"><Select id="backup-storage" className={inputClass} value={storage} onChange={(event) => setStorage(event.target.value)}><option value="">Local or custom S3 repository</option>{locations.data?.map((item) => <option key={item.id} value={item.id}>{item.warning ? `${item.name} (same node, not offsite)` : item.name}</option>)}</Select></Field>
+    {selectedLocation?.warning && <Notice tone="warn" title="Not an offsite backup">{selectedLocation.warning} Node topology can change, so keep a copy elsewhere even when this resource runs on another node.</Notice>}
     {locations.isError && <Notice tone="error">{errorMessage(locations.error)}</Notice>}
     {!storage && <Field id="backup-repository" label="Repository" hint="Use local, or s3:https://endpoint/bucket/path. Local backups do not protect against losing this node."><input className={inputClass} id="backup-repository" name="repository" defaultValue={initial?.storage_id ? "local" : initial?.repository ?? "local"} required /></Field>}
     <Field id="backup-drill-interval" label="Restore verification interval (hours)" hint="0 disables automatic drills. Logical database dumps are restored into isolated containers; volume snapshots are restored and checksum-verified in temporary storage without testing application startup."><input id="backup-drill-interval" name="drill-interval" type="number" min="0" max="8760" step="1" className={inputClass} defaultValue={initial?.drill_interval_hours ?? 0} required /></Field>
@@ -161,15 +171,15 @@ function SnapshotRow({ snapshot, actions }: { snapshot: Snapshot; actions: React
   return <li className="flex flex-wrap items-center justify-between gap-3 py-3"><div><RelativeTime value={snapshot.created_at} /><p className="text-xs text-fg-muted break-all">{snapshot.id}</p>{snapshot.database ? <p className="text-xs text-fg-muted">{backupScopeLabel(snapshot.database)}</p> : <VolumeMethod snapshot={snapshot} />}{snapshot.verified_at && <p className="text-xs text-fg-muted">{snapshot.verification === "database" ? "Database restore verified" : "File restore verified"} <RelativeTime value={snapshot.verified_at} /></p>}</div>{actions}</li>;
 }
 
-interface SnapshotActionsProps { disabled: boolean; canRestore: boolean; canDownload: boolean; restoreDisabled: boolean; verifyHeld: boolean; restoreHeld: boolean; downloadDisabled: boolean; onDownload: () => void; onCopy: () => void; onDrill: () => void; onRestore: () => void }
+interface SnapshotActionsProps { disabled: boolean; canRestore: boolean; inPlace: boolean; canDownload: boolean; restoreDisabled: boolean; verifyHeld: boolean; restoreHeld: boolean; downloadDisabled: boolean; onDownload: () => void; onCopy: () => void; onDrill: () => void; onRestore: () => void }
 
-function SnapshotActions({ disabled, canRestore, canDownload, restoreDisabled, verifyHeld, restoreHeld, downloadDisabled, onDownload, onCopy, onDrill, onRestore }: SnapshotActionsProps) {
+function SnapshotActions({ disabled, canRestore, inPlace, canDownload, restoreDisabled, verifyHeld, restoreHeld, downloadDisabled, onDownload, onCopy, onDrill, onRestore }: SnapshotActionsProps) {
   return <div className="flex flex-wrap gap-2">
     {canDownload && <Button size="sm" disabled={disabled || downloadDisabled} onClick={onDownload}>Download</Button>}
     {canRestore && <>
       <Button size="sm" disabled={disabled || restoreDisabled || verifyHeld} onClick={onCopy}>Restore as new resource</Button>
       <Button size="sm" disabled={disabled || restoreDisabled || verifyHeld} onClick={onDrill}>Verify restore</Button>
-      <Button size="sm" disabled={disabled || restoreDisabled || restoreHeld} onClick={onRestore}>Restore</Button>
+      {inPlace && <Button size="sm" disabled={disabled || restoreDisabled || restoreHeld} onClick={onRestore}>Restore</Button>}
     </>}
   </div>;
 }
@@ -197,7 +207,7 @@ function SnapshotList({ snapshots, row }: { snapshots: UseQueryResult<{ backups:
 // Configuring the policy needs all three, since its destination and encryption decide where data is exported.
 export interface BackupRights { backup: boolean; configure: boolean; restore: boolean; download: boolean; import: boolean }
 
-export function Backups({ workloadId, busy, rights, support, restoreHeld, verifyHeld }: { workloadId: string; busy: boolean; rights: BackupRights; support: WorkerSupport; restoreHeld: string | null; verifyHeld: string | null }) {
+export function Backups({ workloadId, busy, rights, support, restoreHeld, verifyHeld, database }: { workloadId: string; busy: boolean; rights: BackupRights; support: WorkerSupport; restoreHeld: string | null; verifyHeld: string | null; database?: DatabaseResource }) {
   const canEdit = rights.configure;
  const [copy, setCopy] = useState<Snapshot | null>(null);
   const [download, setDownload] = useState<Snapshot | null>(null);
@@ -212,19 +222,20 @@ export function Backups({ workloadId, busy, rights, support, restoreHeld, verify
   const action = useMutation({ mutationFn: (input: { action: "backup" | "restore" | "drill"; backup_id?: string }) => request("POST", `/api/workloads/${workloadId}/operations`, input), onSuccess: async () => { setRestore(null); await client.invalidateQueries({ queryKey: keys.operations }); } });
   if (policy.isError) return <QueryError what="backup policy" error={policy.error} onRetry={() => void policy.refetch()} />;
   if (!policy.data) return <p className="text-sm text-fg-muted">Loading backup policy…</p>;
-  if (editing) return <PolicyForm workloadId={workloadId} initial={policy.data.backup} support={support} onClose={() => setEditing(false)} />;
+  if (editing) return <PolicyForm workloadId={workloadId} initial={policy.data.backup} support={support} onClose={() => setEditing(false)} database={database} />;
   const saved = policy.data.backup;
   const transfersBlocked = support.transfers === false;
   const findSnapshot = (id: string) => snapshots.data?.backups.find((item) => item.id === id);
   return <div className="space-y-4">
     <div className="flex flex-wrap items-center gap-3 empty:hidden">{canEdit && <Button disabled={!online || busy} onClick={() => setEditing(true)}>{saved ? "Edit policy" : "Configure backups"}</Button>}{saved && rights.backup && <Button disabled={!online || busy} pending={action.isPending} onClick={() => action.mutate({ action: "backup" })}>Back up now</Button>}{saved?.database && rights.import && <Button disabled={!online || busy || transfersBlocked} onClick={() => { setInterrupted(false); setImporting(true); }}>Import dump</Button>}</div>
     <PolicySummary saved={saved} canEdit={canEdit} canBackup={rights.backup} canTransfer={rights.download || rights.import} transfersBlocked={transfersBlocked} nodeName={support.nodeName} interrupted={interrupted} />
+    {database && <Notice title="Restoring a managed database">In-place restore and rollback are refused, because retained credentials could disagree with current bindings. Use Restore as new resource: the copy is an ordinary service with the backup's configuration and credentials. Inspect it, then move consumers deliberately.</Notice>}
     {action.isError && <Notice tone="error">{errorMessage(action.error)}</Notice>}
     {rights.restore && (restoreHeld ?? verifyHeld) && <p className="text-xs text-fg-muted">{restoreHeld ?? verifyHeld}</p>}
     {copy && <RestoreCopyForm workloadId={workloadId} snapshot={copy} onClose={() => setCopy(null)} />}
-    <SnapshotList snapshots={snapshots} row={(snapshot) => <SnapshotRow key={snapshot.id} snapshot={snapshot} actions={(rights.restore || rights.download) && <SnapshotActions disabled={!online || busy} canRestore={rights.restore} canDownload={rights.download} restoreDisabled={action.isPending || saved?.repository !== snapshot.repository} verifyHeld={Boolean(verifyHeld)} restoreHeld={Boolean(restoreHeld)} downloadDisabled={transfersBlocked || !matchesPolicy(saved, snapshot)} onDownload={() => setDownload(snapshot)} onCopy={() => setCopy(snapshot)} onDrill={() => action.mutate({ action: "drill", backup_id: snapshot.id })} onRestore={() => setRestore(snapshot)} />} />} />
+    <SnapshotList snapshots={snapshots} row={(snapshot) => <SnapshotRow key={snapshot.id} snapshot={snapshot} actions={(rights.restore || rights.download) && <SnapshotActions disabled={!online || busy} canRestore={rights.restore} inPlace={!database} canDownload={rights.download} restoreDisabled={action.isPending || saved?.repository !== snapshot.repository} verifyHeld={Boolean(verifyHeld)} restoreHeld={Boolean(restoreHeld)} downloadDisabled={transfersBlocked || !matchesPolicy(saved, snapshot)} onDownload={() => setDownload(snapshot)} onCopy={() => setCopy(snapshot)} onDrill={() => action.mutate({ action: "drill", backup_id: snapshot.id })} onRestore={() => setRestore(snapshot)} />} />} />
     {download && <DownloadDialog workloadId={workloadId} snapshot={download} onClose={() => setDownload(null)} />}
-    {importing && saved?.database && <BackupImport workloadId={workloadId} database={saved.database} importedRow={findSnapshot} canRestore={rights.restore && !restoreHeld && !busy && !action.isPending} onRestore={(id) => { const row = findSnapshot(id); setImporting(false); if (row) setRestore(row); }} onClose={(wasInterrupted) => { setImporting(false); setInterrupted(wasInterrupted); }} />}
+    {importing && saved?.database && <BackupImport workloadId={workloadId} database={saved.database} importedRow={findSnapshot} canRestore={!database && rights.restore && !restoreHeld && !busy && !action.isPending} onRestore={(id) => { const row = findSnapshot(id); setImporting(false); if (row) setRestore(row); }} onClose={(wasInterrupted) => { setImporting(false); setInterrupted(wasInterrupted); }} />}
     <ConfirmDialog open={restore !== null} title={restore?.database ? `Restore ${backupScopeLabel(restore.database)}?` : "Restore persistent data?"} confirmLabel="Restore data" danger onCancel={() => setRestore(null)} onConfirm={() => { if (restore) action.mutate({ action: "restore", backup_id: restore.id }); }}>
       {restoreWarning(restore?.database?.engine)}
     </ConfirmDialog>

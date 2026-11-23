@@ -7,6 +7,7 @@ import (
 )
 
 type workloadView struct {
+	Database             *databaseResource               `json:"database,omitempty"`
 	EnvironmentPaused    bool                            `json:"environment_paused"`
 	Rollout              *worker.RolloutOptions          `json:"rollout"`
 	PendingAdoptionID    string                          `json:"pending_adoption_id,omitempty"`
@@ -33,6 +34,7 @@ type workloadView struct {
 	EnvironmentPreviewID string                          `json:"environment_preview_id"`
 }
 type operationView struct {
+	CanCancel               *bool           `json:"can_cancel,omitempty"`
 	Reason                  string          `json:"reason"`
 	EmergencyOverrideBy     *string         `json:"emergency_override_by"`
 	EmergencyOverrideReason string          `json:"emergency_override_reason"`

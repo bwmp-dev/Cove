@@ -2,9 +2,13 @@ package worker
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 )
 
 type FileSecret struct {
@@ -12,6 +16,26 @@ type FileSecret struct {
 	Variable      string   `json:"variable"`
 	Services      []string `json:"services"`
 	BuildServices []string `json:"build_services"`
+}
+
+var databaseCAName = regexp.MustCompile(`^cove_ca_[a-f0-9]{32}$`)
+
+func validateDatabaseCAs(certificates map[string]string) error {
+	if len(certificates) > 64 {
+		return errors.New("too many database CA certificates")
+	}
+	total := 0
+	for name, certificate := range certificates {
+		total += len(certificate)
+		roots := x509.NewCertPool()
+		if !databaseCAName.MatchString(name) || len(certificate) > 65536 || !roots.AppendCertsFromPEM([]byte(certificate)) {
+			return errors.New("invalid database CA certificate")
+		}
+	}
+	if total > 256*1024 {
+		return errors.New("database CA bundles exceed the request size limit")
+	}
+	return nil
 }
 
 func ValidateFileSecrets(secrets []FileSecret) error {
@@ -49,12 +73,26 @@ func (e *Engine) prepareFileSecrets(ctx context.Context, r Request, dir string, 
 	if err := unmarshalCompose(output.data.Bytes(), &config); err != nil {
 		return "", err
 	}
-	if err := validateFileSecretTargets(config, r); err != nil {
-		return "", err
-	}
 	services, ok := config["services"].(map[string]any)
 	if !ok {
 		return "", errors.New("Compose has no services")
+	}
+	r.Environment = maps.Clone(r.Environment)
+	if r.Environment == nil {
+		r.Environment = map[string]string{}
+	}
+	r.FileSecrets = slices.Clone(r.FileSecrets)
+	for _, name := range slices.Sorted(maps.Keys(r.DatabaseCAs)) {
+		for _, secret := range r.FileSecrets {
+			if secret.Name == name {
+				return "", errors.New("database CA trust file conflicts with a configured secret")
+			}
+		}
+		r.Environment[name] = r.DatabaseCAs[name]
+		r.FileSecrets = append(r.FileSecrets, FileSecret{Name: name, Variable: name, Services: slices.Sorted(maps.Keys(services))})
+	}
+	if err := validateFileSecretTargets(config, r); err != nil {
+		return "", err
 	}
 	definitions, ok := config["secrets"].(map[string]any)
 	if !ok {

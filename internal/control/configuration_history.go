@@ -45,11 +45,13 @@ type configurationDiff struct {
 
 func safeConfigurationDiffs(before, after map[string]json.RawMessage) []configurationDiff {
 	diffs := []configurationDiff{}
-	for _, key := range []string{"name", "kind", "job_service", "routes", "limits"} {
+	for _, key := range []string{"name", "kind", "job_service", "routes", "limits", "database"} {
 		if !bytes.Equal(before[key], after[key]) {
 			left, right := string(before[key]), string(after[key])
 			if key == "routes" {
 				left, right = safeRouteJSON(before[key]), safeRouteJSON(after[key])
+			} else if key == "database" {
+				left, right = safeDatabaseJSON(before[key]), safeDatabaseJSON(after[key])
 			}
 			diffs = append(diffs, configurationDiff{key, left, right})
 		}

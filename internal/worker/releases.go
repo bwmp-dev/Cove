@@ -16,7 +16,7 @@ import (
 )
 
 func unmarshalCompose(data []byte, target any) error {
-	// Compose config escapes dollars in both JSON keys and values for a second Compose read.
+	// Docker config escapes mapping keys too; Compose input keys remain literal.
 	return json.Unmarshal(bytes.ReplaceAll(data, []byte("$$"), []byte("$")), target)
 }
 
@@ -250,7 +250,7 @@ func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args
 	if err := writeJSON(path, literalCompose(config)); err != nil {
 		return deployedState{}, err
 	}
-	state := deployedState{ComposePath: path, Environment: r.Environment}
+	state := deployedState{DatabaseMetadata: r.DatabaseMetadata, ComposePath: path, Environment: r.Environment}
 	e.mu.Lock()
 	j, err := e.read(r.ID)
 	e.mu.Unlock()

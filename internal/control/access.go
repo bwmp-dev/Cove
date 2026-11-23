@@ -279,7 +279,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case path == "/api/mcp":
 		return p.Admin || deny()
-	case path == "/api/templates" || path == "/api/templates/draft":
+	case path == "/api/templates" || path == "/api/templates/draft" || path == "/api/database-engines":
 		return true
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):
 		return true
@@ -546,6 +546,15 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			}
 		}
 		if !s.requireAccess(w, r, "workload", id, needed) {
+			return false
+		}
+		if (strings.Contains(path, "/database/") && r.Method != "GET") || strings.HasSuffix(path, "/database/credentials") || strings.Contains(path, "/object-buckets") && r.Method != "GET" {
+			if !s.requirePermission(w, r, "workload", id, "read_secrets") {
+				return false
+			}
+		}
+		if r.Method != "GET" && !strings.Contains(path, "/database/maintenance") && !strings.Contains(path, "/object-buckets") && s.databaseLocked(r.Context(), id) {
+			http.Error(w, "finish or retry database maintenance or bucket provisioning before changing this resource", 409)
 			return false
 		}
 		if strings.Contains(path, "/files") {

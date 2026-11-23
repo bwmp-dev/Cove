@@ -28,7 +28,8 @@ export interface RolloutDraft {
 
 // Jobs and managed previews cannot use rollouts; their saved options are left untouched.
 export function rolloutsApply(workload: Pick<Workload, "kind" | "preview_source_id" | "environment_preview_id">) {
-  return workloadKind(workload.kind) === "service" && !isManagedPreview(workload);
+  // Managed databases are service-shaped for the worker but never get staged rollouts, idle sleep or autoscaling.
+  return workload.kind !== "database" && workloadKind(workload.kind) === "service" && !isManagedPreview(workload);
 }
 
 export const rolloutLimits = { serviceRows: 32, replicasPerService: 16, totalReplicas: 64 } as const;

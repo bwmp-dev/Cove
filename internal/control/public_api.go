@@ -46,6 +46,7 @@ type apiVariableView struct {
 	Version string `json:"version"`
 }
 type apiTunnelInput struct {
+	Tool      string `json:"tool,omitempty"`
 	Service   string `json:"service"`
 	Port      int    `json:"port"`
 	PublicKey string `json:"public_key"`
@@ -60,6 +61,27 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/database-engines", "workloads:read", "List managed database engines and pinned templates", nil, map[string]any{}, 200, s.databaseEngineOptions},
+		{"GET", "/workloads/{id}/database", "workloads:read", "Read database metadata and authorised dependent redeploy flags", nil, map[string]any{}, 200, s.databaseDetails},
+		{"GET", "/workloads/{id}/database/credentials", "databases:manage", "Read audited database credentials; edit and secret permissions required", nil, map[string]string{}, 200, s.databaseDetails},
+		{"GET", "/workloads/{id}/database/maintenance", "workloads:read", "Read retained database maintenance and cut-over capabilities", nil, []map[string]any{}, 200, s.databaseMaintenance},
+		{"POST", "/workloads/{id}/database/maintenance", "databases:manage", "Explicit database maintenance or separate upgrade copy; normal deployment approval, freeze and window admission applies", databaseMaintenanceInput{}, map[string]string{}, 202, s.databaseMaintenance},
+		{"POST", "/workloads/{id}/database/maintenance/{task}/retry", "databases:manage", "Retry the same immutable retained maintenance after an ambiguous result", nil, map[string]string{}, 202, s.databaseMaintenance},
+		{"POST", "/workloads/{id}/database/maintenance/{task}/discard", "databases:manage", "Discard only a failed upgrade copy after confirmation", databaseDiscardInput{}, apiOK{}, 200, s.discardDatabaseCopy},
+		{"POST", "/workloads/{id}/database/maintenance/{task}/cutover", "databases:manage", "Team administrators explicitly rewire bindings after stopped-writers acknowledgement; source is retained and consumers are not deployed", databaseCutoverInput{}, map[string]any{}, 200, s.cutoverDatabaseCopy},
+		{"POST", "/workloads/{id}/database/preflight", "databases:manage", "Inspect engine compatibility before a major-version copy", databasePreflightInput{}, map[string]any{}, 200, s.databasePreflight},
+		{"POST", "/workloads/{id}/database/pooler", "databases:manage", "Save and queue a normal admitted PostgreSQL pooler configuration deployment", databaseSettingsInput{}, map[string]string{}, 202, s.databaseSettings},
+		{"POST", "/workloads/{id}/database/public-access", "databases:manage", "Save sealed native-TLS configuration and queue a normal admitted deployment", databaseSettingsInput{}, map[string]string{}, 202, s.databaseSettings},
+		{"GET", "/workloads/{id}/object-buckets", "workloads:read", "List scoped Garage bucket metadata without credentials", nil, []map[string]any{}, 200, s.objectBuckets},
+		{"POST", "/workloads/{id}/object-buckets", "databases:manage", "Team administrators provision one scoped Garage bucket and optional existing-model backup destination", objectBucketInput{}, map[string]any{}, 201, s.objectBuckets},
+		{"POST", "/workloads/{id}/object-buckets/{bucket}/retry", "databases:manage", "Retry retained Garage provisioning credentials", nil, map[string]any{}, 201, s.objectBuckets},
+		{"DELETE", "/workloads/{id}/object-buckets/{bucket}", "databases:manage", "Revoke a scoped key and bindings while retaining bucket data", struct {
+			Confirm bool `json:"confirm"`
+		}{}, apiOK{}, 200, s.objectBuckets},
+		{"GET", "/workloads/{id}/variable-bindings", "workloads:read", "Read variable-binding references", nil, []resourceVariableBinding{}, 200, s.resourceVariables},
+		{"PUT", "/workloads/{id}/variable-bindings", "workloads:write", "Bind a variable; secret values separately require current source secret-read permission", resourceVariableBinding{}, apiOK{}, 200, s.resourceVariables},
+		{"DELETE", "/workloads/{id}/variable-bindings", "workloads:write", "Remove a variable binding", resourceVariableBinding{}, apiOK{}, 200, s.resourceVariables},
+
 		{"GET", "/session", "", "Read the token creator and selected team", nil, identity{}, 200, s.sessionInfo},
 		{"GET", "/nodes", "workloads:read", "List accessible worker metadata", nil, []map[string]any{}, 200, s.listNodes},
 		{"GET", "/nodes/{id}/adoptions", "migration:adopt", "List node adoption reviews and recovery state; instance administrators only", nil, []map[string]any{}, 200, s.composeAdoptions},
@@ -243,6 +265,12 @@ func apiSchema(t reflect.Type) map[string]any {
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
 			tag := strings.Split(field.Tag.Get("json"), ",")[0]
+			if field.Anonymous && field.Type.Kind() == reflect.Struct && tag == "" {
+				for name, schema := range apiSchema(field.Type)["properties"].(map[string]any) {
+					props[name] = schema
+				}
+				continue
+			}
 			if !field.IsExported() || tag == "-" {
 				continue
 			}
@@ -250,6 +278,9 @@ func apiSchema(t reflect.Type) map[string]any {
 				tag = field.Name
 			}
 			props[tag] = apiSchema(field.Type)
+			if tag == "private_key" {
+				props[tag].(map[string]any)["writeOnly"] = true
+			}
 		}
 		return map[string]any{"type": "object", "properties": props}
 	default:

@@ -31,8 +31,8 @@ WITH visible AS (
  WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0)
  UNION ALL
  SELECT 'page',w.name||' · '||section.label,p.name,'/resources/'||w.id||'/'||section.path FROM workloads w JOIN projects p ON p.id=w.project_id
- CROSS JOIN (VALUES ('logs','Logs'),('metrics','Metrics'),('backups','Backups'),('troubleshooting','Troubleshooting'),('files','Files')) section(path,label)
- WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0) AND (section.path<>'files' OR $3)
+ CROSS JOIN (VALUES ('logs','Logs'),('metrics','Metrics'),('backups','Backups'),('troubleshooting','Troubleshooting'),('files','Files'),('database','Database'),('object-storage','Object storage')) section(path,label)
+ WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0) AND (section.path<>'files' OR $3 AND w.kind<>'database') AND (section.path<>'database' OR w.kind='database') AND (section.path<>'object-storage' OR w.kind<>'database')
  UNION ALL
  SELECT 'node',n.name,n.state,CASE WHEN $3 THEN '/nodes/'||n.id ELSE '/nodes' END FROM nodes n
  WHERE $3 OR EXISTS(SELECT 1 FROM team_nodes t WHERE t.node_id=n.id AND t.team_id=$2)

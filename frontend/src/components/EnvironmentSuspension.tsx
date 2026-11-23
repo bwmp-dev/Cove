@@ -8,6 +8,7 @@ import { nodesQuery } from "../api/queries";
 import type { EnvironmentSuspension as SuspensionState, SuspendedResource } from "../api/types";
 import { useOnline } from "../lib/hooks";
 import { can } from "../lib/permissions";
+import { resourceTypeLabel } from "../lib/operations";
 import { linkClass, listLinkClass } from "../lib/styles";
 import { environmentHold, environmentPhases, isSettling, resourcePhases, type EnvironmentHold } from "../lib/suspension";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -47,7 +48,7 @@ function ResourceRow({ resource, paused, nodeName }: { resource: SuspendedResour
           {resource.name}
         </Link>
         <p className="text-xs text-fg-muted">
-          {resource.kind === "job" ? "Job" : "Service"} on{" "}
+          {resourceTypeLabel(resource.kind)} on{" "}
           <Link to="/nodes/$nodeId" params={{ nodeId: resource.node_id }} className="rounded hover:text-fg">
             {nodeName}
           </Link>

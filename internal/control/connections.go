@@ -127,21 +127,22 @@ func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
 	team := actor(r).Team
 	id := r.PathValue("id")
 	if r.Method == "GET" {
-		rows, err := s.DB.Query(r.Context(), `SELECT id,configuration FROM infrastructure_connections WHERE team_id=$1 AND kind=$2 ORDER BY name`, team, kind)
+		rows, err := s.DB.Query(r.Context(), `SELECT id,configuration,CASE WHEN EXISTS(SELECT 1 FROM object_buckets b WHERE b.storage_id=c.id) THEN 'Storage on the same node is not offsite. Keep an independent backup in another failure domain.' ELSE '' END FROM infrastructure_connections c WHERE team_id=$1 AND kind=$2 ORDER BY name`, team, kind)
 		if err != nil {
 			http.Error(w, "connections unavailable", 503)
 			return
 		}
 		defer rows.Close()
 		type item struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Warning string `json:"warning,omitempty"`
 			connectionConfig
 		}
 		items := []item{}
 		for rows.Next() {
 			var v item
 			var enc []byte
-			if rows.Scan(&v.ID, &enc) != nil {
+			if rows.Scan(&v.ID, &enc, &v.Warning) != nil {
 				http.Error(w, "connections unavailable", 503)
 				return
 			}
@@ -410,6 +411,32 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		return err
 	}
 	if !driftPrepared {
+		if !r.InfrastructurePrepared {
+			var encrypted []byte
+			if err := s.DB.QueryRow(ctx, "SELECT kind='database',configuration FROM workloads WHERE id=$1", r.Workload).Scan(&r.ManagedDatabase, &encrypted); err != nil {
+				return err
+			}
+			if r.ManagedDatabase {
+				if r.DatabaseMaintenance != nil {
+					if err := s.DB.QueryRow(ctx, "SELECT configuration FROM database_maintenance WHERE id=$1", r.ID).Scan(&encrypted); err != nil {
+						return err
+					}
+				}
+				var config workloadInput
+				if err := s.unsealJSON(encrypted, &config); err != nil {
+					return err
+				}
+				metadata := databaseMetadata(config.Database)
+				if metadata == nil {
+					return errors.New("managed database metadata unavailable")
+				}
+				var err error
+				r.DatabaseMetadata, err = json.Marshal(metadata)
+				if err != nil {
+					return err
+				}
+			}
+		}
 		if !r.InfrastructurePrepared && (r.Action == "stop" || r.Action == "start" || r.Action == "restart") {
 			r.Backup = nil
 		}
@@ -660,6 +687,10 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	}
 	if r.Action == "deploy" || r.Action == "build" {
 		if err := s.resolveDeploymentVariables(ctx, r); err != nil {
+			return err
+		}
+		r.DatabaseCAs, err = s.databaseBindingCAs(ctx, r.Workload)
+		if err != nil {
 			return err
 		}
 	}

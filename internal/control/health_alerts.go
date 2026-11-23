@@ -112,7 +112,7 @@ func (s *Server) checkBackupHealth(ctx context.Context) error {
 	}
 	_, err = s.DB.Exec(ctx, `DELETE FROM health_alerts a WHERE
  (kind='backup_overdue' AND NOT EXISTS(SELECT 1 FROM workloads w WHERE w.id=a.subject AND w.team_id=a.team_id AND w.backup_interval>0)) OR
- (kind='resource_unhealthy' AND NOT EXISTS(SELECT 1 FROM workloads w WHERE w.id=a.subject AND w.team_id=a.team_id AND w.kind='service')) OR
+ (kind='resource_unhealthy' AND NOT EXISTS(SELECT 1 FROM workloads w WHERE w.id=a.subject AND w.team_id=a.team_id AND w.kind IN ('service','database'))) OR
  (kind IN ('node_unreachable','disk_low') AND NOT EXISTS(SELECT 1 FROM team_nodes t WHERE t.node_id=a.subject AND t.team_id=a.team_id)) OR
  (kind LIKE 'threshold_%' AND NOT EXISTS(SELECT 1 FROM threshold_rules r JOIN team_nodes t ON t.team_id=r.team_id AND t.node_id=r.node_id WHERE a.kind='threshold_'||r.id AND a.team_id=r.team_id AND a.subject=COALESCE(r.workload_id,r.node_id)))`)
 	return err
@@ -261,7 +261,7 @@ func (s *Server) nodeHealth(ctx context.Context, id, state string, p *worker.Pro
 }
 
 func (s *Server) checkResourceHealth(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)) FROM workloads w WHERE kind='service' AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
+	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)) FROM workloads w WHERE kind IN ('service','database') AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
 	if err != nil {
 		return err
 	}

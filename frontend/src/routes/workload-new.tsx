@@ -9,6 +9,7 @@ import { useCreateWorkload } from "../api/mutations";
 import { projectsQuery } from "../api/projects";
 import { nodesQuery } from "../api/queries";
 import { WorkloadForm, type ProviderLink } from "../components/WorkloadForm";
+import { DatabaseForm } from "../components/DatabaseForm";
 import type { WorkloadInput } from "../api/types";
 import { Breadcrumbs, Button, LoadingRows, Notice, PageHeader, QueryError } from "../components/ui";
 import { saveProviderSource } from "../api/git-providers";
@@ -50,7 +51,7 @@ function NewResourceCrumbs({ placement }: { placement: Placement | undefined }) 
 
 export function NewWorkloadPage() {
   const search = route.useSearch();
-  const [selection, setSelection] = useState<{ draft?: ResourceDraft } | null>(null);
+  const [selection, setSelection] = useState<{ draft?: ResourceDraft; database?: true } | null>(null);
   // The resource exists once created, so a failed provider connection is reported instead of resubmitting the form.
   const [linking, setLinking] = useState(false);
   const [unlinked, setUnlinked] = useState<{ id: string; message: string } | null>(null);
@@ -116,7 +117,19 @@ export function NewWorkloadPage() {
           </Notice>
         </div>
       ) : selection === null ? (
-        <TemplateBrowser onUse={(draft) => setSelection({ draft })} onCustom={() => setSelection({})} />
+        <TemplateBrowser onUse={(draft) => setSelection({ draft })} onCustom={() => setSelection({})} onDatabase={() => setSelection({ database: true })} />
+      ) : selection.database ? (
+        <>
+          <div className="px-4 pt-4 sm:px-6"><Button variant="ghost" onClick={() => setSelection(null)}>Back to resource browser</Button></div>
+          <DatabaseForm
+            nodes={nodes.data ?? []}
+            projects={projects.data ?? []}
+            initialEnvironmentId={placement?.environment?.id ?? ""}
+            initialProjectId={placement?.project.id ?? ""}
+            cancel={cancel}
+            onCreated={(id) => void navigate({ to: "/resources/$resourceId", params: { resourceId: id } })}
+          />
+        </>
       ) : (
         <>
         <div className="px-4 pt-4 sm:px-6"><Button variant="ghost" disabled={create.isPending} onClick={() => { create.reset(); setSelection(null); }}>Back to resource browser</Button></div>

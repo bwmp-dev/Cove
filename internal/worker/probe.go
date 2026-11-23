@@ -21,6 +21,7 @@ type Probe struct {
 	ComposeBundles      bool         `json:"compose_bundles"`
 	Exec                bool         `json:"exec"`
 	BuiltinVariables    bool         `json:"builtin_variables"`
+	ManagedDatabases    bool         `json:"managed_databases"`
 	OutboundProxy       bool         `json:"outbound_proxy"`
 	ReleaseDiff         bool         `json:"release_diff"`
 	BinarySHA256        string       `json:"binary_sha256"`
@@ -87,6 +88,7 @@ func Inspect(ctx context.Context) Probe {
 		}
 	}
 	p.OutboundProxy = true
+	p.ManagedDatabases = true
 	p.ReleaseDiff = true
 	p.Previews = true
 	p.Imports = true

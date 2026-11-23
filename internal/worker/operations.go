@@ -26,10 +26,13 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
-	RecordDrift            bool              `json:"record_drift,omitempty"`
-	ComposeBundle          *ComposeBundle    `json:"compose_bundle,omitempty"`
-	BuiltinDefaults        map[string]string `json:"builtin_defaults,omitempty"`
-	OutboundProxy          *outbound.Config  `json:"outbound_proxy,omitempty"`
+	DatabaseMetadata       json.RawMessage      `json:"database_metadata,omitempty"`
+	ManagedDatabase        bool                 `json:"managed_database,omitempty"`
+	DatabaseMaintenance    *DatabaseMaintenance `json:"database_maintenance,omitempty"`
+	RecordDrift            bool                 `json:"record_drift,omitempty"`
+	ComposeBundle          *ComposeBundle       `json:"compose_bundle,omitempty"`
+	BuiltinDefaults        map[string]string    `json:"builtin_defaults,omitempty"`
+	OutboundProxy          *outbound.Config     `json:"outbound_proxy,omitempty"`
 	resolvedPublicBuiltins map[string]string
 	resolvedSecrets        []string
 	snapshotMounts         []backupMount
@@ -49,6 +52,7 @@ type Request struct {
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
 	RestoreCopy            *RestoreCopy             `json:"restore_copy,omitempty"`
 	FileSecrets            []FileSecret             `json:"file_secrets,omitempty"`
+	DatabaseCAs            map[string]string        `json:"database_cas,omitempty"`
 	ImagePins              map[string]string        `json:"image_pins,omitempty"`
 	Hooks                  *DeploymentHooks         `json:"hooks,omitempty"`
 	Limits                 map[string]ServiceLimits `json:"limits,omitempty"`
@@ -115,6 +119,7 @@ type routeRecovery struct {
 	running    bool
 }
 type deployedState struct {
+	DatabaseMetadata  json.RawMessage     `json:"database_metadata,omitempty"`
 	Traffic           trafficState        `json:"traffic,omitempty"`
 	Generation        string              `json:"generation,omitempty"`
 	Rollout           *RolloutOptions     `json:"rollout,omitempty"`
@@ -129,6 +134,7 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	databaseMu       sync.Mutex
 	helperImageMu    sync.Mutex
 	idleMu           sync.Mutex
 	adoptionMu       sync.RWMutex
@@ -214,10 +220,22 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.DatabaseMaintenance != nil {
+		if r.DatabaseMaintenance.Request.DatabaseMaintenance != nil || r.ID != r.DatabaseMaintenance.ID || r.Workload != r.DatabaseMaintenance.Request.Workload || r.Action != "deploy" {
+			return errors.New("invalid maintenance envelope")
+		}
+		return ValidateDatabaseMaintenance(*r.DatabaseMaintenance)
+	}
 	if r.OutboundProxy != nil {
 		if err := r.OutboundProxy.Validate(); err != nil {
 			return err
 		}
+	}
+	if len(r.DatabaseMetadata) > 0 && (!r.ManagedDatabase || len(r.DatabaseMetadata) > 64<<10 || !json.Valid(r.DatabaseMetadata)) {
+		return errors.New("invalid managed database snapshot metadata")
+	}
+	if r.ManagedDatabase && (r.Scale != nil || r.Rollout != nil || r.Idle != nil || r.Build != nil || r.PullLatest || r.ComposeBundle != nil) {
+		return errors.New("managed databases require explicit single-instance deployments")
 	}
 	if err := validateCPUScale(r); err != nil {
 		return err
@@ -248,7 +266,7 @@ func ValidateRequest(r Request) error {
 	if r.PullLatest && (r.Action != "deploy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || len(r.ImagePins) > 0) {
 		return errors.New("pull latest requires an unpinned service deployment")
 	}
-	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
+	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || len(r.DatabaseCAs) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
 		return errors.New("preview deployment must use a pinned revision and isolated configuration")
 	}
 	if r.GuardedDeploy != nil && *r.GuardedDeploy && r.Kind == "job" {
@@ -258,6 +276,9 @@ func ValidateRequest(r Request) error {
 		return err
 	}
 	if err := ValidateFileSecrets(r.FileSecrets); err != nil {
+		return err
+	}
+	if err := validateDatabaseCAs(r.DatabaseCAs); err != nil {
 		return err
 	}
 	if err := ValidateLimits(r.Limits); err != nil {
@@ -499,6 +520,9 @@ func (e *Engine) Logs(id string) (string, error) {
 	return string(data), err
 }
 func (e *Engine) Recover() error {
+	if err := e.removeOrphanDatabaseTools(); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if state, err := e.loadCustomIngress(); err != nil {
@@ -909,6 +933,20 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			result = err
 		}
 	}()
+	if r.DatabaseMaintenance != nil {
+		for _, value := range r.Environment {
+			log.secrets = append(log.secrets, value)
+		}
+		log.secrets = append(log.secrets, r.DatabaseMaintenance.PreviousPassword)
+		if r.OutboundProxy != nil {
+			log.secrets = append(log.secrets, r.OutboundProxy.Secrets()...)
+		}
+		err := e.MaintainDatabase(ctx, *r.DatabaseMaintenance)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
 	var bundleSecrets []string
 	var publicBuiltins map[string]string
 	if len(r.BuiltinDefaults) > 0 {
@@ -1329,7 +1367,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
-		if len(r.FileSecrets) > 0 {
+		if len(r.FileSecrets) > 0 || len(r.DatabaseCAs) > 0 {
 			composePath, err = e.prepareFileSecrets(ctx, r, dir, args, env)
 			if err != nil {
 				return err
@@ -1444,7 +1482,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), up...), env, log); err != nil {
 			return err
 		}
-		state := deployedState{ComposePath: composePath, Environment: r.Environment}
+		state := deployedState{DatabaseMetadata: r.DatabaseMetadata, ComposePath: composePath, Environment: r.Environment}
 		if r.Kind != "job" {
 			state, err = e.captureRelease(ctx, r, dir, args, env)
 			if err != nil {

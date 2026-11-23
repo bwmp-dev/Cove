@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 function subscribeOnline(callback: () => void) {
   window.addEventListener("online", callback);
@@ -63,4 +63,18 @@ function clockFor(interval: number) {
 export function useNow(interval: number) {
   const clock = clockFor(interval);
   return useSyncExternalStore(clock.subscribe, clock.getSnapshot, clock.getSnapshot);
+}
+
+// The value when the component mounted. Confirmation dialogs mount when they open, so a background refresh cannot
+// change what the person reviewed or what the dialog will submit.
+export function useReviewed<T>(value: T): T {
+  const [reviewed] = useState(value);
+  return reviewed;
+}
+
+// The first defined value, for reviewed data that finishes loading after a dialog opens.
+export function useFirstLoaded<T>(value: T | undefined): T | undefined {
+  const [first, setFirst] = useState(value);
+  if (first === undefined && value !== undefined) setFirst(value);
+  return first ?? value;
 }

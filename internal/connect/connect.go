@@ -85,13 +85,37 @@ func Run(ctx context.Context, args []string) error {
 			}
 			command = append(command, "cove@"+*host, "database-access")
 			process := exec.CommandContext(ctx, "ssh", command...)
-			process.Stdin = conn
-			process.Stdout = conn
+			input, err := process.StdinPipe()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Database SSH session could not start:", err)
+				return
+			}
+			output, err := process.StdoutPipe()
+			if err != nil {
+				input.Close()
+				fmt.Fprintln(os.Stderr, "Database SSH session could not start:", err)
+				return
+			}
 			process.Stderr = os.Stderr
 			process.WaitDelay = 2 * time.Second
 			stopConnection := context.AfterFunc(ctx, func() { conn.Close() })
 			defer stopConnection()
-			if err := process.Run(); err != nil && ctx.Err() == nil {
+			if err := process.Start(); err != nil {
+				input.Close()
+				output.Close()
+				fmt.Fprintln(os.Stderr, "Database SSH session could not start:", err)
+				return
+			}
+			inputDone := make(chan struct{})
+			go func() {
+				io.Copy(input, conn)
+				input.Close()
+				close(inputDone)
+			}()
+			_, outputErr := io.Copy(conn, output)
+			conn.Close()
+			<-inputDone
+			if err := errors.Join(outputErr, process.Wait()); err != nil && ctx.Err() == nil {
 				fmt.Fprintln(os.Stderr, "Database SSH session closed:", err)
 			}
 		})

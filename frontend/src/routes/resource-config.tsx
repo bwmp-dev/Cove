@@ -41,7 +41,8 @@ import { CpuAutoscaleSettings } from "../components/CpuAutoscale";
 import { Button, DefinitionList, EmptyState, Field, Notice, Section, SettingRow, SettingRows, Spinner, SwitchField } from "../components/ui";
 import { rolloutChanged, rolloutDraft, rolloutsApply, validateRollout, type RolloutDraft, type RolloutErrors } from "../lib/rollouts";
 import { useOnline } from "../lib/hooks";
-import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
+import { actionLabels, activeOperation, isActive, resourceTypeLabel, workloadKind } from "../lib/operations";
+import { engineName, exportLabels, isDatabaseExport } from "../lib/databases";
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
 import { createRow, extensionSummary, formValues, isSSHRepository, routeRows, sameRoutes, validateRoutes, validateWorkload, withoutAuthSecrets, type EnvRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
@@ -277,7 +278,7 @@ export function ResourceGeneral() {
             <DefinitionList
               items={[
                 { term: "Name", value: workload.name },
-                { term: "Type", value: kind === "job" ? "Job: runs to completion on each deploy" : "Service: long-running" },
+                { term: "Type", value: workload.database ? `Database: managed ${engineName(workload.database.engine)} ${workload.database.version}` : kind === "job" ? "Job: runs to completion on each deploy" : "Service: long-running" },
                 ...(kind === "job" ? [{ term: "Job service", value: <span className="font-mono text-xs">{workload.job_service}</span> }] : []),
                 { term: "Node", value: nodeName },
               ]}
@@ -351,15 +352,23 @@ function GeneralForm({ workload, nodeName }: { workload: Workload; nodeName: str
           <SettingRow label="Node" description="Moving an existing resource to another node requires a data migration and is not supported.">
             <span className="text-fg-muted">{nodeName}</span>
           </SettingRow>
-          {/* The type choices are wide cards, so this row spans the full width instead of the right column. */}
-          <div className="space-y-4">
-            <TypeFields
-              values={values}
-              errors={errors}
-              set={set}
-              kindHint={values.kind === "job" && workload.routes?.length ? "Jobs cannot have domains. Remove this service's domains before converting it." : undefined}
-            />
-          </div>
+          {workload.database ? (
+            <SettingRow label="Type" description="The engine and version are fixed. Create another database, or a PostgreSQL copy, for a different version.">
+              <span className="text-fg-muted">
+                {resourceTypeLabel(workload.kind)} · {engineName(workload.database.engine)} {workload.database.version}
+              </span>
+            </SettingRow>
+          ) : (
+            // The type choices are wide cards, so this row spans the full width instead of the right column.
+            <div className="space-y-4">
+              <TypeFields
+                values={values}
+                errors={errors}
+                set={set}
+                kindHint={values.kind === "job" && workload.routes?.length ? "Jobs cannot have domains. Remove this service's domains before converting it." : undefined}
+              />
+            </div>
+          )}
           </SettingRows>
           <FormError errors={errors} error={update.error} />
         </fieldset>
@@ -370,6 +379,11 @@ function GeneralForm({ workload, nodeName }: { workload: Workload; nodeName: str
 
 export function ResourceSource() {
   const workload = useResource();
+  if (workload.database) return <ManagedConfiguration workload={workload} />;
+  return <SourcePages workload={workload} />;
+}
+
+function SourcePages({ workload }: { workload: Workload }) {
   const editable = can(workload.permissions, "edit");
   const blocked = useSaveBlocked(workload.id);
   const provider = useQuery(providerSourceQuery(workload.id));
@@ -391,6 +405,25 @@ export function ResourceSource() {
       {!temporary && <SourceTrigger workload={workload} editable={editable} blocked={blocked} blockers={<SaveBlockers workload={workload} />} />}
       {!temporary && <DeployHook workload={workload} editable={editable} />}
     </>
+  );
+}
+
+function ManagedConfiguration({ workload }: { workload: Workload }) {
+  return (
+    <Section width="form" title="Configuration" description="Generated from the pinned built-in template when the database was created.">
+      <div className="space-y-4">
+        <Notice title="Managed by Cove">
+          The Compose file, credentials and storage of a managed database cannot be edited, replaced by a Git source or given public routes. Rename it or change its limits on the General and Resource limits pages. Connect applications from{" "}
+          <Link to="/resources/$resourceId/database" params={{ resourceId: workload.id }} className="underline underline-offset-4">
+            the Database page
+          </Link>
+          .
+        </Notice>
+        <pre aria-label="Compose file" className="max-h-[32rem] overflow-auto rounded-md border border-line bg-panel p-3 font-mono text-xs leading-relaxed text-fg">
+          {workload.compose}
+        </pre>
+      </div>
+    </Section>
   );
 }
 
@@ -494,6 +527,11 @@ function SourceForm({ workload }: { workload: Workload }) {
 export function ResourceEnvironment() {
   const workload = useResource();
   const keys = [...workload.environment_keys].sort();
+  if (workload.database) return <ManagedVariables workload={workload} keys={keys} />;
+  return <EnvironmentPages workload={workload} keys={keys} />;
+}
+
+function EnvironmentPages({ workload, keys }: { workload: Workload; keys: string[] }) {
   const blocked = useSaveBlocked(workload.id);
   const projects = useQuery(projectsQuery);
   // Preview resources are temporary; the server refuses to import variables into them.
@@ -524,6 +562,42 @@ export function ResourceEnvironment() {
     );
   }
   return <div className="space-y-6"><EnvironmentForm workload={workload} savedKeys={keys} /><EnvironmentFileActions workload={workload} temporary={temporary} blocked={blocked} /><BuiltinVariables workloadId={workload.id} /><ResourceVariables key={workload.id} workloadId={workload.id} /><ResourceFileSecrets key={`files-${workload.id}`} /></div>;
+}
+
+function ManagedVariables({ workload, keys }: { workload: Workload; keys: string[] }) {
+  const exported = keys.filter(isDatabaseExport);
+  const generated = keys.filter((key) => !isDatabaseExport(key));
+  return (
+    <Section width="form" title="Environment variables" description="Generated when the database was created. Values are encrypted at rest and never shown here." flush>
+      <div className="border-b border-line p-3">
+        <Notice title="Managed variables">
+          Variables of a managed database cannot be edited. Other resources bind the exported keys below from their own Environment variables page. Editors can read the values from{" "}
+          <Link to="/resources/$resourceId/database" params={{ resourceId: workload.id }} className="underline underline-offset-4">
+            the Database page
+          </Link>
+          .
+        </Notice>
+      </div>
+      <h3 className="px-4 pt-3 text-[13px] font-semibold text-fg">Exported for bindings</h3>
+      <ul aria-label="Exported variables" className="divide-y divide-line">
+        {exported.map((key) => (
+          <li key={key} className="flex items-center justify-between gap-4 px-4 py-2">
+            <span className="truncate font-mono text-xs text-fg">{key}</span>
+            <span className="text-xs text-fg-subtle">{exportLabels[key]}</span>
+          </li>
+        ))}
+      </ul>
+      <h3 className="border-t border-line px-4 pt-3 text-[13px] font-semibold text-fg">Generated configuration</h3>
+      <ul aria-label="Generated variables" className="divide-y divide-line">
+        {generated.map((key) => (
+          <li key={key} className="flex items-center justify-between gap-4 px-4 py-2">
+            <span className="truncate font-mono text-xs text-fg">{key}</span>
+            <span className="text-xs text-fg-subtle">Value hidden</span>
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
 }
 
 function EnvironmentForm({ workload, savedKeys }: { workload: Workload; savedKeys: string[] }) {
@@ -621,6 +695,9 @@ function EnvironmentForm({ workload, savedKeys }: { workload: Workload; savedKey
 
 export function ResourceDomains() {
   const workload = useResource();
+  if (workload.database) {
+    return <EmptyState title="Databases have no public domains">Applications reach a managed database through a private connection. Use temporary database access on the Networking page for administration.</EmptyState>;
+  }
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Jobs cannot have domains">Domains route HTTPS traffic to long-running services. Change the resource type to a service first.</EmptyState>;
   }
@@ -810,7 +887,36 @@ function DomainsForm({ workload }: { workload: Workload }) {
 export function ResourceNetworking() {
   const workload = useResource();
   const active = useActiveOperation(workload.id);
+  if (workload.database) return <DatabaseNetworking workload={workload} />;
   return <div className="space-y-6"><Networks workload={workload} /><PrivateNetwork id={workload.id} canEdit={can(workload.permissions, "edit")} />{can(workload.permissions, "edit") && <PortBindings workload={workload} busy={Boolean(active)} />}{can(workload.permissions,"edit") && <DatabaseAccess id={workload.id} />}</div>;
+}
+
+function DatabaseNetworking({ workload }: { workload: Workload }) {
+  const projects = useQuery(projectsQuery);
+  const placement = findPlacement(projects.data, workload.environment_id, workload.project_id);
+  const graph = placement?.environment ? (
+    <Link to="/projects/$projectId/environments/$environmentId" params={{ projectId: placement.project.id, environmentId: placement.environment.id }} className="underline underline-offset-4">
+      {placement.environment.name} resource graph
+    </Link>
+  ) : placement ? (
+    <Link to="/projects/$projectId" params={{ projectId: placement.project.id }} className="underline underline-offset-4">
+      project resource graph
+    </Link>
+  ) : (
+    "environment resource graph"
+  );
+  return (
+    <div className="space-y-6">
+      <Section width="form" title="Private connections" description="Applications reach this database only through private connections. No host port is published.">
+        <p className="text-[13px] text-fg">
+          Create a connection from the consuming resource in the {graph}. The form fills in service <span className="font-mono text-xs">{workload.database?.service}</span>, port{" "}
+          <span className="font-mono text-xs">{workload.database?.port}</span> and hostname <span className="font-mono text-xs break-all">{workload.database?.host}</span> when this database is the
+          target.
+        </p>
+      </Section>
+      {can(workload.permissions, "edit") && <DatabaseAccess id={workload.id} database={workload.database ?? undefined} />}
+    </div>
+  );
 }
 
 export function ResourceRegistryPage() {

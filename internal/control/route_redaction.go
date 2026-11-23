@@ -48,6 +48,8 @@ func redactConfigurationChanges(changes []configurationChange) {
 			diff := &changes[i].Diffs[j]
 			if diff.Field == "routes" {
 				diff.Before, diff.After = safeRouteJSON(json.RawMessage(diff.Before)), safeRouteJSON(json.RawMessage(diff.After))
+			} else if diff.Field == "database" {
+				diff.Before, diff.After = safeDatabaseJSON(json.RawMessage(diff.Before)), safeDatabaseJSON(json.RawMessage(diff.After))
 			}
 		}
 	}

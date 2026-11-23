@@ -44,7 +44,7 @@ func redisCLI(engine string) string {
 
 const mongoAuth = `if [ -n "${MONGO_INITDB_ROOT_USERNAME_FILE:-}" ]; then export MONGO_INITDB_ROOT_USERNAME=$(cat "$MONGO_INITDB_ROOT_USERNAME_FILE"); fi; `
 
-const redisAuth = `export REDISCLI_AUTH="${REDIS_PASSWORD:-${VALKEY_PASSWORD:-}}"; if [ -n "${REDIS_PASSWORD_FILE:-}" ]; then REDISCLI_AUTH=$(cat "$REDIS_PASSWORD_FILE"); fi; if [ -n "${VALKEY_PASSWORD_FILE:-}" ]; then REDISCLI_AUTH=$(cat "$VALKEY_PASSWORD_FILE"); fi; if [ -n "$REDISCLI_AUTH" ]; then export REDISCLI_AUTH; export VALKEYCLI_AUTH="$REDISCLI_AUTH"; else unset REDISCLI_AUTH VALKEYCLI_AUTH; fi; `
+const redisAuth = `export REDISCLI_AUTH="${REDISCLI_AUTH:-${REDIS_PASSWORD:-${VALKEY_PASSWORD:-${CACHE_PASSWORD:-}}}}"; if [ -n "${REDIS_PASSWORD_FILE:-}" ]; then REDISCLI_AUTH=$(cat "$REDIS_PASSWORD_FILE"); fi; if [ -n "${VALKEY_PASSWORD_FILE:-}" ]; then REDISCLI_AUTH=$(cat "$VALKEY_PASSWORD_FILE"); fi; if [ -n "$REDISCLI_AUTH" ]; then export REDISCLI_AUTH; export VALKEYCLI_AUTH="$REDISCLI_AUTH"; else unset REDISCLI_AUTH VALKEYCLI_AUTH; fi; `
 
 func (e *Engine) verifyExtendedDatabase(ctx context.Context, r Request, source, dump string, appendOnly bool) (cleanup func() error, result error) {
 	image, err := e.output(ctx, "docker", "inspect", "--format", "{{.Image}}", source)

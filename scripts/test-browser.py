@@ -336,12 +336,21 @@ def main():
                 api("POST", "/api/nodes/"+enrollment["id"]+"/verify")
                 time.sleep(1)
             else: raise RuntimeError("Browser worker did not become ready")
+            if sys.argv[1:] == ["--managed-data"] or "e2e/databases.spec.ts" in sys.argv[1:]:
+                ready = next(item for item in api("GET", "/api/nodes") if item["id"] == enrollment["id"])
+                if not ready.get("capabilities", {}).get("managed_databases") or len(api("GET", "/api/database-engines")["engines"]) != 7:
+                    raise RuntimeError("Managed-data acceptance requires this branch's panel and worker capabilities")
             client_binary=fixture / ("cove.exe" if os.name == "nt" else "cove")
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
             ssh_port=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
             env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
-            subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
+            if sys.argv[1:] == ["--managed-data"]:
+                env["COVE_BROWSER_CA"] = str(fixture / "cert.pem")
+                env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
+                subprocess.run([sys.executable, str(ROOT / "scripts/test-managed-data.py")], cwd=ROOT, env=env, check=True)
+            else:
+                subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
         finally:
             state = {"owner": None, "backup_owner": None, "workloads": set(), "operations": set(), "shared_networks": set(), "links": False}
             root_proved = False

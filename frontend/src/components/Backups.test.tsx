@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
+import type { DatabaseResource } from "../api/types";
 import { Backups, type WorkerSupport } from "./Backups";
 
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: Error) => error.message }));
@@ -25,7 +26,7 @@ interface Database { engine: string; service: string; name: string }
 type SavedPolicy = typeof policy & { database?: Database; volume_snapshot?: { max_bytes: number } | null };
 interface Snapshot { id: string; created_at: string; repository: string; database?: Database; volume_method?: string; fallback_reason?: string }
 
-function renderBackups(saved: SavedPolicy | null, support: WorkerSupport, backups: Snapshot[] = [], preview: () => Promise<unknown> = () => Promise.reject(new Error("unexpected preview"))) {
+function renderBackups(saved: SavedPolicy | null, support: WorkerSupport, backups: Snapshot[] = [], preview: () => Promise<unknown> = () => Promise.reject(new Error("unexpected preview")), database?: DatabaseResource) {
   vi.mocked(request).mockImplementation((method: string, path: string) => {
     if (path.includes("/backups/snapshot-preview")) return preview();
     if (method === "PUT") return Promise.resolve({ ok: true });
@@ -34,7 +35,7 @@ function renderBackups(saved: SavedPolicy | null, support: WorkerSupport, backup
     if (path.endsWith("/backups")) return Promise.resolve({ backups });
     return Promise.resolve([]);
   });
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Backups workloadId="w1" busy={false} rights={{ backup: true, configure: true, restore: true, download: true, import: true }} support={support} restoreHeld={null} verifyHeld={null} /></QueryClientProvider>);
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Backups workloadId="w1" busy={false} rights={{ backup: true, configure: true, restore: true, download: true, import: true }} support={support} restoreHeld={null} verifyHeld={null} database={database} /></QueryClientProvider>);
 }
 
 function chooseMethod(name: string) {
@@ -256,4 +257,31 @@ it("shows the actual volume method and fallback reason in backup history", async
   expect(screen.getByText("Stopped containers")).toBeInTheDocument();
   expect(screen.getByText("Snapshots unavailable: /srv/uploads: tmpfs is not supported")).toBeInTheDocument();
   expect(screen.getAllByText(/filesystem snapshot$|^Stopped containers$/)).toHaveLength(2);
+});
+
+const managed = (engine: DatabaseResource["engine"], service: string): DatabaseResource => ({ engine, version: "1", template_revision: "r1", service, image: `${engine}:1`, port: 1, host: `${service}.internal` });
+
+it("offers a managed database only its own online backup and never an in-place restore", async () => {
+  const snapshot = { id: "snap-pg", created_at: "2026-11-21T10:00:00Z", repository: "local", database: { engine: "postgresql", service: "postgres", name: "app" } };
+  renderBackups(null, upgraded, [snapshot], undefined, managed("postgresql", "postgres"));
+  expect(await screen.findByText("Restoring a managed database")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Restore as new resource" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Configure backups" }));
+  expect(screen.getByLabelText("Database Compose service")).toHaveValue("postgres");
+  expect(screen.getByLabelText("Database Compose service")).toHaveAttribute("readonly");
+  expect(screen.getByLabelText("Database name")).toHaveValue("app");
+  fireEvent.click(screen.getByRole("combobox", { name: "Backup method" }));
+  expect(screen.getByRole("option", { name: "PostgreSQL logical dump (online)" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "MariaDB logical dump (online, InnoDB only)" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "Redis RDB snapshot (online)" })).not.toBeInTheDocument();
+});
+
+it("keeps a managed standalone MongoDB on volume snapshots", async () => {
+  renderBackups(null, upgraded, [], undefined, managed("mongodb", "mongo"));
+  fireEvent.click(await screen.findByRole("button", { name: "Configure backups" }));
+  expect(screen.getByText(/MongoDB uses consistent volume snapshots/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("combobox", { name: "Backup method" }));
+  expect(screen.queryByRole("option", { name: "MongoDB replica set archive (online)" })).not.toBeInTheDocument();
 });

@@ -77,24 +77,8 @@ func (e *Engine) dumpDatabase(ctx context.Context, r Request, container, staging
 		return errors.New("this database needs a consistent volume backup: TimescaleDB and non-InnoDB tables are not supported by logical backup mode")
 	}
 	remote := "/tmp/cove-database-" + r.ID + ".dump"
-	defer func() {
-		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		if err := e.Run(cleanup, e.Root, []string{"docker", "exec", container, "rm", "-f", remote}, nil, io.Discard); err != nil {
-			result = errors.Join(result, errors.New("could not remove temporary database dump from the container"))
-		}
-	}()
-	if err := e.Run(ctx, e.Root, []string{"docker", "exec", container, "sh", "-ec", databaseCommand(d.Engine, false), "cove", d.Name, remote}, nil, io.Discard); err != nil {
-		return errors.New("database dump failed; verify the database name and container credentials")
-	}
-	if err := e.Run(ctx, e.Root, []string{"docker", "cp", container + ":" + remote, filepath.Join(staging, "database.dump")}, nil, io.Discard); err != nil {
-		return errors.New("could not retrieve database dump")
-	}
-	info, err := os.Lstat(filepath.Join(staging, "database.dump"))
-	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-		return errors.New("database dump is missing or empty")
-	}
-	return os.Chmod(filepath.Join(staging, "database.dump"), 0600)
+	return e.dumpDatabaseFile(ctx, container, remote, filepath.Join(staging, "database.dump"), databaseCommand(d.Engine, false), []string{"cove", d.Name, remote})
+
 }
 
 func (e *Engine) performDatabaseBackup(ctx context.Context, r Request, out io.Writer) (result error) {
@@ -227,4 +211,33 @@ func (e *Engine) performDatabaseBackup(ctx context.Context, r Request, out io.Wr
 		return errors.New("database restore failed; database stopped for recovery")
 	}
 	return os.Remove(recovery)
+}
+
+func (e *Engine) dumpDatabaseFile(ctx context.Context, container, remote, destination, command string, arguments []string) (result error) {
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := e.Run(cleanup, e.Root, []string{"docker", "exec", container, "rm", "-f", remote}, nil, io.Discard); err != nil {
+			result = errors.Join(result, errors.New("could not remove temporary database dump from the container"))
+		}
+	}()
+	args := append([]string{"docker", "exec", container, "sh", "-ec", command}, arguments...)
+	if err := e.Run(ctx, e.Root, args, nil, io.Discard); err != nil {
+		return errors.New("database dump failed; verify the database name and container credentials")
+	}
+	if err := e.Run(ctx, e.Root, []string{"docker", "cp", container + ":" + remote, destination}, nil, io.Discard); err != nil {
+		return errors.New("could not retrieve database dump")
+	}
+	info, err := os.Lstat(destination)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		return errors.New("database dump is missing or empty")
+	}
+	if err = os.Chmod(destination, 0600); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(destination, os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	return errors.Join(file.Sync(), file.Close())
 }
