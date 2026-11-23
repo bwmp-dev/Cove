@@ -27,6 +27,7 @@ import (
 var assets embed.FS
 
 type Server struct {
+	ProviderTransport     http.RoundTripper
 	CloudflareTransport   http.RoundTripper
 	NotificationTransport http.RoundTripper
 	DB                    *pgxpool.Pool
@@ -92,6 +93,15 @@ func (s *Server) Init(ctx context.Context) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerPanelRecovery(mux)
+	for _, pattern := range []string{"GET /api/node-providers", "POST /api/node-providers", "PUT /api/node-providers/{id}", "DELETE /api/node-providers/{id}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.nodeProviders)))
+	}
+	mux.Handle("GET /api/node-providers/{id}/catalog", s.admin(http.HandlerFunc(s.nodeProviderCatalog)))
+	for _, pattern := range []string{"GET /api/node-provisions", "POST /api/node-provisions", "DELETE /api/node-provisions/{id}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.nodeProvisions)))
+	}
+	mux.Handle("POST /api/node-provisions/{id}/reconcile", s.admin(http.HandlerFunc(s.reconcileNodeProvision)))
+	mux.Handle("GET /api/nodes/{id}/cloud", s.admin(http.HandlerFunc(s.nodeCloudMetadata)))
 	mux.Handle("GET /api/nodes/{id}/firewall", s.admin(http.HandlerFunc(s.nodeFirewall)))
 	mux.Handle("POST /api/nodes/{id}/firewall/preview", s.admin(http.HandlerFunc(s.nodeFirewall)))
 	mux.Handle("POST /api/nodes/{id}/firewall", s.admin(http.HandlerFunc(s.nodeFirewall)))

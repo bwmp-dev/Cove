@@ -1,3 +1,4 @@
+import { CloudServers, ProviderTokens } from "../components/NodeProviders";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Plus, RefreshCw, Server } from "lucide-react";
@@ -209,6 +210,8 @@ export function NodesPage() {
           </Section>
         </>
       )}
+      {admin && <CloudServers />}
+      {admin && <ProviderTokens />}
       {admin && <Bastions />}
     </>
   );

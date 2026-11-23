@@ -208,6 +208,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
+	case path == "/api/node-providers" || strings.HasPrefix(path, "/api/node-providers/") || path == "/api/node-provisions" || strings.HasPrefix(path, "/api/node-provisions/"):
+		return p.Admin || deny()
 	case path == "/api/bastions" || strings.HasPrefix(path, "/api/bastions/"):
 		return p.Admin || deny()
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):

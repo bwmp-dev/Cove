@@ -374,9 +374,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	timer := time.NewTicker(3 * time.Second)
 	defer timer.Stop()
 	telemetryContext, stopTelemetry := context.WithCancel(ctx)
-	telemetryDone := make(chan error, 3)
+	telemetryDone := make(chan error, 4)
 	var telemetryJobs sync.WaitGroup
-	for _, run := range []func(context.Context) error{s.runUptimeChecks, s.runLogForwards, s.runTrafficCollection} {
+	for _, run := range []func(context.Context) error{s.runUptimeChecks, s.runLogForwards, s.runTrafficCollection, s.runNodeProvisions} {
 		telemetryJobs.Go(func() { telemetryDone <- run(telemetryContext) })
 	}
 	defer func() { stopTelemetry(); telemetryJobs.Wait() }()

@@ -1,3 +1,4 @@
+import { NodeCloudOrigin } from "../components/NodeProviders";
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
 import { CleanupPreview } from "../components/CleanupPreview";
@@ -243,6 +244,7 @@ function NodeDetail({ node }: { node: Node }) {
 
         {admin && <NodeSSH node={node} verify={verify} />}
 
+        {admin && <NodeCloudOrigin nodeId={node.id} />}
         {admin && <NodeCost nodeId={node.id} />}
 
         {admin && <NodeLinks nodeId={node.id} />}

@@ -835,3 +835,34 @@ CREATE TABLE IF NOT EXISTS node_identity_rotations (
  phase text NOT NULL CHECK(phase IN ('queued','staged','switched','aborting','succeeded','cancelled')),
  configuration bytea,last_error text NOT NULL DEFAULT '',next_attempt_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Instance-admin cloud credentials and bounded resumable server creation.
+CREATE TABLE IF NOT EXISTS node_providers (
+ id text PRIMARY KEY,
+ kind text NOT NULL CHECK(kind IN ('hetzner','digitalocean','vultr')),
+ name text NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+ secret bytea NOT NULL CHECK(octet_length(secret) BETWEEN 16 AND 8192),
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_provider_id text REFERENCES node_providers(id) ON DELETE SET NULL;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_kind text NOT NULL DEFAULT '' CHECK(cloud_kind IN ('','hetzner','digitalocean','vultr'));
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_server_id text NOT NULL DEFAULT '' CHECK(length(cloud_server_id)<=128);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_server_name text NOT NULL DEFAULT '' CHECK(length(cloud_server_name)<=128);
+CREATE TABLE IF NOT EXISTS node_provisions (
+ id text PRIMARY KEY,
+ provider_id text REFERENCES node_providers(id) ON DELETE SET NULL,
+ provider_kind text NOT NULL CHECK(provider_kind IN ('hetzner','digitalocean','vultr')),
+ provider_name text NOT NULL CHECK(length(provider_name) BETWEEN 1 AND 120),
+ team_id text NOT NULL REFERENCES teams(id),
+ node_id text REFERENCES nodes(id) ON DELETE SET NULL,
+ cloud_id text NOT NULL DEFAULT '' CHECK(length(cloud_id)<=128),
+ cloud_name text NOT NULL CHECK(length(cloud_name) BETWEEN 1 AND 128),
+ phase text NOT NULL DEFAULT 'queued' CHECK(phase IN ('queued','creating','server_pending','enrolling','succeeded','failed','uncertain','cancelled')),
+ configuration bytea NOT NULL CHECK(octet_length(configuration)<=16384),
+ last_error text NOT NULL DEFAULT '' CHECK(length(last_error)<=1024),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ next_check_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE node_provisions ADD COLUMN IF NOT EXISTS deadline timestamptz NOT NULL DEFAULT now()+interval '20 minutes';
+CREATE INDEX IF NOT EXISTS node_provision_active_idx ON node_provisions(next_check_at) WHERE phase IN ('queued','creating','server_pending','enrolling');
