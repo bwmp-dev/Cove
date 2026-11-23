@@ -29,12 +29,14 @@ const sourceHints: Record<PolicyDraft["certificateSource"], string> = {
 // choices is undefined where the resource has no certificate storage yet, such as the create form. A saved stored or
 // proxy default selection is still shown so it is never dropped silently. protocol4: the worker supports the proxy
 // default choice (route protocol 4); undefined while unknown, which offers it only when already selected.
-export function CertificateSourceField({ id, policy, choices, protocol4, onChange }: { id: string; policy: PolicyDraft; choices?: CertificateChoices; protocol4?: boolean; onChange: Change }) {
+// error: a certificate problem that is not about the stored version, such as Let's Encrypt on a private route.
+export function CertificateSourceField({ id, policy, choices, protocol4, error, onChange }: { id: string; policy: PolicyDraft; choices?: CertificateChoices; protocol4?: boolean; error?: string; onChange: Change }) {
   const uploaded = policy.certificateSource === "uploaded";
   const proxyDefault = policy.certificateSource === "default";
-  const hint = `${sourceHints[policy.certificateSource]}${!proxyDefault && protocol4 === false ? " The proxy default certificate needs a newer worker on this node." : ""}`;
+  const privateRoute = policy.visibility === "lan" || policy.visibility === "tailscale";
+  const hint = `${sourceHints[policy.certificateSource]}${!proxyDefault && protocol4 === false ? " The proxy default certificate needs a newer worker on this node." : ""}${privateRoute ? " Private routes need the proxy default or a stored certificate; Let's Encrypt cannot reach them." : ""}`;
   return (
-    <Field id={id} label="Certificate" hint={hint}>
+    <Field id={id} label="Certificate" hint={hint} error={error}>
       <Select
         id={id}
         value={policy.certificateSource || "acme"}
@@ -44,7 +46,8 @@ export function CertificateSourceField({ id, policy, choices, protocol4, onChang
           // Switching away from a saved uploaded certificate must name the new source: an omitted one keeps the saved selection.
           else onChange({ certificateSource: value === "default" ? "default" : policy.certificateSource === "" ? "" : "acme", certificateId: "" });
         }}
-        aria-describedby={`${id}-hint`}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${id}-error` : `${id}-hint`}
       >
         <option value="acme">Let's Encrypt</option>
         <option value="default" disabled={!proxyDefault && protocol4 !== true}>

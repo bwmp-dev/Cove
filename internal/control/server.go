@@ -192,6 +192,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle(method+" /api/workloads/{id}/certificates", s.admin(http.HandlerFunc(s.routeCertificates)))
 	}
 	mux.Handle("DELETE /api/workloads/{id}/certificates/{certificate}", s.admin(http.HandlerFunc(s.routeCertificates)))
+	mux.Handle("GET /api/workloads/{id}/route-listeners", s.admin(http.HandlerFunc(s.routeListeners)))
 	mux.Handle("GET /api/workloads/{id}/certificate-zones", s.admin(http.HandlerFunc(s.certificateZones)))
 	mux.Handle("GET /api/workloads/{id}/certificate-authority", s.admin(http.HandlerFunc(s.certificateAuthority)))
 	mux.Handle("GET /api/workloads/{id}/certificate-challenges", s.admin(http.HandlerFunc(s.certificateDNSChallenges)))

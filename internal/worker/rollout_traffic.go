@@ -258,6 +258,7 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 			config.HTTP.Routers[next] = router
 		}
 	}
+	config.addPrivateDenials(routes)
 	if err := e.applyRouteCertificates(ctx, routes, &config, out); err != nil {
 		return "", err
 	}

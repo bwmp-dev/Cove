@@ -217,6 +217,9 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 			if !s.checkRouteClaims(w, r.Context(), tx, r.PathValue("id"), in.Routes) {
 				return
 			}
+			if !s.checkPrivateRouteSelection(w, r, node, in.Routes) {
+				return
+			}
 		}
 		if in.Source != nil && in.Source.Token == "" && old.Source != nil && in.Source.Repository == old.Source.Repository {
 			in.Source.Token = old.Source.Token

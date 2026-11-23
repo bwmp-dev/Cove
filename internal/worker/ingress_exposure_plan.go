@@ -147,6 +147,14 @@ func (e *Engine) prepareIngressExposure(ctx context.Context, client *http.Client
 	if err != nil {
 		return prepared, errors.New("managed route inventory is unreadable")
 	}
+	for _, list := range routes {
+		if err := ValidateRouteListeners(list, desired); err != nil {
+			return prepared, err
+		}
+	}
+	if err := e.validatePendingRouteListeners(desired); err != nil {
+		return prepared, err
+	}
 	_, prepared.Probes, err = e.selectedRouteCertificates(routes)
 	if err != nil {
 		return prepared, err

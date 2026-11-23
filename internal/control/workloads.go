@@ -112,6 +112,9 @@ func (s *Server) createWorkload(w http.ResponseWriter, r *http.Request) {
 	if !s.checkRouteClaims(w, r.Context(), tx, id, in.Routes) {
 		return
 	}
+	if !s.checkPrivateRouteSelection(w, r, in.NodeID, in.Routes) {
+		return
+	}
 	cpu, memory := configuredUsage(in)
 	_, err = tx.Exec(r.Context(), "INSERT INTO workloads(id,node_id,name,configuration,kind,backup_interval,next_backup_at,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,$6,now()+make_interval(hours=>$6),NULLIF($7,''),$8,$9,$10,$11)", id, in.NodeID, in.Name, encrypted, in.Kind, interval, environmentID, actor(r).Team, projectID, cpu, memory)
 	if quotaError(w, err) {
@@ -686,6 +689,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if worker.RouteProtocol(request.Routes) >= 4 {
 		method = "submit_routes_v4"
+	}
+	if worker.RouteProtocol(request.Routes) >= 5 {
+		method = "submit_routes_v5"
 	}
 	if cancelRequested {
 		method = "cancel"

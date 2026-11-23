@@ -24,6 +24,8 @@ import { supportsImageLifecycle } from "../lib/images";
 import { RouteEditor } from "../components/RouteEditor";
 import { RouteCertificates } from "../components/RouteCertificates";
 import type { CertificateChoices } from "../components/RouteCertificatePicker";
+import type { ListenerChoices } from "../components/RouteVisibility";
+import { routeListenersQuery, type Listener } from "../api/ingress-listeners";
 import { isManagedPreview } from "../lib/previews";
 import { routeProtocolOf } from "../lib/nodes";
 import { shortId } from "../lib/format";
@@ -40,7 +42,7 @@ import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, workloadKind } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
-import { certificateSwitches, extensionSummary, formValues, refreshCertificateErrors, routeRows, sameRoutes, validateRoutes, validateWorkload, type EnvRow, type RouteRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { certificateSwitches, extensionSummary, formValues, refreshCertificateErrors, routeRows, sameRoutes, validateRoutes, validateWorkload, visibilitySummary, type EnvRow, type RouteRow, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
 import { useResource } from "./workload-detail";
 
 const nextDeploy = "Changes apply on the next deploy.";
@@ -586,6 +588,14 @@ export function ResourceDomains() {
   return <DomainsPanel workload={workload} />;
 }
 
+function useListenerChoices(workloadId: string, routeProtocol: number | undefined, nodeName: string): ListenerChoices {
+  // Private routes need route protocol 5; older workers cannot report their listeners.
+  const query = useQuery({ ...routeListenersQuery(workloadId), enabled: (routeProtocol ?? 0) >= 5 });
+  // A failed refetch keeps the previous data cached; treat the list as unknown until a read succeeds again.
+  const list = query.isError ? undefined : query.data;
+  return { routeProtocol, list, error: query.error, retry: () => void query.refetch(), retrying: query.isFetching, nodeName };
+}
+
 // Managed previews cannot hold stored certificates or issuers: their hostnames are generated and the API rejects them.
 function DomainsPanel({ workload }: { workload: Workload }) {
   const nodes = useQuery(nodesQuery);
@@ -603,19 +613,20 @@ function DomainsPanel({ workload }: { workload: Workload }) {
   const choices: CertificateChoices | undefined = uploads
     ? { supported: node ? (node.capabilities?.route_protocol ?? 0) >= 3 : undefined, list: certificates.data, error: certificates.error, retry: () => void certificates.refetch(), retrying: certificates.isFetching }
     : undefined;
+  const listeners = useListenerChoices(workload.id, routeProtocolOf(node), nodeName);
   return (
     <>
       <Section
         width="form"
         title="Domains"
-        description={`HTTPS hostnames served by the managed Traefik proxy on ${nodeName}. Point each hostname's DNS at that node and keep ports 80 and 443 reachable; certificates are issued automatically unless a route uses the proxy default or a stored certificate.`}
+        description={`HTTPS hostnames served by the managed Traefik proxy on ${nodeName}. For public routes, point each hostname's DNS at that node and keep ports 80 and 443 reachable; certificates are issued automatically unless a route uses the proxy default or a stored certificate. Private routes are served only on the selected LAN or Tailscale listener, so point private DNS at that listener's address.`}
       >
         {editable ? (
-          <DomainsForm workload={workload} certificates={choices} />
+          <DomainsForm workload={workload} certificates={choices} listeners={listeners} />
         ) : (
           <div className="space-y-4">
             <ViewOnly />
-            <RouteList workload={workload} certificates={certificates.data} />
+            <RouteList workload={workload} certificates={certificates.data} listeners={listeners.list} />
           </div>
         )}
       </Section>
@@ -626,12 +637,14 @@ function DomainsPanel({ workload }: { workload: Workload }) {
   );
 }
 
-function RouteList({ workload, certificates }: { workload: Workload; certificates?: RouteCertificate[] }) {
+function RouteList({ workload, certificates, listeners }: { workload: Workload; certificates?: RouteCertificate[]; listeners?: Listener[] }) {
   if (!workload.routes?.length) return <p className="text-[13px] text-fg-muted">No domains.</p>;
   return (
     <ul aria-label="Routes" className="divide-y divide-line rounded-md border border-line">
       {workload.routes.map((route) => {
         const extensions = extensionSummary(route.policy);
+        const privacy = visibilitySummary(route.policy, listeners);
+        if (privacy) extensions.unshift(privacy);
         const certificateId = route.policy?.certificate_id;
         if (certificateId) extensions.push(`stored certificate ${certificates?.find((item) => item.id === certificateId)?.name ?? shortId(certificateId)}`);
         else if (route.policy?.certificate_source === "default") extensions.push("proxy default certificate");
@@ -671,7 +684,7 @@ function ProxyRestartNotice({ rows, saved, nodeName = "this node" }: { rows: Rou
 // The API sends null for a resource with no saved routes.
 const noRoutes: Route[] = [];
 
-function DomainsForm({ workload, certificates }: { workload: Workload; certificates?: CertificateChoices }) {
+function DomainsForm({ workload, certificates, listeners }: { workload: Workload; certificates?: CertificateChoices; listeners: ListenerChoices }) {
   const client = useQueryClient();
   const operations = useQuery(workloadOperationsQuery(workload.id));
   // The resource is fetched before a deploy finishes, so also trust a release seen in the live operation list.
@@ -697,7 +710,7 @@ function DomainsForm({ workload, certificates }: { workload: Workload; certifica
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = validateRoutes(rows, saved, certificates?.list, routeProtocol);
+    const result = validateRoutes(rows, saved, certificates?.list, routeProtocol, listeners.list);
     setErrors(result.errors);
     if (!result.routes) {
       focusFirstInvalid(event.currentTarget);
@@ -774,11 +787,12 @@ function DomainsForm({ workload, certificates }: { workload: Workload; certifica
           routeProtocol={routeProtocol}
           saved={saved}
           certificates={certificates}
+          listeners={listeners}
           onChange={(next) => {
             save.reset();
             setApplying(null);
             setRows(next);
-            setErrors((current) => refreshCertificateErrors(current, next, saved, certificates?.list, routeProtocol));
+            setErrors((current) => refreshCertificateErrors(current, next, saved, certificates?.list, routeProtocol, listeners.list));
           }}
         />
       </fieldset>

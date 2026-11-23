@@ -1,5 +1,6 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
+import { keys } from "./queries";
 
 export interface ListenerBinding {
   address: string;
@@ -91,6 +92,20 @@ export const listenerStatusQuery = (nodeId: string) =>
     queryFn: async ({ signal }) => normalStatus(await request<ListenerStatus>("GET", base(nodeId), undefined, signal)),
     // The worker finishes or restores an applied change on its own; follow it until it settles.
     refetchInterval: (query) => (changeActive(query.state.data?.change) ? 3_000 : false),
+    retry: false,
+  });
+
+export const routeListenersKey = (workloadId: string) => [...keys.workload(workloadId), "route-listeners"] as const;
+
+// The saved managed listeners of the resource's node, readable by anyone who can view the resource. Listeners are
+// configured by instance administrators on the node's Proxy page; this never changes them.
+export const routeListenersQuery = (workloadId: string) =>
+  queryOptions({
+    queryKey: routeListenersKey(workloadId),
+    queryFn: async ({ signal }) => {
+      const reply = await request<{ listeners: Listener[] | null }>("GET", `/api/workloads/${encodeURIComponent(workloadId)}/route-listeners`, undefined, signal);
+      return (reply.listeners ?? []).map((listener) => ({ ...listener, bindings: listener.bindings ?? [] }));
+    },
     retry: false,
   });
 

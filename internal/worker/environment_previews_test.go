@@ -227,7 +227,7 @@ func TestProtectedRoutes(t *testing.T) {
 	for name, router := range config.HTTP.Routers {
 		live := []map[string]any{}
 		for other, r := range config.HTTP.Routers {
-			entry := map[string]any{"name": other + "@file", "status": "enabled", "rule": r.Rule, "service": r.Service}
+			entry := map[string]any{"name": other + "@file", "status": "enabled", "rule": r.Rule, "service": r.Service, "entryPoints": r.EntryPoints}
 			if other != name {
 				middlewares := []string{}
 				for _, m := range r.Middlewares {

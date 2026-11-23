@@ -3,7 +3,7 @@ import type { Listener, ListenerBinding, ListenerProtocol, ListenerSettings, Lis
 // Mirrors the worker's limits so obvious mistakes are caught before a plan is requested. The worker stays authoritative.
 export const maxListeners = 32;
 export const maxBindings = 8;
-const listenerName = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+export const listenerName = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 export const protocolLabels: Record<ListenerProtocol, string> = { https: "HTTPS", tcp: "TCP", udp: "UDP" };
 export const visibilityLabels: Record<ListenerVisibility, string> = { public: "Public", lan: "Private LAN", tailscale: "Tailscale" };

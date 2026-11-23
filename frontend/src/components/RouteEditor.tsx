@@ -1,10 +1,11 @@
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
-import type { Route } from "../api/types";
-import { cidrList, draftUsesExtensions, emptyPolicy, isWildcardHostname, routeLimits, routesNeedProtocol4, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
+import type { Route, RoutePolicy } from "../api/types";
+import { cidrList, draftUsesExtensions, emptyPolicy, isPrivateVisibility, isWildcardHostname, routeLimits, visibilitySummary, routesNeedProtocol4, routesUseExtensions, routesUsePolicies, type HeaderRow, type PolicyDraft, type RouteRow, type UpstreamRow } from "../lib/workload-form";
 import { describedBy, inputClass } from "../lib/styles";
 import { CertificateSourceField, UploadedCertificatePicker, type CertificateChoices } from "./RouteCertificatePicker";
 import { RouteExtensionFields } from "./RouteExtensions";
+import { RouteVisibilityFields, type ListenerChoices } from "./RouteVisibility";
 import { Button, Field, Notice, SwitchField } from "./ui";
 
 const label = "mb-1 block text-xs font-medium text-fg-muted";
@@ -17,7 +18,9 @@ const noErrors: Record<string, string> = {};
 // saved: the routes the API has, so removing forward-auth from one of their hostnames can be called out. certificates:
 // the resource's stored certificates; omitted where none can exist yet, such as the create form. routeProtocol: the
 // node worker's route protocol, undefined while unknown; 4 adds wildcard hostnames and the proxy default certificate.
-export function RouteEditor({ routes, errors = noErrors, policies, extensions, routeProtocol, saved = noRoutes, certificates, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; routeProtocol?: number; saved?: Route[]; certificates?: CertificateChoices; onChange: (routes: RouteRow[]) => void }) {
+// listeners: the node's managed listeners for private routes; omitted where they cannot be chosen yet, such as the
+// create form.
+export function RouteEditor({ routes, errors = noErrors, policies, extensions, routeProtocol, saved = noRoutes, certificates, listeners, onChange }: { routes: RouteRow[]; errors?: Record<string, string>; policies?: boolean; extensions?: boolean; routeProtocol?: number; saved?: Route[]; certificates?: CertificateChoices; listeners?: ListenerChoices; onChange: (routes: RouteRow[]) => void }) {
   const id = useId();
   const protocol4 = routeProtocol === undefined ? undefined : routeProtocol >= 4;
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
@@ -52,6 +55,11 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, r
           The worker on this node cannot apply them. They are kept as saved, but saving is rejected while any remain. Upgrade the worker and verify the node again, or change those routes to Let&apos;s Encrypt or a stored certificate for an exact hostname to save other changes.
         </Notice>
       )}
+      {routeProtocol !== undefined && routeProtocol < 5 && routes.some((route) => isPrivateVisibility(route.policy?.visibility)) && (
+        <Notice tone="warn" title="Private routes need a newer worker">
+          The worker on this node cannot apply LAN or Tailscale visibility. Saved private settings are kept, but saving is rejected until the worker is upgraded and the node verified again. Switching a route to Public is also checked against the worker.
+        </Notice>
+      )}
       {routes.length > 0 && (
         <ul aria-label="Routes" className="space-y-3">
           {routes.map((route, index) => {
@@ -60,6 +68,7 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, r
             const policyError = Object.keys(errors).some((key) => key.startsWith(`${route.id}.`));
             const open = policies === true && (expanded.has(route.id) || policyError);
             const panel = `${id}-${index}-advanced`;
+            const privacy = route.policy && visibilitySummary({ visibility: route.policy.visibility || undefined, listener: route.policy.listener }, listeners?.list);
             return (
               <li key={route.id} className="space-y-1.5 border-b border-line pb-3 last:border-b-0 last:pb-0">
                 <div className="grid grid-cols-[minmax(0,1fr)_5.5rem_auto] items-end gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_6rem_auto]">
@@ -125,6 +134,7 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, r
                 )}
                 {isWildcardHostname(route.domain.trim()) && <WildcardHint domain={route.domain.trim()} />}
                 {route.auth && <p className="text-xs text-fg-muted">Requires a password at the proxy. The saved credential is kept.</p>}
+                {privacy && <p className="text-xs break-words text-fg-muted">{privacy}. Public HTTP and HTTPS requests for this hostname are refused.</p>}
                 {policies === true && (
                   <div>
                     <button type="button" aria-expanded={open} aria-controls={panel} onClick={() => toggle(route)} className="flex max-w-full items-start gap-1.5 rounded py-1 text-left text-xs font-medium text-fg-muted hover:text-fg pointer-coarse:min-h-10">
@@ -143,6 +153,8 @@ export function RouteEditor({ routes, errors = noErrors, policies, extensions, r
                           errors={errors}
                           certificates={certificates}
                           protocol4={protocol4}
+                          listeners={listeners}
+                          savedVisibility={saved.find((item) => item.domain === route.domain.trim().toLowerCase())?.policy?.visibility}
                           onChange={(patch) => update(route.id, { policy: { ...(route.policy ?? emptyPolicy()), ...patch } })}
                         />
                         {extensions !== undefined && (extensions || draftUsesExtensions(route.policy)) && (
@@ -198,16 +210,18 @@ function policySummary(policy: PolicyDraft) {
   if (policy.sticky) parts.push("sticky sessions");
   if (policy.certificateSource === "default") parts.push("proxy default certificate");
   if (policy.certificateSource === "uploaded") parts.push("stored certificate");
+  if (isPrivateVisibility(policy.visibility)) parts.unshift(policy.visibility === "lan" ? "LAN only" : "Tailscale only");
   return parts.length > 0 ? parts.join(", ") : "Not configured";
 }
 
-function PolicyFields({ id, route, policy, errors, certificates, protocol4, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; certificates?: CertificateChoices; protocol4?: boolean; onChange: (patch: Partial<PolicyDraft>) => void }) {
+function PolicyFields({ id, route, policy, errors, certificates, protocol4, listeners, savedVisibility, onChange }: { id: string; route: RouteRow; policy: PolicyDraft; errors: Record<string, string>; certificates?: CertificateChoices; protocol4?: boolean; listeners?: ListenerChoices; savedVisibility?: RoutePolicy["visibility"]; onChange: (patch: Partial<PolicyDraft>) => void }) {
   const pathError = errors[`${route.id}.path`];
   const redirectError = errors[`${route.id}.redirect`];
   const cidrError = errors[`${route.id}.cidr`];
   const host = route.domain.trim() || "this hostname";
   return (
     <div className="space-y-5">
+      <RouteVisibilityFields id={id} route={route} policy={policy} savedVisibility={savedVisibility} errors={errors} choices={listeners} onChange={onChange} />
       <div className="grid gap-4 sm:grid-cols-2">
         <Field id={`${id}-path`} label="Path prefix" optional error={pathError} hint={`Only requests under this path on ${host} use this route. The prefix is passed to the service unchanged.`}>
           <input
@@ -224,7 +238,7 @@ function PolicyFields({ id, route, policy, errors, certificates, protocol4, onCh
             aria-describedby={describedBy(`${id}-path`, pathError, true)}
           />
         </Field>
-        <CertificateSourceField id={`${id}-certificate`} policy={policy} choices={certificates} protocol4={protocol4} onChange={onChange} />
+        <CertificateSourceField id={`${id}-certificate`} policy={policy} choices={certificates} protocol4={protocol4} error={policy.certificateSource === "uploaded" ? undefined : errors[`${route.id}.certificate`]} onChange={onChange} />
       </div>
       {policy.certificateSource === "uploaded" && <UploadedCertificatePicker id={`${id}-uploaded`} route={route} policy={policy} error={errors[`${route.id}.certificate`]} choices={certificates} onChange={onChange} />}
 

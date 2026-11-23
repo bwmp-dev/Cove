@@ -19,6 +19,8 @@ type RouteUpstream struct {
 }
 
 type RoutePolicy struct {
+	Visibility        string            `json:"visibility,omitempty"`
+	Listener          string            `json:"listener,omitempty"`
 	Maintenance       *RouteMaintenance `json:"maintenance,omitempty"`
 	ErrorPages        map[string]string `json:"error_pages,omitempty"`
 	ForwardAuth       *RouteForwardAuth `json:"forward_auth,omitempty"`
@@ -55,6 +57,9 @@ var headerName = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 func (r Route) validatePolicy() error {
 	if err := validateRouteExtensions(r.Policy); err != nil {
+		return err
+	}
+	if err := validatePrivateRoute(r); err != nil {
 		return err
 	}
 	p := r.Policy
@@ -161,6 +166,10 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 		key := next + suffix
 		c.HTTP.Middlewares[key] = middleware
 		router.Middlewares = append(router.Middlewares, key)
+	}
+	if r.privateRoute() {
+		add("-visibility", ingressMiddleware{IPAllowList: map[string]any{"sourceRange": privateRouteRanges(p.Visibility)}})
+		router.EntryPoints = []string{ingressListenerName(p.Listener)}
 	}
 	if len(p.IPAllowList) > 0 {
 		add("-allow", ingressMiddleware{IPAllowList: map[string]any{"sourceRange": p.IPAllowList}})

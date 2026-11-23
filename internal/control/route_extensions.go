@@ -73,6 +73,12 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 			policy.CertificateID, policy.CertificateSource = previous.CertificateID, previous.CertificateSource
 		}
 	}
+	if !provided("visibility", incoming.Visibility != "") && !provided("listener", incoming.Listener != "") {
+		if ambiguous && (policy.Visibility != previous.Visibility || policy.Listener != previous.Listener) {
+			return errors.New("set route visibility and listener explicitly when changing paths with different privacy settings")
+		}
+		policy.Visibility, policy.Listener = previous.Visibility, previous.Listener
+	}
 	if !provided("forward_auth", incoming.ForwardAuth != nil) {
 		if ambiguous && !reflect.DeepEqual(policy.ForwardAuth, previous.ForwardAuth) {
 			return errors.New("set forward-auth explicitly when changing a path with different route protections")
@@ -91,7 +97,7 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 		}
 		policy.ErrorPages = previous.ErrorPages
 	}
-	if target.Policy != nil || policy.CertificateSource == "default" || policy.CertificateID != "" || policy.ForwardAuth != nil || policy.Maintenance != nil || policy.ErrorPages != nil {
+	if target.Policy != nil || policy.Visibility != "" || policy.Listener != "" || policy.CertificateSource == "default" || policy.CertificateID != "" || policy.ForwardAuth != nil || policy.Maintenance != nil || policy.ErrorPages != nil {
 		target.Policy = &policy
 	}
 	return nil

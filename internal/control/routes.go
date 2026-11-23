@@ -302,6 +302,14 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 	if !s.checkRouteClaims(w, r.Context(), tx, id, routes) {
 		return
 	}
+	var routeNode string
+	if err := tx.QueryRow(r.Context(), "SELECT node_id FROM workloads WHERE id=$1", id).Scan(&routeNode); err != nil {
+		http.Error(w, "worker unavailable", 503)
+		return
+	}
+	if !s.checkPrivateRouteSelection(w, r, routeNode, routes) {
+		return
+	}
 	attempted, err := deployAttempted(r.Context(), tx, id)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)

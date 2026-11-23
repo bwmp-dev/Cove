@@ -322,7 +322,7 @@ func (s *Server) reconcileResourceDNS(ctx context.Context, zone, team string, ex
 		return errors.New("resource configuration unavailable")
 	}
 	for _, route := range config.Routes {
-		if cloudflareDomainAllowed(domains, route.Domain) {
+		if (route.Policy == nil || route.Policy.Visibility == "" || route.Policy.Visibility == "public") && cloudflareDomainAllowed(domains, route.Domain) {
 			if err = s.reconcileDNSRecord(ctx, c, route.Domain, c.Nodes[node]); err != nil {
 				return err
 			}

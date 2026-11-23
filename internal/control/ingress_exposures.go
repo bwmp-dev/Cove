@@ -21,7 +21,7 @@ func (s *Server) planIngressExposures(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &settings) {
 		return
 	}
-	s.ingressExposureRPC(w, r, worker.RPCRequest{Method: "ingress_exposures_plan", Exposures: &worker.IngressExposureRequest{Settings: settings}})
+	s.withIngressListenerClaims(w, r, settings, worker.RPCRequest{Method: "ingress_exposures_plan", Exposures: &worker.IngressExposureRequest{Settings: settings}})
 }
 
 func (s *Server) changeIngressExposures(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +33,7 @@ func (s *Server) changeIngressExposures(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "a reviewed listener plan and confirmation of the shared proxy interruption are required", 400)
 		return
 	}
-	s.ingressExposureRPC(w, r, worker.RPCRequest{Method: "ingress_exposures_apply", Exposures: &request})
+	s.withIngressListenerClaims(w, r, request.Settings, worker.RPCRequest{Method: "ingress_exposures_apply", Exposures: &request})
 }
 
 func (s *Server) ingressExposureRPC(w http.ResponseWriter, r *http.Request, request worker.RPCRequest) {

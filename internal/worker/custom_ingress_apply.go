@@ -405,6 +405,15 @@ func (e *Engine) ChangeIngressConfig(ctx context.Context, r IngressConfigRequest
 	if err != nil {
 		return refused("", "custom proxy configuration state is unreadable")
 	}
+	routes, err := e.loadIngress()
+	if err != nil {
+		return refused("unavailable", "managed route inventory is unreadable")
+	}
+	if r.Content != nil {
+		if err := validatePrivateCustomConfig(*r.Content, len(privateRouteGuards(routes)) > 0); err != nil {
+			return refused("invalid", err.Error())
+		}
+	}
 	digest := ingressDigest(r)
 	if r.Action != "validate" {
 		if j := state.Change; j != nil && j.ID == r.ChangeID {

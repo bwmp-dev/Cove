@@ -26,6 +26,11 @@ type routeCertificateProbe struct {
 
 func RouteProtocol(routes []Route) int {
 	for _, route := range routes {
+		if route.Policy != nil && (route.Policy.Visibility != "" || route.Policy.Listener != "") {
+			return 5
+		}
+	}
+	for _, route := range routes {
 		if strings.HasPrefix(route.Domain, "*.") || route.Policy != nil && route.Policy.CertificateSource == "default" {
 			return 4
 		}

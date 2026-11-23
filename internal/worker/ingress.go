@@ -71,6 +71,9 @@ func ValidateRoutes(routes []Route, kind string) error {
 		certificates[route.Domain] = selection
 		seen[key] = true
 	}
+	if err := validateRouteVisibilities(routes); err != nil {
+		return err
+	}
 	for _, wildcard := range routes {
 		if !strings.HasPrefix(wildcard.Domain, "*.") {
 			continue
@@ -111,6 +114,7 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 			}
 		}
 	}
+	config.addPrivateDenials(routes)
 	// Traefik rejects empty nested maps as standalone configuration elements.
 	if len(config.HTTP.Routers) == 0 {
 		return "{}", nil
@@ -339,6 +343,9 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	if err := e.ensureIngress(ctx, out); err != nil {
 		return err
 	}
+	if err := e.validatePrivateIngress(ctx, routes); err != nil {
+		return err
+	}
 	config, err := e.ingressTraffic(ctx, routes, out)
 	if err != nil {
 		return err
@@ -438,7 +445,11 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 	for attempt := 0; attempt < 30; attempt++ {
 		current, readErr := e.output(ctx, "docker", "exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers")
 		if readErr == nil && ingressAccepted(current, desired) {
-			if certificateErr = e.confirmRouteCertificates(ctx, routes); certificateErr == nil {
+			certificateErr = e.validatePrivateIngress(ctx, routes)
+			if certificateErr == nil {
+				certificateErr = e.confirmRouteCertificates(ctx, routes)
+			}
+			if certificateErr == nil {
 				return e.pruneRouteAuxiliary(ctx, desired, out)
 			}
 		}
@@ -775,6 +786,7 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		Rule        string
 		Service     string
 		Middlewares []string
+		EntryPoints []string
 		Priority    int
 	}
 	if json.Unmarshal([]byte(data), &routers) != nil {
@@ -788,6 +800,9 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		name := strings.TrimSuffix(router.Name, "@file")
 		want, ok := desired.HTTP.Routers[name]
 		if !ok || router.Status != "enabled" || router.Rule != want.Rule || strings.TrimSuffix(router.Service, "@file") != want.Service || len(router.Middlewares) != len(want.Middlewares) {
+			return false
+		}
+		if !slices.Equal(router.EntryPoints, want.EntryPoints) {
 			return false
 		}
 		if want.Priority != 0 && router.Priority != want.Priority {

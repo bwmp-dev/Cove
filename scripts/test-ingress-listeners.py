@@ -1,9 +1,13 @@
 from pathlib import Path
 import os
+import argparse
 import secrets
 import subprocess
 import tempfile
 import time
+parser = argparse.ArgumentParser()
+parser.add_argument("pattern", nargs="?", default="^TestIngress(Proxy|Exposure)")
+selection = parser.parse_args().pattern
 root = Path(__file__).resolve().parent.parent
 scratch = Path(tempfile.mkdtemp(prefix='cove-proxy-replay-'))
 owner = 'cove-proxy-replay-' + secrets.token_hex(6)
@@ -20,8 +24,8 @@ try:
     env = os.environ | {'GOOS': 'linux', 'GOARCH': 'amd64', 'CGO_ENABLED': '0'}
     run('go', '-C', 'test/ingress-client', 'build', '-o', str(scratch / 'ingress-client'), '.', env=env)
     run('go', 'test', '-c', '-o', str(scratch / 'worker.test'), './internal/worker', env=env)
-    run('docker', 'image', 'inspect', 'docker:29-dind', 'docker:29-cli', 'traefik:v3.7.19', stdout=subprocess.DEVNULL)
-    run('docker', 'save', '-o', str(scratch / 'images.tar'), 'traefik:v3.7.19')
+    run('docker', 'image', 'inspect', 'docker:29-dind', 'docker:29-cli', 'traefik:v3.7.19', 'busybox:1.37', stdout=subprocess.DEVNULL)
+    run('docker', 'save', '-o', str(scratch / 'images.tar'), 'traefik:v3.7.19', 'busybox:1.37')
     run('docker', 'network', 'create', '--internal', '--label', label, network, stdout=subprocess.DEVNULL)
     net = True
     made.append(daemon)
@@ -36,7 +40,7 @@ try:
         run('docker', 'exec', '-i', daemon, 'docker', 'load', stdin=images, stdout=subprocess.DEVNULL)
     made.append(client)
     with (scratch / 'result.log').open('wb') as out:
-        result = subprocess.run(('docker', 'run', '--rm', '--name', client, '--label', label, '--network', network, '-e', 'DOCKER_HOST=tcp://daemon:2375', '-e', 'DOCKER_TLS_CERTDIR=', '-e', 'COVE_TEST_PROXY_SNAPSHOT_DOCKER=1', '-e', 'COVE_TEST_PROXY_SNAPSHOT_REPLAY=1', '-e', 'COVE_TEST_PROXY_RECOVERY_DOCKER=1', '-e', 'COVE_TEST_HTTP3_CLIENT=/tests/ingress-client', '--mount', 'type=bind,source=' + str(scratch) + ',target=/tests,readonly', 'docker:29-cli', '/tests/worker.test', '-test.v', '-test.run', '^TestIngress(Proxy|Exposure)', '-test.timeout', '4m'), cwd=root, stdout=out, stderr=subprocess.STDOUT)
+        result = subprocess.run(('docker', 'run', '--rm', '--name', client, '--label', label, '--network', network, '-e', 'DOCKER_HOST=tcp://daemon:2375', '-e', 'DOCKER_TLS_CERTDIR=', '-e', 'COVE_TEST_PROXY_SNAPSHOT_DOCKER=1', '-e', 'COVE_TEST_PROXY_SNAPSHOT_REPLAY=1', '-e', 'COVE_TEST_PROXY_RECOVERY_DOCKER=1', '-e', 'COVE_TEST_HTTP3_CLIENT=/tests/ingress-client', '--mount', 'type=bind,source=' + str(scratch) + ',target=/tests,readonly', 'docker:29-cli', '/tests/worker.test', '-test.v', '-test.run', selection, '-test.timeout', '4m'), cwd=root, stdout=out, stderr=subprocess.STDOUT)
     print((scratch / 'result.log').read_text(errors='replace'))
     print('Artifact:', scratch)
     if result.returncode:

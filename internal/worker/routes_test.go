@@ -128,7 +128,7 @@ func (d *fakeDocker) run(_ context.Context, _ string, args, _ []string, out io.W
 		}
 		routers := []map[string]any{}
 		for name, router := range config.HTTP.Routers {
-			routers = append(routers, map[string]any{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service + "@file", "middlewares": router.Middlewares})
+			routers = append(routers, map[string]any{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service + "@file", "middlewares": router.Middlewares, "entryPoints": router.EntryPoints})
 		}
 		return json.NewEncoder(out).Encode(routers)
 	}

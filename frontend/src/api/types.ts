@@ -238,7 +238,14 @@ export interface RoutePolicy {
   certificate_id?: string | null;
   upstreams?: RouteUpstream[];
   sticky?: boolean;
+  // Route protocol 5. A private route ("lan" or "tailscale") is served only on the named managed HTTPS listener of the
+  // same visibility. While both are omitted the API keeps the hostname's saved values, so switching a private hostname
+  // back to public sends "public" with a null listener.
+  visibility?: RouteVisibility;
+  listener?: string | null;
 }
+
+export type RouteVisibility = "public" | "lan" | "tailscale";
 
 // Public metadata of a certificate stored for a resource. The certificate chain and private key are never returned.
 export interface RouteCertificate {

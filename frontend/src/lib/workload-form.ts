@@ -1,5 +1,7 @@
-import type { GitSourceInput, Route, RouteCertificate, RouteForwardAuth, RoutePolicy, Workload, WorkloadInput, WorkloadKind } from "../api/types";
+import type { Listener } from "../api/ingress-listeners";
+import type { GitSourceInput, Route, RouteCertificate, RouteForwardAuth, RoutePolicy, RouteVisibility, Workload, WorkloadInput, WorkloadKind } from "../api/types";
 import { ownershipProblem, wildcardCovers } from "./certificates";
+import { formatBinding, listenerName } from "./ingress-listeners";
 import type { ResourceDraft } from "./templates";
 
 export interface EnvRow {
@@ -252,6 +254,10 @@ export interface PolicyDraft {
   certificateId: string;
   upstreams: UpstreamRow[];
   sticky: boolean;
+  // Empty keeps an omitted visibility omitted (public). "public" is kept only when it was saved explicitly.
+  visibility: "" | RouteVisibility;
+  // The managed listener of a private route; kept as loaded even when the node's listeners cannot be read.
+  listener: string;
 }
 
 export interface RouteRow {
@@ -271,7 +277,7 @@ export function emptyForwardAuth(): ForwardAuthDraft {
 }
 
 export function emptyPolicy(): PolicyDraft {
-  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", certificateId: "", upstreams: [], sticky: false };
+  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", certificateId: "", upstreams: [], sticky: false, visibility: "", listener: "" };
 }
 
 function headerRows(headers: Record<string, string> | undefined): HeaderRow[] {
@@ -307,6 +313,8 @@ function policyDraft(policy: RoutePolicy): PolicyDraft {
     certificateId: policy.certificate_id ?? "",
     upstreams: (policy.upstreams ?? []).map((target) => ({ id: crypto.randomUUID(), ...target })),
     sticky: policy.sticky ?? false,
+    visibility: policy.visibility ?? "",
+    listener: policy.listener ?? "",
   };
 }
 
@@ -366,6 +374,8 @@ function policyOf(draft: PolicyDraft): RoutePolicy | undefined {
   if (draft.certificateSource === "uploaded") policy.certificate_id = draft.certificateId;
   if (draft.upstreams.length > 0) policy.upstreams = draft.upstreams.map((target) => ({ service: target.service.trim(), port: target.port }));
   if (draft.sticky) policy.sticky = true;
+  if (draft.visibility) policy.visibility = draft.visibility;
+  if (isPrivateVisibility(draft.visibility)) policy.listener = draft.listener;
   return Object.keys(policy).length > 0 ? policy : undefined;
 }
 
@@ -375,6 +385,10 @@ function routeOf(row: RouteRow): Route {
   const policy = row.policy && policyOf(row.policy);
   if (policy) route.policy = policy;
   return route;
+}
+
+export function isPrivateVisibility(visibility: string | undefined): visibility is "lan" | "tailscale" {
+  return visibility === "lan" || visibility === "tailscale";
 }
 
 export function routesUsePolicies(rows: RouteRow[]) {
@@ -394,15 +408,22 @@ const extensionFields = ["maintenance", "error_pages", "forward_auth"] as const;
 // The API keeps a saved extension when its field is omitted on the same hostname, so a removed one, or one on a route
 // that was deleted and added again, must be sent as null. It also keeps a saved stored certificate or proxy default
 // choice while both certificate_source and certificate_id are omitted, so that selection is cleared with a null
-// certificate_id. Routes on hostnames without saved extensions or certificate choices keep the shape older workers accept.
+// certificate_id. A saved private visibility is kept the same way, so a hostname switched back to public names
+// "public" with a null listener. Routes on hostnames without saved extensions, certificate choices or privacy keep the
+// shape older workers accept.
 function withRemovals(route: Route, saved: Route[]): Route {
   const matches = saved.filter((item) => item.domain === route.domain);
   const removed = extensionFields.filter((field) => route.policy?.[field] === undefined && matches.some((item) => item.policy?.[field] != null));
   const certificateRemoved = route.policy?.certificate_source === undefined && matches.some((item) => item.policy?.certificate_id || item.policy?.certificate_source === "default");
-  if (removed.length === 0 && !certificateRemoved) return route;
+  const privacyRemoved = route.policy?.visibility === undefined && matches.some((item) => isPrivateVisibility(item.policy?.visibility) || item.policy?.listener);
+  if (removed.length === 0 && !certificateRemoved && !privacyRemoved) return route;
   const policy: RoutePolicy = { ...route.policy };
   for (const field of removed) policy[field] = null;
   if (certificateRemoved) policy.certificate_id = null;
+  if (privacyRemoved) {
+    policy.visibility = "public";
+    policy.listener = null;
+  }
   return { ...route, policy };
 }
 
@@ -697,6 +718,66 @@ function wildcardErrors(rows: RouteRow[], routes: Route[], errors: Record<string
   });
 }
 
+export const visibilityNames: Record<RouteVisibility, string> = { public: "Public", lan: "LAN", tailscale: "Tailscale" };
+
+export function listenerBindings(listener: Listener) {
+  return listener.bindings.length > 0 ? listener.bindings.map(formatBinding).join(", ") : "no bindings";
+}
+
+// "LAN only via office (192.168.10.2:8443)" for a saved or edited private route; empty for a public one.
+export function visibilitySummary(policy: Pick<RoutePolicy, "visibility" | "listener"> | undefined, list?: Listener[]) {
+  const visibility = policy?.visibility;
+  if (!isPrivateVisibility(visibility)) return "";
+  const id = policy?.listener ?? "";
+  if (!id) return `${visibilityNames[visibility]} only, no listener selected`;
+  const listener = list?.find((item) => item.id === id);
+  return `${visibilityNames[visibility]} only via ${id}${listener ? ` (${listenerBindings(listener)})` : ""}`;
+}
+
+function privacyOf(route: Route) {
+  const visibility = route.policy?.visibility || "public";
+  return { visibility, listener: isPrivateVisibility(visibility) ? (route.policy?.listener ?? "") : "" };
+}
+
+function overlaps(a: string, b: string) {
+  return a === b || wildcardCovers(a, b) || wildcardCovers(b, a);
+}
+
+// Mirrors the worker: a private route needs an explicit managed HTTPS listener of the same visibility and a stored or
+// proxy default certificate, and every path and overlapping wildcard of a hostname shares one visibility and listener.
+// listeners: the node's saved listeners; undefined while they are unknown, which leaves listener checks to the API.
+// New privacy settings need route protocol 5; saved ones on an older worker are kept for the control plane to reject.
+function visibilityErrors(rows: RouteRow[], routes: Route[], saved: Route[], routeProtocol: number | undefined, listeners: Listener[] | undefined, errors: Record<string, string>) {
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route || errors[row.id]) return;
+    const { visibility, listener } = privacyOf(route);
+    const savedPrivacy = saved.filter((item) => item.domain === route.domain).map(privacyOf);
+    const changed = route.policy?.visibility !== undefined && !savedPrivacy.some((item) => item.visibility === visibility && item.listener === listener);
+    if (changed && routeProtocol !== undefined && routeProtocol < 5) {
+      errors[`${row.id}.visibility`] = "Private routing needs a newer worker on this node. Upgrade it and verify the node again.";
+      return;
+    }
+    const other = routes.find((item, position) => position < index && overlaps(item.domain, route.domain) && (privacyOf(item).visibility !== visibility || privacyOf(item).listener !== listener));
+    if (other) {
+      const message = other.domain === route.domain ? `Every path on ${route.domain} must use the same visibility and listener.` : `${route.domain} overlaps ${other.domain}, so both must use the same visibility and listener.`;
+      if (row.policy) errors[`${row.id}.visibility`] = message;
+      else errors[row.id] = `${message} Set it under Advanced routing.`;
+      return;
+    }
+    if (!isPrivateVisibility(visibility)) return;
+    if (listener === "") errors[`${row.id}.listener`] = "Choose the listener that serves this hostname.";
+    else if (!listenerName.test(listener)) errors[`${row.id}.listener`] = "This listener ID is not valid. Choose a listener from the node.";
+    else if (listeners) {
+      const match = listeners.find((item) => item.id === listener);
+      if (!match) errors[`${row.id}.listener`] = `Listener ${listener} is not configured on this node. Choose another listener or make the route public.`;
+      else if (match.protocol !== "https" || match.visibility !== visibility) errors[`${row.id}.listener`] = `Listener ${listener} is not a ${visibilityNames[visibility]} HTTPS listener. Choose another listener.`;
+    }
+    const source = route.policy?.certificate_source;
+    if (source !== "default" && source !== "uploaded") errors[`${row.id}.certificate`] ??= "Private routes cannot use Let's Encrypt. Choose the proxy default certificate or a stored certificate.";
+  });
+}
+
 // Whether the routes use anything that needs route protocol 4: a wildcard hostname or the proxy default certificate.
 export function routesNeedProtocol4(rows: RouteRow[]) {
   return rows.some((row) => isWildcardHostname(row.domain.trim()) || row.policy?.certificateSource === "default");
@@ -705,8 +786,8 @@ export function routesNeedProtocol4(rows: RouteRow[]) {
 // Mirrors the worker's route validation so mistakes are reported next to the field before saving. Hostname, service
 // and port errors are keyed by the row id; policy errors by "<row id>.<field>". Pass the saved routes when editing so
 // removed maintenance, error page and forward-auth settings are sent as explicit nulls, and the resource's uploaded
-// certificates so their hostname rules are checked.
-export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number): { routes?: Route[]; errors: Record<string, string> } {
+// certificates so their hostname rules are checked, and the node's listeners once they are known.
+export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number, listeners?: Listener[]): { routes?: Route[]; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   const seen = new Set<string>();
   const routes = rows.map((row) => {
@@ -726,16 +807,17 @@ export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificat
   certificateErrors(rows, routes, certificates, errors);
   protocolErrors(rows, routes, saved, routeProtocol, errors);
   wildcardErrors(rows, routes, errors);
+  visibilityErrors(rows, routes, saved, routeProtocol, listeners, errors);
   return Object.keys(errors).length > 0 ? { errors } : { routes: routes.map((route) => withRemovals(route, saved)), errors };
 }
 
-// Certificate errors shown after a save attempt depend on the selected certificate and on every route's hostname, so
-// they are re-checked against the edited rows: an error for a choice that was replaced is cleared or updated. Other
-// errors stay until the next save, and no certificate error appears on a row that had none.
-export function refreshCertificateErrors(errors: Record<string, string>, rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number) {
-  const shown = Object.keys(errors).filter((key) => key.endsWith(".certificate"));
+// Certificate, visibility and listener errors shown after a save attempt depend on the selected choice and on every
+// route's hostname, so they are re-checked against the edited rows: an error for a choice that was replaced is cleared
+// or updated. Other errors stay until the next save, and no such error appears on a row that had none.
+export function refreshCertificateErrors(errors: Record<string, string>, rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number, listeners?: Listener[]) {
+  const shown = Object.keys(errors).filter((key) => key.endsWith(".certificate") || key.endsWith(".visibility") || key.endsWith(".listener"));
   if (shown.length === 0) return errors;
-  const current = validateRoutes(rows, saved, certificates, routeProtocol).errors;
+  const current = validateRoutes(rows, saved, certificates, routeProtocol, listeners).errors;
   const next = { ...errors };
   for (const key of shown) {
     if (current[key]) next[key] = current[key];
