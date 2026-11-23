@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || ((os.Args[1] == "tunnel" || os.Args[1] == "snapshot-reap") && len(os.Args) != 3) || ((os.Args[1] != "tunnel" && os.Args[1] != "snapshot-reap") && len(os.Args) != 2) {
+	if len(os.Args) < 2 || ((os.Args[1] == "firewall-revert" || os.Args[1] == "firewall-restore") && len(os.Args) != 4) || ((os.Args[1] == "tunnel" || os.Args[1] == "snapshot-reap") && len(os.Args) != 3) || ((os.Args[1] != "tunnel" && os.Args[1] != "snapshot-reap" && os.Args[1] != "firewall-revert" && os.Args[1] != "firewall-restore") && len(os.Args) != 2) {
 		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
@@ -18,6 +18,12 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "host-firewall":
+		err = worker.RunHostFirewall(ctx, os.Stdin, os.Stdout)
+	case "firewall-revert":
+		err = worker.RunFirewallRevert(ctx, os.Args[2], os.Args[3])
+	case "firewall-restore":
+		err = worker.RunFirewallRestore(ctx, os.Args[2], os.Args[3])
 	case "host-maintenance":
 		err = worker.RunHostMaintenance(ctx, os.Stdin, os.Stdout)
 	case "pitr-fetch":

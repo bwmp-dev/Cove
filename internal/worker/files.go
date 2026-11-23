@@ -120,7 +120,7 @@ func (e *Engine) fileOperation(ctx context.Context, workload string, r FileReque
 		return nil, err
 	}
 	e.mu.Lock()
-	busy := e.busy(workload) || e.draining || len(e.active) >= 4
+	busy := e.busy(workload) || e.draining || e.hostChanging || len(e.active) >= 4
 	for _, op := range e.pending {
 		if op.Workload == workload {
 			busy = true

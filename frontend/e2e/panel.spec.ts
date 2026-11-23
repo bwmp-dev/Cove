@@ -2359,3 +2359,203 @@ test("administrator password rotation signs out every session", async ({ page })
   await signIn(page);
   await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
 });
+
+// Browser checks never send a firewall change to a real host: supported states are mocked, and the real worker is only inspected.
+const firewallPath = /\/api\/nodes\/[^/]+\/firewall(?:\/preview)?$/;
+
+async function fixtureNode(page: Page) {
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; name: string; capabilities: { firewall?: boolean } | null }[];
+  const node = nodes.find((item) => item.name === "ready-browser-worker");
+  if (!node) throw new Error("Fixture worker node missing");
+  return node;
+}
+
+test("host firewall previews, applies with typed confirmation and reverts pending changes in every mocked state", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/nodes"); await signIn(page);
+  const node = await fixtureNode(page);
+  expect(node.capabilities?.firewall).toBe(true);
+
+  const base = {
+    supported: true, active: true, revision: "", limited: false, notice: "", last_error: "",
+    rules: [{ protocol: "tcp", port: 8080, sources: ["192.0.2.0/24"] }],
+    available: [{ protocol: "tcp", port: 8080 }, { protocol: "udp", port: 5353 }, { protocol: "tcp", port: 2222 }],
+    reserved: [22, 80, 443, 2222],
+    ufw: "Status: active\nLogging: on (low)\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n\nTo                         Action      From\n--                         ------      ----\n22/tcp                     ALLOW IN    Anywhere",
+    nftables: "table inet filter {\n chain input {\n  type filter hook input priority filter; policy accept;\n }\n}",
+  };
+  const revision = "b".repeat(64);
+  let current: Record<string, unknown> = base;
+  const posts: { url: string; body: unknown }[] = [];
+  let releaseApply: (() => void) | undefined;
+  let applyResponse: { status: number; body: unknown } = { status: 200, body: base };
+  await page.route(firewallPath, async (route) => {
+    const request = route.request();
+    if (request.method() === "GET") return route.fulfill({ json: current, headers: { "Cache-Control": "no-store" } });
+    const body = request.postDataJSON() as { rules?: unknown[]; revert?: boolean };
+    posts.push({ url: new URL(request.url()).pathname, body });
+    if (request.url().endsWith("/preview")) return route.fulfill({ json: { ...current, rules: body.rules, revision } });
+    if (!body.revert) await new Promise<void>((resolve) => { releaseApply = resolve; });
+    if (applyResponse.status !== 200) return route.fulfill({ status: applyResponse.status, contentType: "text/plain", body: String(applyResponse.body) });
+    return route.fulfill({ json: applyResponse.body });
+  });
+
+  await page.goto(`/nodes/${node.id}`);
+  const section = page.getByRole("region", { name: "Host firewall" });
+  await expect(section.getByText(/Not inspected yet/)).toBeVisible();
+  await section.scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "firewall-not-inspected");
+  await section.getByRole("button", { name: "Inspect", exact: true }).click();
+  await expect(section.getByRole("list", { name: "Current Cove rules" })).toContainText("192.0.2.0/24");
+  await expect(section.getByText("(protected)")).toBeVisible();
+  await section.getByText("UFW status", { exact: true }).click();
+  const ufw = section.getByRole("region", { name: "UFW status" });
+  await ufw.focus();
+  await expect(ufw).toBeFocused();
+  await capture(page, testInfo, "firewall-inspected");
+
+  // Edit, preview, then change a field: the earlier preview must be discarded and a new one requested.
+  await section.getByRole("button", { name: "Edit rules", exact: true }).click();
+  const sources = section.getByLabel("Allowed sources");
+  await sources.fill("198.51.100.0/24\n2001:db8::/32");
+  await section.getByRole("button", { name: "Add rule", exact: true }).click();
+  await expect(section.getByLabel("Port")).toHaveCount(2);
+  await capture(page, testInfo, "firewall-editor");
+  await section.getByRole("button", { name: "Preview change", exact: true }).click();
+  let dialog = page.getByRole("dialog", { name: "Apply this firewall policy?" });
+  await expect(dialog).toContainText("2001:db8::/32");
+  await expect(dialog).toContainText("Denies all new connections");
+  await capture(page, testInfo, "firewall-preview");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await section.getByRole("button", { name: /Remove rule for UDP 5353/ }).click();
+  await section.getByRole("button", { name: "Preview change", exact: true }).click();
+  dialog = page.getByRole("dialog", { name: "Apply this firewall policy?" });
+  await expect(dialog).not.toContainText("Denies all new connections");
+  expect(posts.map((post) => post.url)).toEqual([`/api/nodes/${node.id}/firewall/preview`, `/api/nodes/${node.id}/firewall/preview`]);
+
+  // The typed node name gates the keyboard path as well as the button.
+  const confirm = dialog.getByLabel(`Type ${node.name} to confirm`);
+  await confirm.fill(node.name.slice(0, -1));
+  await confirm.press("Enter");
+  await expect(dialog.getByRole("button", { name: "Apply firewall change", exact: true })).toBeDisabled();
+  expect(posts).toHaveLength(2);
+  await confirm.fill(node.name);
+  applyResponse = { status: 200, body: { ...base, rules: [{ protocol: "tcp", port: 8080, sources: ["198.51.100.0/24", "2001:db8::/32"] }] } };
+  await confirm.press("Enter");
+  await expect(section.getByText("Applying the firewall change", { exact: true })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Inspect again", exact: true })).toBeDisabled();
+  await capture(page, testInfo, "firewall-applying");
+  expect(posts[2]).toEqual({ url: `/api/nodes/${node.id}/firewall`, body: { rules: [{ protocol: "tcp", port: 8080, sources: ["198.51.100.0/24", "2001:db8::/32"] }], revision, confirm: true } });
+  current = applyResponse.body as Record<string, unknown>;
+  releaseApply?.();
+  await expect(section.getByText("Firewall change confirmed", { exact: true })).toBeVisible();
+  await expect(section.getByText(/protected boot service restores this policy/)).toBeVisible();
+  await capture(page, testInfo, "firewall-confirmed");
+
+  // An ambiguous failure re-inspects once, finds the unconfirmed change and never retries by itself.
+  await section.getByRole("button", { name: "Edit rules", exact: true }).click();
+  await section.getByLabel("Allowed sources").fill("203.0.113.0/24");
+  await section.getByRole("button", { name: "Preview change", exact: true }).click();
+  dialog = page.getByRole("dialog", { name: "Apply this firewall policy?" });
+  await dialog.getByLabel(`Type ${node.name} to confirm`).fill(node.name);
+  applyResponse = { status: 502, body: "firewall confirmation could not be verified; refresh before retrying and inspect the recovery deadline" };
+  await dialog.getByRole("button", { name: "Apply firewall change", exact: true }).click();
+  await expect(section.getByText("Applying the firewall change", { exact: true })).toBeVisible();
+  current = { ...base, rules: [{ protocol: "tcp", port: 8080, sources: ["203.0.113.0/24"] }], pending: { id: "c".repeat(32), deadline: new Date(Date.now() + 120_000).toISOString() } };
+  releaseApply?.();
+  await expect(section.getByText("The firewall change could not be confirmed", { exact: true })).toBeVisible();
+  await expect(section.getByText(/may or may not have been applied/)).toBeVisible();
+  await expect(section.getByText("Unconfirmed firewall change", { exact: true })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Edit rules", exact: true })).toBeDisabled();
+  await capture(page, testInfo, "firewall-pending");
+  const applies = posts.filter((post) => post.url === `/api/nodes/${node.id}/firewall`);
+  expect(applies).toHaveLength(2);
+
+  // Revert needs explicit confirmation; cancelling sends nothing.
+  await section.getByRole("button", { name: "Revert change", exact: true }).click();
+  const revertDialog = page.getByRole("dialog", { name: "Revert the unconfirmed firewall change?" });
+  await revertDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(posts.filter((post) => (post.body as { revert?: boolean }).revert)).toHaveLength(0);
+  await section.getByRole("button", { name: "Revert change", exact: true }).click();
+  const reverted = { ...base, last_error: "The unconfirmed firewall change was reverted." };
+  applyResponse = { status: 200, body: reverted };
+  current = reverted;
+  await revertDialog.getByRole("button", { name: "Revert change", exact: true }).click();
+  await expect(section.getByText("Unconfirmed change reverted", { exact: true })).toBeVisible();
+  await expect(section.getByText("Last recovery note", { exact: true })).toBeVisible();
+  expect(posts.at(-1)?.body).toEqual({ revert: true, confirm: true });
+  await capture(page, testInfo, "firewall-reverted");
+
+  // Long policies wrap inside the section; unsupported hosts stay read-only.
+  current = {
+    ...base,
+    rules: Array.from({ length: 32 }, (_, index) => ({ protocol: index % 2 ? "udp" : "tcp", port: 10000 + index, sources: index === 0 ? Array.from({ length: 32 }, (_, n) => `2001:db8:${n.toString(16)}:ffff:ffff:ffff:ffff:0/112`) : index % 3 ? [`198.51.${index}.0/24`] : [] })),
+    available: Array.from({ length: 40 }, (_, index) => ({ protocol: index % 2 ? "udp" : "tcp", port: 10000 + index })),
+    nftables: "table inet filter {}\n".repeat(400), limited: true,
+  };
+  await section.getByRole("button", { name: "Inspect again", exact: true }).click();
+  await expect(section.getByRole("list", { name: "Current Cove rules" }).locator(":scope > li")).toHaveCount(32);
+  await expect(section.getByText(/clipped at the inspection limit/)).toBeVisible();
+  await capture(page, testInfo, "firewall-long");
+  current = { ...base, supported: false, active: false, rules: null, available: null, reserved: null, notice: "A running host systemd manager is required for independent timed firewall recovery." };
+  await section.getByRole("button", { name: "Inspect again", exact: true }).click();
+  await expect(section.getByText("Firewall changes are unavailable on this host", { exact: true })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Edit rules", exact: true })).toBeDisabled();
+  await capture(page, testInfo, "firewall-unsupported");
+  expect(errors).toEqual([]);
+});
+
+test("host firewall inspects the real worker read-only and the browser never sends a change", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const inspections: number[] = [];
+  const blocked: string[] = [];
+  // Any write is aborted before it leaves the browser, so this test cannot change the real host's firewall.
+  await page.route(firewallPath, (route) => {
+    if (route.request().method() === "GET") return route.continue();
+    blocked.push(route.request().url());
+    return route.abort();
+  });
+  page.on("response", (response) => { if (firewallPath.test(new URL(response.url()).pathname) && response.request().method() === "GET") inspections.push(response.status()); });
+
+  await page.goto("/nodes"); await signIn(page);
+  const node = await fixtureNode(page);
+  expect(node.capabilities?.firewall).toBe(true);
+  await page.goto(`/nodes/${node.id}`);
+  const section = page.getByRole("region", { name: "Host firewall" });
+  await expect(section.getByText(/Not inspected yet/)).toBeVisible();
+  expect(inspections).toEqual([]);
+
+  const first = page.waitForResponse((response) => response.url().endsWith(`/api/nodes/${node.id}/firewall`) && response.request().method() === "GET", { timeout: 120_000 });
+  await section.getByRole("button", { name: "Inspect", exact: true }).click();
+  const response = await first;
+  expect(response.headers()["cache-control"]).toBe("no-store");
+  if (response.status() !== 200) {
+    // A refusal such as a busy or unsupported worker is shown as an error with its message and is never retried automatically.
+    testInfo.annotations.push({ type: "firewall", description: `${response.status()} ${await response.text()}` });
+    await expect(section.getByText("Could not load the firewall status", { exact: true })).toBeVisible();
+  } else {
+    const status = await response.json() as { supported: boolean; active: boolean; rules: unknown[] | null; available: unknown[] | null; reserved: number[] | null; notice: string; pending?: unknown; limited: boolean };
+    testInfo.annotations.push({ type: "firewall", description: JSON.stringify({ ...status, ufw: undefined, nftables: undefined }) });
+    if (!status.supported) {
+      await expect(section.getByText("Firewall changes are unavailable on this host", { exact: true })).toBeVisible();
+      await expect(section.getByRole("button", { name: "Edit rules", exact: true })).toBeDisabled();
+      if (status.notice) await expect(section.getByText(status.notice, { exact: false }).first()).toBeVisible();
+    }
+    expect(status.pending).toBeUndefined();
+    for (const port of status.reserved ?? []) await expect(section.getByText(String(port), { exact: true }).first()).toBeVisible();
+    await section.getByText("nftables ruleset", { exact: true }).click();
+    await expect(section.getByRole("region", { name: "nftables ruleset" })).toBeVisible();
+  }
+  await section.scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "firewall-real");
+  await expect(section.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled();
+  await page.waitForTimeout(1_000);
+  expect(inspections).toHaveLength(1);
+  expect(blocked).toEqual([]);
+  expect(errors).toEqual([]);
+});

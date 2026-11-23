@@ -128,6 +128,7 @@ type Engine struct {
 	pending       []Operation
 	fatal         chan error
 	draining      bool
+	hostChanging  bool
 	cancels       map[string]context.CancelFunc
 	recovering    map[string]routeRecovery
 	// A custom proxy configuration change that did not commit is restored until it settles.
@@ -526,7 +527,7 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 		e.customRunning = true
 		jobs.Go(func() { e.runCustomRecovery(ctx) })
 	}
-	if e.draining {
+	if e.draining || e.hostChanging {
 		return nil
 	}
 	sort.Slice(e.pending, func(i, j int) bool { return e.pending[i].CreatedAt.Before(e.pending[j].CreatedAt) })

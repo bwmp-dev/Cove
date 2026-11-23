@@ -15,6 +15,7 @@ import (
 )
 
 type RPCRequest struct {
+	Firewall        *FirewallControl        `json:"firewall,omitempty"`
 	HostMaintenance *HostMaintenanceRequest `json:"host_maintenance,omitempty"`
 	Identity        *IdentityRequest        `json:"identity,omitempty"`
 	Snapshot        *VolumeSnapshotConfig   `json:"snapshot,omitempty"`
@@ -36,6 +37,7 @@ type RPCRequest struct {
 	ID              string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	Firewall      *FirewallResult       `json:"firewall,omitempty"`
 	HostPatches   *HostPatchStatus      `json:"host_patches,omitempty"`
 	Identity      *IdentityState        `json:"identity,omitempty"`
 	PITR          *PITRStatus           `json:"pitr,omitempty"`
@@ -71,6 +73,16 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "firewall":
+		if r.Firewall == nil {
+			return RPCResponse{Error: "firewall options required"}
+		}
+		state, err := e.ConfigureFirewall(ctx, *r.Firewall)
+		response := RPCResponse{Firewall: state}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
 	case "host_maintenance":
 		if r.HostMaintenance == nil {
 			return RPCResponse{Error: "host maintenance options required"}
@@ -465,7 +477,7 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 // separate Traefik and confirmation against the live proxy, which can each take tens of seconds.
 func RPCTimeout(method string) time.Duration {
 	switch method {
-	case "host_maintenance":
+	case "host_maintenance", "firewall":
 		return 90 * time.Second
 	case "stream":
 		return 30 * time.Minute

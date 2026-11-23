@@ -92,6 +92,9 @@ func (s *Server) Init(ctx context.Context) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerPanelRecovery(mux)
+	mux.Handle("GET /api/nodes/{id}/firewall", s.admin(http.HandlerFunc(s.nodeFirewall)))
+	mux.Handle("POST /api/nodes/{id}/firewall/preview", s.admin(http.HandlerFunc(s.nodeFirewall)))
+	mux.Handle("POST /api/nodes/{id}/firewall", s.admin(http.HandlerFunc(s.nodeFirewall)))
 	mux.Handle("GET /api/nodes/{id}/host-maintenance", s.admin(http.HandlerFunc(s.nodeHostMaintenance)))
 	mux.Handle("PUT /api/nodes/{id}/host-maintenance", s.admin(http.HandlerFunc(s.nodeHostMaintenance)))
 	mux.HandleFunc("GET /metrics", s.prometheus)
