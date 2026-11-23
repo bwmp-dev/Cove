@@ -143,6 +143,10 @@ func (s *Server) portBindings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "configuration unavailable", 503)
 		return
 	}
+	if c.Database != nil {
+		http.Error(w, "use database public-access settings to change managed port bindings", 409)
+		return
+	}
 	if c.Source != nil && !c.Source.InlineCompose {
 		http.Error(w, "edit port bindings in the Git repository, or switch to inline Compose", 409)
 		return

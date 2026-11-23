@@ -9,6 +9,8 @@ import {
   ChevronDown,
   ClipboardCheck,
   Container,
+  Database,
+  HardDrive,
   FileClock,
   FileCode,
   Gauge,
@@ -35,7 +37,7 @@ import { createContext, use, useEffect, useId, useMemo, useRef, useState } from 
 import { errorMessage, isStatus } from "../api/client";
 import { useCancelOperation, useQueueOperation } from "../api/mutations";
 import { projectsQuery, useAssignEnvironment, type Project } from "../api/projects";
-import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
+import { nodesQuery, operationQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
 import type { Operation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
@@ -52,7 +54,9 @@ import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can, currentTeam, managesTeam } from "../lib/permissions";
 import { useSession } from "../lib/session";
-import { actionLabels, activeOperation, allowedActions, isActive, reasonError, stateLabels, workerResult, workloadKind } from "../lib/operations";
+import { actionLabels, activeOperation, allowedActions, isActive, reasonError, resourceTypeLabel, stateLabels, workerResult, workloadKind } from "../lib/operations";
+import { ResourceIcon } from "../components/ResourceIcon";
+import { engineName } from "../lib/databases";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -129,8 +133,11 @@ function PlacementLink({ workload, projects }: { workload: Workload; projects: P
 }
 
 // Explains why the resource actions are disabled and offers the way out, next to the actions themselves.
-function ActiveOperationStatus({ id, operation, kind }: { id: string; operation: Operation; kind: "service" | "job" }) {
+function ActiveOperationStatus({ id, operation, kind, database }: { id: string; operation: Operation; kind: "service" | "job"; database: boolean }) {
   const cancel = useCancelOperation(operation.id);
+  // Only the detail endpoint reports can_cancel; database maintenance refuses cancellation once queued.
+  const detail = useQuery({ ...operationQuery(operation.id), enabled: database });
+  const cancellable = !database || (detail.data !== undefined && detail.data.can_cancel !== false);
   const online = useOnline();
   const [confirm, setConfirm] = useState(false);
   const label = kind === "job" && operation.action === "deploy" ? "Run" : actionLabels[operation.action];
@@ -144,15 +151,18 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
         <Link to="/operations/$operationId" params={{ operationId: operation.id }} className={linkClass}>
           View operation
         </Link>
-        <button
-          type="button"
-          className={`${linkClass} disabled:cursor-not-allowed disabled:text-fg-disabled disabled:no-underline`}
-          disabled={!online || cancel.isPending || requested}
-          onClick={() => setConfirm(true)}
-        >
-          {requested ? "Cancellation requested" : "Cancel operation"}
-        </button>
+        {cancellable && (
+          <button
+            type="button"
+            className={`${linkClass} disabled:cursor-not-allowed disabled:text-fg-disabled disabled:no-underline`}
+            disabled={!online || cancel.isPending || requested}
+            onClick={() => setConfirm(true)}
+          >
+            {requested ? "Cancellation requested" : "Cancel operation"}
+          </button>
+        )}
       </span>
+      {database && detail.data?.can_cancel === false && <span>Database maintenance cannot be cancelled after it is queued.</span>}
       {cancel.isError && <span role="alert" className="text-bad">Could not request cancellation: {errorMessage(cancel.error)}</span>}
       <ConfirmDialog open={confirm} title="Cancel this operation?" confirmLabel="Cancel operation" danger onCancel={() => setConfirm(false)} onConfirm={() => { setConfirm(false); cancel.mutate(); }}>
         This stops the deployment command when the worker acknowledges it. Changes already made to containers are not undone; check the resource afterward.
@@ -222,7 +232,7 @@ function useResourceActions(workload: Workload) {
             );
           })}
         </div>
-        {active && <ActiveOperationStatus id={statusId} operation={active} kind={kind} />}
+        {active && <ActiveOperationStatus id={statusId} operation={active} kind={kind} database={workload.kind === "database"} />}
       </div>
     ),
     feedback: (
@@ -313,11 +323,11 @@ function ResourceHeader({ workload }: { workload: Workload }) {
             {workload.name}
           </Breadcrumbs>
         }
-        icon={kind === "job" ? <Timer className="size-4" /> : <Boxes className="size-4" />}
+        icon={<ResourceIcon kind={workload.kind} className="size-4" />}
         title={workload.name}
         description={
           <MetaList>
-            <span key="kind">{kind === "job" ? "Job" : "Service"}</span>
+            <span key="kind">{workload.database ? `${resourceTypeLabel(workload.kind)} · ${engineName(workload.database.engine)} ${workload.database.version}` : resourceTypeLabel(workload.kind)}</span>
             <span key="node" className="inline-flex min-w-0 items-center gap-2 align-middle">
               <Link to="/nodes/$nodeId" params={{ nodeId: workload.node_id }} className="truncate rounded hover:text-fg">
                 {node?.name ?? "Node"}
@@ -435,6 +445,8 @@ type ResourcePath =
   | "/resources/$resourceId/promotion"
   | "/resources/$resourceId/troubleshooting"
   | "/resources/$resourceId/configuration-history"
+  | "/resources/$resourceId/database"
+  | "/resources/$resourceId/object-storage"
   | "/resources/$resourceId/settings";
 
 interface ResourceSection {
@@ -446,6 +458,7 @@ interface ResourceSection {
 
 // Grouped by what the visitor is doing: watching the resource, configuring what runs, controlling releases, or managing its data and lifecycle.
 function resourceSections(workload: Workload): { label: string; links: ResourceSection[] }[] {
+  if (workload.kind === "database") return databaseSections();
   const service = workloadKind(workload.kind) === "service";
   return [
     {
@@ -463,6 +476,7 @@ function resourceSections(workload: Workload): { label: string; links: ResourceS
         { to: "/resources/$resourceId/general", label: "General", icon: SlidersHorizontal },
         { to: "/resources/$resourceId/source", label: "Source", icon: FileCode },
         { to: "/resources/$resourceId/environment", label: "Environment variables", icon: KeyRound },
+        ...(workload.preview_source_id ? [] : [{ to: "/resources/$resourceId/object-storage" as const, label: "Object storage", icon: HardDrive }]),
         ...(service ? [{ to: "/resources/$resourceId/domains" as const, label: "Domains", icon: Globe }] : []),
         { to: "/resources/$resourceId/networking", label: "Networking", icon: Network },
         { to: "/resources/$resourceId/registry", label: "Registry", icon: Container },
@@ -484,6 +498,46 @@ function resourceSections(workload: Workload): { label: string; links: ResourceS
       label: "Manage",
       links: [
         ...(service ? [{ to: "/resources/$resourceId/backups" as const, label: "Backups", icon: Archive }] : []),
+        { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
+      ],
+    },
+  ];
+}
+
+// Managed databases have generated configuration, no public routes and no hooks, so only the pages that apply are offered.
+function databaseSections(): { label: string; links: ResourceSection[] }[] {
+  return [
+    {
+      label: "Monitor",
+      links: [
+        { to: "/resources/$resourceId", label: "Overview", icon: LayoutDashboard, exact: true },
+        { to: "/resources/$resourceId/logs", label: "Logs", icon: ScrollText },
+        { to: "/resources/$resourceId/operations", label: "Operations", icon: History },
+        { to: "/resources/$resourceId/troubleshooting", label: "Troubleshooting", icon: Stethoscope },
+      ],
+    },
+    {
+      label: "Configure",
+      links: [
+        { to: "/resources/$resourceId/database", label: "Database", icon: Database },
+        { to: "/resources/$resourceId/general", label: "General", icon: SlidersHorizontal },
+        { to: "/resources/$resourceId/source", label: "Configuration", icon: FileCode },
+        { to: "/resources/$resourceId/environment", label: "Environment variables", icon: KeyRound },
+        { to: "/resources/$resourceId/networking", label: "Networking", icon: Network },
+        { to: "/resources/$resourceId/limits", label: "Resource limits", icon: Gauge },
+      ],
+    },
+    {
+      label: "Deploy",
+      links: [
+        { to: "/resources/$resourceId/preflight", label: "Preflight", icon: ClipboardCheck },
+        { to: "/resources/$resourceId/configuration-history", label: "Change history", icon: FileClock },
+      ],
+    },
+    {
+      label: "Manage",
+      links: [
+        { to: "/resources/$resourceId/backups", label: "Backups", icon: Archive },
         { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
       ],
     },
@@ -611,10 +665,22 @@ export function ResourceOverview() {
           compact
           items={[
             { term: "Placement", value: <PlacementLink workload={workload} projects={projects.data} /> },
-            { term: "Type", value: kind === "job" ? "Job" : "Service" },
-            { term: "Source", value: workload.source ? <span className="font-mono text-xs break-all">{workload.source.repository}</span> : "Compose file" },
+            { term: "Type", value: resourceTypeLabel(workload.kind) },
+            ...(workload.database
+              ? [
+                  { term: "Engine", value: `${engineName(workload.database.engine)} ${workload.database.version}` },
+                  {
+                    term: "Connection",
+                    value: (
+                      <Link to="/resources/$resourceId/database" params={{ resourceId: workload.id }} className="rounded font-mono text-xs break-all underline underline-offset-4">
+                        {workload.database.host}:{workload.database.port}
+                      </Link>
+                    ),
+                  },
+                ]
+              : [{ term: "Source", value: workload.source ? <span className="font-mono text-xs break-all">{workload.source.repository}</span> : "Compose file" }]),
             ...(workload.source ? [{ term: "Branch", value: <span className="font-mono text-xs">{workload.source.branch}</span> }] : []),
-            ...(kind === "service"
+            ...(kind === "service" && !workload.database
               ? [
                   {
                     term: "Domains",
@@ -688,7 +754,7 @@ export function ResourceBackups() {
   }
   return (
     <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts. Containers stop briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} />
+      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} database={workload.database ?? undefined} />
     </Section>
   );
 }
@@ -741,8 +807,15 @@ export function ResourceSettings() {
       <Section width="form" title="Placement" description="Projects and environments organise resources. Nodes are chosen when a resource is created.">
         <PlacementForm workload={workload} />
       </Section>
+      {workload.database && (
+        <div className="px-4 pt-5 sm:px-6">
+          <div className="max-w-3xl">
+            <Notice title="Cloning a database">The copy gets freshly generated credentials, a new private hostname and empty storage. Data is not copied; use a backup's separate recovery copy to carry data.</Notice>
+          </div>
+        </div>
+      )}
       <Clone kind="resource" id={workload.id} name={workload.name} />
-      {publishesTemplates && !workload.preview_source_id && <SaveAsTemplate workloadId={workload.id} workloadName={workload.name} />}
+      {publishesTemplates && !workload.preview_source_id && !workload.database && <SaveAsTemplate workloadId={workload.id} workloadName={workload.name} />}
       <Section width="form" title="Danger zone" tone="danger">
         <DeleteResource kind="workload" id={workload.id} />
       </Section>

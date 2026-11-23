@@ -49,7 +49,7 @@ function ChoiceGroup<T extends string>({ legend, name, value, choices, onChange 
   );
 }
 
-function FormSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
+export function FormSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return (
     <section className="grid gap-x-8 gap-y-3 px-4 pt-5 sm:px-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
       <div>

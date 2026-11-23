@@ -9,6 +9,7 @@ import { useCreateWorkload } from "../api/mutations";
 import { projectsQuery } from "../api/projects";
 import { nodesQuery } from "../api/queries";
 import { WorkloadForm } from "../components/WorkloadForm";
+import { DatabaseForm } from "../components/DatabaseForm";
 import { Breadcrumbs, Button, LoadingRows, PageHeader, QueryError } from "../components/ui";
 import { findPlacement, type Placement } from "../lib/hierarchy";
 import { buttonClass } from "../lib/styles";
@@ -48,7 +49,7 @@ function NewResourceCrumbs({ placement }: { placement: Placement | undefined }) 
 
 export function NewWorkloadPage() {
   const search = route.useSearch();
-  const [selection, setSelection] = useState<{ draft?: ResourceDraft } | null>(null);
+  const [selection, setSelection] = useState<{ draft?: ResourceDraft; database?: true } | null>(null);
   const nodes = useQuery(nodesQuery);
   const projects = useQuery(projectsQuery);
   const create = useCreateWorkload();
@@ -82,7 +83,19 @@ export function NewWorkloadPage() {
           <QueryError what={failed === nodes ? "nodes" : "projects"} error={failed.error} onRetry={() => void failed.refetch()} retrying={failed.isFetching} />
         </div>
       ) : selection === null ? (
-        <TemplateBrowser onUse={(draft) => setSelection({ draft })} onCustom={() => setSelection({})} />
+        <TemplateBrowser onUse={(draft) => setSelection({ draft })} onCustom={() => setSelection({})} onDatabase={() => setSelection({ database: true })} />
+      ) : selection.database ? (
+        <>
+          <div className="px-4 pt-4 sm:px-6"><Button variant="ghost" onClick={() => setSelection(null)}>Back to resource browser</Button></div>
+          <DatabaseForm
+            nodes={nodes.data ?? []}
+            projects={projects.data ?? []}
+            initialEnvironmentId={placement?.environment?.id ?? ""}
+            initialProjectId={placement?.project.id ?? ""}
+            cancel={cancel}
+            onCreated={(id) => void navigate({ to: "/resources/$resourceId", params: { resourceId: id } })}
+          />
+        </>
       ) : (
         <>
         <div className="px-4 pt-4 sm:px-6"><Button variant="ghost" disabled={create.isPending} onClick={() => { create.reset(); setSelection(null); }}>Back to resource browser</Button></div>

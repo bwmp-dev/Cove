@@ -123,6 +123,8 @@ const resourceDomainsRoute = createRoute({ getParentRoute: () => resourceRoute, 
 const resourceEnvironmentRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/environment", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceEnvironment") });
 const resourceNetworkingRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/networking", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceNetworking") });
 const resourceRegistryRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/registry", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceRegistryPage") });
+const resourceDatabaseRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/database", component: lazyRouteComponent(() => import("./routes/database"), "ResourceDatabase") });
+const resourceObjectStorageRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/object-storage", component: lazyRouteComponent(() => import("./routes/object-storage"), "ResourceObjectStorage") });
 const resourceBackupsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/backups", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceBackups") });
 const resourceSettingsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/settings", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceSettings") });
 
@@ -184,6 +186,8 @@ const routeTree = rootRoute.addChildren([
       resourceNetworkingRoute,
       resourceRegistryRoute,
       resourceBackupsRoute,
+      resourceDatabaseRoute,
+      resourceObjectStorageRoute,
       resourceSettingsRoute,
     ]),
     nodesRoute,

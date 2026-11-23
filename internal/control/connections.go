@@ -98,21 +98,22 @@ func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
 	team := actor(r).Team
 	id := r.PathValue("id")
 	if r.Method == "GET" {
-		rows, err := s.DB.Query(r.Context(), `SELECT id,configuration FROM infrastructure_connections WHERE team_id=$1 AND kind=$2 ORDER BY name`, team, kind)
+		rows, err := s.DB.Query(r.Context(), `SELECT id,configuration,CASE WHEN EXISTS(SELECT 1 FROM object_buckets b WHERE b.storage_id=c.id) THEN 'Storage on the same node is not offsite. Keep an independent backup in another failure domain.' ELSE '' END FROM infrastructure_connections c WHERE team_id=$1 AND kind=$2 ORDER BY name`, team, kind)
 		if err != nil {
 			http.Error(w, "connections unavailable", 503)
 			return
 		}
 		defer rows.Close()
 		type item struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Warning string `json:"warning,omitempty"`
 			connectionConfig
 		}
 		items := []item{}
 		for rows.Next() {
 			var v item
 			var enc []byte
-			if rows.Scan(&v.ID, &enc) != nil {
+			if rows.Scan(&v.ID, &enc, &v.Warning) != nil {
 				http.Error(w, "connections unavailable", 503)
 				return
 			}
@@ -491,6 +492,10 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			return err
 		}
 		r.Environment = resolved
+		r.DatabaseCAs, err = s.databaseBindingCAs(ctx, r.Workload)
+		if err != nil {
+			return err
+		}
 	}
 	if r.Action == "deploy" && r.Registry == nil {
 		var id string

@@ -26,6 +26,22 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var active bool
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM object_buckets WHERE workload_id=$1 OR storage_resource_id=$1)`, r.PathValue("id")).Scan(&active); err != nil {
+		http.Error(w, "bucket dependencies unavailable", 503)
+		return
+	}
+	if active {
+		http.Error(w, "revoke this resource's object bucket keys before deleting it or its storage", 409)
+		return
+	}
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM database_access WHERE workload_id=$1 AND revoked_at IS NULL AND expires_at>now())`, r.PathValue("id")).Scan(&active); err != nil {
+		http.Error(w, "temporary access unavailable", 503)
+		return
+	}
+	if active {
+		http.Error(w, "close temporary database access and admin tools before deleting", 409)
+		return
+	}
 	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM previews WHERE source_id=$1)`, r.PathValue("id")).Scan(&active); err != nil {
 		http.Error(w, "previews unavailable", 503)
 		return

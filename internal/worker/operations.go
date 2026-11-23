@@ -26,12 +26,14 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	DatabaseMaintenance    *DatabaseMaintenance     `json:"database_maintenance,omitempty"`
 	OutboundProxy          *outbound.Config         `json:"outbound_proxy,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
 	RestoreCopy            *RestoreCopy             `json:"restore_copy,omitempty"`
 	FileSecrets            []FileSecret             `json:"file_secrets,omitempty"`
+	DatabaseCAs            map[string]string        `json:"database_cas,omitempty"`
 	ImagePins              map[string]string        `json:"image_pins,omitempty"`
 	Hooks                  *DeploymentHooks         `json:"hooks,omitempty"`
 	Limits                 map[string]ServiceLimits `json:"limits,omitempty"`
@@ -96,6 +98,7 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	databaseMu   sync.Mutex
 	comparisonMu sync.Mutex
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
@@ -170,12 +173,18 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.DatabaseMaintenance != nil {
+		if r.DatabaseMaintenance.Request.DatabaseMaintenance != nil || r.ID != r.DatabaseMaintenance.ID || r.Workload != r.DatabaseMaintenance.Request.Workload || r.Action != "deploy" {
+			return errors.New("invalid maintenance envelope")
+		}
+		return ValidateDatabaseMaintenance(*r.DatabaseMaintenance)
+	}
 	if r.OutboundProxy != nil {
 		if err := r.OutboundProxy.Validate(); err != nil {
 			return err
 		}
 	}
-	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
+	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || len(r.DatabaseCAs) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
 		return errors.New("preview deployment must use a pinned revision and isolated configuration")
 	}
 	if r.GuardedDeploy != nil && *r.GuardedDeploy && r.Kind == "job" {
@@ -185,6 +194,9 @@ func ValidateRequest(r Request) error {
 		return err
 	}
 	if err := ValidateFileSecrets(r.FileSecrets); err != nil {
+		return err
+	}
+	if err := validateDatabaseCAs(r.DatabaseCAs); err != nil {
 		return err
 	}
 	if err := ValidateLimits(r.Limits); err != nil {
@@ -379,6 +391,9 @@ func (e *Engine) Logs(id string) (string, error) {
 	return string(data), err
 }
 func (e *Engine) Recover() error {
+	if err := e.removeOrphanDatabaseTools(); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if state, err := e.loadCustomIngress(); err != nil {
@@ -684,6 +699,20 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			result = err
 		}
 	}()
+	if r.DatabaseMaintenance != nil {
+		for _, value := range r.Environment {
+			log.secrets = append(log.secrets, value)
+		}
+		log.secrets = append(log.secrets, r.DatabaseMaintenance.PreviousPassword)
+		if r.OutboundProxy != nil {
+			log.secrets = append(log.secrets, r.OutboundProxy.Secrets()...)
+		}
+		err := e.MaintainDatabase(ctx, *r.DatabaseMaintenance)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
 	env := []string{}
 	if r.OutboundProxy != nil {
 		env = append(env, r.OutboundProxy.Env()...)
@@ -925,7 +954,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
 		}
-		if len(r.FileSecrets) > 0 {
+		if len(r.FileSecrets) > 0 || len(r.DatabaseCAs) > 0 {
 			composePath, err = e.prepareFileSecrets(ctx, r, dir, args, env)
 			if err != nil {
 				return err

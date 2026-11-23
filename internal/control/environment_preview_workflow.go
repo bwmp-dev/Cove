@@ -445,7 +445,7 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 		item := plans[src.ID]
 		policy := recipe.Resources[src.ID]
 		target := targets[src.ID]
-		config := workloadInput{Name: src.Name, NodeID: src.Node, Kind: src.Kind, JobService: src.Config.JobService, Limits: src.Config.Limits, Hooks: src.Config.Hooks, Environment: map[string]string{}}
+		config := workloadInput{Name: src.Name, NodeID: src.Node, Kind: src.Config.Kind, Database: src.Config.Database, JobService: src.Config.JobService, Limits: src.Config.Limits, Hooks: src.Config.Hooks, Environment: map[string]string{}}
 		if config.Kind == "" {
 			config.Kind = "service"
 		}
@@ -481,6 +481,12 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 			baseline.Compose = deployed.Compose
 		}
 		config.Compose = baseline.Compose
+		if config.Database != nil {
+			if err = isolateDatabaseCopy(&config, target); err != nil {
+				return s.failPreview(ctx, p.ID, "plan", "Database private configuration cannot be isolated")
+			}
+			baseline.Compose = config.Compose
+		}
 		if src.Kind == "job" && baseline.Source != nil {
 			pinned := *baseline.Source
 			config.Source = &pinned
@@ -497,7 +503,7 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 		if src.Kind == "job" && policy.Schedule {
 			cron = src.JobCron
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='' THEN NULL ELSE now()+interval '1 minute' END)`, target, src.Node, src.Name, encrypted, config.Kind, environment, p.Team, p.Project, cpu, memory, cron); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='' THEN NULL ELSE now()+interval '1 minute' END)`, target, src.Node, src.Name, encrypted, resourceKind(config), environment, p.Team, p.Project, cpu, memory, cron); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.ConstraintName == "cove_team_quota" {
 				tx.Rollback(ctx)

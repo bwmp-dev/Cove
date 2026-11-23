@@ -4,6 +4,7 @@ import { errorMessage } from "../api/client";
 import type { Project } from "../api/projects";
 import { recipeQuery, useSaveRecipe, type PlannedResource, type PlannedVolume, type PreviewPlan, type PreviewRecipe, type PreviewResourcePolicy, type RecipeView, type VariableMode } from "../api/previews";
 import { useOnline } from "../lib/hooks";
+import { resourceTypeLabel } from "../lib/operations";
 import { draftFromView, formatBytes, missingOverrides, recipeForSave, resourceSource, setOmitted, setVariable, shortRevision, unresolved, updatePolicy } from "../lib/previews";
 import { choiceClass, inputClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { Checkbox } from "./Checkbox";
@@ -258,7 +259,7 @@ function ResourcePolicy({ resource, policy, recipe, onChange }: { resource: Plan
         <div className="min-w-0 flex-1 basis-64">
           <h3 className="text-[13px] font-semibold break-words text-fg">{resource.name}</h3>
           <p className="mt-0.5 text-xs text-fg-muted">
-            {resource.kind === "job" ? "Job" : "Service"}
+            {resourceTypeLabel(resource.kind)}
             {resource.repository && (
               <>
                 {" · "}

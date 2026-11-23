@@ -76,8 +76,15 @@ export const stateLabels: Record<OperationState, string> = {
   interrupted: "Interrupted",
 };
 
+// How a resource deploys. Managed databases deploy as services.
 export function workloadKind(kind: string | undefined) {
   return kind === "job" ? "job" : "service";
+}
+
+export function resourceTypeLabel(kind: string | undefined) {
+  if (kind === "job") return "Job";
+  if (kind === "database") return "Database";
+  return "Service";
 }
 
 // Jobs run to completion on deploy, so start and restart do not apply to them.

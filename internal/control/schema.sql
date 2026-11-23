@@ -876,3 +876,38 @@ CREATE TABLE IF NOT EXISTS team_templates (
  id text NOT NULL, definition jsonb NOT NULL, revision text NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(team_id,id)
 );
+
+CREATE TABLE IF NOT EXISTS database_maintenance (
+ id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE, workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ source_id text REFERENCES workloads(id) ON DELETE SET NULL, node_id text NOT NULL REFERENCES nodes(id),
+ kind text NOT NULL CHECK(kind IN ('rotate','extension','upgrade')),
+ configuration bytea NOT NULL,
+ state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','failed','succeeded','discarded')),
+ last_error text NOT NULL DEFAULT '', retry_requested boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS database_maintenance_active ON database_maintenance(workload_id) WHERE state IN ('pending','failed');
+ALTER TABLE database_maintenance ADD COLUMN IF NOT EXISTS cutover_at timestamptz;
+ALTER TABLE database_maintenance ADD COLUMN IF NOT EXISTS cutover_by text NOT NULL DEFAULT '';
+CREATE OR REPLACE FUNCTION cove_database_maintenance_lock() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE resource text;
+BEGIN
+ resource:=OLD.id;
+ PERFORM 1 FROM workloads WHERE id=resource FOR UPDATE;
+ IF EXISTS(SELECT 1 FROM database_maintenance WHERE (state IN ('pending','failed') AND workload_id=resource) OR (state='pending' AND source_id=resource)) OR EXISTS(SELECT 1 FROM object_buckets WHERE state='pending' AND (workload_id=resource OR storage_resource_id=resource)) THEN
+  RAISE EXCEPTION 'database maintenance requires confirmation or retry before changing this resource';
+ END IF;
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS database_maintenance_workloads ON workloads;
+CREATE TRIGGER database_maintenance_workloads BEFORE UPDATE OF configuration,node_id,project_id,environment_id OR DELETE ON workloads FOR EACH ROW EXECUTE FUNCTION cove_database_maintenance_lock();
+
+ALTER TABLE database_access ADD COLUMN IF NOT EXISTS tool text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS object_buckets (
+ id text PRIMARY KEY, workload_id text NOT NULL REFERENCES workloads(id),
+ storage_resource_id text NOT NULL REFERENCES workloads(id),
+ storage_id text REFERENCES infrastructure_connections(id),
+ configuration bytea NOT NULL, state text NOT NULL DEFAULT 'pending',
+ created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(workload_id)
+);

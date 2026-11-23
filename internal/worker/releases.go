@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Escape resolved literal dollars before Compose reads the snapshot a second time.
+// The preview parser substitutes values itself, so Compose has not escaped their dollars yet.
 func literalCompose(value any) any {
 	switch value := value.(type) {
 	case string:
@@ -220,7 +220,7 @@ func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args
 		return deployedState{}, err
 	}
 	path := filepath.Join(snapshots, r.ID+".compose.json")
-	if err := writeJSON(path, literalCompose(config)); err != nil {
+	if err := writeJSON(path, config); err != nil {
 		return deployedState{}, err
 	}
 	state := deployedState{ComposePath: path, Environment: r.Environment}

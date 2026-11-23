@@ -254,7 +254,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
-	case path == "/api/templates" || path == "/api/templates/draft":
+	case path == "/api/templates" || path == "/api/templates/draft" || path == "/api/database-engines":
 		return true
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):
 		return true
@@ -454,6 +454,10 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			}
 		}
 		if !s.requireAccess(w, r, "workload", id, needed) {
+			return false
+		}
+		if r.Method != "GET" && !strings.Contains(path, "/database/maintenance") && !strings.Contains(path, "/object-buckets") && s.databaseLocked(r.Context(), id) {
+			http.Error(w, "finish or retry database maintenance or bucket provisioning before changing this resource", 409)
 			return false
 		}
 		if strings.HasSuffix(path, "/environment") {

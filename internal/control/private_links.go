@@ -88,7 +88,7 @@ func checkEndpoint(e connectionEndpoint, role, service string) (int, string) {
 	switch {
 	case e.preview:
 		return 409, "preview resources cannot have manually managed private connections; environment previews copy their production connections"
-	case role == "target" && e.kind != "service":
+	case role == "target" && e.kind != "service" && e.kind != "database":
 		return 409, "the target must be a service; jobs cannot accept connections"
 	// An unreachable worker reports no capabilities; changes for it stay pending until it returns.
 	case e.ready && !e.capable:
@@ -183,6 +183,10 @@ func (s *Server) createPrivateConnection(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	if !databaseConnectionAllowed(endpoints[in.TargetID].config.Database, in.TargetService, in.Port, in.Alias) {
+		http.Error(w, "use the database's service, native port and private hostname from its connection details", 400)
+		return
+	}
 	id := resourceID()
 	_, err = tx.Exec(r.Context(), `INSERT INTO resource_connections(id,team_id,source_id,source_service,target_id,target_service,port,alias,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, p.Team, in.SourceID, in.SourceService, in.TargetID, in.TargetService, in.Port, in.Alias, p.ID)
 	if connectionConflict(w, err) {
@@ -260,6 +264,10 @@ func (s *Server) updatePrivateConnection(w http.ResponseWriter, r *http.Request)
 		}
 		if status, message := checkEndpoint(endpoint, check.role, check.service); status != 0 {
 			http.Error(w, message, status)
+			return
+		}
+		if check.role == "target" && !databaseConnectionAllowed(endpoint.config.Database, in.TargetService, in.Port, in.Alias) {
+			http.Error(w, "use the database or pooler's service, native port and private hostname from its connection details", 400)
 			return
 		}
 	}

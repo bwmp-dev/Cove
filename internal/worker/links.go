@@ -1009,7 +1009,7 @@ func (e *Engine) prepareLinks(ctx context.Context, r Request, dir string, args, 
 		return "", false, err
 	}
 	path := filepath.Join(dir, r.ID+"-links.yaml")
-	return path, true, writeJSON(path, literalCompose(config))
+	return path, true, writeJSON(path, config)
 }
 
 // removeWorkloadLinks revokes a removed workload's links locally and deletes its link networks.

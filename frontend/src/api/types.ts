@@ -81,7 +81,7 @@ export interface WorkloadSummary {
   name: string;
   node_id: string;
   node: string;
-  kind: WorkloadKind;
+  kind: ResourceKind;
 }
 
 export interface GitSource {
@@ -97,6 +97,38 @@ export interface GitSourceInput extends GitSource {
 }
 
 export type WorkloadKind = "service" | "job";
+// The public kind of a resource. Managed databases run as services on the worker but are listed separately.
+export type ResourceKind = WorkloadKind | "database";
+
+export interface DatabaseResource {
+  engine: DatabaseEngineId;
+  version: string;
+  template_revision: string;
+  service: string;
+  image: string;
+  port: number;
+  host: string;
+  variant?: "vector" | "postgis" | "";
+  // Extensions enabled through Cove maintenance; the runtime may hold others.
+  extensions?: string[];
+  pooler?: boolean;
+  // The pooler's canonical private alias; present only while the pooler is enabled.
+  pooler_host?: string;
+  public_access?: DatabasePublicAccess | null;
+  // The original private hostname while public TLS access replaces host with the certificate hostname.
+  private_host?: string;
+  settings_operation?: string;
+}
+
+export interface DatabasePublicAccess {
+  hostname: string;
+  bind_address: string;
+  port: number;
+  fingerprint: string;
+  expires_at: string;
+}
+
+export type DatabaseEngineId = "postgresql" | "mysql" | "mariadb" | "mongodb" | "redis" | "valkey" | "clickhouse";
 
 export interface ServiceLimits { cpus: number; memory_mb: number }
 
@@ -125,7 +157,9 @@ export interface Workload {
   name: string;
   node_id: string;
   // Empty or missing means a long-running service.
-  kind?: WorkloadKind | "";
+  kind?: ResourceKind | "";
+  // Present only on managed databases.
+  database?: DatabaseResource | null;
   job_service?: string;
   compose: string;
   environment_keys: string[];
@@ -178,6 +212,8 @@ export interface ControlPlaneResult {
 
 export interface Operation {
   approval_required?: boolean;
+  // Present on the detail endpoint only; database maintenance cannot be cancelled once queued.
+  can_cancel?: boolean;
   approved_at?: string | null;
   can_approve?: boolean;
   cancel_requested?: boolean;

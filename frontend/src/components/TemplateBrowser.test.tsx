@@ -51,7 +51,7 @@ function renderBrowser(handlers: { get?: () => Promise<unknown>; draft?: (body: 
   const onUse = vi.fn();
   render(
     <QueryClientProvider client={client}>
-      <TemplateBrowser onUse={onUse} onCustom={vi.fn()} />
+      <TemplateBrowser onUse={onUse} onCustom={vi.fn()} onDatabase={vi.fn()} />
     </QueryClientProvider>,
   );
   return { client, onUse };

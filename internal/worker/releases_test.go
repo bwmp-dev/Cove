@@ -15,7 +15,7 @@ func releaseFixture(args []string, out io.Writer) (bool, error) {
 	var text string
 	switch {
 	case args[len(args)-1] == "json":
-		text = `{"services":{"app":{"image":"mutable:latest","build":".","environment":{"VALUE":"literal$value"}}}}`
+		text = `{"services":{"app":{"image":"mutable:latest","build":".","command":["sh","-ec","echo $$VALUE"],"environment":{"VALUE":"literal$$value"}}}}`
 	case len(args) > 1 && args[1] == "ps":
 		text = "testcontainer"
 	case len(args) > 1 && args[1] == "inspect":
@@ -65,6 +65,10 @@ func TestRollbackUsesRetainedImageAndLiteralConfiguration(t *testing.T) {
 	}
 	if strings.Contains(string(data), `"build"`) || !strings.Contains(string(data), "sha256:") || !strings.Contains(string(data), "literal$$value") {
 		t.Fatalf("snapshot not immutable: %s", data)
+	}
+	service := config["services"].(map[string]any)["app"].(map[string]any)
+	if command := service["command"].([]any)[2]; command != "echo $$VALUE" {
+		t.Fatal("Compose shell escape changed while retaining the release", command)
 	}
 	commands = nil
 	run(Request{ID: "rollback", Workload: "app", Action: "rollback", Release: "original"})

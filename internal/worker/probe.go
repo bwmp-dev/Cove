@@ -14,6 +14,7 @@ import (
 )
 
 type Probe struct {
+	ManagedDatabases    bool         `json:"managed_databases"`
 	OutboundProxy       bool         `json:"outbound_proxy"`
 	ReleaseDiff         bool         `json:"release_diff"`
 	BinarySHA256        string       `json:"binary_sha256"`
@@ -56,6 +57,7 @@ func Inspect(ctx context.Context) Probe {
 		}
 	}
 	p.OutboundProxy = true
+	p.ManagedDatabases = true
 	p.ReleaseDiff = true
 	p.Previews = true
 	p.EnvironmentPreviews = runtime.GOOS == "linux"

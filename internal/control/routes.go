@@ -167,6 +167,10 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "only services can have routes", 400)
 		return
 	}
+	if config.Database != nil && len(in.Routes) > 0 {
+		http.Error(w, "databases use private connections or temporary database access", 400)
+		return
+	}
 	if config.Private != nil && len(in.Routes) > 0 {
 		http.Error(w, "disable private networking and deploy before adding public domains", 409)
 		return

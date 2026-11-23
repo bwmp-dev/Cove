@@ -19,7 +19,7 @@ import { formatAbsolute, formatDuration } from "../lib/format";
 import { actionLabels, durationMs, isActive, overrideEligible, reasonError, workerResult } from "../lib/operations";
 import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
-import { inputClass, linkClass } from "../lib/styles";
+import { buttonClass, inputClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/operations/$operationId");
 
@@ -156,7 +156,7 @@ export function OperationPage() {
           ) : back
         }
         actions={
-          active && can(workload?.permissions, "operate") ? (
+          active && can(workload?.permissions, "operate") && operation.can_cancel !== false ? (
             <Button disabled={!online || cancel.isPending || operation.cancel_requested || cancel.isSuccess} onClick={() => setConfirmCancel(true)}>
               {operation.cancel_requested || cancel.isSuccess ? "Cancellation requested" : "Cancel operation"}
             </Button>
@@ -200,6 +200,8 @@ export function OperationPage() {
         <div className="space-y-4">
           {workload?.kind === "service" && can(workload.permissions, "operate") && operation.state === "succeeded" && (operation.action === "deploy" || operation.action === "rollback") && <RollbackRelease workloadId={workload.id} release={operation.id} />}
           {cancel.isError && <Notice tone="error" title="Could not request cancellation">{errorMessage(cancel.error)}</Notice>}
+          {active && operation.can_cancel === false && <Notice title="Cannot be cancelled">Database maintenance stays locked until this same change succeeds. If it fails, retry it from the resource's Database page.</Notice>}
+          {workload?.kind === "database" && (operation.state === "failed" || operation.state === "interrupted") && operation.reason?.startsWith("Database maintenance:") && <Notice tone="warn" title="Retry this maintenance" action={<Link to="/resources/$resourceId/database" params={{ resourceId: workload.id }} className={buttonClass("secondary")}>Open maintenance</Link>}>The change is retained. Retry the same task after fixing the reported problem; do not start a different change to recover.</Notice>}
           {active && operation.cancel_requested && <Notice tone="warn" title="Waiting for the worker">The request is saved and will be delivered when the worker is reachable.</Notice>}
           <p className="text-[13px] text-fg-muted">{stateDescriptions[operation.state]}</p>
           <OperationResultNotice operation={operation} />

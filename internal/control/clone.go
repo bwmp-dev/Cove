@@ -1,6 +1,7 @@
 package control
 
 import (
+	"cove/internal/catalog"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -174,6 +175,23 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 		}
 		if !in.IncludeSecrets {
 			config.Environment = nil
+			if config.Database != nil {
+				engine, ok := findDatabaseEngine(config.Database.Engine)
+				if !ok {
+					http.Error(w, "database engine unavailable", 409)
+					return
+				}
+				definition, _, e := databaseTemplate(engine)
+				if e != nil {
+					http.Error(w, "database template unavailable", 503)
+					return
+				}
+				config.Environment, e = catalog.Values(definition, nil, false)
+				if e != nil {
+					http.Error(w, "database credentials unavailable", 503)
+					return
+				}
+			}
 			if config.Source != nil {
 				config.Source.Token = ""
 			}
@@ -189,6 +207,12 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			target = v.environment
 			config.Name = in.Name
 		}
+		if config.Database != nil {
+			if err = isolateDatabaseCopy(&config, next); err != nil {
+				http.Error(w, "could not isolate database configuration", 503)
+				return
+			}
+		}
 		clonedResources[v.id] = next
 		data, err = json.Marshal(config)
 		if err != nil {
@@ -201,7 +225,7 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cpu, memory := configuredUsage(config)
-		if _, err = tx.Exec(ctx, "INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10)", next, v.node, config.Name, encrypted, config.Kind, target, p.Team, project, cpu, memory); err != nil {
+		if _, err = tx.Exec(ctx, "INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10)", next, v.node, config.Name, encrypted, resourceKind(config), target, p.Team, project, cpu, memory); err != nil {
 			if quotaError(w, err) {
 				return
 			}

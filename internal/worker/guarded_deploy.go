@@ -104,7 +104,7 @@ func (e *Engine) testDeploymentCandidate(ctx context.Context, r Request, dir str
 	service["pull_policy"] = "never"
 	delete(service, "build")
 	path = filepath.Join(dir, r.ID+".guarded.compose.json")
-	if err = writeJSON(path, literalCompose(config)); err != nil {
+	if err = writeJSON(path, config); err != nil {
 		return "", err
 	}
 	if err = writeJSON(filepath.Join(dir, "pending-candidate.json"), r.ID); err != nil {

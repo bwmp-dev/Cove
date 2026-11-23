@@ -138,7 +138,7 @@ func (e *Engine) prepareNetworks(ctx context.Context, r Request, dir string, arg
 		}
 	}
 	path := filepath.Join(dir, r.ID+".yaml")
-	if err := writeJSON(path, literalCompose(config)); err != nil {
+	if err := writeJSON(path, config); err != nil {
 		return "", err
 	}
 	return path, nil

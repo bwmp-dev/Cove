@@ -83,5 +83,5 @@ func (e *Engine) prepareLimits(ctx context.Context, r Request, dir string, args,
 		return "", err
 	}
 	path := filepath.Join(dir, r.ID+".limits.compose.json")
-	return path, writeJSON(path, literalCompose(config))
+	return path, writeJSON(path, config)
 }

@@ -237,5 +237,5 @@ func (e *Engine) preparePromotion(ctx context.Context, r Request, dir string, ar
 		return "", err
 	}
 	path := filepath.Join(dir, r.ID+".promotion.compose.json")
-	return path, writeJSON(path, literalCompose(config))
+	return path, writeJSON(path, config)
 }

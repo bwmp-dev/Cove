@@ -485,7 +485,7 @@ func (e *Engine) preparePreviewStorage(ctx context.Context, r Request, dir strin
 		}
 	}
 	path := filepath.Join(dir, r.ID+".environment-preview.compose.json")
-	return path, writeJSON(path, literalCompose(config))
+	return path, writeJSON(path, config)
 }
 
 // seedPreviewDatabase restores the production snapshot into the preview's own database service
