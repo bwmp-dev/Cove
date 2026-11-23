@@ -816,3 +816,6 @@ CREATE TABLE IF NOT EXISTS workload_pitr (
  operation_id text REFERENCES operations(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS workload_pitr_due ON workload_pitr(next_backup_at) WHERE enabled;
+
+-- Streamed resource file transfer bounds; the text editor remains independently bounded.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS file_transfer_bytes bigint NOT NULL DEFAULT 67108864 CHECK(file_transfer_bytes BETWEEN 1048576 AND 1073741824);

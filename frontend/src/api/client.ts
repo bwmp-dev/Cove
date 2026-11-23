@@ -105,8 +105,8 @@ export async function request<T>(method: string, path: string, body?: unknown, s
 }
 
 // Sends a file as the raw request body. The browser streams a File from disk, so it is never read into memory here.
-export async function uploadFile<T>(path: string, file: Blob, signal?: AbortSignal): Promise<T> {
-  const headers = { Accept: "application/json", "Content-Type": "application/octet-stream", "X-Cove-Size": String(file.size) };
+export async function uploadFile<T>(path: string, file: Blob, signal?: AbortSignal, extraHeaders: Record<string, string> = {}): Promise<T> {
+  const headers = { ...extraHeaders, Accept: "application/json", "Content-Type": "application/octet-stream", "X-Cove-Size": String(file.size) };
   return readJson<T>(await dispatch(path, { method: "POST", headers, body: file, signal }));
 }
 

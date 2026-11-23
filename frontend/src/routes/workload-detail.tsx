@@ -55,7 +55,6 @@ import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
-import { useSession } from "../lib/session";
 import { can } from "../lib/permissions";
 import { actionLabels, activeOperation, allowedActions, isActive, stateLabels, workloadKind } from "../lib/operations";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
@@ -422,8 +421,8 @@ interface ResourceSection {
 }
 
 // Grouped by what the visitor is doing: watching the resource, configuring what runs, controlling releases, or managing its data and lifecycle.
-// File access is limited to instance administrators, like the node terminal; the control plane enforces this too.
-function resourceSections(workload: Workload, admin: boolean): { label: string; links: ResourceSection[] }[] {
+// File access needs editor access to the resource, because it reads and changes application data; the control plane enforces this too.
+function resourceSections(workload: Workload, canEditFiles: boolean): { label: string; links: ResourceSection[] }[] {
   const service = workloadKind(workload.kind) === "service";
   return [
     {
@@ -463,7 +462,7 @@ function resourceSections(workload: Workload, admin: boolean): { label: string; 
       label: "Manage",
       links: [
         ...(service ? [{ to: "/resources/$resourceId/backups" as const, label: "Backups", icon: Archive }] : []),
-        ...(admin ? [{ to: "/resources/$resourceId/files" as const, label: "Files", icon: FolderOpen }] : []),
+        ...(canEditFiles ? [{ to: "/resources/$resourceId/files" as const, label: "Files", icon: FolderOpen }] : []),
         { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
       ],
     },
@@ -535,7 +534,7 @@ function MobileResourceNav({ workload, groups }: { workload: Workload; groups: {
 }
 
 function ResourceNav({ workload }: { workload: Workload }) {
-  const groups = resourceSections(workload, Boolean(useSession()?.is_admin));
+  const groups = resourceSections(workload, can(workload.permissions, "edit"));
   return (
     <>
       <MobileResourceNav workload={workload} groups={groups} />

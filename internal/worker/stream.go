@@ -19,6 +19,8 @@ import (
 const MaxTransferBytes int64 = 64 << 30
 
 type StreamRequest struct {
+	Files         *FileRequest     `json:"files,omitempty"`
+	Workload      string           `json:"workload,omitempty"`
 	Action        string           `json:"action"`
 	Request       *Request         `json:"request"`
 	Limit         int64            `json:"limit"`
@@ -61,6 +63,10 @@ func decodeRPCFrame(in io.Reader) (RPCRequest, io.Reader, error) {
 }
 
 func (e *Engine) serveStream(w http.ResponseWriter, httpRequest *http.Request, stream *StreamRequest, input io.Reader) {
+	if stream != nil && strings.HasPrefix(stream.Action, "file_") {
+		e.serveFileStream(w, httpRequest, stream, input)
+		return
+	}
 	controller := http.NewResponseController(w)
 	deadline := time.Now().Add(30 * time.Minute)
 	_ = controller.SetReadDeadline(deadline)
@@ -214,7 +220,8 @@ func ReadStreamResponse(input io.Reader) (StreamResponse, *bufio.Reader, error) 
 	if response.Error != "" {
 		return response, nil, errors.New(response.Error)
 	}
-	if response.Size < 1 || response.Size > MaxTransferBytes || !snapshotIdentifier.MatchString(response.SHA256) {
+	empty := sha256.Sum256(nil)
+	if response.Size < 0 || response.Size > MaxTransferBytes || !snapshotIdentifier.MatchString(response.SHA256) || response.Size == 0 && response.SHA256 != hex.EncodeToString(empty[:]) {
 		return response, nil, errors.New("invalid worker stream metadata")
 	}
 	return response, reader, nil

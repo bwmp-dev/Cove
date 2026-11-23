@@ -15,6 +15,7 @@ export interface Capabilities {
   backup_transfers?: boolean;
   backblaze_b2?: boolean;
   file_browser?: boolean;
+  file_transfers?: boolean;
   alert_observations?: boolean;
   scheduled_cleanup?: boolean;
   journal_retention?: boolean;

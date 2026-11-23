@@ -10,6 +10,10 @@ import (
 )
 
 func (s *Server) workloadFiles(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/download") || strings.HasSuffix(r.URL.Path, "/upload") {
+		s.streamWorkloadFile(w, r)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodGet {
 		response := &statusResponse{ResponseWriter: w}
@@ -22,8 +26,7 @@ func (s *Server) workloadFiles(w http.ResponseWriter, r *http.Request) {
 			s.recordAudit(r, actor(r).ID, status)
 		}()
 	}
-	if !actor(r).Admin {
-		http.Error(w, "file browsing requires an instance administrator", 403)
+	if !s.requireAccess(w, r, "workload", r.PathValue("id"), 3) {
 		return
 	}
 	var in worker.FileRequest
@@ -40,6 +43,8 @@ func (s *Server) workloadFiles(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/targets"):
 		in.Action = "targets"
+	case strings.HasSuffix(r.URL.Path, "/metadata"):
+		in.Action = "stat"
 	case r.Method == http.MethodPut || r.Method == http.MethodPost:
 		in.Action = "write"
 	case r.Method == http.MethodDelete:
@@ -92,14 +97,19 @@ func (s *Server) workloadFiles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "worker file response exceeds limits", 502)
 		return
 	}
+	if in.Action == "stat" {
+		var limit int64
+		if err = tx.QueryRow(r.Context(), `SELECT file_transfer_bytes FROM control_settings WHERE id=1`).Scan(&limit); err != nil {
+			http.Error(w, "file transfer limit unavailable", 503)
+			return
+		}
+		if response.Files.Size < 0 || response.Files.Size > limit {
+			http.Error(w, "file exceeds the configured transfer limit", 413)
+			return
+		}
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		http.Error(w, "file operation completed but database confirmation failed; refresh before retrying", 503)
-		return
-	}
-	if strings.HasSuffix(r.URL.Path, "/download") {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", `attachment; filename="cove-file.bin"`)
-		_, _ = w.Write(response.Files.Data)
 		return
 	}
 	respond(w, 200, response.Files)

@@ -2,6 +2,9 @@ package control
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"strings"
 	"testing"
 
@@ -16,10 +19,13 @@ func TestFileBrowserPermissionsBoundsAndAudit(t *testing.T) {
 	sealed, _ := seal(f.s.Key, []byte(`{}`))
 	f.sql("INSERT INTO workloads(id,node_id,name,configuration,project_id,team_id) VALUES('files-resource','files-node','Resource',$1,'files-project','default')", sealed)
 	owner := f.user("files-owner", "files-owner@example.com")
+	viewer := f.user("files-viewer", "files-viewer@example.com")
 	f.sql(`INSERT INTO team_members(team_id,user_id,role,grants) VALUES('default','files-owner','owner','[]')`)
-	f.call(owner, "default", "GET", "/api/workloads/files-resource/files/targets", nil, 403)
+	f.sql(`INSERT INTO team_members(team_id,user_id,role,grants) VALUES('default','files-viewer','member','[{"scope":"project","scope_id":"files-project","role":"viewer"}]')`)
+	f.call(viewer, "default", "GET", "/api/workloads/files-resource/files/targets", nil, 403)
+	f.call(owner, "default", "GET", "/api/workloads/files-resource/files/targets", nil, 409)
 	f.call("root", "default", "GET", "/api/workloads/files-resource/files/targets", nil, 409)
-	f.sql(`UPDATE nodes SET capabilities='{"file_browser":true}' WHERE id='files-node'`)
+	f.sql(`UPDATE nodes SET capabilities='{"file_browser":true,"file_transfers":true}' WHERE id='files-node'`)
 	calls := 0
 	f.s.workerRPC = func(_ context.Context, node string, r worker.RPCRequest) (worker.RPCResponse, error) {
 		calls++
@@ -27,6 +33,11 @@ func TestFileBrowserPermissionsBoundsAndAudit(t *testing.T) {
 			t.Fatal("incorrect file RPC")
 		}
 		return worker.RPCResponse{Files: &worker.FileResponse{Data: []byte("sample"), Revision: strings.Repeat("a", 64), MaxBytes: worker.MaxFileBytes}}, nil
+	}
+	f.s.workerStream = func(_ context.Context, _ string, _ worker.RPCRequest, _ io.Reader, consume func(worker.StreamResponse, io.Reader) error) error {
+		calls++
+		digest := sha256.Sum256([]byte("sample"))
+		return consume(worker.StreamResponse{Size: 6, SHA256: hex.EncodeToString(digest[:])}, strings.NewReader("sample"))
 	}
 	path := "/api/workloads/files-resource/files/content?kind=container&target=aaaaaaaaaaaa&path=/data/config"
 	response := f.call("root", "default", "GET", path, nil, 200)
@@ -47,7 +58,8 @@ func TestFileBrowserPermissionsBoundsAndAudit(t *testing.T) {
 	}
 	data := []byte("changed")
 	in := worker.FileRequest{Kind: "container", Target: "aaaaaaaaaaaa", Path: "/data/config", Data: &data, Revision: strings.Repeat("a", 64)}
-	f.call(owner, "default", "PUT", "/api/workloads/files-resource/files/content", in, 403)
+	f.call(viewer, "default", "PUT", "/api/workloads/files-resource/files/content", in, 403)
+	f.call(owner, "default", "PUT", "/api/workloads/files-resource/files/content", in, 200)
 	f.call("root", "default", "PUT", "/api/workloads/files-resource/files/content", in, 200)
 	large := make([]byte, worker.MaxFileBytes+1)
 	in.Data = &large

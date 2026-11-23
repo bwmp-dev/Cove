@@ -3,11 +3,13 @@ import { ArrowUp, Download, File, FilePlus, FileQuestion, Folder, Link2, RotateC
 import { useEffect, useId, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { errorMessage } from "../api/client";
 import {
+  fileDownloadUrl,
   fileKeys,
+  fileLimitsQuery,
   fileListQuery,
   fileTargetsQuery,
   useDeleteFile,
-  useDownloadFile,
+  useFileMetadata,
   useReadFile,
   useUploadFile,
   useWriteFile,
@@ -15,7 +17,6 @@ import {
   type FileLocation,
   type FileTarget,
 } from "../api/files";
-import { formatBytes } from "../lib/format";
 import {
   baseName,
   containerTools,
@@ -36,7 +37,8 @@ import {
   targetKey,
   utf8Length,
 } from "../lib/files";
-import { describedBy, inputClass } from "../lib/styles";
+import { buttonClass, describedBy, inputClass } from "../lib/styles";
+import { formatBinaryBytes } from "../lib/telemetry";
 import { ConfirmDialog, Dialog } from "./ConfirmDialog";
 import { UnsavedChangesGuard } from "./SaveBar";
 import { Select } from "./Select";
@@ -44,24 +46,23 @@ import { Button, EmptyState, Field, LoadingRows, Notice, QueryError, Section } f
 
 interface OpenFile {
   location: FileLocation;
-  bytes: Uint8Array<ArrayBuffer>;
+  size: number;
+  revision: string;
+  // Null when only the file's size and revision were read, because it is larger than the text editor.
+  bytes: Uint8Array<ArrayBuffer> | null;
   // Null when the bytes cannot be edited as text without changing them; such files can be downloaded or replaced.
   text: string | null;
   carriageReturns: boolean;
-  revision: string;
+}
+
+interface Upload {
+  file: File;
+  path: string;
+  replacing: boolean;
 }
 
 const encoder = new TextEncoder();
-const sizeLimit = formatBytes(maxFileBytes);
-
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
-}
+const editorLimit = formatBinaryBytes(maxFileBytes);
 
 // Section titles do not wrap long unbroken names, so the full path is shown in the description instead.
 function shortName(name: string) {
@@ -71,6 +72,46 @@ function shortName(name: string) {
 function targetLabel(target: FileTarget) {
   if (target.kind === "volume") return target.name;
   return targetAvailable(target) ? target.name : `${target.name} (${target.state || "unknown"}, not running)`;
+}
+
+function isAbort(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+// A cancelled or failed upload is never retried: the worker may already have applied it.
+function uploadErrorMessage(error: unknown) {
+  if (isAbort(error)) return "The upload was cancelled. The change may still have completed; refresh before trying again.";
+  return `${errorMessage(error)} The file may or may not have changed. Nothing was retried; refresh before trying again.`;
+}
+
+function filesDescription(transfers: Transfers) {
+  const intro = `Browse one folder at a time, up to ${maxEntries} entries. Text files up to ${editorLimit} can be edited here`;
+  const audit = "Every read and change is audited without its contents.";
+  if (!transfers.supported) return `${intro}. ${audit}`;
+  const limit = transfers.limit === undefined ? "the transfer limit" : formatBinaryBytes(transfers.limit);
+  return `${intro}; files up to ${limit} can be downloaded, uploaded and replaced. ${audit}`;
+}
+
+function actionError(failures: [unknown, string][]) {
+  const failure = failures.find(([error]) => error);
+  if (!failure) return null;
+  const [error, action] = failure;
+  return `${action}: ${action === "Could not upload" ? uploadErrorMessage(error) : errorMessage(error)}`;
+}
+
+function TargetPicker({ targets, limited, value, disabled, onChange }: { targets: FileTarget[]; limited: boolean; value: string; disabled: boolean; onChange: (key: string) => void }) {
+  const id = useId();
+  const containers = targets.filter((item) => item.kind === "container");
+  const volumes = targets.filter((item) => item.kind === "volume");
+  return (
+    <Field id={id} label="Container or volume" hint={limited ? "Some volumes are not listed: at most 128 owned volumes and 32 containers are shown." : "Stopped containers cannot be browsed. Volumes can be browsed while the resource runs."}>
+      <Select id={id} className={`${inputClass} sm:max-w-md`} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} aria-describedby={`${id}-hint`}>
+        <option value="" disabled>Choose a container or volume</option>
+        {containers.length > 0 && <optgroup label="Containers">{containers.map((item) => <option key={targetKey(item)} value={targetKey(item)} disabled={!targetAvailable(item)}>{targetLabel(item)}</option>)}</optgroup>}
+        {volumes.length > 0 && <optgroup label="Volumes">{volumes.map((item) => <option key={targetKey(item)} value={targetKey(item)}>{targetLabel(item)}</option>)}</optgroup>}
+      </Select>
+    </Field>
+  );
 }
 
 function TargetNotice({ target, containersRunning }: { target: FileTarget; containersRunning: number }) {
@@ -90,9 +131,9 @@ function TargetNotice({ target, containersRunning }: { target: FileTarget; conta
   );
 }
 
-function FolderPath({ path, onNavigate }: { path: string; onNavigate: (path: string) => void }) {
+function FolderPath({ path, disabled, onNavigate }: { path: string; disabled: boolean; onNavigate: (path: string) => void }) {
   const segments = pathSegments(path);
-  const crumbClass = "rounded px-1 font-mono text-xs text-fg-muted hover:bg-raised hover:text-fg pointer-coarse:min-h-10";
+  const crumbClass = "rounded px-1 font-mono text-xs text-fg-muted hover:bg-raised hover:text-fg disabled:cursor-not-allowed disabled:text-fg-disabled disabled:hover:bg-transparent pointer-coarse:min-h-10";
   return (
     <nav aria-label="Folder path" className="min-w-0 flex-1">
       <ol className="flex min-w-0 flex-wrap items-center gap-0.5">
@@ -100,7 +141,7 @@ function FolderPath({ path, onNavigate }: { path: string; onNavigate: (path: str
           {segments.length === 0 ? (
             <span aria-current="location" className="px-1 font-mono text-xs text-fg">/</span>
           ) : (
-            <button type="button" className={crumbClass} onClick={() => onNavigate("/")}>/</button>
+            <button type="button" className={crumbClass} disabled={disabled} onClick={() => onNavigate("/")}>/</button>
           )}
         </li>
         {segments.map((segment, index) => (
@@ -109,7 +150,7 @@ function FolderPath({ path, onNavigate }: { path: string; onNavigate: (path: str
             {index === segments.length - 1 ? (
               <span aria-current="location" className="truncate px-1 font-mono text-xs text-fg" title={segment.name}>{segment.name}</span>
             ) : (
-              <button type="button" className={`${crumbClass} max-w-48 truncate`} title={segment.name} onClick={() => onNavigate(segment.path)}>{segment.name}</button>
+              <button type="button" className={`${crumbClass} max-w-48 truncate`} title={segment.name} disabled={disabled} onClick={() => onNavigate(segment.path)}>{segment.name}</button>
             )}
           </li>
         ))}
@@ -118,31 +159,69 @@ function FolderPath({ path, onNavigate }: { path: string; onNavigate: (path: str
   );
 }
 
+// Downloads are plain links so the browser streams the file to disk itself; Cove never buffers it in the page.
+function DownloadLink({ href, name, disabled, label }: { href: string; name: string; disabled: boolean; label?: string }) {
+  const accessibleName = `Download ${name}`;
+  if (disabled) {
+    return (
+      <Button variant={label ? "secondary" : "ghost"} size="sm" aria-label={label ? undefined : accessibleName} title={accessibleName} disabled>
+        <Download aria-hidden className="size-3.5" />
+        {label}
+      </Button>
+    );
+  }
+  return (
+    <a href={href} target="_blank" rel="noopener" className={buttonClass(label ? "secondary" : "ghost", "gap-1.5", "sm")} aria-label={label ? undefined : accessibleName} title={accessibleName}>
+      <Download aria-hidden className="size-3.5" />
+      {label}
+    </a>
+  );
+}
+
 const entryIcons = { directory: Folder, file: File, link: Link2, other: FileQuestion } as const;
 
-function entryDetail(entry: FileEntry, blocked: boolean) {
+interface Transfers {
+  // False on workers without streamed file support: only small text files can be read and edited there.
+  supported: boolean;
+  // The configured cap for downloads and uploads, once it has been read.
+  limit: number | undefined;
+}
+
+function fileAccess(size: number, transfers: Transfers) {
+  const editable = size <= maxFileBytes;
+  const transferable = transfers.supported && transfers.limit !== undefined && size <= transfers.limit;
+  return { editable, transferable, openable: editable || transferable };
+}
+
+function entryDetail(entry: FileEntry, blocked: boolean, transfers: Transfers) {
   if (entry.kind === "directory") return blocked ? "Folder · not browsable" : "Folder";
   if (entry.kind === "link") return "Symbolic link · not followed";
   if (entry.kind === "other") return "Special file · not readable";
-  return entry.size > maxFileBytes ? `${formatBytes(entry.size)} · larger than ${sizeLimit}` : formatBytes(entry.size);
+  const size = formatBinaryBytes(entry.size);
+  if (entry.size <= maxFileBytes) return size;
+  if (!transfers.supported) return `${size} · larger than the ${editorLimit} editor; upgrade the worker to download`;
+  if (transfers.limit !== undefined && entry.size > transfers.limit) return `${size} · over the ${formatBinaryBytes(transfers.limit)} transfer limit`;
+  return `${size} · download or replace`;
 }
 
 interface EntryRowProps {
   entry: FileEntry;
   path: string;
+  downloadUrl: string;
   blocked: boolean;
+  transfers: Transfers;
   current: boolean;
   disabled: boolean;
+  offline: boolean;
   reading: boolean;
-  downloading: boolean;
   onOpen: () => void;
-  onDownload: () => void;
   onDelete: () => void;
 }
 
-function EntryRow({ entry, path, blocked, current, disabled, reading, downloading, onOpen, onDownload, onDelete }: EntryRowProps) {
+function EntryRow({ entry, path, downloadUrl, blocked, transfers, current, disabled, offline, reading, onOpen, onDelete }: EntryRowProps) {
   const Icon = entryIcons[entry.kind];
-  const openable = (entry.kind === "directory" && !blocked) || (entry.kind === "file" && entry.size <= maxFileBytes);
+  const access = fileAccess(entry.size, transfers);
+  const openable = (entry.kind === "directory" && !blocked) || (entry.kind === "file" && access.openable);
   const nameContent = (
     <>
       <Icon aria-hidden className={`size-4 shrink-0 ${entry.kind === "directory" ? "text-fg-muted" : "text-fg-subtle"}`} />
@@ -167,16 +246,12 @@ function EntryRow({ entry, path, blocked, current, disabled, reading, downloadin
           <span className="flex max-w-full items-center gap-2 text-fg-muted" title={path}>{nameContent}</span>
         )}
         <p className="mt-0.5 pl-6 text-xs text-fg-muted">
-          {entryDetail(entry, blocked)}
+          {entryDetail(entry, blocked, transfers)}
           {reading && " · opening…"}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        {entry.kind === "file" && entry.size <= maxFileBytes && (
-          <Button variant="ghost" size="sm" aria-label={`Download ${entry.name}`} title={`Download ${entry.name}`} disabled={disabled} pending={downloading} onClick={onDownload}>
-            {!downloading && <Download aria-hidden className="size-3.5" />}
-          </Button>
-        )}
+        {entry.kind === "file" && access.transferable && <DownloadLink href={downloadUrl} name={entry.name} disabled={offline} />}
         {(entry.kind === "file" || (entry.kind === "directory" && !blocked)) && (
           <Button variant="ghost" size="sm" aria-label={`Delete ${entry.name}`} title={`Delete ${entry.name}`} disabled={disabled} onClick={onDelete}>
             <Trash2 aria-hidden className="size-3.5" />
@@ -184,6 +259,74 @@ function EntryRow({ entry, path, blocked, current, disabled, reading, downloadin
         )}
       </div>
     </li>
+  );
+}
+
+interface EntryListProps {
+  workloadId: string;
+  location: FileLocation;
+  entries: FileEntry[];
+  transfers: Transfers;
+  openPath: string | undefined;
+  readingPath: string | undefined;
+  disabled: boolean;
+  offline: boolean;
+  onOpen: (entry: FileEntry, location: FileLocation) => void;
+  onDelete: (entry: FileEntry) => void;
+}
+
+function EntryList({ workloadId, location, entries, transfers, openPath, readingPath, disabled, offline, onOpen, onDelete }: EntryListProps) {
+  return (
+    <ul aria-label={`Contents of ${location.path}`} className="divide-y divide-line">
+      {entries.map((entry) => {
+        const entryLocation = { ...location, path: joinPath(location.path, entry.name) };
+        return (
+          <EntryRow
+            key={entry.name}
+            entry={entry}
+            path={entryLocation.path}
+            downloadUrl={fileDownloadUrl(workloadId, entryLocation)}
+            blocked={isBlockedPath(location.kind, entryLocation.path)}
+            transfers={transfers}
+            current={openPath === entryLocation.path}
+            disabled={disabled}
+            offline={offline}
+            reading={readingPath === entryLocation.path}
+            onOpen={() => onOpen(entry, entryLocation)}
+            onDelete={() => onDelete(entry)}
+          />
+        );
+      })}
+    </ul>
+  );
+}
+
+function UploadStatus({ upload, onCancel }: { upload: Upload; onCancel: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <p role="status" className="min-w-0 text-xs break-all text-fg-muted">
+        {upload.replacing ? "Replacing" : "Uploading"} <span className="font-mono">{upload.path}</span> with {upload.file.name} ({formatBinaryBytes(upload.file.size)})…
+      </p>
+      <Button variant="ghost" size="sm" onClick={onCancel}>Cancel upload</Button>
+    </div>
+  );
+}
+
+// A local error was found before any request; a server error may have left a change applied or not.
+function FolderFeedback({ upload, error, localOnly, status, onCancelUpload }: { upload: Upload | null; error: string | null; localOnly: boolean; status: string | null; onCancelUpload: () => void }) {
+  return (
+    <>
+      {upload && (
+        <div className="px-3 py-2">
+          <UploadStatus upload={upload} onCancel={onCancelUpload} />
+        </div>
+      )}
+      {(error || status) && (
+        <div className="px-3 py-2">
+          {error ? <Notice tone="error" title={localOnly ? "Nothing was sent" : "Could not confirm the action"}>{error}</Notice> : <p role="status" className="text-xs text-fg-muted">{status}</p>}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -213,52 +356,144 @@ function CreateFileDialog({ open, directory, kind, existing, pending, error, onC
   );
 }
 
+function NotEditableNotice({ file, transfers }: { file: OpenFile; transfers: Transfers }) {
+  const size = formatBinaryBytes(file.size);
+  if (file.bytes === null) {
+    return (
+      <Notice title={`Larger than the ${editorLimit} editor`}>
+        Cove read this file's size and revision without its contents.{" "}
+        {fileAccess(file.size, transfers).transferable ? `Download it, or replace it with a local file of up to ${formatBinaryBytes(transfers.limit ?? 0)}.` : "Download and replace need an upgraded worker."}
+      </Notice>
+    );
+  }
+  if (file.carriageReturns) {
+    return (
+      <Notice title="Text with carriage returns">
+        Browsers convert CR line endings while editing, which would rewrite every line of this {size} file. {transfers.supported ? "Download it, edit it locally and replace it instead." : "Upgrade the worker to download and replace it instead."}
+      </Notice>
+    );
+  }
+  return (
+    <Notice title="Binary file">
+      This {size} file is not UTF-8 text, so it cannot be edited here. {transfers.supported ? "Download it, or replace it with a local file." : "Upgrade the worker to download or replace it."}
+    </Notice>
+  );
+}
+
+function failureMessage(saveError: unknown, replaceError: unknown, dirty: boolean) {
+  if (saveError) return `${errorMessage(saveError)} Your edits are kept here. If the file changed since you opened it, read it again and reapply them.`;
+  if (replaceError) return `${uploadErrorMessage(replaceError)}${dirty ? " Your edits are kept here." : ""}`;
+  return null;
+}
+
+interface EditorActionsProps {
+  file: OpenFile;
+  downloadUrl: string;
+  transfers: Transfers;
+  disabled: boolean;
+  offline: boolean;
+  replacing: boolean;
+  onReplace: () => void;
+  onClose: () => void;
+}
+
+function EditorActions({ file, downloadUrl, transfers, disabled, offline, replacing, onReplace, onClose }: EditorActionsProps) {
+  const name = baseName(file.location.path);
+  return (
+    <>
+      {fileAccess(file.size, transfers).transferable && <DownloadLink href={downloadUrl} name={name} disabled={offline} label="Download" />}
+      {transfers.supported && (
+        <Button size="sm" onClick={onReplace} disabled={disabled || transfers.limit === undefined} pending={replacing}>
+          {!replacing && <Upload aria-hidden className="size-3.5" />}Replace
+        </Button>
+      )}
+      <Button variant="ghost" size="sm" aria-label="Close file" title="Close file" disabled={replacing} onClick={onClose}><X aria-hidden className="size-3.5" /></Button>
+    </>
+  );
+}
+
+interface FolderToolbarProps {
+  path: string;
+  navigationDisabled: boolean;
+  busy: boolean;
+  transfers: Transfers;
+  uploading: boolean;
+  limitsLoading: boolean;
+  onNavigate: (path: string) => void;
+  onCreate: () => void;
+  onUpload: (event: ChangeEvent<HTMLInputElement>) => void;
+}
+
+function FolderToolbar({ path, navigationDisabled, busy, transfers, uploading, limitsLoading, onNavigate, onCreate, onUpload }: FolderToolbarProps) {
+  const input = useRef<HTMLInputElement>(null);
+  const waiting = uploading || limitsLoading;
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+      <Button variant="ghost" size="sm" aria-label="Parent folder" title="Parent folder" disabled={path === "/" || navigationDisabled} onClick={() => onNavigate(parentPath(path))}>
+        <ArrowUp aria-hidden className="size-3.5" />
+      </Button>
+      <FolderPath path={path} disabled={navigationDisabled} onNavigate={onNavigate} />
+      <div className="flex items-center gap-2">
+        <Button size="sm" disabled={busy} onClick={onCreate}><FilePlus aria-hidden className="size-3.5" />New file</Button>
+        {transfers.supported && (
+          <>
+            <Button size="sm" disabled={busy || transfers.limit === undefined} pending={waiting} onClick={() => input.current?.click()}>
+              {!waiting && <Upload aria-hidden className="size-3.5" />}Upload
+            </Button>
+            <input ref={input} type="file" className="hidden" tabIndex={-1} aria-hidden onChange={onUpload} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface EditorProps {
   file: OpenFile;
   draft: string;
+  downloadUrl: string;
+  transfers: Transfers;
   disabled: boolean;
+  offline: boolean;
   saving: boolean;
   saveError: unknown;
+  replaceError: unknown;
   saved: boolean;
-  downloading: boolean;
+  upload: Upload | null;
   onDraft: (value: string) => void;
   onSave: () => void;
   onDiscard: () => void;
   onReread: () => void;
   onReplace: () => void;
-  onDownload: () => void;
+  onCancelUpload: () => void;
   onClose: () => void;
 }
 
-function FileEditor({ file, draft, disabled, saving, saveError, saved, downloading, onDraft, onSave, onDiscard, onReread, onReplace, onDownload, onClose }: EditorProps) {
+function FileEditor({ file, draft, downloadUrl, transfers, disabled, offline, saving, saveError, replaceError, saved, upload, onDraft, onSave, onDiscard, onReread, onReplace, onCancelUpload, onClose }: EditorProps) {
   const id = useId();
   const editor = useRef<HTMLTextAreaElement>(null);
-  const binaryNotice = useRef<HTMLDivElement>(null);
+  const notice = useRef<HTMLDivElement>(null);
   const dirty = file.text !== null && draft !== file.text;
-  const bytes = file.text === null ? file.bytes.length : utf8Length(draft);
+  const bytes = file.text === null ? file.size : utf8Length(draft);
   const tooLarge = bytes > maxFileBytes;
   const path = file.location.path;
+  const name = baseName(path);
+  const failure = failureMessage(saveError, replaceError, dirty);
 
   useEffect(() => {
-    if (file.text === null) binaryNotice.current?.focus();
+    if (file.text === null) notice.current?.focus();
     else editor.current?.focus();
   }, [path, file.text]);
 
   return (
     <Section
-      title={shortName(baseName(path))}
+      title={shortName(name)}
       description={
         <>
-          <span className="font-mono break-all">{path}</span> · revision <span className="font-mono">{file.revision.slice(0, 12)}</span>
+          <span className="font-mono break-all">{path}</span> · {formatBinaryBytes(file.size)} · revision <span className="font-mono">{file.revision.slice(0, 12)}</span>
         </>
       }
-      actions={
-        <>
-          <Button size="sm" onClick={onDownload} disabled={disabled} pending={downloading}>{!downloading && <Download aria-hidden className="size-3.5" />}Download</Button>
-          <Button size="sm" onClick={onReplace} disabled={disabled}><Upload aria-hidden className="size-3.5" />Replace</Button>
-          <Button variant="ghost" size="sm" aria-label="Close file" title="Close file" onClick={onClose}><X aria-hidden className="size-3.5" /></Button>
-        </>
-      }
+      actions={<EditorActions file={file} downloadUrl={downloadUrl} transfers={transfers} disabled={disabled} offline={offline} replacing={Boolean(upload?.replacing)} onReplace={onReplace} onClose={onClose} />}
       footer={
         file.text === null ? undefined : (
           <form className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2" onSubmit={(event) => { event.preventDefault(); onSave(); }}>
@@ -270,26 +505,19 @@ function FileEditor({ file, draft, disabled, saving, saveError, saved, downloadi
       }
     >
       <div className="space-y-3">
-        {Boolean(saveError) && (
+        {upload?.replacing && <UploadStatus upload={upload} onCancel={onCancelUpload} />}
+        {failure && (
           <Notice
             tone="error"
-            title="The file was not changed"
+            title="Could not confirm the file change"
             action={<Button variant="ghost" size="sm" onClick={onReread} disabled={disabled}><RotateCw aria-hidden className="size-3.5" />Read again</Button>}
           >
-            {errorMessage(saveError)} Your edits are kept here. If the file changed since you opened it, read it again and reapply them.
+            {failure}
           </Notice>
         )}
         {file.text === null ? (
-          <div ref={binaryNotice} tabIndex={-1} className="rounded-md">
-            {file.carriageReturns ? (
-              <Notice title="Text with carriage returns">
-                Browsers convert CR line endings while editing, which would rewrite every line of this {formatBytes(file.bytes.length)} file. Download it, edit it locally and replace it instead.
-              </Notice>
-            ) : (
-              <Notice title="Binary file">
-                This {formatBytes(file.bytes.length)} file is not UTF-8 text, so it cannot be edited here. Download it, or replace it with a local file.
-              </Notice>
-            )}
+          <div ref={notice} tabIndex={-1} className="rounded-md">
+            <NotEditableNotice file={file} transfers={transfers} />
           </div>
         ) : (
           <div className="space-y-1.5">
@@ -310,7 +538,7 @@ function FileEditor({ file, draft, disabled, saving, saveError, saved, downloadi
               className={`${inputClass} h-auto min-h-64 resize-y py-2 font-mono text-xs leading-relaxed`}
             />
             <p id={`${id}-size`} className={`text-xs tabular-nums ${tooLarge ? "text-bad" : "text-fg-muted"}`}>
-              {bytes.toLocaleString()} of {maxFileBytes.toLocaleString()} bytes{tooLarge && " — remove content before saving"}
+              {bytes.toLocaleString()} of {maxFileBytes.toLocaleString()} bytes{tooLarge && " — remove content before saving, or replace the file with a local copy"}
             </p>
           </div>
         )}
@@ -319,11 +547,18 @@ function FileEditor({ file, draft, disabled, saving, saveError, saved, downloadi
   );
 }
 
-export function FileBrowser({ workloadId, blocked }: { workloadId: string; blocked: boolean }) {
+interface FileBrowserProps {
+  workloadId: string;
+  blocked: boolean;
+  offline: boolean;
+  // Whether the worker streams downloads, uploads and metadata; older workers only edit small text files.
+  transfersSupported: boolean;
+}
+
+export function FileBrowser({ workloadId, blocked, offline, transfersSupported }: FileBrowserProps) {
   const client = useQueryClient();
-  const pickerId = useId();
-  const uploadInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
+  const uploadAbort = useRef<AbortController | null>(null);
   const [selectedKey, setSelectedKey] = useState("");
   const [path, setPath] = useState("/");
   const [file, setFile] = useState<OpenFile | null>(null);
@@ -331,11 +566,12 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
   const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<FileEntry | null>(null);
-  const [replacing, setReplacing] = useState<{ name: string; bytes: Uint8Array<ArrayBuffer>; revision: string } | null>(null);
+  const [replacing, setReplacing] = useState<File | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
   const targets = useQuery({ ...fileTargetsQuery(workloadId), enabled: !blocked, refetchOnWindowFocus: false });
+  const limits = useQuery({ ...fileLimitsQuery(workloadId), enabled: !blocked && transfersSupported, refetchOnWindowFocus: false });
   const target = targets.data?.targets.find((item) => targetKey(item) === selectedKey);
   const location = target && targetAvailable(target) ? { kind: target.kind, target: target.id, path } : null;
   const listing = useQuery({
@@ -343,15 +579,18 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
     enabled: !blocked && location !== null,
     refetchOnWindowFocus: false,
   });
+  const transfers: Transfers = { supported: transfersSupported, limit: limits.data?.file_bytes };
 
   const read = useReadFile(workloadId);
-  const download = useDownloadFile(workloadId);
+  const metadata = useFileMetadata(workloadId);
   const write = useWriteFile(workloadId);
   const createFile = useWriteFile(workloadId);
   const upload = useUploadFile(workloadId);
   const remove = useDeleteFile(workloadId);
-  const busy = blocked || read.isPending || write.isPending || createFile.isPending || upload.isPending || remove.isPending;
+  const busy = blocked || read.isPending || metadata.isPending || write.isPending || createFile.isPending || upload.isPending || remove.isPending;
   const dirty = file?.text != null && draft !== file.text;
+  const activeUpload: Upload | null = upload.isPending ? { file: upload.variables.file, path: upload.variables.path, replacing: upload.variables.revision !== "" } : null;
+  const replaceFailed = upload.isError && upload.variables.revision !== "";
 
   const entries = listing.data ? sortEntries(listing.data.entries) : [];
   const names = new Set(entries.map((entry) => entry.name));
@@ -365,17 +604,20 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
   function resetFeedback() {
     setLocalError(null);
     setStatus(null);
-    download.reset();
     remove.reset();
-    upload.reset();
+    // A running upload keeps its state so it can still be cancelled and its result reported.
+    if (!upload.isPending) upload.reset();
     write.reset();
+    metadata.reset();
   }
 
   function closeFile() {
     setFile(null);
     setDraft("");
     read.reset();
+    metadata.reset();
     write.reset();
+    if (upload.isError) upload.reset();
   }
 
   function refreshListing() {
@@ -403,19 +645,29 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
     const decoded = decodeText(bytes);
     const carriageReturns = decoded?.includes("\r") ?? false;
     const text = carriageReturns ? null : decoded;
-    setFile({ location, bytes, text, revision, carriageReturns });
+    setFile({ location, size: bytes.length, bytes, text, revision, carriageReturns });
     setDraft(text ?? "");
   }
 
-  function openFile(location: FileLocation) {
-    guard(() => {
-      resetFeedback();
-      read.mutate(location, { onSuccess: (response) => show(location, decodeBase64(response.data), response.revision) });
-    });
+  function showMetadata(location: FileLocation, size: number, revision: string) {
+    setFile({ location, size, revision, bytes: null, text: null, carriageReturns: false });
+    setDraft("");
   }
 
-  function downloadFile(location: FileLocation) {
-    download.mutate(location, { onSuccess: (blob) => saveBlob(blob, baseName(location.path)) });
+  // Files the editor can hold are read in full; larger ones only have their size and revision read, so nothing is buffered.
+  function load(location: FileLocation, size: number) {
+    if (size <= maxFileBytes) {
+      read.mutate(location, { onSuccess: (response) => show(location, decodeBase64(response.data), response.revision) });
+    } else {
+      metadata.mutate(location, { onSuccess: (response) => showMetadata(location, response.size ?? size, response.revision) });
+    }
+  }
+
+  function openFile(location: FileLocation, size: number) {
+    guard(() => {
+      resetFeedback();
+      load(location, size);
+    });
   }
 
   // The next save must name the revision just written, which is the SHA-256 of the bytes sent.
@@ -439,7 +691,7 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
       { ...file.location, data: encodeBase64(bytes), revision: file.revision },
       {
         onSuccess: () => {
-          setFile((current) => (current && current.location.path === file.location.path ? { ...current, bytes, text: saved, revision } : current));
+          setFile((current) => (current && current.location.path === file.location.path ? { ...current, size: bytes.length, bytes, text: saved, revision } : current));
           refreshListing();
         },
       },
@@ -463,53 +715,61 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
     );
   }
 
-  async function chooseUpload(event: ChangeEvent<HTMLInputElement>) {
+  function sizeProblem(chosen: File) {
+    if (transfers.limit === undefined || chosen.size <= transfers.limit) return undefined;
+    return `${chosen.name} is ${formatBinaryBytes(chosen.size)}; files are limited to ${formatBinaryBytes(transfers.limit)}.`;
+  }
+
+  function startUpload(location: FileLocation, chosen: File, revision: string, onSuccess: (size: number, revision: string) => void) {
+    const controller = new AbortController();
+    uploadAbort.current = controller;
+    upload.mutate(
+      { ...location, file: chosen, revision, signal: controller.signal },
+      {
+        onSuccess: (receipt) => onSuccess(receipt.size, receipt.revision),
+        onSettled: () => {
+          if (uploadAbort.current === controller) uploadAbort.current = null;
+        },
+      },
+    );
+  }
+
+  function chooseUpload(event: ChangeEvent<HTMLInputElement>) {
     const chosen = event.target.files?.[0];
     event.target.value = "";
     if (!chosen || !location) return;
     resetFeedback();
-    const problem = chosen.size > maxFileBytes ? `${chosen.name} is ${formatBytes(chosen.size)}; uploads are limited to ${sizeLimit}.` : names.has(chosen.name) ? `${chosen.name} already exists in this folder. Open it and use Replace to overwrite it.` : fileNameError(chosen.name, path, location.kind);
+    const problem = sizeProblem(chosen) ?? (names.has(chosen.name) ? `${chosen.name} already exists in this folder. Open it and use Replace to overwrite it.` : fileNameError(chosen.name, path, location.kind));
     if (problem) {
       setLocalError(problem);
       return;
     }
-    const bytes = new Uint8Array(await chosen.arrayBuffer());
-    upload.mutate(
-      { ...location, path: joinPath(path, chosen.name), data: encodeBase64(bytes), revision: "" },
-      { onSuccess: () => { setStatus(`Uploaded ${chosen.name}.`); refreshListing(); } },
-    );
+    startUpload({ ...location, path: joinPath(path, chosen.name) }, chosen, "", (size) => {
+      setStatus(`Uploaded ${chosen.name} (${formatBinaryBytes(size)}).`);
+    });
   }
 
-  async function chooseReplacement(event: ChangeEvent<HTMLInputElement>) {
+  function chooseReplacement(event: ChangeEvent<HTMLInputElement>) {
     const chosen = event.target.files?.[0];
     event.target.value = "";
     if (!chosen || !file) return;
     resetFeedback();
-    if (chosen.size > maxFileBytes) {
-      setLocalError(`${chosen.name} is ${formatBytes(chosen.size)}; uploads are limited to ${sizeLimit}.`);
-      return;
-    }
-    const bytes = new Uint8Array(await chosen.arrayBuffer());
-    const revision = await nextRevision(bytes);
-    if (revision !== null) setReplacing({ name: chosen.name, bytes, revision });
+    const problem = sizeProblem(chosen);
+    if (problem) setLocalError(problem);
+    else setReplacing(chosen);
   }
 
   function confirmReplace() {
     if (!file || !replacing) return;
-    const { bytes, name, revision } = replacing;
+    const chosen = replacing;
     const location = file.location;
-    upload.mutate(
-      { ...location, data: encodeBase64(bytes), revision: file.revision },
-      {
-        onSuccess: () => {
-          setReplacing(null);
-          show(location, bytes, revision);
-          setStatus(`Replaced ${baseName(location.path)} with ${name}.`);
-          refreshListing();
-        },
-        onError: () => setReplacing(null),
-      },
-    );
+    setReplacing(null);
+    startUpload(location, chosen, file.revision, (size, revision) => {
+      // The receipt's revision is what the next change must name, so it is kept even if showing the new contents fails.
+      showMetadata(location, size, revision);
+      if (size <= maxFileBytes) load(location, size);
+      setStatus(`Replaced ${baseName(location.path)} with ${chosen.name}.`);
+    });
   }
 
   function confirmDelete() {
@@ -543,18 +803,23 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
   if (!blocked && available.length === 0) {
     return <EmptyState title="Nothing to browse">This resource has no containers or Cove-owned named volumes on its node. Deploy it first; host paths and external volumes are never shown.</EmptyState>;
   }
-  const containers = available.filter((item) => item.kind === "container");
-  const volumes = available.filter((item) => item.kind === "volume");
-  const mutationError = localError ?? (remove.isError ? `Could not delete: ${errorMessage(remove.error)}` : upload.isError && !file ? `Could not upload: ${errorMessage(upload.error)}` : download.isError ? `Could not download: ${errorMessage(download.error)}` : read.isError ? `Could not open the file: ${errorMessage(read.error)}` : null);
+  const mutationError =
+    localError ??
+    actionError([
+      [remove.error, "Could not delete"],
+      [replaceFailed ? null : upload.error, "Could not upload"],
+      [read.error, "Could not open the file"],
+      [metadata.error, "Could not read the file's size and revision"],
+    ]);
 
   return (
     <>
       <UnsavedChangesGuard dirty={dirty} />
       <Section
         title="Files"
-        description={`Browse one folder at a time, up to ${maxEntries} entries. Files up to ${sizeLimit} can be opened, edited, uploaded and downloaded. Every read and change is audited without its contents.`}
+        description={filesDescription(transfers)}
         actions={location && (
-          <Button size="sm" onClick={() => { resetFeedback(); void targets.refetch(); refreshListing(); }} disabled={blocked} pending={listing.isFetching}>
+          <Button size="sm" onClick={() => { resetFeedback(); void targets.refetch(); refreshListing(); }} disabled={blocked || upload.isPending} pending={listing.isFetching}>
             {!listing.isFetching && <RotateCw aria-hidden className="size-3.5" />}Refresh
           </Button>
         )}
@@ -562,34 +827,32 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
       >
         <div className="divide-y divide-line">
           <div className="space-y-3 p-4">
-            <Field id={pickerId} label="Container or volume" hint={targets.data?.limited ? "Some volumes are not listed: at most 128 owned volumes and 32 containers are shown." : "Stopped containers cannot be browsed. Volumes can be browsed while the resource runs."}>
-              <Select id={pickerId} className={`${inputClass} sm:max-w-md`} value={selectedKey} disabled={blocked} onChange={(event) => chooseTarget(event.target.value)} aria-describedby={`${pickerId}-hint`}>
-                <option value="" disabled>Choose a container or volume</option>
-                {containers.length > 0 && <optgroup label="Containers">{containers.map((item) => <option key={targetKey(item)} value={targetKey(item)} disabled={!targetAvailable(item)}>{targetLabel(item)}</option>)}</optgroup>}
-                {volumes.length > 0 && <optgroup label="Volumes">{volumes.map((item) => <option key={targetKey(item)} value={targetKey(item)}>{targetLabel(item)}</option>)}</optgroup>}
-              </Select>
-            </Field>
+            <TargetPicker targets={available} limited={Boolean(targets.data?.limited)} value={selectedKey} disabled={blocked || upload.isPending} onChange={chooseTarget} />
+            {!transfersSupported && (
+              <Notice title="Downloads and uploads need an upgraded worker">
+                This worker can open and edit text files up to {editorLimit}. Upgrade and verify it to download files, upload them and replace large or binary files.
+              </Notice>
+            )}
+            {limits.isError && (
+              <QueryError what="the file transfer limit" error={limits.error} onRetry={() => void limits.refetch()} retrying={limits.isFetching} />
+            )}
             {target && <TargetNotice target={target} containersRunning={containersRunning} />}
             {target && !targetAvailable(target) && <Notice tone="warn" title={`${target.name} is not running`}>Start the resource to browse this container. Cove does not start or stop containers for file access.</Notice>}
           </div>
           {location && (
             <>
-              <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-                <Button variant="ghost" size="sm" aria-label="Parent folder" title="Parent folder" disabled={path === "/" || blocked} onClick={() => navigate(parentPath(path))}>
-                  <ArrowUp aria-hidden className="size-3.5" />
-                </Button>
-                <FolderPath path={path} onNavigate={navigate} />
-                <div className="flex items-center gap-2">
-                  <Button size="sm" disabled={busy} onClick={() => { resetFeedback(); setCreating(true); }}><FilePlus aria-hidden className="size-3.5" />New file</Button>
-                  <Button size="sm" disabled={busy} pending={upload.isPending && !replacing} onClick={() => uploadInput.current?.click()}>{!(upload.isPending && !replacing) && <Upload aria-hidden className="size-3.5" />}Upload</Button>
-                  <input ref={uploadInput} type="file" className="hidden" tabIndex={-1} aria-hidden onChange={(event) => void chooseUpload(event)} />
-                </div>
-              </div>
-              {(mutationError || status) && (
-                <div className="px-3 py-2">
-                  {mutationError ? <Notice tone="error" title="The action did not complete">{mutationError}</Notice> : <p role="status" className="text-xs text-fg-muted">{status}</p>}
-                </div>
-              )}
+              <FolderToolbar
+                path={path}
+                navigationDisabled={blocked || upload.isPending}
+                busy={busy}
+                transfers={transfers}
+                uploading={activeUpload?.replacing === false}
+                limitsLoading={limits.isLoading}
+                onNavigate={navigate}
+                onCreate={() => { resetFeedback(); setCreating(true); }}
+                onUpload={chooseUpload}
+              />
+              <FolderFeedback upload={activeUpload?.replacing ? null : activeUpload} error={mutationError} localOnly={localError !== null} status={status} onCancelUpload={() => uploadAbort.current?.abort()} />
               {listing.isPending ? (
                 <LoadingRows label="Loading folder" rows={4} />
               ) : listing.isError ? (
@@ -606,27 +869,18 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
                   {entries.length === 0 ? (
                     <p className="px-3 py-6 text-center text-[13px] text-fg-muted">This folder is empty.</p>
                   ) : (
-                    <ul aria-label={`Contents of ${path}`} className="divide-y divide-line">
-                      {entries.map((entry) => {
-                        const entryPath = joinPath(path, entry.name);
-                        const entryLocation = { ...location, path: entryPath };
-                        return (
-                          <EntryRow
-                            key={entry.name}
-                            entry={entry}
-                            path={entryPath}
-                            blocked={isBlockedPath(location.kind, entryPath)}
-                            current={file?.location.path === entryPath}
-                            disabled={busy}
-                            reading={read.isPending && read.variables.path === entryPath}
-                            downloading={download.isPending && download.variables.path === entryPath}
-                            onOpen={() => (entry.kind === "directory" ? navigate(entryPath) : openFile(entryLocation))}
-                            onDownload={() => { resetFeedback(); downloadFile(entryLocation); }}
-                            onDelete={() => { resetFeedback(); setDeleting(entry); }}
-                          />
-                        );
-                      })}
-                    </ul>
+                    <EntryList
+                      workloadId={workloadId}
+                      location={location}
+                      entries={entries}
+                      transfers={transfers}
+                      openPath={file?.location.path}
+                      readingPath={[read, metadata].find((mutation) => mutation.isPending)?.variables?.path}
+                      disabled={busy}
+                      offline={offline || blocked}
+                      onOpen={(entry, entryLocation) => (entry.kind === "directory" ? navigate(entryLocation.path) : openFile(entryLocation, entry.size))}
+                      onDelete={(entry) => { resetFeedback(); setDeleting(entry); }}
+                    />
                   )}
                 </>
               )}
@@ -638,21 +892,25 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
         <FileEditor
           file={file}
           draft={draft}
+          downloadUrl={fileDownloadUrl(workloadId, file.location)}
+          transfers={transfers}
           disabled={busy}
+          offline={offline || blocked}
           saving={write.isPending}
-          saveError={write.error ?? (upload.isError ? upload.error : null)}
+          saveError={write.error}
+          replaceError={replaceFailed ? upload.error : null}
           saved={write.isSuccess && !dirty}
-          downloading={download.isPending && download.variables.path === file.location.path}
+          upload={activeUpload}
           onDraft={(value) => { write.reset(); setDraft(value); }}
           onSave={() => void save()}
           onDiscard={() => { write.reset(); setDraft(file.text ?? ""); }}
-          onReread={() => openFile(file.location)}
+          onReread={() => guard(() => { resetFeedback(); load(file.location, file.size); })}
           onReplace={() => replaceInput.current?.click()}
-          onDownload={() => { resetFeedback(); downloadFile(file.location); }}
+          onCancelUpload={() => uploadAbort.current?.abort()}
           onClose={() => guard(closeFile)}
         />
       )}
-      <input ref={replaceInput} type="file" className="hidden" tabIndex={-1} aria-hidden onChange={(event) => void chooseReplacement(event)} />
+      {transfersSupported && <input ref={replaceInput} type="file" className="hidden" tabIndex={-1} aria-hidden onChange={chooseReplacement} />}
       {location && creating && (
         <CreateFileDialog
           open
@@ -683,12 +941,12 @@ export function FileBrowser({ workloadId, blocked }: { workloadId: string; block
         title={`Replace ${file ? baseName(file.location.path) : "file"}?`}
         confirmLabel="Replace file"
         danger
-        pending={upload.isPending}
         onCancel={() => setReplacing(null)}
         onConfirm={confirmReplace}
       >
-        The contents of <span className="font-mono break-all text-fg">{file?.location.path}</span> will be overwritten with {replacing?.name} ({formatBytes(replacing?.bytes.length ?? 0)}).
-        {dirty && " Your unsaved edits will be discarded."} The replacement fails if the file changed since you opened it. Cove keeps no copy of the old contents.
+        The contents of <span className="font-mono break-all text-fg">{file?.location.path}</span> ({formatBinaryBytes(file?.size ?? 0)}, revision <span className="font-mono">{file?.revision.slice(0, 12)}</span>) will be overwritten with{" "}
+        <span className="break-all">{replacing?.name}</span> ({formatBinaryBytes(replacing?.size ?? 0)}), byte for byte.
+        {dirty && " Your unsaved edits will be discarded."} The replacement fails if the file changed since Cove read this revision, and leaves it unchanged. Its owner and permissions are kept. Cove keeps no copy of the old contents.
       </ConfirmDialog>
       <ConfirmDialog
         open={pendingLeave !== null}

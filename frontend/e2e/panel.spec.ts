@@ -1716,57 +1716,173 @@ test("Redis backups download as a verified RDB, import back through the panel an
   }
 });
 
-test("administrators browse, edit, download and delete container files on the real worker", async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
+test("scoped editors stream, replace and edit container files on the real worker while viewers cannot", async ({ page, browser, baseURL }, testInfo) => {
+  test.setTimeout(300_000);
   await page.goto("/projects");
   await signIn(page);
   await createProject(page, "Files project");
   const url = await createResource(page, "files-service");
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const origin = new URL(url).origin;
   // This test covers Files, not Compose editor input, so store the exact Compose text before deploying.
-  const id = new URL(url).pathname.split("/")[2];
   const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
-  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: compose("files-service") } })).status()).toBe(200);
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: compose("files-service") } })).status()).toBe(200);
   await page.reload();
   await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
 
-  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true }).click();
-  const files = page.getByRole("region", { name: "Files", exact: true });
-  await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
-  const root = files.getByRole("list", { name: "Contents of /" });
-  await expect(root.getByRole("button", { name: "tmp", exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(root.getByRole("button", { name: "proc", exact: true })).toHaveCount(0);
-  await root.getByRole("button", { name: "tmp", exact: true }).click();
-  await expect(files.getByRole("list", { name: "Contents of /tmp" }).or(files.getByText("This folder is empty.", { exact: true }))).toBeVisible();
+  // Fail fast against a panel or worker built without this branch's streamed file API.
+  const limits = await page.request.get(`/api/workloads/${id}/files/limits`);
+  expect(limits.status(), await limits.text()).toBe(200);
+  const configured = await limits.json() as { file_bytes: number; editor_bytes: number };
+  expect(configured.editor_bytes).toBe(32768);
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; capabilities: { file_transfers?: boolean } | null }[];
+  expect(nodes.find(node => node.id === resource.node_id)?.capabilities?.file_transfers).toBe(true);
 
-  await files.getByRole("button", { name: "New file", exact: true }).click();
-  const create = page.getByRole("dialog", { name: "New file" });
-  await create.getByLabel("File name", { exact: true }).fill("cove-browser.txt");
-  await create.getByRole("button", { name: "Create file", exact: true }).click();
-  const editor = page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true });
-  await expect(editor).toHaveValue("");
-  await editor.fill("hello from the browser\n");
-  await page.getByRole("button", { name: "Save file", exact: true }).click();
-  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await editor.fill("second revision\n");
-  await page.getByRole("button", { name: "Save file", exact: true }).click();
-  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await capture(page, testInfo, "resource-files");
+  const container = containers(url).split("\n")[0]?.split("|")[0] ?? "";
+  const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+  const write = (path: string, data: Buffer) => execFileSync("docker", ["exec", "-i", container, "sh", "-c", `cat > ${path}`], { input: data });
+  const remoteHash = (path: string) => execFileSync("docker", ["exec", container, "sha256sum", path], { encoding: "utf8" }).split(" ")[0];
+  const seed = randomBytes(40_000);
+  write("/tmp/seed.bin", seed);
 
-  const download = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download", exact: true }).click();
-  const saved = await download;
-  expect(saved.suggestedFilename()).toBe("cove-browser.txt");
-  expect(readFileSync(await saved.path(), "utf8")).toBe("second revision\n");
-  expect(page.url()).not.toContain("cove-browser");
-  expect(await page.evaluate(() => JSON.stringify({ ...window.localStorage }) + JSON.stringify({ ...window.sessionStorage }))).not.toContain("second revision");
+  const invite = async (email: string, role: string) => {
+    await page.goto("/team");
+    const form = page.getByRole("region", { name: "Invite someone" });
+    await form.getByLabel("Email", { exact: true }).fill(email);
+    await form.getByRole("button", { name: "Add grant", exact: true }).click();
+    await chooseOption(form.getByLabel("Scope", { exact: true }), { label: "Files project / production" });
+    await chooseOption(form.getByLabel("Role", { exact: true }), { label: role });
+    await form.getByRole("button", { name: "Create invitation", exact: true }).click();
+    const link = await form.getByLabel("Invitation link", { exact: true }).inputValue();
+    // The link is a bearer credential: dismiss it before any screenshot is written.
+    await form.getByRole("button", { name: "Done", exact: true }).click();
+    const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true, acceptDownloads: true });
+    const member = await context.newPage();
+    await member.goto(link.replace(/^https?:\/\/[^/]+/, ""));
+    await member.getByRole("button", { name: "Review invitation", exact: true }).click();
+    await member.getByLabel("Name", { exact: true }).fill(`Files ${role}`);
+    await member.getByLabel("Password", { exact: true }).fill("browser-files-member-password");
+    await member.getByLabel("Confirm password", { exact: true }).fill("browser-files-member-password");
+    await member.getByRole("button", { name: "Create account and join", exact: true }).click();
+    await expect(member.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+    return { context, member };
+  };
+  const suffix = Date.now();
+  const viewer = await invite(`files-viewer-${suffix}@example.test`, "Viewer");
+  const editor = await invite(`files-editor-${suffix}@example.test`, "Editor");
 
-  await page.getByRole("button", { name: "Delete cove-browser.txt", exact: true }).click();
-  const remove = page.getByRole("dialog", { name: "Delete cove-browser.txt?" });
-  await expect(remove).toContainText("/tmp/cove-browser.txt");
-  await remove.getByRole("button", { name: "Delete file", exact: true }).click();
-  await expect(page.getByText("Deleted cove-browser.txt.", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true })).toHaveCount(0);
+  try {
+    await viewer.member.goto(url);
+    await expect(viewer.member.getByRole("heading", { name: "files-service", exact: true })).toBeVisible();
+    await expect(viewer.member.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true })).toHaveCount(0);
+    await viewer.member.goto(`${url}/files`);
+    await expect(viewer.member.getByText("Files need editor access", { exact: true })).toBeVisible();
+    expect((await viewer.member.request.get(`/api/workloads/${id}/files/targets`)).status()).toBe(403);
+    expect((await viewer.member.request.get(`/api/workloads/${id}/files/download?kind=container&target=${container}&path=%2Ftmp%2Fseed.bin`)).status()).toBe(403);
+
+    const member = editor.member;
+    await member.goto(url);
+    await member.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true }).click();
+    const files = member.getByRole("region", { name: "Files", exact: true });
+    await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+    const root = files.getByRole("list", { name: "Contents of /" });
+    await expect(root.getByRole("button", { name: "tmp", exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(root.getByRole("button", { name: "proc", exact: true })).toHaveCount(0);
+    await root.getByRole("button", { name: "tmp", exact: true }).click();
+    const tmp = files.getByRole("list", { name: "Contents of /tmp" });
+    await expect(tmp.getByText("39.1 KiB · download or replace", { exact: true })).toBeVisible();
+
+    // The download is a native link opened in a new tab, so the browser writes it to disk without page buffering.
+    const link = tmp.getByRole("link", { name: "Download seed.bin", exact: true });
+    expect(await link.getAttribute("href")).toContain("team_id=");
+    const popupDownload = new Promise<Download>(resolve => editor.context.once("page", popup => popup.once("download", resolve)));
+    await link.click();
+    const saved = await Promise.race([popupDownload, member.waitForEvent("download")]);
+    expect(saved.suggestedFilename()).toBe("seed.bin");
+    expect(sha256(readFileSync(await saved.path()))).toBe(sha256(seed));
+    expect(member.url()).not.toContain("seed.bin");
+
+    // Larger than the editor: only the size and revision are read, then the exact revision guards the replacement.
+    await tmp.getByRole("button", { name: "seed.bin", exact: true }).click();
+    await expect(member.getByText("Larger than the 32.0 KiB editor", { exact: true })).toBeVisible();
+    await expect(member.getByText(sha256(seed).slice(0, 12), { exact: true })).toBeVisible();
+    const replacement = randomBytes(50_000);
+    const replaceInput = member.locator('input[type="file"]').last();
+
+    // A change made after Cove read the revision makes the replacement fail without touching the file.
+    const changed = Buffer.concat([seed, Buffer.from("changed")]);
+    write("/tmp/seed.bin", changed);
+    await replaceInput.setInputFiles({ name: "replacement.bin", mimeType: "application/octet-stream", buffer: replacement });
+    await member.getByRole("dialog", { name: "Replace seed.bin?" }).getByRole("button", { name: "Replace file", exact: true }).click();
+    await expect(member.getByText("Could not confirm the file change", { exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(remoteHash("/tmp/seed.bin")).toBe(sha256(changed));
+
+    await member.getByRole("button", { name: "Read again", exact: true }).click();
+    await expect(member.getByText(sha256(changed).slice(0, 12), { exact: true })).toBeVisible();
+    await replaceInput.setInputFiles({ name: "replacement.bin", mimeType: "application/octet-stream", buffer: replacement });
+    await member.getByRole("dialog", { name: "Replace seed.bin?" }).getByRole("button", { name: "Replace file", exact: true }).click();
+    await expect(member.getByText("Replaced seed.bin with replacement.bin.", { exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(remoteHash("/tmp/seed.bin")).toBe(sha256(replacement));
+    await expect(member.getByText(sha256(replacement).slice(0, 12), { exact: true })).toBeVisible();
+    await capture(member, testInfo, "resource-files-large");
+
+    // New uploads are create-only and streamed as the raw file.
+    const uploaded = randomBytes(60_000);
+    await files.locator('input[type="file"]').setInputFiles({ name: "upload.bin", mimeType: "application/octet-stream", buffer: uploaded });
+    await expect(member.getByText("Uploaded upload.bin (58.6 KiB).", { exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(remoteHash("/tmp/upload.bin")).toBe(sha256(uploaded));
+    await files.locator('input[type="file"]').setInputFiles({ name: "upload.bin", mimeType: "application/octet-stream", buffer: randomBytes(10) });
+    await expect(member.getByText(/upload\.bin already exists in this folder/)).toBeVisible();
+    const createOnly = await member.request.post(`/api/workloads/${id}/files/upload?kind=container&target=${container}&path=%2Ftmp%2Fupload.bin`, { headers: { Origin: origin, "Content-Type": "application/octet-stream", "X-Cove-Size": "3" }, data: Buffer.from("new") });
+    expect(createOnly.ok()).toBe(false);
+    expect(remoteHash("/tmp/upload.bin")).toBe(sha256(uploaded));
+
+    // The configured cap is exact and enforced before any bytes reach the worker.
+    expect((await page.request.put("/api/settings/file-transfer-limits", { headers: { Origin: origin }, data: { file_bytes: 1048576 } })).status()).toBe(200);
+    try {
+      await member.reload();
+      await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+      await files.getByRole("list", { name: "Contents of /" }).getByRole("button", { name: "tmp", exact: true }).click();
+      await files.locator('input[type="file"]').setInputFiles({ name: "too-big.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(1048577) });
+      await expect(member.getByText("too-big.bin is 1.00 MiB; files are limited to 1.00 MiB.", { exact: true })).toBeVisible();
+      const oversized = await member.request.post(`/api/workloads/${id}/files/upload?kind=container&target=${container}&path=%2Ftmp%2Ftoo-big.bin`, { headers: { Origin: origin, "Content-Type": "application/octet-stream", "X-Cove-Size": "1048577" }, data: Buffer.alloc(1048577) });
+      expect(oversized.status()).toBe(413);
+      expect(execFileSync("docker", ["exec", container, "sh", "-c", "test -e /tmp/too-big.bin && echo present || echo absent"], { encoding: "utf8" }).trim()).toBe("absent");
+    } finally {
+      expect((await page.request.put("/api/settings/file-transfer-limits", { headers: { Origin: origin }, data: { file_bytes: configured.file_bytes } })).status()).toBe(200);
+    }
+
+    // Small text files still use the 32 KiB editor with revision chaining.
+    await member.reload();
+    await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+    await files.getByRole("list", { name: "Contents of /" }).getByRole("button", { name: "tmp", exact: true }).click();
+    await files.getByRole("button", { name: "New file", exact: true }).click();
+    const create = member.getByRole("dialog", { name: "New file" });
+    await create.getByLabel("File name", { exact: true }).fill("cove-browser.txt");
+    await create.getByRole("button", { name: "Create file", exact: true }).click();
+    const text = member.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true });
+    await expect(text).toHaveValue("");
+    await text.fill("hello from the browser\n");
+    await member.getByRole("button", { name: "Save file", exact: true }).click();
+    await expect(member.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await text.fill("second revision\n");
+    await member.getByRole("button", { name: "Save file", exact: true }).click();
+    await expect(member.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    expect(remoteHash("/tmp/cove-browser.txt")).toBe(sha256(Buffer.from("second revision\n")));
+    await capture(member, testInfo, "resource-files");
+    expect(await member.evaluate(() => JSON.stringify({ ...window.localStorage }) + JSON.stringify({ ...window.sessionStorage }))).not.toContain("second revision");
+
+    await member.getByRole("button", { name: "Delete cove-browser.txt", exact: true }).click();
+    const remove = member.getByRole("dialog", { name: "Delete cove-browser.txt?" });
+    await expect(remove).toContainText("/tmp/cove-browser.txt");
+    await remove.getByRole("button", { name: "Delete file", exact: true }).click();
+    await expect(member.getByText("Deleted cove-browser.txt.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(member.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true })).toHaveCount(0);
+  } finally {
+    await viewer.context.close();
+    await editor.context.close();
+  }
 });
 
 test("alert observations inspect a real service and certificate and container rules target it", async ({ page }, testInfo) => {

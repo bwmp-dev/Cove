@@ -5,11 +5,11 @@ import { FileBrowser } from "../components/FileBrowser";
 import { EmptyState, LoadingRows, Notice } from "../components/ui";
 import { useOnline } from "../lib/hooks";
 import { activeOperation } from "../lib/operations";
-import { useSession } from "../lib/session";
+import { can } from "../lib/permissions";
 import { linkClass } from "../lib/styles";
 import { useResource } from "./workload-detail";
 
-function AdminFiles() {
+function EditorFiles() {
   const workload = useResource();
   const online = useOnline();
   const nodes = useQuery(nodesQuery);
@@ -47,19 +47,19 @@ function AdminFiles() {
           </Notice>
         </div>
       )}
-      <FileBrowser workloadId={workload.id} blocked={!online || Boolean(active) || operations.isPending} />
+      <FileBrowser workloadId={workload.id} blocked={!online || Boolean(active) || operations.isPending} offline={!online} transfersSupported={node ? Boolean(node.capabilities?.file_transfers) : true} />
     </>
   );
 }
 
 export function ResourceFiles() {
-  const session = useSession();
-  if (!session?.is_admin) {
+  const workload = useResource();
+  if (!can(workload.permissions, "edit")) {
     return (
-      <EmptyState title="Instance administrators only">
-        File access reaches inside containers and volumes on a worker that other teams may share, so it is limited to instance administrators like the node terminal. Ask one for help with this resource's files.
+      <EmptyState title="Files need editor access">
+        Files can hold application data and secrets, so reading and changing them needs editor access to this resource. Ask a team owner or admin for editor access.
       </EmptyState>
     );
   }
-  return <AdminFiles />;
+  return <EditorFiles />;
 }
