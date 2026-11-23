@@ -21,7 +21,9 @@ function serve(overrides: { factors?: Partial<typeof factors> } = {}, routes: Re
 }
 
 function renderWith(element: React.ReactNode) {
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{element}</QueryClientProvider>);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}>{element}</QueryClientProvider>);
+  return client;
 }
 
 afterEach(() => vi.clearAllMocks());
@@ -72,4 +74,67 @@ it("lists linked identities and explains refusing to unlink the last sign-in met
   fireEvent.click(screen.getByRole("button", { name: /^Unlink\s*Corp SSO$/ }));
   expect(await screen.findByText("This sign-in method is still needed")).toBeInTheDocument();
   await waitFor(() => expect(request).toHaveBeenCalledWith("DELETE", "/api/account/identities/corp", {}));
+});
+
+it("links a directory account with local proof and labels it without exposing its subject", async () => {
+  let linked = false;
+  serve(
+    {},
+    {
+      "GET /auth/ldap/providers": () => Promise.resolve([{ id: "dir", display_name: "Corp directory" }]),
+      "GET /api/account/identities": () => Promise.resolve(linked ? [{ provider_id: "ldap:dir", subject: "a1b2c3d4" }] : []),
+      "POST /auth/ldap/dir/sign-in": () => {
+        linked = true;
+        return Promise.resolve({ user: "u1", linked: true, second_factor_required: false });
+      },
+    },
+  );
+  renderWith(<SignInIdentities />);
+  fireEvent.change(await screen.findByLabelText("Directory username"), { target: { value: "ada" } });
+  fireEvent.change(screen.getByLabelText("Directory password"), { target: { value: "directory secret" } });
+  // The OIDC linking form above has its own current password field; the directory form is last.
+  fireEvent.change(screen.getAllByLabelText("Current password").at(-1)!, { target: { value: "local secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Link directory account" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/auth/ldap/dir/sign-in", { email: "ada", password: "directory secret", link: true, current_password: "local secret" }));
+  expect(await screen.findByText("Directory account linked")).toBeInTheDocument();
+  expect(screen.getByLabelText("Directory password")).toHaveValue("");
+  expect(await screen.findByText("Directory account")).toBeInTheDocument();
+  expect(screen.queryByText("a1b2c3d4")).not.toBeInTheDocument();
+});
+
+it("keeps refused directory and local passwords out of the mutation cache", async () => {
+  serve(
+    {},
+    {
+      "GET /auth/ldap/providers": () => Promise.resolve([{ id: "dir", display_name: "Corp directory" }]),
+      "GET /api/account/identities": () => Promise.resolve([]),
+      "POST /auth/ldap/dir/sign-in": () => Promise.reject(new ApiError(401, "Invalid directory credentials")),
+    },
+  );
+  const client = renderWith(<SignInIdentities />);
+  fireEvent.change(await screen.findByLabelText("Directory username"), { target: { value: "ada" } });
+  fireEvent.change(screen.getByLabelText("Directory password"), { target: { value: "directory secret" } });
+  fireEvent.change(screen.getAllByLabelText("Current password").at(-1)!, { target: { value: "local secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Link directory account" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/auth/ldap/dir/sign-in", { email: "ada", password: "directory secret", link: true, current_password: "local secret" }));
+  expect(await screen.findByText("Incorrect directory username or password.")).toBeInTheDocument();
+  expect(screen.getByLabelText("Directory password")).toHaveValue("");
+  const mutations = client.getMutationCache().getAll();
+  expect(mutations.length).toBeGreaterThan(0);
+  for (const mutation of mutations) expect(mutation.state.variables).toBeUndefined();
+});
+
+it("explains that SCIM provisioning must be detached before unlinking its identity", async () => {
+  serve(
+    {},
+    {
+      "GET /api/account/identities": () => Promise.resolve([{ provider_id: "corp", subject: "sub-1" }]),
+      "DELETE /api/account/identities/corp": () => Promise.reject(new ApiError(409, "Ask an administrator to detach SCIM provisioning before unlinking its sign-in identity")),
+    },
+  );
+  renderWith(<SignInIdentities />);
+  fireEvent.click(await screen.findByRole("button", { name: /^Unlink\s*Corp SSO/ }));
+  fireEvent.change(screen.getAllByLabelText("Current password")[0]!, { target: { value: "local secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Unlink Corp SSO" }));
+  expect(await screen.findByText(/SCIM provisioning manages this sign-in identity/)).toBeInTheDocument();
 });

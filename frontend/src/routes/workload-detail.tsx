@@ -41,7 +41,7 @@ import { useCancelOperation, useQueueOperation } from "../api/mutations";
 import { projectsQuery, type Project } from "../api/projects";
 import { nodesQuery, operationQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
 import { ResourceExec } from "../components/ResourceExec";
-import type { Operation, WorkerOperation, Workload } from "../api/types";
+import type { Operation, Route, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
 import { useCapacityGate } from "../components/CapacityCheck";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -65,6 +65,7 @@ import { PendingRolloutMessage, StagedRollout, usePendingRollout } from "../comp
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
+import { isWildcardHostname } from "../lib/certificates";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { backupRights, can, currentTeam, managesTeam } from "../lib/permissions";
@@ -304,6 +305,17 @@ function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: s
   };
 }
 
+// Links the first exact hostname; a resource with only wildcard routes shows the pattern as text.
+function HeaderDomain({ routes }: { routes: Route[] }) {
+  const exact = routes.find((route) => !isWildcardHostname(route.domain));
+  if (!exact) return <span className="font-mono text-xs break-all">{routes[0]?.domain}</span>;
+  return (
+    <a href={`https://${exact.domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
+      {exact.domain}
+    </a>
+  );
+}
+
 function ResourceHeader({ workload }: { workload: Workload }) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const nodes = useQuery(nodesQuery);
@@ -373,9 +385,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
             )}
             {workload.routes?.[0] && (
               <span key="domain">
-                <a href={`https://${workload.routes[0].domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
-                  {workload.routes[0].domain}
-                </a>
+                <HeaderDomain routes={workload.routes} />
                 {workload.routes.length > 1 && <span className="text-fg-subtle"> +{workload.routes.length - 1}</span>}
               </span>
             )}
@@ -757,11 +767,17 @@ export function ResourceOverview() {
                     term: "Domains",
                     value: workload.routes?.length ? (
                       <div className="space-y-1">
-                        {workload.routes.map((item) => (
-                          <a key={item.domain} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
-                            {item.domain}
-                          </a>
-                        ))}
+                        {workload.routes.map((item) =>
+                          isWildcardHostname(item.domain) ? (
+                            <span key={item.domain} className="block font-mono text-xs break-all">
+                              {item.domain}
+                            </span>
+                          ) : (
+                            <a key={item.domain} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
+                              {item.domain}
+                            </a>
+                          ),
+                        )}
                       </div>
                     ) : (
                       <Link to="/resources/$resourceId/domains" params={{ resourceId: workload.id }} className="rounded text-fg-muted underline underline-offset-4 hover:text-fg">

@@ -63,6 +63,49 @@ function operation(overrides: Partial<Operation>): Operation {
   return { id: "op-1", workload_id: "job-1", action: "deploy", state: "succeeded", result: null, created_at: "2026-11-22T10:00:00Z", ...overrides };
 }
 
+it("explains a suspended schedule without an owner and claims it only when saved", async () => {
+  serve({ schedule: { ...saved, ownership_required: true }, put: () => Promise.resolve({ ...saved, ownership_required: false }) });
+  renderSchedule();
+  expect(await screen.findByText("Scheduled runs are suspended")).toBeInTheDocument();
+  expect(screen.getByText(/Save the schedule to make your account its owner and resume future runs/)).toBeInTheDocument();
+  expect(screen.getByText("No run is scheduled while the schedule has no owner.")).toBeInTheDocument();
+  expect(screen.queryByText(/Next run:/)).not.toBeInTheDocument();
+  expect(vi.mocked(request).mock.calls.filter(([method]) => method === "PUT")).toHaveLength(0);
+
+  await waitFor(() => expect(saveButton()).toBeEnabled());
+  fireEvent.click(saveButton());
+  await waitFor(() => expect(request).toHaveBeenCalledWith("PUT", "/api/workloads/job-1/schedule", { cron: "0 9 * * *", timezone: "America/Los_Angeles", overlap_policy: "skip", timeout_seconds: 1800 }));
+  await waitFor(() => expect(screen.queryByText("Scheduled runs are suspended")).not.toBeInTheDocument());
+  expect(screen.getByText(/Next run:/)).toBeInTheDocument();
+});
+
+it("tells viewers without configuration access who can resume a suspended schedule", async () => {
+  resource = { ...base, permissions: ["read", "operate"] };
+  serve({ schedule: { ...saved, ownership_required: true } });
+  renderSchedule();
+  expect(await screen.findByText(/no currently authorised owner/)).toBeInTheDocument();
+  expect(screen.getByText(/Someone with Edit configuration and Operate access must save the schedule/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Save schedule" })).not.toBeInTheDocument();
+});
+
+it("lets configuration editors without Operate clear a schedule but not claim one", async () => {
+  resource = { ...base, permissions: ["read", "edit", "edit_configuration"] };
+  serve({ schedule: { ...saved, ownership_required: true } });
+  renderSchedule();
+  expect(await screen.findByText(/Resuming it needs Operate access as well as Edit configuration/)).toBeInTheDocument();
+  expect(screen.getByText("You can disable scheduling. Saving a cron expression also needs Operate access.")).toBeInTheDocument();
+
+  await waitFor(() => expect(saveButton()).toBeEnabled());
+  fireEvent.click(saveButton());
+  expect(await screen.findByText(/Saving a cron schedule also needs Operate access to this job/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Cron expression")).toHaveAttribute("aria-invalid", "true");
+  expect(vi.mocked(request).mock.calls.filter(([method]) => method === "PUT")).toHaveLength(0);
+
+  fireEvent.change(screen.getByLabelText("Cron expression"), { target: { value: "" } });
+  fireEvent.click(saveButton());
+  await waitFor(() => expect(request).toHaveBeenCalledWith("PUT", "/api/workloads/job-1/schedule", { cron: "", timezone: "America/Los_Angeles", overlap_policy: "skip", timeout_seconds: 1800 }));
+});
+
 it("shows the saved time zone and saves it with the execution settings", async () => {
   serve({ put: () => Promise.resolve({ ...saved, cron: "0 9 * * 1", timezone: "America/New_York", next_run_at: "2026-11-23T14:00:00Z" }) });
   renderSchedule();

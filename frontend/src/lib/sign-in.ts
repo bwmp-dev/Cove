@@ -13,6 +13,9 @@ export interface SignInMethods {
   oidc_registration_enabled: boolean;
   oidc_auto_redirect: string;
   oidc_providers: SignInProvider[];
+  // Enabled LDAP directories. They stay available when local password sign-in is turned off.
+  ldap_enabled?: boolean;
+  ldap_providers?: SignInProvider[] | null;
   second_factor_pending: boolean;
   // Only filled while this browser holds a pending challenge younger than ten minutes.
   second_factor_methods: SecondFactorMethod[];

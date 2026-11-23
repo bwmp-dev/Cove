@@ -474,6 +474,9 @@ export interface JobSchedule {
   timeout_seconds: number;
   // Set while one coalesced scheduled run waits for the current operation to finish.
   pending_since: string | null;
+  // The saved cron has no currently authorised owner, so its ticks are suspended until it is saved again by an account
+  // with Edit configuration and Operate (or, while the owner is still recorded, until that owner's rights return).
+  ownership_required?: boolean;
 }
 
 // Omitted execution fields keep the saved values.

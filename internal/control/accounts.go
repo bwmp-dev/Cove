@@ -41,6 +41,10 @@ func setSession(w http.ResponseWriter, token string, expiry time.Time) {
 	}()
 	http.SetCookie(w, &http.Cookie{Name: "__Host-cove", Value: token, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expiry})
 }
+func (s *Server) completeSignIn(w http.ResponseWriter, r *http.Request, user, token string, expiry time.Time) {
+	s.githubTeamSignIn(r.Context(), user)
+	setSession(w, token, expiry)
+}
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user string) {
 	token := randomToken()
 	expiry := time.Now().Add(12 * time.Hour)
@@ -62,7 +66,7 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user strin
 		http.Error(w, "authentication unavailable", 503)
 		return
 	}
-	setSession(w, token, expiry)
+	s.completeSignIn(w, r, user, token, expiry)
 	respond(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) authLimit(w http.ResponseWriter, r *http.Request) bool {
@@ -101,7 +105,7 @@ func (s *Server) publicAccount(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		handler := next
-		if r.URL.Path == "/auth/second-factor" || r.URL.Path == "/auth/forgot-password" || r.URL.Path == "/auth/reset-password" || r.URL.Path == "/auth/passkeys/finish" {
+		if r.URL.Path == "/auth/second-factor" || r.URL.Path == "/auth/forgot-password" || r.URL.Path == "/auth/reset-password" || r.URL.Path == "/auth/passkeys/finish" || strings.HasPrefix(r.URL.Path, "/auth/ldap/") {
 			handler = s.loginAttempt(next)
 		}
 		s.authenticated(handler, w, r, "account authentication")
@@ -227,7 +231,7 @@ func (s *Server) registerAccount(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "setup could not be completed", 503)
 			return
 		}
-		setSession(w, token, expiry)
+		s.completeSignIn(w, r, "bootstrap", token, expiry)
 		respond(w, 200, map[string]bool{"ok": true, "setup_complete": true})
 		return
 	}
@@ -567,7 +571,13 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), "UPDATE users SET is_admin=$1,disabled=$2,auth_version=auth_version+1 WHERE id=$3", in.Admin, in.Disabled, r.PathValue("id"))
 	}
 	if err == nil {
+		_, err = tx.Exec(r.Context(), "UPDATE scim_users SET disabled_by_scim=false WHERE id=$1", r.PathValue("id"))
+	}
+	if err == nil {
 		_, err = tx.Exec(r.Context(), "DELETE FROM sessions WHERE user_id=$1", r.PathValue("id"))
+	}
+	if err == nil && in.Disabled {
+		err = revokeSCIMAccess(r.Context(), tx, r.PathValue("id"))
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())

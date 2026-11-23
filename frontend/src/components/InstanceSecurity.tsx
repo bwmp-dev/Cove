@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
-import { errorMessage } from "../api/client";
+import { errorMessage, isStatus } from "../api/client";
 import {
   auditExportQuery,
   oidcProvidersQuery,
@@ -100,7 +100,7 @@ function SignInPolicyForm({ saved, providers }: { saved: SignInPolicy; providers
               id="password-login-disabled"
               layout="row"
               label="Turn off password sign-in"
-              description="People sign in with an identity provider, GitHub or a passkey. Instance administrators keep a break-glass password route that ignores auto-redirect; their enrolled second factors still apply."
+              description="Turns off local Cove passwords only. People sign in with an identity provider, an LDAP directory, GitHub or a passkey; directory passwords are checked by the directory, with Cove's two-step verification and lockout. Instance administrators keep a break-glass password route that ignores auto-redirect; their enrolled second factors still apply."
               checked={value.password_login_disabled}
               onChange={(event) => setDraft({ ...value, password_login_disabled: event.target.checked })}
             />
@@ -244,6 +244,7 @@ function OidcProviders({ providers, autoRedirect }: { providers: OidcProvider[];
         <div className="p-3">
           <Notice tone="error" title="Could not remove the provider">
             {errorMessage(remove.error)}
+            {isStatus(remove.error, 409) && " SCIM provisioning uses this provider: choose another provider in SCIM provisioning and detach the accounts bound to it first."}
           </Notice>
         </div>
       )}

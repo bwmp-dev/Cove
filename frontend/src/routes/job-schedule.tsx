@@ -36,6 +36,7 @@ import { useResource } from "./workload-detail";
 
 function NextRun({ schedule }: { schedule: Schedule }) {
   const displayZone = useDisplayTimeZone();
+  if (schedule.ownership_required) return <p className="text-[13px] text-fg-muted">No run is scheduled while the schedule has no owner.</p>;
   if (!schedule.next_run_at) return <p className="text-[13px] text-fg-muted">Scheduling is disabled.</p>;
   const zoned = formatAbsoluteInZone(schedule.next_run_at, schedule.timezone);
   return (
@@ -54,13 +55,29 @@ function PendingRun({ since }: { since: string }) {
   );
 }
 
+// Saving a cron expression makes the saving account the schedule's owner, so it needs Operate as well as Edit configuration.
+// Clearing the expression only needs Edit configuration.
+function OwnershipRequired({ editable, canOperate }: { editable: boolean; canOperate: boolean }) {
+  const action = editable && canOperate
+    ? "Save the schedule to make your account its owner and resume future runs."
+    : editable
+      ? "Resuming it needs Operate access as well as Edit configuration; you can still clear the schedule. Ask someone with both to save it."
+      : "Someone with Edit configuration and Operate access must save the schedule to own it and resume future runs.";
+  return (
+    <Notice tone="warn" title="Scheduled runs are suspended">
+      This schedule has no currently authorised owner: the account that saved it no longer has the access or required two-step verification to run it, or was deactivated. Scheduled runs are paused and missed ticks are not replayed. Restoring that
+      account's access resumes the schedule unless the account was deactivated. {action}
+    </Notice>
+  );
+}
+
 function useJobRuns(workload: Pick<Workload, "node_id">) {
   const nodes = useQuery(nodesQuery);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   return { nodes, node, supported: node?.capabilities?.job_runs === true };
 }
 
-function UpgradeNotice({ node, schedule, save }: { node: Node; schedule: Schedule; save: ReturnType<typeof useSaveSchedule> }) {
+function UpgradeNotice({ node, schedule, save, canOperate }: { node: Node; schedule: Schedule; save: ReturnType<typeof useSaveSchedule>; canOperate: boolean }) {
   const online = useOnline();
   const savedTimeout = schedule.timeout_seconds !== defaultJobTimeoutSeconds;
   const saved = hasAdvancedExecution(schedule.overlap_policy, schedule.timeout_seconds);
@@ -69,7 +86,8 @@ function UpgradeNotice({ node, schedule, save }: { node: Node; schedule: Schedul
       tone="warn"
       title="Worker upgrade needed"
       action={
-        saved && (
+        saved &&
+        (canOperate || !schedule.cron) && (
           <Button
             disabled={!online}
             pending={save.isPending}
@@ -93,6 +111,7 @@ function UpgradeNotice({ node, schedule, save }: { node: Node; schedule: Schedul
 }
 
 interface FormErrors {
+  cron?: string;
   timezone?: string;
   timeout?: string;
 }
@@ -109,9 +128,17 @@ function useSaveSchedule(id: string) {
   });
 }
 
+function saveStatus(editable: boolean, canOperate: boolean, online: boolean) {
+  if (!editable) return "Changing the schedule needs edit access.";
+  if (!canOperate) return "You can disable scheduling. Saving a cron expression also needs Operate access.";
+  if (!online) return "You are offline. Save is available when the connection returns.";
+  return null;
+}
+
 function ScheduleForm({ resource, schedule, supported, save }: { resource: Workload; schedule: Schedule; supported: boolean; save: ReturnType<typeof useSaveSchedule> }) {
   const online = useOnline();
   const editable = can(resource.permissions, "edit");
+  const canOperate = can(resource.permissions, "operate");
   const advancedEditable = editable && supported;
   const [errors, setErrors] = useState<FormErrors>({});
   const statusId = useId();
@@ -123,6 +150,7 @@ function ScheduleForm({ resource, schedule, supported, save }: { resource: Workl
     const next: FormErrors = {};
     const input: JobScheduleInput = { cron: formText(form, "cron").trim(), timezone };
     if (!timezone) next.timezone = "Enter a time zone, such as UTC.";
+    if (input.cron && !canOperate) next.cron = "Saving a cron schedule also needs Operate access to this job. Leave it empty to disable scheduling.";
     if (advancedEditable) {
       const overlap = formText(form, "overlap_policy");
       if (isOverlapPolicy(overlap)) input.overlap_policy = overlap;
@@ -131,17 +159,17 @@ function ScheduleForm({ resource, schedule, supported, save }: { resource: Workl
       else input.timeout_seconds = timeout.value;
     }
     setErrors(next);
-    if (next.timezone || next.timeout) return;
+    if (next.cron || next.timezone || next.timeout) return;
     save.mutate(input);
   }
 
-  const status = !editable ? "Changing the schedule needs edit access." : !online ? "You are offline. Save is available when the connection returns." : null;
+  const status = saveStatus(editable, canOperate, online);
 
   return (
     <form onSubmit={submit} noValidate className="space-y-4">
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field id="job-cron" label="Cron expression" hint="Five numeric fields: minute hour day month weekday (Sunday = 0). Supports *, lists, ranges, and steps. Example: 0 3 * * * runs at 03:00 in the schedule's time zone. Leave empty to disable.">
-          <input id="job-cron" name="cron" defaultValue={schedule.cron} className={`${inputClass} font-mono`} maxLength={256} spellCheck={false} autoComplete="off" aria-describedby="job-cron-hint" disabled={!editable} />
+        <Field id="job-cron" label="Cron expression" error={errors.cron} hint="Five numeric fields: minute hour day month weekday (Sunday = 0). Supports *, lists, ranges, and steps. Example: 0 3 * * * runs at 03:00 in the schedule's time zone. Leave empty to disable. Saving a schedule makes your account its owner.">
+          <input id="job-cron" name="cron" defaultValue={schedule.cron} className={`${inputClass} font-mono`} maxLength={256} spellCheck={false} autoComplete="off" aria-invalid={errors.cron ? true : undefined} aria-describedby={describedBy("job-cron", errors.cron)} disabled={!editable} />
         </Field>
         <Field id="job-timezone" label="Time zone" error={errors.timezone} hint="IANA time zone name, such as America/Los_Angeles. Jobs use UTC unless you change it. A local time skipped by a daylight saving change does not run, and a repeated one can run twice.">
           <input id="job-timezone" name="timezone" defaultValue={schedule.timezone} className={`${inputClass} font-mono`} maxLength={128} spellCheck={false} autoComplete="off" aria-invalid={errors.timezone ? true : undefined} aria-describedby={describedBy("job-timezone", errors.timezone)} disabled={!editable} />
@@ -361,6 +389,7 @@ export function JobSchedule() {
   // Kept outside the form, which remounts with the saved values after a successful save.
   const save = useSaveSchedule(resource.id);
   const editable = can(resource.permissions, "edit");
+  const canOperate = can(resource.permissions, "operate");
   const data = schedule.data;
   const formKey = data ? `${resource.id}:${data.cron}:${data.timezone}:${data.overlap_policy}:${data.timeout_seconds}` : resource.id;
   const isJob = resource.kind === "job";
@@ -377,7 +406,8 @@ export function JobSchedule() {
               {schedule.isError && <QueryError what="the schedule" error={schedule.error} onRetry={() => void schedule.refetch()} retrying={schedule.isFetching} />}
               {schedule.isPending && <LoadingRows label="Loading schedule" rows={2} />}
               {editable && nodes.isError && <QueryError what="worker capabilities" error={nodes.error} onRetry={() => void nodes.refetch()} retrying={nodes.isFetching} />}
-              {data && editable && node && !supported && <UpgradeNotice node={node} schedule={data} save={save} />}
+              {data && editable && node && !supported && <UpgradeNotice node={node} schedule={data} save={save} canOperate={canOperate} />}
+              {data?.ownership_required && <OwnershipRequired editable={editable} canOperate={canOperate} />}
               {data?.pending_since && <PendingRun since={data.pending_since} />}
               {data && <ScheduleForm key={formKey} resource={resource} schedule={data} supported={supported} save={save} />}
             </>

@@ -30,14 +30,14 @@ WITH visible AS (
  SELECT 'workload',w.name,p.name||COALESCE(' / '||e.name,''),'/resources/'||w.id FROM workloads w JOIN projects p ON p.id=w.project_id LEFT JOIN environments e ON e.id=w.environment_id
  WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0)
  UNION ALL
- SELECT 'page',w.name||' · '||section.label,p.name,'/resources/'||w.id||'/'||section.path FROM workloads w JOIN projects p ON p.id=w.project_id
+ SELECT 'page',w.name||' Â· '||section.label,p.name,'/resources/'||w.id||'/'||section.path FROM workloads w JOIN projects p ON p.id=w.project_id
  CROSS JOIN (VALUES ('logs','Logs'),('metrics','Metrics'),('backups','Backups'),('troubleshooting','Troubleshooting'),('files','Files'),('database','Database'),('object-storage','Object storage')) section(path,label)
  WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0) AND (section.path<>'files' OR $3 AND w.kind<>'database') AND (section.path<>'database' OR w.kind='database') AND (section.path<>'object-storage' OR w.kind<>'database')
  UNION ALL
  SELECT 'node',n.name,n.state,CASE WHEN $3 THEN '/nodes/'||n.id ELSE '/nodes' END FROM nodes n
  WHERE $3 OR EXISTS(SELECT 1 FROM team_nodes t WHERE t.node_id=n.id AND t.team_id=$2)
  UNION ALL
- SELECT 'operation',w.name||' · '||o.action,o.state||' · '||left(o.id,8),'/operations/'||o.id FROM operations o JOIN workloads w ON w.id=o.workload_id
+ SELECT 'operation',w.name||' Â· '||o.action,o.state||' Â· '||left(o.id,8),'/operations/'||o.id FROM operations o JOIN workloads w ON w.id=o.workload_id
  WHERE w.team_id=$2 AND ($3 OR cove_access($1,w.team_id,w.project_id,COALESCE(w.environment_id,''))>0)
 )
 SELECT kind,name,detail,path FROM visible WHERE strpos(lower(name),lower($4))>0 OR (kind='operation' AND strpos(path,$4)>0)
@@ -78,6 +78,7 @@ ORDER BY CASE kind WHEN 'workload' THEN 0 WHEN 'project' THEN 1 WHEN 'environmen
 		pages = append(pages, searchResult{"page", "Log forwarding", "Notifications", "/notifications"}, searchResult{"page", "Threshold rules", "Notifications", "/notifications"})
 	}
 	if p.Admin {
+		pages = append(pages, searchResult{"page", "Directory sign-in", "Settings", "/admin"}, searchResult{"page", "LDAP sign-in", "Settings", "/admin"}, searchResult{"page", "SCIM provisioning", "Settings", "/admin"}, searchResult{"page", "GitHub team sync", "Settings", "/admin"})
 		pages = append(pages, searchResult{"page", "Settings", "Administration", "/admin"}, searchResult{"page", "Users", "Administration", "/users"}, searchResult{"page", "Terminal", "Administration", "/terminal"})
 		pages = append(pages, searchResult{"page", "Panel backup and recovery", "Settings", "/admin"}, searchResult{"page", "Telemetry retention", "Settings", "/admin"}, searchResult{"page", "Prometheus export", "Settings", "/admin"})
 	}

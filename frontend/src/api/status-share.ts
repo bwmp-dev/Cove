@@ -1,7 +1,12 @@
 import { queryOptions } from "@tanstack/react-query";
 import { request, requestPublic } from "./client";
 
-export type StatusShare = { enabled: false; title?: string; expires_at?: string; created_at?: string } | { enabled: true; title: string; expires_at: string; created_at: string };
+// ownership_required: the link has no currently authorised creator (deactivated, lacking current project edit rights or
+// required two-step verification, or never recorded), so the public page and badge are not served. Creating or rotating
+// the link makes the current account its creator.
+export type StatusShare =
+  | { enabled: false; title?: string; expires_at?: string; created_at?: string; ownership_required?: boolean }
+  | { enabled: true; title: string; expires_at: string; created_at: string; ownership_required?: boolean };
 
 // Returned once when a link is created or rotated. The server keeps only a hash of the token.
 export interface CreatedStatusShare {

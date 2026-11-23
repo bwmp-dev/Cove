@@ -27,6 +27,12 @@ func (s *Server) securityPosture(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "security posture unavailable", 503)
 		return
 	}
+	directoryRegistration, err := s.ldapRegistrationEnabled(r.Context())
+	if err != nil {
+		http.Error(w, "directory security posture unavailable", 503)
+		return
+	}
+	registration = registration || directoryRegistration
 	checks := []postureCheck{}
 	add := func(id string, pass bool, message, remediation string) {
 		status := "warn"
@@ -38,7 +44,7 @@ func (s *Server) securityPosture(w http.ResponseWriter, r *http.Request) {
 	add("admin_second_factor_required", secondFactor, "Instance second-factor policy evaluated.", "Require second factor in Settings > Two-step verification.")
 	add("admin_second_factor_enrolled", enrolled, "Enabled administrator TOTP and passkey enrollment evaluated.", "Enroll each administrator in TOTP or a passkey before enforcing the policy.")
 	add("password_login", passwordDisabled, "Password login policy evaluated.", "Consider disabling password login after testing another sign-in method and the documented host recovery procedure.")
-	add("registration", !registration, "Open email and OIDC registration policies evaluated.", "Disable open registration in Settings when accounts should be invitation-only.")
+	add("registration", !registration, "Open email, OIDC and enabled LDAP registration policies evaluated.", "Disable open registration in Settings and LDAP providers when accounts should be invitation-only.")
 	if override, ok := os.LookupEnv("COVE_PANEL_ALLOWLIST"); ok {
 		allowlist = nil
 		if override != "" {

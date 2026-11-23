@@ -42,7 +42,7 @@ func (s *Server) projectStatusShare(w http.ResponseWriter, r *http.Request) {
 		}
 		token := randomToken()
 		expires := time.Now().UTC().Add(time.Duration(in.Days) * 24 * time.Hour)
-		if _, err := s.DB.Exec(r.Context(), `INSERT INTO project_status_shares(project_id,title,token_hash,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT(project_id) DO UPDATE SET title=EXCLUDED.title,token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at,created_at=now()`, id, in.Title, tokenHash(token), expires); err != nil {
+		if _, err := s.DB.Exec(r.Context(), `INSERT INTO project_status_shares(project_id,title,token_hash,expires_at,creator_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(project_id) DO UPDATE SET title=EXCLUDED.title,token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at,created_at=now(),creator_id=EXCLUDED.creator_id`, id, in.Title, tokenHash(token), expires, actor(r).ID); err != nil {
 			http.Error(w, "could not enable sharing", 503)
 			return
 		}
@@ -51,7 +51,8 @@ func (s *Server) projectStatusShare(w http.ResponseWriter, r *http.Request) {
 	}
 	var title string
 	var expires, created time.Time
-	err := s.DB.QueryRow(r.Context(), `SELECT title,expires_at,created_at FROM project_status_shares WHERE project_id=$1`, id).Scan(&title, &expires, &created)
+	var ownerAllowed bool
+	err := s.DB.QueryRow(r.Context(), `SELECT s.title,s.expires_at,s.created_at,cove_automation_allowed(s.creator_id,p.team_id,p.id,'','edit_configuration') FROM project_status_shares s JOIN projects p ON p.id=s.project_id WHERE s.project_id=$1`, id).Scan(&title, &expires, &created, &ownerAllowed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		respond(w, 200, map[string]any{"enabled": false})
 		return
@@ -60,7 +61,7 @@ func (s *Server) projectStatusShare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sharing unavailable", 503)
 		return
 	}
-	respond(w, 200, map[string]any{"enabled": expires.After(time.Now()), "title": title, "expires_at": expires, "created_at": created})
+	respond(w, 200, map[string]any{"enabled": ownerAllowed && expires.After(time.Now()), "ownership_required": !ownerAllowed, "title": title, "expires_at": expires, "created_at": created})
 }
 
 var statusBadgeTemplate = template.Must(template.New("badge").Parse(`<svg xmlns="http://www.w3.org/2000/svg" width="220" height="24" role="img" aria-label="Deployment status: {{.}}"><title>Deployment status: {{.}}</title><rect width="220" height="24" fill="#262626"/><text x="8" y="16" fill="white" font-family="sans-serif" font-size="12">Cove deployment: {{.}}</text></svg>`))
@@ -97,9 +98,9 @@ func (s *Server) publicProjectStatus(w http.ResponseWriter, r *http.Request) {
  count(w.id) FILTER(WHERE o.state IN ('queued','running')),
  count(w.id) FILTER(WHERE w.manually_stopped AND o.state='succeeded'),
  count(w.id) FILTER(WHERE o.state IS NULL OR o.state NOT IN ('succeeded','failed','interrupted','queued','running'))
- FROM project_status_shares s LEFT JOIN workloads w ON w.project_id=s.project_id
+ FROM project_status_shares s JOIN projects p ON p.id=s.project_id LEFT JOIN workloads w ON w.project_id=s.project_id
  LEFT JOIN LATERAL(SELECT state FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt','start','restart','stop') ORDER BY created_at DESC,id DESC LIMIT 1)o ON true
- WHERE s.token_hash=$1 AND s.expires_at>now() GROUP BY s.title`, tokenHash(token)).Scan(&title, &counts.Total, &counts.Succeeded, &counts.Failed, &counts.Pending, &counts.Stopped, &counts.Unknown)
+ WHERE s.token_hash=$1 AND s.expires_at>now() AND cove_automation_allowed(s.creator_id,p.team_id,p.id,'','edit_configuration') GROUP BY s.title`, tokenHash(token)).Scan(&title, &counts.Total, &counts.Succeeded, &counts.Failed, &counts.Pending, &counts.Stopped, &counts.Unknown)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
 import { errorMessage, request } from "../api/client";
 import { logForwardersQuery, type ForwarderKind, type LogForwarder, type LogForwarderInput } from "../api/outputs";
 import { useOnline } from "../lib/hooks";
@@ -55,12 +55,16 @@ function KindField({ id, value, replacing, onChange }: { id: string; value: Forw
   );
 }
 
-// Request bodies carry credentials, so the mutation is dropped from the cache as soon as the form closes.
-function useSaveForwarder(id: string | undefined, onSaved: () => void) {
+// The body carries credentials. Mutation variables stay in the cache while the request runs and after a failure, so the
+// mutation takes none: mutationFn reads the body from the form when it runs.
+function useSaveForwarder(id: string | undefined, body: () => LogForwarderInput, onSaved: () => void) {
   const client = useQueryClient();
   return useMutation({
     gcTime: 0,
-    mutationFn: (input: LogForwarderInput) => (id ? request<{ id: string }>("PUT", `/api/notifications/forwarders/${encodeURIComponent(id)}`, input) : request<{ id: string }>("POST", "/api/notifications/forwarders", input)),
+    mutationFn: () => {
+      const input = body();
+      return id ? request<{ id: string }>("PUT", `/api/notifications/forwarders/${encodeURIComponent(id)}`, input) : request<{ id: string }>("POST", "/api/notifications/forwarders", input);
+    },
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: logForwardersQuery.queryKey });
       onSaved();
@@ -77,7 +81,13 @@ function ForwarderForm({ initial, close }: { initial?: LogForwarder; close: () =
   const keeps = initial !== undefined && initial.kind === kind;
   const endpointSaved = keeps && initial.endpoint_set;
   const tokenSaved = keeps && initial.token_set;
-  const save = useSaveForwarder(initial?.id, close);
+  const submitted = useRef<LogForwarderInput | null>(null);
+  const save = useSaveForwarder(initial?.id, () => {
+    if (!submitted.current) throw new Error("No forwarder to save.");
+    const input = submitted.current;
+    submitted.current = null;
+    return input;
+  }, close);
   const fieldId = (field: FieldName) => `${id}-${field}`;
   const message = (field: FieldName) => (error?.field === field ? error.message : undefined);
 
@@ -90,7 +100,8 @@ function ForwarderForm({ initial, close }: { initial?: LogForwarder; close: () =
       return;
     }
     setError(undefined);
-    save.mutate(input);
+    submitted.current = input;
+    save.mutate();
   }
 
   return (

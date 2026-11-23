@@ -608,6 +608,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	templateDone := make(chan struct{})
 	go func() { defer close(templateDone); s.runTemplateRepositories(templateCtx) }()
 	defer func() { stopTemplates(); <-templateDone }()
+	directoryCtx, stopDirectories := context.WithCancel(ctx)
+	directoryDone := make(chan struct{})
+	go func() { defer close(directoryDone); s.runGithubTeamSync(directoryCtx) }()
+	defer func() { stopDirectories(); <-directoryDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {
@@ -755,6 +759,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if json.Unmarshal(data, &request) != nil {
 		return s.failOperation(ctx, id, "Operation configuration is invalid.")
 	}
+	if proceed, err := s.scheduledJobDispatch(ctx, id, false); err != nil || !proceed {
+		return err
+	}
 	var cancelRequested bool
 	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested FROM operations WHERE id=$1", id).Scan(&cancelRequested); err != nil {
 		return err
@@ -837,6 +844,11 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 			if _, err = s.DB.Exec(ctx, "UPDATE database_maintenance SET retry_requested=false WHERE id=$1", id); err != nil {
 				return err
 			}
+		}
+	}
+	if !cancelRequested {
+		if proceed, err := s.scheduledJobDispatch(ctx, id, true); err != nil || !proceed {
+			return err
 		}
 	}
 	response, err := s.nodeRPC(ctx, node, worker.RPCRequest{Method: method, Request: &request})

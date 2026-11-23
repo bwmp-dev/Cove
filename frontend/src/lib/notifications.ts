@@ -115,6 +115,7 @@ const outcomeGroups = {
   migration: { title: "Imports and adoption", description: "Import reviews and Compose adoption. Importers do not change the source system." },
   rollouts: { title: "Rollouts and CPU scaling", description: "Staged rollouts waiting for promotion and their outcome, and replica changes queued by CPU autoscaling." },
   sleep: { title: "Idle sleep", description: "Request-driven services stopped after being idle and woken by the next request." },
+  directory: { title: "Directory provisioning", description: "Accounts and team access changed by SCIM, LDAP or GitHub team sync, and directory syncs that did not finish." },
 } satisfies Record<string, { title: string; description: string }>;
 
 const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: string }> = {
@@ -141,6 +142,10 @@ const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: 
   "autoscale.failed": { group: "rollouts", label: "CPU scaling failed" },
   "resource.asleep": { group: "sleep", label: "Resource went to sleep" },
   "resource.awake": { group: "sleep", label: "Resource woke" },
+  "identity.provisioned": { group: "directory", label: "Account provisioned" },
+  "identity.deprovisioned": { group: "directory", label: "Account deprovisioned" },
+  "identity.membership_changed": { group: "directory", label: "Team access changed by a directory" },
+  "identity.sync_failed": { group: "directory", label: "Directory sync failed" },
 };
 
 export interface EventGroup {

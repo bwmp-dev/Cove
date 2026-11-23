@@ -96,7 +96,7 @@ func (s *Server) moveResource(w http.ResponseWriter, r *http.Request) {
 	}
 	review := resourceMoveReview{Blockers: []string{}, Effects: []string{
 		"The resource ID, node, containers, saved local variables, routes and operation history are retained. No deployment is queued.",
-		"Access is inherited from the destination. Source grants are not copied. Destination shared variables, built-in placement variables and deployment policies apply to future deployments.",
+		"Access is inherited from the destination. Source grants are not copied. Cross-team transfers suspend owned job schedules until explicitly saved in the destination. Destination shared variables, built-in placement variables and deployment policies apply to future deployments.",
 	}, CrossTeam: team != in.TeamID}
 	if team == in.TeamID && project == in.ProjectID && environment == in.EnvironmentID {
 		review.Blockers = append(review.Blockers, "Choose a different destination.")
@@ -232,6 +232,10 @@ func (s *Server) moveResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if review.CrossTeam {
+		if _, err = tx.Exec(ctx, `UPDATE workloads SET job_schedule_creator_id=NULL,next_job_at=NULL,job_pending_at=NULL WHERE id=$1`, id); err != nil {
+			http.Error(w, "could not suspend source automation", 503)
+			return
+		}
 		for _, query := range []string{`DELETE FROM api_tokens WHERE workload_id=$1`, `DELETE FROM deploy_hooks WHERE workload_id=$1`, `DELETE FROM webhook_deliveries WHERE workload_id=$1`} {
 			if _, err = tx.Exec(ctx, query, id); err != nil {
 				http.Error(w, "could not revoke source access", 503)

@@ -121,7 +121,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication unavailable", 503)
 		return
 	}
-	setSession(w, token, expiry)
+	s.completeSignIn(w, r, userID, token, expiry)
 	var required bool
 	if s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM account_totp WHERE user_id=$1 AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=$1)", userID).Scan(&required) != nil {
 		http.Error(w, "authentication unavailable", 503)

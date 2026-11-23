@@ -79,7 +79,7 @@ function StatusPageForm({ projectId, saved }: { projectId: string; saved: Settin
           </SettingRows>
           {saved.enabled && publicURL && (
             <div className="space-y-2 border-t border-line pt-4">
-              <Field id={`${id}-url`} label="Public link" hint="The address stays the same when you turn the page off and on again.">
+              <Field id={`${id}-url`} label="Public link" hint="Saving makes your account responsible for this page and may change the address. If another account saved it last, it gets a new address and this one stops working. Turning it off and on again yourself keeps the same address.">
                 <input id={`${id}-url`} className={`${inputClass} font-mono`} value={publicURL} readOnly aria-describedby={`${id}-url-hint`} />
               </Field>
               <div className="flex flex-wrap items-center gap-2">
@@ -90,6 +90,11 @@ function StatusPageForm({ projectId, saved }: { projectId: string; saved: Settin
                 </a>
               </div>
             </div>
+          )}
+          {saved.ownership_required && (
+            <Notice tone="warn" title="Status page is suspended">
+              The editor who published this page was deactivated, no longer has edit access to the project or the required two-step verification, or is not recorded. Its previous link returns Not found. Publish the page again to make your account responsible for it; it gets a new link and the previous one stays off.
+            </Notice>
           )}
           {save.isError && <Notice tone="error" title="Could not save the status page">{errorMessage(save.error)}</Notice>}
         </div>
@@ -103,6 +108,7 @@ function StatusPageForm({ projectId, saved }: { projectId: string; saved: Settin
         onConfirm={() => save.mutate({ enabled: true, title: title.trim() })}
       >
         Anyone with the link can see, without signing in, the page title, each public label, whether the check is up, its latency, when it last ran and the share of successful checks over 24 hours. Domains, paths, error messages and other project details are not shown. Search engines and others may find the link if it is shared.
+        <span className="mt-2 block">Saving makes your account responsible for the page. If another account saved it last, or its publisher lost access, it gets a new link.</span>
         {save.isError && <span className="mt-2 block text-bad">{errorMessage(save.error)}</span>}
       </ConfirmDialog>
     </form>
@@ -125,5 +131,5 @@ export function StatusPageSettings({ projectId }: { projectId: string }) {
       </Section>
     );
   }
-  return <StatusPageForm key={`${settings.data.enabled}-${settings.data.title}-${settings.data.slug}`} projectId={projectId} saved={settings.data} />;
+  return <StatusPageForm key={`${settings.data.enabled}-${settings.data.title}-${settings.data.slug}-${settings.data.ownership_required}`} projectId={projectId} saved={settings.data} />;
 }

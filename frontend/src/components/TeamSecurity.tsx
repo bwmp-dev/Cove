@@ -174,7 +174,7 @@ export function CustomRoles({ team }: { team: TeamMembership }) {
           {remove.isError && (
             <div className="p-3">
               <Notice tone="error" title="Could not delete the role">
-                {isStatus(remove.error, 409) ? "Members or pending invitations still use this role. Change their grants or revoke the invitations first." : errorMessage(remove.error)}
+                {isStatus(remove.error, 409) ? "Members, pending invitations or directory group mappings (GitHub team sync, SCIM or LDAP) still use this role. Change their grants, revoke the invitations or remap the groups first." : errorMessage(remove.error)}
               </Notice>
             </div>
           )}

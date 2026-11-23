@@ -88,23 +88,26 @@ func (s *Server) validGrants(r *http.Request, team string, in memberInput) bool 
 	return true
 }
 func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), "SELECT u.id,COALESCE(u.email,''),u.name,m.role,m.grants FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 ORDER BY u.name,u.id", r.PathValue("id"))
+	rows, err := s.DB.Query(r.Context(), `SELECT u.id,COALESCE(u.email,''),u.name,m.role,m.grants,
+ COALESCE((SELECT jsonb_agg(v) FROM (SELECT DISTINCT source_kind,source_id FROM identity_membership_claims c WHERE c.team_id=m.team_id AND c.user_id=m.user_id ORDER BY source_kind,source_id) v),'[]'::jsonb)
+ FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 ORDER BY u.name,u.id`, r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	defer rows.Close()
 	type member struct {
-		ID     string  `json:"user_id"`
-		Email  string  `json:"email"`
-		Name   string  `json:"name"`
-		Role   string  `json:"role"`
-		Grants []grant `json:"grants"`
+		ID      string            `json:"user_id"`
+		Email   string            `json:"email"`
+		Name    string            `json:"name"`
+		Role    string            `json:"role"`
+		Grants  []grant           `json:"grants"`
+		Sources []directorySource `json:"managed_by"`
 	}
 	out := []member{}
 	for rows.Next() {
 		var m member
-		if err = rows.Scan(&m.ID, &m.Email, &m.Name, &m.Role, &m.Grants); err != nil {
+		if err = rows.Scan(&m.ID, &m.Email, &m.Name, &m.Role, &m.Grants, &m.Sources); err != nil {
 			http.Error(w, "could not read members", 500)
 			return
 		}
@@ -113,6 +116,20 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 	if rows.Err() != nil {
 		http.Error(w, "could not read members", 500)
 		return
+	}
+	rows.Close()
+	if actor(r).Admin {
+		names, e := s.directorySourceNames(r.Context())
+		if e != nil {
+			http.Error(w, "membership sources unavailable", 503)
+			return
+		}
+		for i := range out {
+			for j := range out[i].Sources {
+				source := &out[i].Sources[j]
+				source.Name = names[source.Kind+"\x00"+source.ID]
+			}
+		}
 	}
 	respond(w, 200, out)
 }
@@ -166,13 +183,28 @@ func (s *Server) changeMember(w http.ResponseWriter, r *http.Request) {
 	}
 	if targetRole == "owner" && (r.Method == "DELETE" || in.Role != "owner") {
 		var count int
-		err = tx.QueryRow(r.Context(), "SELECT count(*) FROM team_members WHERE team_id=$1 AND role='owner'", team).Scan(&count)
+		err = tx.QueryRow(r.Context(), "SELECT count(*) FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 AND m.user_id<>$2 AND m.role='owner' AND NOT u.disabled", team, user).Scan(&count)
 		if err != nil {
 			http.Error(w, "database unavailable", 503)
 			return
 		}
-		if count < 2 {
+		if count < 1 {
 			http.Error(w, "team must keep an owner", 409)
+			return
+		}
+	}
+	var managed bool
+	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM identity_membership_bases WHERE team_id=$1 AND user_id=$2)", team, user).Scan(&managed); err != nil {
+		http.Error(w, "membership settings unavailable", 503)
+		return
+	}
+	if managed {
+		if r.Method != "PUT" || in.Role != "owner" {
+			http.Error(w, "membership is managed by a directory; change its group mappings instead", 409)
+			return
+		}
+		if _, err = tx.Exec(r.Context(), "UPDATE identity_membership_bases SET role='owner',grants='[]' WHERE team_id=$1 AND user_id=$2", team, user); err != nil {
+			http.Error(w, "membership settings unavailable", 503)
 			return
 		}
 	}

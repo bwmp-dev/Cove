@@ -3,6 +3,7 @@ import base64
 from contextlib import contextmanager
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -192,6 +193,8 @@ def main():
     if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*", base_path) or len(base_path) > 200:
         raise ValueError("Use a simple COVE_BROWSER_BASE_PATH without a trailing slash")
     containers = []
+    identity_images = []
+    identity = None
     network_created = False
     ingress = []
     worker_state_owned = False
@@ -253,9 +256,15 @@ def main():
             origin = f"https://localhost:{port}"
             panel_url = origin + base_path
             env.update(DATABASE_URL=f"postgres://postgres:{env['POSTGRES_PASSWORD']}@db:5432/cove?sslmode=disable", COVE_PUBLIC_URL=panel_url)
+            identity_options = []
+            if "e2e/directory.spec.ts" in sys.argv[1:] or sys.argv[1:] == ["--identity"]:
+                identity_spec = importlib.util.spec_from_file_location("cove_browser_identity", ROOT / "scripts/browser-identity.py")
+                identity = importlib.util.module_from_spec(identity_spec)
+                identity_spec.loader.exec_module(identity)
+                identity_options = identity.start(name, fixture, env, containers, identity_images, openssl)
             options = [item for key in ("DATABASE_URL", "COVE_PUBLIC_URL", "COVE_ADMIN_PASSWORD", "COVE_ADMIN_TOKEN", "COVE_ENCRYPTION_KEY") for item in ("-e", key)]
             run("docker", "run", "-d", "--name", name + "-panel", "--network", name,
-                "--network-alias", "panel", *options, panel_image, env=env, stdout=subprocess.DEVNULL)
+                "--network-alias", "panel", *options, *identity_options, panel_image, env=env, stdout=subprocess.DEVNULL)
             containers.append(name + "-panel")
             run("docker", "run", "-d", "--name", name + "-tls", "--network", name,
                 "-p", f"127.0.0.1:{port}:443", "--mount", f"type=bind,source={fixture},target=/fixture,readonly",
@@ -284,6 +293,8 @@ def main():
             roles = api("GET", "/api/teams/default/roles")
             if "certificates:write" not in [item["name"] for item in api("GET", "/api/access-tokens/scopes")]:
                 raise RuntimeError("Packaged panel lacks this merge's scoped certificate contract")
+            if "directory:manage" not in [item["name"] for item in api("GET", "/api/access-tokens/scopes")]:
+                raise RuntimeError("Packaged panel lacks this merge's directory scope and ownership contract")
             events = api("GET", "/api/notifications/events")
             if not isinstance(search.get("items"), list) or search.get("limit") != 40 or timezone.get("schedule_timezone") != "UTC" or "read_secrets" not in roles.get("permission_catalogue", []):
                 raise RuntimeError("Packaged panel does not expose the merged integration/trust contract")
@@ -291,6 +302,8 @@ def main():
                 raise RuntimeError("Packaged panel does not expose the merged operations outcome catalogue")
             if "rollout.staged" not in events or "autoscale.queued" not in events:
                 raise RuntimeError("Packaged panel does not expose the merged deployment lifecycle contract")
+            if identity is not None:
+                identity.seed(name + "-db", env)
             run("go", "build", "-o", "bin/cove-worker-linux-amd64", "./cmd/cove-worker", env=env | {"GOOS": "linux", "GOARCH": "amd64"})
             run("docker", "build", "-f", "test/worker/Dockerfile", "-t", worker_image, ".", stdout=subprocess.DEVNULL)
             for resource in ("container", "volume"):
@@ -338,19 +351,24 @@ def main():
                 api("POST", "/api/nodes/"+enrollment["id"]+"/verify")
                 time.sleep(1)
             else: raise RuntimeError("Browser worker did not become ready")
-            if sys.argv[1:] == ["--managed-data"] or "e2e/databases.spec.ts" in sys.argv[1:]:
+            if sys.argv[1:] == ["--managed-data"] or "e2e/databases.spec.ts" in sys.argv[1:] or identity is not None:
                 ready = next(item for item in api("GET", "/api/nodes") if item["id"] == enrollment["id"])
                 if not ready.get("capabilities", {}).get("managed_databases") or len(api("GET", "/api/database-engines")["engines"]) != 7:
                     raise RuntimeError("Managed-data acceptance requires this branch's panel and worker capabilities")
+            if identity is not None:
+                methods = api("GET", "/auth/sign-in-methods")
+                if "ldap_providers" not in methods or not api("GET", "/api/settings/directory/teams").get("teams"):
+                    raise RuntimeError("Directory acceptance requires this branch's identity APIs")
             client_binary=fixture / ("cove.exe" if os.name == "nt" else "cove")
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
             ssh_port=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
             env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
-            if sys.argv[1:] == ["--managed-data"]:
+            if sys.argv[1:] in (["--managed-data"], ["--identity"]):
                 env["COVE_BROWSER_CA"] = str(fixture / "cert.pem")
                 env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
-                subprocess.run([sys.executable, str(ROOT / "scripts/test-managed-data.py")], cwd=ROOT, env=env, check=True)
+                script = "test-identity.py" if identity is not None else "test-managed-data.py"
+                subprocess.run([sys.executable, str(ROOT / "scripts" / script)], cwd=ROOT, env=env, check=True)
             else:
                 subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
         finally:
@@ -411,7 +429,7 @@ def main():
                     result = subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True)
                     if result.returncode and inspect_cleanup_resource("network", name) is not None:
                         cleanup_errors.append("could not remove fixture network " + name)
-                for image in (worker_image, panel_image):
+                for image in (*identity_images, worker_image, panel_image):
                     subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if cleanup_errors:
                     raise RuntimeError("; ".join(cleanup_errors))

@@ -235,7 +235,7 @@ func (s *Server) passkeyFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ceremony == "login" {
-		setSession(w, token, expiry)
+		s.completeSignIn(w, r, u.ID, token, expiry)
 	}
 	respond(w, 200, map[string]bool{"ok": true})
 }

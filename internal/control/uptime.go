@@ -393,9 +393,10 @@ func (s *Server) statusPageSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type config struct {
-		Enabled bool   `json:"enabled"`
-		Title   string `json:"title"`
-		Slug    string `json:"slug"`
+		OwnershipRequired bool   `json:"ownership_required"`
+		Enabled           bool   `json:"enabled"`
+		Title             string `json:"title"`
+		Slug              string `json:"slug"`
 	}
 	c := config{}
 	if r.Method == http.MethodPut {
@@ -407,13 +408,13 @@ func (s *Server) statusPageSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "a public status title is required and must not exceed 120 characters", 400)
 			return
 		}
-		_, err := s.DB.Exec(ctx, `INSERT INTO project_status_pages(project_id,enabled,title,slug) SELECT id,$2,$3,$4 FROM projects WHERE id=$1 AND team_id=$5 ON CONFLICT(project_id) DO UPDATE SET enabled=EXCLUDED.enabled,title=EXCLUDED.title`, id, c.Enabled, c.Title, resourceID()+resourceID(), actor(r).Team)
+		_, err := s.DB.Exec(ctx, `INSERT INTO project_status_pages(project_id,enabled,title,slug,creator_id) SELECT id,$2,$3,$4,$6 FROM projects WHERE id=$1 AND team_id=$5 ON CONFLICT(project_id) DO UPDATE SET enabled=EXCLUDED.enabled,title=EXCLUDED.title,creator_id=EXCLUDED.creator_id,slug=CASE WHEN project_status_pages.creator_id IS DISTINCT FROM EXCLUDED.creator_id THEN EXCLUDED.slug ELSE project_status_pages.slug END`, id, c.Enabled, c.Title, resourceID()+resourceID(), actor(r).Team, actor(r).ID)
 		if err != nil {
 			http.Error(w, "could not save status page", 503)
 			return
 		}
 	}
-	err := s.DB.QueryRow(ctx, `SELECT p.enabled,p.title,p.slug FROM project_status_pages p JOIN projects pr ON pr.id=p.project_id WHERE p.project_id=$1 AND pr.team_id=$2`, id, actor(r).Team).Scan(&c.Enabled, &c.Title, &c.Slug)
+	err := s.DB.QueryRow(ctx, `SELECT p.enabled AND cove_automation_allowed(p.creator_id,pr.team_id,pr.id,'','edit_configuration'),p.title,p.slug,NOT cove_automation_allowed(p.creator_id,pr.team_id,pr.id,'','edit_configuration') FROM project_status_pages p JOIN projects pr ON pr.id=p.project_id WHERE p.project_id=$1 AND pr.team_id=$2`, id, actor(r).Team).Scan(&c.Enabled, &c.Title, &c.Slug, &c.OwnershipRequired)
 	if errors.Is(err, pgx.ErrNoRows) {
 		respond(w, 200, config{})
 		return
@@ -439,7 +440,7 @@ func (s *Server) publicStatusPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var project, title string
-	err = s.DB.QueryRow(r.Context(), `SELECT project_id,title FROM project_status_pages WHERE slug=$1 AND enabled`, r.PathValue("slug")).Scan(&project, &title)
+	err = s.DB.QueryRow(r.Context(), `SELECT s.project_id,s.title FROM project_status_pages s JOIN projects p ON p.id=s.project_id WHERE s.slug=$1 AND s.enabled AND cove_automation_allowed(s.creator_id,p.team_id,p.id,'','edit_configuration')`, r.PathValue("slug")).Scan(&project, &title)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return

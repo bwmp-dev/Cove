@@ -7,6 +7,10 @@ import { OutboundProxy } from "../components/OutboundProxy";
 import { TemplateRepositories } from "../components/TemplateRepositories";
 import { SecurityPosture } from "../components/SecurityPosture";
 import { LoginHistory, loginHistoryDescription } from "../components/LoginHistory";
+import { GitHubTeamSync } from "../components/GitHubTeamSync";
+import { LdapProviders } from "../components/LdapProviders";
+import { ScimProvisioning } from "../components/ScimProvisioning";
+import { scimLinksQuery, type ScimLink } from "../api/directory";
 import { useResetSecondFactor } from "../api/security";
 import { MetricsExport } from "../components/MetricsExport";
 import { PanelRecovery } from "../components/PanelRecovery";
@@ -224,6 +228,9 @@ function ResetLink({ user, onClose }: { user: User; onClose: () => void }) {
 function Users() {
   const session = useSession();
   const users = useQuery(usersQuery);
+  // Optional context: the list still works when provisioning links cannot be read.
+  const links = useQuery(scimLinksQuery);
+  const provisioned = new Map<string, ScimLink>((links.data ?? []).map((link) => [link.user_id, link]));
   const update = useUpdateUser();
   const online = useOnline();
   const resetFactor = useResetSecondFactor();
@@ -265,6 +272,8 @@ function Users() {
       <ul className="divide-y divide-line">
         {users.data.map((user) => {
           const self = user.id === session?.user_id;
+          const link = provisioned.get(user.id);
+          const deprovisioned = link !== undefined && (!link.active || link.deleted_at !== null);
           const busy = !online || (update.isPending && update.variables.id === user.id);
           return (
             <li key={user.id}>
@@ -276,8 +285,14 @@ function Users() {
                   </p>
                   <p className="text-xs break-all text-fg-muted">
                     {user.email} · {user.is_admin ? "Instance administrator" : "User"}
+                    {link && " · Provisioned by SCIM"}
                     {user.disabled && <span className="text-warn"> · Disabled</span>}
                   </p>
+                  {deprovisioned && (
+                    <p className="text-xs text-warn">
+                      {link.deleted_at ? "Deleted" : "Deactivated"} by the identity provider: signed out everywhere and API tokens revoked.
+                    </p>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Button variant="ghost" size="sm" disabled={busy} onClick={() => update.mutate({ id: user.id, disabled: user.disabled, is_admin: !user.is_admin })}>
@@ -355,18 +370,21 @@ export function AdminPage() {
   }
   return (
     <>
-      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, security, panel access, MCP, outbound proxy, template sources, audit export, update, panel recovery, backup transfer and data retention settings for this Cove instance." />
+      <PageHeader icon={<Settings aria-hidden />} title="Settings" description="Sign-in, directories, provisioning, security, panel access, MCP, outbound proxy, template sources, audit export, update, panel recovery, backup transfer and data retention settings for this Cove instance." />
       <SecurityPosture />
       <Section title="Sign-in" width="form">
         <SignInSettings />
       </Section>
       <SignInProviders />
+      <LdapProviders />
       <InstanceSecondFactor />
       <PanelAccessSettings />
       <InstanceIntegrations />
       <Section title="MCP server" width="form" description="Let MCP clients use the public API with scoped API keys. Off by default.">
         <McpSettings />
       </Section>
+      <GitHubTeamSync />
+      <ScimProvisioning />
       <OutboundProxy />
       <TemplateRepositories scope={{ kind: "instance" }} />
       <AuditExport />

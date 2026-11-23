@@ -7,7 +7,7 @@ import { AdminPage } from "./admin";
 const session = vi.hoisted(() => ({ is_admin: true }));
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: () => "Update unavailable", isStatus: () => false }));
 vi.mock("../lib/session", () => ({ useSession: () => session }));
-vi.mock("@tanstack/react-router", () => ({ useRouterState: () => "", useBlocker: () => ({ status: "idle" }), Link: ({ children }: { children: React.ReactNode }) => <span>{children}</span> }));
+vi.mock("@tanstack/react-router", () => ({ useRouterState: () => "", useNavigate: () => vi.fn(), useBlocker: () => ({ status: "idle" }), Link: ({ children }: { children: React.ReactNode }) => <span>{children}</span> }));
 // jsdom does not implement modal dialogs.
 HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
   this.open = true;
@@ -21,6 +21,14 @@ function securityResponse(path: string) {
   if (path === "/api/settings/sign-in") return Promise.resolve({ password_login_disabled: false, oidc_registration_enabled: false, oidc_auto_redirect: "" });
   if (path === "/api/settings/template-repositories") return Promise.resolve({ repositories: [] });
   if (path === "/api/settings/second-factor") return Promise.resolve({ require_second_factor: false });
+  if (path === "/api/settings/github-team-sync") return Promise.resolve({ sources: [] });
+  if (path === "/api/settings/scim") return Promise.resolve({ enabled: false, token_configured: false, oidc_provider_id: "", rotated_at: null, version: 0, base_url: "https://cove.example.com/scim/v2" });
+  if (path === "/api/settings/scim/groups") return Promise.resolve({ groups: [] });
+  if (path === "/api/settings/scim/links") return Promise.resolve({ links: [] });
+  if (path === "/api/settings/ldap/providers") return Promise.resolve({ network_policy_configured: true, providers: [] });
+  if (path === "/api/users") return Promise.resolve([]);
+  if (path === "/api/settings/scim/activity") return Promise.resolve({ activity: [] });
+  if (path === "/api/settings/directory/teams") return Promise.resolve({ teams: [] });
   if (path === "/api/settings/audit-export") return Promise.resolve({ configuration: { webhook_url: "", syslog_address: "", syslog_tls: true, retention_days: 365 }, webhook_secret_configured: false, pending_deliveries: 0 });
   return undefined;
 }

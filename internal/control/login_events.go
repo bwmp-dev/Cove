@@ -41,6 +41,8 @@ func (s *Server) loginAttempt(next http.HandlerFunc) http.HandlerFunc {
 		user := ""
 		if fields.Token != "" {
 			err = s.DB.QueryRow(r.Context(), "SELECT user_id FROM account_actions WHERE token_hash=$1 AND purpose='reset'", tokenHash(fields.Token)).Scan(&user)
+		} else if strings.HasPrefix(r.URL.Path, "/auth/ldap/") {
+			err = s.DB.QueryRow(r.Context(), "SELECT id FROM users WHERE email=$1 UNION SELECT user_id FROM ldap_identities WHERE provider_id=$2 AND username=$1 ORDER BY id LIMIT 1", email, r.PathValue("provider")).Scan(&user)
 		} else if email != "" || r.URL.Path == "/auth/login" {
 			err = s.DB.QueryRow(r.Context(), "SELECT id FROM users WHERE email=$1 OR ($1='' AND id='bootstrap')", email).Scan(&user)
 		} else if cookie, e := r.Cookie("__Host-cove"); e == nil {
@@ -91,6 +93,9 @@ func (s *Server) loginAttempt(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		method := strings.TrimPrefix(r.URL.Path, "/auth/")
+		if strings.HasPrefix(method, "ldap/") {
+			method = "ldap"
+		}
 		s.recordLogin(r, user, success, method, address)
 	}
 }
@@ -111,7 +116,7 @@ func (s *Server) recordLogin(r *http.Request, user string, success bool, method,
 	if s.DB.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM account_totp WHERE user_id=$1 AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=$1)", user).Scan(&needsFactor) != nil {
 		return
 	}
-	if needsFactor && (method == "login" || method == "oidc" || method == "github") {
+	if needsFactor && (method == "login" || method == "oidc" || method == "github" || method == "ldap") {
 		return
 	}
 	result, err := s.DB.Exec(ctx, "INSERT INTO account_devices(user_id,device_hash) VALUES($1,$2) ON CONFLICT(user_id,device_hash) DO UPDATE SET last_seen=now() WHERE account_devices.last_seen<now()-interval '90 days'", user, tokenHash(loginDevice(r)))
@@ -237,7 +242,12 @@ func (s *Server) publicSignInMethods(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	respond(w, 200, map[string]any{"password_enabled": !disabled, "passkeys_enabled": true, "oidc_registration_enabled": registration, "oidc_auto_redirect": redirect, "oidc_providers": providers, "second_factor_pending": pending, "second_factor_methods": factors})
+	ldapProviders, err := s.enabledLDAPProviders(r.Context())
+	if err != nil {
+		http.Error(w, "directory providers unavailable", 503)
+		return
+	}
+	respond(w, 200, map[string]any{"password_enabled": !disabled, "passkeys_enabled": true, "oidc_registration_enabled": registration, "oidc_auto_redirect": redirect, "oidc_providers": providers, "ldap_enabled": len(ldapProviders) > 0, "ldap_providers": ldapProviders, "second_factor_pending": pending, "second_factor_methods": factors})
 }
 
 func loginDevice(r *http.Request) string {

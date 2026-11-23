@@ -16,11 +16,12 @@ func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 		var expression, timezone, overlap string
 		var timeout int
 		var next, pending *time.Time
-		if err := s.DB.QueryRow(r.Context(), `SELECT job_cron,next_job_at,job_timezone,job_overlap_policy,job_timeout_seconds,job_pending_at FROM workloads WHERE id=$1`, id).Scan(&expression, &next, &timezone, &overlap, &timeout, &pending); err != nil {
+		var ownerAllowed bool
+		if err := s.DB.QueryRow(r.Context(), `SELECT job_cron,next_job_at,job_timezone,job_overlap_policy,job_timeout_seconds,job_pending_at,cove_automation_allowed(job_schedule_creator_id,team_id,project_id,COALESCE(environment_id,''),'operate') FROM workloads WHERE id=$1`, id).Scan(&expression, &next, &timezone, &overlap, &timeout, &pending, &ownerAllowed); err != nil {
 			http.Error(w, "schedule unavailable", 503)
 			return
 		}
-		respond(w, 200, map[string]any{"cron": expression, "timezone": timezone, "next_run_at": next, "overlap_policy": overlap, "timeout_seconds": timeout, "pending_since": pending})
+		respond(w, 200, map[string]any{"cron": expression, "timezone": timezone, "next_run_at": next, "overlap_policy": overlap, "timeout_seconds": timeout, "pending_since": pending, "ownership_required": expression != "" && !ownerAllowed})
 		return
 	}
 	var in struct {
@@ -49,6 +50,9 @@ func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 	var config workloadInput
 	if err != nil || json.Unmarshal(raw, &config) != nil {
 		http.Error(w, "configuration unavailable", 503)
+		return
+	}
+	if in.Cron != "" && !s.requirePermission(w, r, "workload", id, "operate") {
 		return
 	}
 	if in.Cron != "" && config.Kind != "job" {
@@ -107,7 +111,7 @@ func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 		}
 		next = &value
 	}
-	if _, err = tx.Exec(r.Context(), `UPDATE workloads SET job_cron=$2,next_job_at=$3,job_timezone=$4,job_overlap_policy=$5,job_timeout_seconds=$6,job_pending_at=NULL WHERE id=$1`, id, in.Cron, next, timezone, overlap, timeout); err != nil {
+	if _, err = tx.Exec(r.Context(), `UPDATE workloads SET job_cron=$2,next_job_at=$3,job_timezone=$4,job_overlap_policy=$5,job_timeout_seconds=$6,job_pending_at=NULL,job_schedule_creator_id=NULLIF($7,'') WHERE id=$1`, id, in.Cron, next, timezone, overlap, timeout, actor(r).ID); err != nil {
 		http.Error(w, "could not save schedule", 503)
 		return
 	}
@@ -115,7 +119,7 @@ func (s *Server) jobSchedule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not save schedule", 503)
 		return
 	}
-	respond(w, 200, map[string]any{"cron": in.Cron, "timezone": timezone, "next_run_at": next, "overlap_policy": overlap, "timeout_seconds": timeout, "pending_since": nil})
+	respond(w, 200, map[string]any{"cron": in.Cron, "timezone": timezone, "next_run_at": next, "overlap_policy": overlap, "timeout_seconds": timeout, "pending_since": nil, "ownership_required": false})
 }
 
 var errJobWorkerUnsupported = errors.New("upgrade and verify the worker before running this job")
@@ -143,12 +147,12 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,w.job_cron,(w.manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)),w.job_timezone,w.job_overlap_policy,w.job_pending_at,w.next_job_at<=now(),COALESCE((n.capabilities->>'job_runs')::boolean,false) FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.job_cron<>'' AND (w.next_job_at<=now() OR w.job_pending_at IS NOT NULL) ORDER BY COALESCE(w.job_pending_at,w.next_job_at) LIMIT 16 FOR UPDATE OF w SKIP LOCKED`)
+	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,w.job_cron,COALESCE(w.job_schedule_creator_id,''),(w.manually_stopped OR NOT cove_automation_allowed(w.job_schedule_creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate') OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)),w.job_timezone,w.job_overlap_policy,w.job_pending_at,w.next_job_at<=now(),COALESCE((n.capabilities->>'job_runs')::boolean,false) FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.job_cron<>'' AND (w.next_job_at<=now() OR w.job_pending_at IS NOT NULL) ORDER BY COALESCE(w.job_pending_at,w.next_job_at) LIMIT 16 FOR UPDATE OF w SKIP LOCKED`)
 	if err != nil {
 		return err
 	}
 	type due struct {
-		id, cron        string
+		id, cron, owner string
 		configuration   []byte
 		stopped         bool
 		timezone        string
@@ -159,7 +163,7 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 	jobs := []due{}
 	for rows.Next() {
 		var j due
-		if err = rows.Scan(&j.id, &j.configuration, &j.cron, &j.stopped, &j.timezone, &j.overlap, &j.pending, &j.tick, &j.supported); err != nil {
+		if err = rows.Scan(&j.id, &j.configuration, &j.cron, &j.owner, &j.stopped, &j.timezone, &j.overlap, &j.pending, &j.tick, &j.supported); err != nil {
 			break
 		}
 		jobs = append(jobs, j)
@@ -241,6 +245,9 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 					return err
 				}
 				if result.RowsAffected() > 0 {
+					if _, err = tx.Exec(ctx, `INSERT INTO scheduled_job_runs(operation_id,creator_id) VALUES($1,$2)`, request.ID, j.owner); err != nil {
+						return err
+					}
 					pending = nil
 					if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status) VALUES('scheduler','scheduled job',$1,202)`, j.id); err != nil {
 						return err

@@ -41,6 +41,11 @@ function isIPAddress(name: string) {
   return /^[0-9.]+$/.test(name) || name.includes(":");
 }
 
+// A wildcard route hostname is a pattern, not an address anyone can open or connect to.
+export function isWildcardHostname(domain: string) {
+  return domain.startsWith("*.");
+}
+
 // Whether a wildcard route hostname such as *.example.com matches name: exactly one more label, never the apex, deeper
 // names or another wildcard.
 export function wildcardCovers(pattern: string, name: string) {

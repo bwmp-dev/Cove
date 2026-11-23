@@ -73,7 +73,13 @@ function ActiveShare({ projectId, share, onRotate }: { projectId: string; share:
           Created <RelativeTime value={share.created_at} /> · <ExpiryTime value={share.expires_at} subject="Link" />
         </p>
       </div>
-      <p className="text-xs text-fg-muted">The link was shown once when it was created. Rotate it to get a new link; the current one stops working immediately.</p>
+      {share.ownership_required ? (
+        <Notice tone="warn" title="Sharing is suspended">
+          This link has no currently authorised creator: the account that created it was deactivated, no longer has edit access to the project or the required two-step verification, or is not recorded. The page and badge are not served. Rotate the link to make your account responsible for it; the current link stays off.
+        </Notice>
+      ) : (
+        <p className="text-xs text-fg-muted">The link was shown once when it was created. Rotate it to get a new link; the current one stops working immediately.</p>
+      )}
       {revoke.isError && (
         <Notice tone="error" title="Could not turn off sharing">
           {errorMessage(revoke.error)}
@@ -101,6 +107,22 @@ function ActiveShare({ projectId, share, onRotate }: { projectId: string; share:
         The page and badge stop working immediately for everyone who has the link. Embedded badges show as broken images.
       </ConfirmDialog>
     </div>
+  );
+}
+
+function PreviousLinkNotice({ share }: { share: Extract<StatusShare, { enabled: false }> }) {
+  if (share.ownership_required) {
+    return (
+      <Notice tone="warn" title="Sharing is suspended">
+        The previous link has no currently authorised creator: the account that created it was deactivated, no longer has edit access to the project or the required two-step verification, or is not recorded. The page and badge are not served. Create a new link to make your account responsible for it.
+      </Notice>
+    );
+  }
+  if (!share.expires_at) return null;
+  return (
+    <Notice tone="warn" title="The previous link expired">
+      Create a new link to share the status page again.
+    </Notice>
   );
 }
 
@@ -138,11 +160,7 @@ function ShareForm({ projectId, current, onCreated, onCancel }: { projectId: str
 
   return (
     <form className="space-y-4" onSubmit={submit}>
-      {!current.enabled && current.expires_at && (
-        <Notice tone="warn" title="The previous link expired">
-          Create a new link to share the status page again.
-        </Notice>
-      )}
+      {!current.enabled && <PreviousLinkNotice share={current} />}
       <Notice title="What is shared">{disclosure}</Notice>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field id={`${id}-title`} label="Public title" hint="Shown on the page. Use a public name, not an internal one.">

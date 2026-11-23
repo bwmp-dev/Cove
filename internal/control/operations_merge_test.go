@@ -213,9 +213,9 @@ func TestOperationsMergeMetricsCapabilityRevalidation(t *testing.T) {
 }
 
 func TestOperationsMergePublicStatusPrefixAndIsolation(t *testing.T) {
-	f, id, _ := publicFixture(t)
-	slug := strings.Repeat("e", 64)
-	f.sql(`INSERT INTO project_status_pages(project_id,enabled,title,slug) VALUES('variable-project',true,'Public availability',$1)`, slug)
+	f, id, cookie := publicFixture(t)
+	saved := f.call(cookie, "default", "PUT", "/api/projects/variable-project/status-page", map[string]any{"enabled": true, "title": "Public availability"}, 200)
+	slug := jsonString(t, saved, "slug")
 	f.sql(`INSERT INTO route_checks(id,workload_id,team_id,domain,path,enabled,interval_seconds,timeout_seconds,expected_min,expected_max,public_label) VALUES('private-check',$1,'default','private-host.invalid','/private-path',true,60,2,200,299,'Public API')`, id)
 	f.sql(`UPDATE control_settings SET panel_allowlist=ARRAY['127.0.0.1/32']`)
 	f.s.PublicURL = "https://cove.example/control/cove"

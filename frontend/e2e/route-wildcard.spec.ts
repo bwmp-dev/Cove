@@ -145,6 +145,15 @@ test("wildcard routes: upload a wildcard certificate, save one-label wildcard ro
     expect(await servedFingerprint(base, authority.ca)).toMatch(/^rejected: /);
     expect(await servedFingerprint(`a.b.${base}`, authority.ca)).toMatch(/^rejected: /);
 
+    // The resource header and overview link only exact hostnames; the wildcard pattern stays text, never https://*.host.
+    await page.goto(`/resources/${id}`);
+    const details = page.getByRole("region", { name: "Details", exact: true });
+    await expect(details.getByRole("link", { name: priority, exact: true })).toHaveAttribute("href", `https://${priority}`);
+    await expect(details.getByText(wildcard, { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("link", { name: priority, exact: true }).first()).toHaveAttribute("href", `https://${priority}`);
+    await expect(page.locator('a[href*="*"]')).toHaveCount(0);
+    await page.goto(`/resources/${id}/domains`);
+
     // The certificate cannot be deleted while saved routes select it.
     await expect(page.getByRole("list", { name: "Stored certificates" }).getByRole("button", { name: "Delete certificate Browser CA wildcard" })).toBeDisabled();
     await capture(page, testInfo, "route-wildcard-applied");

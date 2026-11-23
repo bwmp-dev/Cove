@@ -61,6 +61,27 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/settings/directory/teams", "directory:manage", "List directory mapping targets; instance administrators only", nil, map[string]any{}, 200, s.directoryTeams},
+		{"GET", "/settings/github-team-sync", "directory:manage", "Read sealed GitHub directory source metadata; instance administrators only", nil, []githubTeamSource{}, 200, s.githubTeamSources},
+		{"POST", "/settings/github-team-sync", "directory:manage", "Create a GitHub group source; instance administrators only", githubTeamSourceInput{}, apiID{}, 200, s.githubTeamSources},
+		{"PUT", "/settings/github-team-sync/{source}", "directory:manage", "Update a versioned GitHub group source; instance administrators only", githubTeamSourceInput{}, apiID{}, 200, s.githubTeamSources},
+		{"DELETE", "/settings/github-team-sync/{source}", "directory:manage", "Remove a confirmed GitHub group source; instance administrators only", githubTeamDeleteInput{}, apiID{}, 200, s.githubTeamSources},
+		{"POST", "/settings/github-team-sync/{source}/preview", "directory:manage", "Review directory membership differences; instance administrators only", githubTeamPreviewInput{}, githubDirectoryReport{}, 200, s.githubTeamPreview},
+		{"POST", "/settings/github-team-sync/{source}/reconcile", "directory:manage", "Apply the confirmed current roster; instance administrators only", githubTeamPreviewInput{}, githubDirectoryReport{}, 200, s.githubTeamPreview},
+		{"GET", "/settings/scim", "directory:manage", "Read provisioning metadata and prefixed base URL; instance administrators only", nil, map[string]any{}, 200, s.scimSettings},
+		{"PUT", "/settings/scim", "directory:manage", "Configure separately authenticated provisioning; instance administrators only", scimSettingsInput{}, apiOK{}, 200, s.scimSettings},
+		{"POST", "/settings/scim/token", "directory:manage", "Rotate the separate provisioning credential; returned once; instance administrators only", scimSettingsInput{}, map[string]any{}, 200, s.scimSettings},
+		{"GET", "/settings/scim/activity", "directory:manage", "Read provisioning audit outcomes; instance administrators only", nil, map[string]any{}, 200, s.scimActivity},
+		{"GET", "/settings/scim/groups", "directory:manage", "Read provisioning group mappings; instance administrators only", nil, map[string]any{}, 200, s.scimGroupMappings},
+		{"PUT", "/settings/scim/groups/{group}/mappings", "directory:manage", "Confirm a current group role mapping; instance administrators only", scimMappingsInput{}, apiOK{}, 200, s.scimGroupMappings},
+		{"GET", "/settings/scim/links", "directory:manage", "Read explicitly adopted provisioning links; instance administrators only", nil, []map[string]any{}, 200, s.scimAccountLink},
+		{"POST", "/settings/scim/links", "directory:manage", "Explicitly adopt an existing account into provisioning; instance administrators only", scimLinkInput{}, apiOK{}, 200, s.scimAccountLink},
+		{"DELETE", "/settings/scim/links/{user}", "directory:manage", "Detach provisioning ownership without enabling an account; instance administrators only", scimLinkInput{}, apiOK{}, 200, s.scimAccountLink},
+		{"GET", "/settings/ldap/providers", "directory:manage", "Read directory provider metadata without bind credentials; instance administrators only", nil, []map[string]any{}, 200, s.ldapProviders},
+		{"POST", "/settings/ldap/providers", "directory:manage", "Seal a verified LDAP provider and role mappings; instance administrators only", ldapProviderInput{}, map[string]any{}, 200, s.ldapProviders},
+		{"PUT", "/settings/ldap/providers/{provider}", "directory:manage", "Update a versioned LDAP provider; instance administrators only", ldapProviderInput{}, apiOK{}, 200, s.ldapProviders},
+		{"DELETE", "/settings/ldap/providers/{provider}", "directory:manage", "Remove a confirmed LDAP provider; instance administrators only", ldapProviderInput{}, apiOK{}, 200, s.ldapProviders},
+		{"POST", "/settings/ldap/providers/{provider}/test", "directory:manage", "Test verified LDAP through the dedicated host CIDR policy; instance administrators only", nil, apiOK{}, 200, s.ldapTest},
 		{"GET", "/workloads/{id}/certificates", "workloads:read", "List public certificate metadata without key material", nil, []routeCertificateView{}, 200, s.routeCertificates},
 		{"POST", "/workloads/{id}/certificates", "certificates:write", "Seal an immutable resource certificate version", routeCertificateInput{}, routeCertificateView{}, 201, s.routeCertificates},
 		{"DELETE", "/workloads/{id}/certificates/{certificate}", "certificates:write", "Delete an unused certificate version", nil, map[string]string{}, 200, s.routeCertificates},
@@ -286,7 +307,7 @@ func apiSchema(t reflect.Type) map[string]any {
 				tag = field.Name
 			}
 			props[tag] = apiSchema(field.Type)
-			if tag == "private_key" || tag == "private_key_pem" {
+			if tag == "private_key" || tag == "private_key_pem" || tag == "bind_password" {
 				props[tag].(map[string]any)["writeOnly"] = true
 			}
 		}
@@ -337,7 +358,9 @@ func (s *Server) openAPIDocument() map[string]any {
 		}
 		entry[strings.ToLower(route.Method)] = operation
 	}
-	return map[string]any{"openapi": "3.1.0", "info": map[string]string{"title": "Cove public API", "version": "1.0.0", "description": "Scopes limit tokens; every request also revalidates its creator's current grants. Errors are plain text. Deployment is explicit and asynchronous. Secret values appear only in audited exports."}, "servers": []any{map[string]string{"url": s.panelBasePath() + "/api/v1"}}, "paths": paths, "components": map[string]any{"securitySchemes": map[string]any{"bearer": map[string]string{"type": "http", "scheme": "bearer"}}}}
+	document := map[string]any{"openapi": "3.1.0", "info": map[string]string{"title": "Cove public API", "version": "1.0.0", "description": "Scopes limit tokens; every request also revalidates its creator's current grants. Errors are plain text. Deployment is explicit and asynchronous. Secret values appear only in audited exports."}, "servers": []any{map[string]string{"url": s.panelBasePath() + "/api/v1"}}, "paths": paths, "components": map[string]any{"securitySchemes": map[string]any{"bearer": map[string]string{"type": "http", "scheme": "bearer"}}}}
+	s.documentSCIM(document)
+	return document
 }
 
 func (s *Server) publicGroup(w http.ResponseWriter, r *http.Request) {

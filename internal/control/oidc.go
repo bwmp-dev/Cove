@@ -72,13 +72,36 @@ func (s *Server) oidcProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "DELETE" {
-		result, err := s.DB.Exec(r.Context(), "DELETE FROM oidc_providers WHERE id=$1", r.PathValue("provider"))
+		tx, err := s.identityTransaction(r.Context())
+		if err != nil {
+			http.Error(w, "providers unavailable", 503)
+			return
+		}
+		defer tx.Rollback(r.Context())
+		state, err := loadSCIMState(r.Context(), tx, s.Key)
+		var managed bool
+		if err == nil {
+			err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM scim_users WHERE oidc_provider_id=$1)", r.PathValue("provider")).Scan(&managed)
+		}
+		if err != nil {
+			http.Error(w, "provisioning policy unavailable", 503)
+			return
+		}
+		if managed || state.Config.OIDCProvider == r.PathValue("provider") {
+			http.Error(w, "detach SCIM accounts and change its OIDC binding before deleting this provider", 409)
+			return
+		}
+		result, err := tx.Exec(r.Context(), "DELETE FROM oidc_providers WHERE id=$1", r.PathValue("provider"))
 		if err != nil {
 			http.Error(w, "providers unavailable", 503)
 			return
 		}
 		if result.RowsAffected() == 0 {
 			http.NotFound(w, r)
+			return
+		}
+		if tx.Commit(r.Context()) != nil {
+			http.Error(w, "providers unavailable", 503)
 			return
 		}
 		respond(w, 200, map[string]bool{"ok": true})
@@ -366,7 +389,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	status = 200
 	userForEvent = user
-	setSession(w, sessionToken, expiry)
+	s.completeSignIn(w, r, user, sessionToken, expiry)
 	http.Redirect(w, r, "/login?authenticated=1", http.StatusSeeOther)
 }
 func (s *Server) signInPolicy(w http.ResponseWriter, r *http.Request) {

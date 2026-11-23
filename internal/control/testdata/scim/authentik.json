@@ -1,0 +1,11 @@
+{
+  "source": "https://docs.goauthentik.io/add-secure-apps/providers/scim/",
+  "evidence": "Synthetic identities following authentik's documented full-resource replacement and PATCH membership behaviour with a static bearer token.",
+  "requests": [
+    {"method":"POST","path":"/Users","status":201,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"authentik@example.invalid","externalId":"authentik-subject","active":true,"name":{"givenName":"Authentik","familyName":"Fixture"},"emails":[{"value":"authentik@example.invalid","type":"work","primary":true}]}},
+    {"method":"PUT","path":"/Users/$user","status":200,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User","urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"],"userName":"authentik@example.invalid","externalId":"authentik-subject","active":true,"displayName":"Updated fixture","emails":[{"value":"authentik@example.invalid","primary":true}],"urn:ietf:params:scim:schemas:extension:enterprise:2.0:User":{"department":"Engineering"}}},
+    {"method":"POST","path":"/Groups","status":201,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"Authentik fixture","members":[{"value":"$user","display":"Updated fixture"}]}},
+    {"method":"PUT","path":"/Groups/$group","status":200,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"Updated group fixture","members":[{"value":"$user"}]}},
+    {"method":"PATCH","path":"/Groups/$group","status":204,"body":{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"remove","path":"members[value eq \"$user\"]"}]}}
+  ]
+}

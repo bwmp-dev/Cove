@@ -85,3 +85,30 @@ it("explains an expired link", async () => {
   renderShare();
   expect(await screen.findByText("The previous link expired")).toBeInTheDocument();
 });
+
+it("explains a suspended link without an owner and claims it only through the confirmed rotation", async () => {
+  const user = userEvent.setup();
+  vi.mocked(request).mockImplementation((method: string) => {
+    if (method === "GET") return Promise.resolve({ enabled: true, title: "Public API", expires_at: "2026-12-22T00:00:00Z", created_at: "2026-11-22T00:00:00Z", ownership_required: true });
+    return Promise.resolve(created);
+  });
+  renderShare();
+  expect(await screen.findByText("Sharing is suspended")).toBeInTheDocument();
+  expect(screen.getByText(/Rotate the link to make your account responsible for it/)).toBeInTheDocument();
+  expect(request).toHaveBeenCalledTimes(1);
+
+  await user.click(screen.getByRole("button", { name: "Rotate link" }));
+  await user.click(screen.getByRole("checkbox", { name: /anyone who has the link/ }));
+  await user.click(screen.getByRole("button", { name: "Rotate link" }));
+  expect(request).not.toHaveBeenCalledWith("POST", expect.anything(), expect.anything());
+  await user.click(within(screen.getByRole("dialog", { name: "Rotate the public link?" })).getByRole("button", { name: "Rotate link" }));
+  expect(request).toHaveBeenCalledWith("POST", "/api/projects/p1/status-share", { title: "Public API", days: 30, acknowledge: true });
+});
+
+it("explains a turned-off link whose owner lost access instead of calling it expired", async () => {
+  vi.mocked(request).mockResolvedValue({ enabled: false, title: "Old", expires_at: "2026-12-22T00:00:00Z", created_at: "2026-11-01T00:00:00Z", ownership_required: true });
+  renderShare();
+  expect(await screen.findByText("Sharing is suspended")).toBeInTheDocument();
+  expect(screen.queryByText("The previous link expired")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Create public link" })).toBeInTheDocument();
+});

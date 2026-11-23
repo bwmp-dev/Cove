@@ -16,7 +16,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("../api/client", async (original) => ({ ...(await original<typeof import("../api/client")>()), request: vi.fn() }));
 
-const methods = { password_enabled: true, passkeys_enabled: true, oidc_registration_enabled: false, oidc_auto_redirect: "", oidc_providers: [{ id: "corp", display_name: "Corp SSO" }], second_factor_pending: false, second_factor_methods: [] as string[] };
+const methods = { password_enabled: true, passkeys_enabled: true, oidc_registration_enabled: false, oidc_auto_redirect: "", oidc_providers: [{ id: "corp", display_name: "Corp SSO" }], second_factor_pending: false, second_factor_methods: [] as string[], ldap_enabled: false, ldap_providers: [] as { id: string; display_name: string }[] };
 const pendingChallenge = { second_factor_pending: true, second_factor_methods: ["totp", "recovery_code", "passkey"] };
 const config = { setup_required: false, registration_enabled: false, github_enabled: false, email_enabled: false };
 
@@ -26,16 +26,19 @@ function serve(overrides: Partial<typeof methods> | (() => Partial<typeof method
     if (path === "/auth/config") return Promise.resolve(config);
     if (path === "/auth/sign-in-methods") return Promise.resolve({ ...methods, ...(typeof overrides === "function" ? overrides() : overrides) });
     const handler = routes[`${method} ${path}`];
-    return handler ? handler(body) : Promise.reject(new ApiError(404, "Not found"));
+    if (handler) return handler(body);
+    return Promise.reject(new ApiError(404, "Not found"));
   });
 }
 
 function renderLogin() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider client={client}>
       <LoginPage />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 beforeEach(() => {
@@ -136,4 +139,100 @@ it("explains a provider return whose pending sign-in is gone and does not auto-r
   expect(await screen.findByText(/did not finish/)).toBeInTheDocument();
   expect(screen.getByLabelText("Password")).toBeInTheDocument();
   expect(request).not.toHaveBeenCalledWith("POST", "/auth/oidc/corp/start", expect.anything());
+});
+
+const directories = { ldap_enabled: true, ldap_providers: [{ id: "corp", display_name: "Corp directory" }] };
+
+it("signs in with a directory username and then asks for Cove's second factor", async () => {
+  let signedIn = false;
+  serve(() => (signedIn ? { ...directories, ...pendingChallenge } : directories), {
+    "POST /auth/ldap/corp/sign-in": () => {
+      signedIn = true;
+      return Promise.resolve({ user: "u1", linked: false, second_factor_required: true });
+    },
+    "POST /auth/second-factor": () => Promise.resolve({ ok: true }),
+  });
+  renderLogin();
+  fireEvent.click(await screen.findByRole("button", { name: "Continue with Corp directory" }));
+  const username = screen.getByLabelText("Directory username");
+  expect(username).not.toHaveAttribute("type", "email");
+  fireEvent.change(username, { target: { value: " jsmith " } });
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "directory secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/auth/ldap/corp/sign-in", { email: "jsmith", password: "directory secret" }));
+  const code = await screen.findByLabelText("Authenticator or recovery code");
+  expect(router.navigate).not.toHaveBeenCalled();
+  fireEvent.change(code, { target: { value: "123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "Verify and sign in" }));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith({ href: "/dashboard", replace: true }));
+});
+
+it("enters directly after a directory sign-in without an enrolled factor", async () => {
+  serve(directories, { "POST /auth/ldap/corp/sign-in": () => Promise.resolve({ user: "u1", linked: false, second_factor_required: false }) });
+  renderLogin();
+  fireEvent.click(await screen.findByRole("button", { name: "Continue with Corp directory" }));
+  fireEvent.change(screen.getByLabelText("Directory username"), { target: { value: "jsmith" } });
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "directory secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  await waitFor(() => expect(router.navigate).toHaveBeenCalledWith({ href: "/dashboard", replace: true }));
+});
+
+it("explains directory refusals and clears the typed password", async () => {
+  const errors = [
+    new ApiError(401, "Invalid directory credentials"),
+    new ApiError(409, "Account exists; sign in and explicitly link this directory identity"),
+    new ApiError(429, "Too many attempts", 30),
+  ];
+  serve(directories, { "POST /auth/ldap/corp/sign-in": () => Promise.reject(errors.shift() ?? new Error("unexpected")) });
+  renderLogin();
+  fireEvent.click(await screen.findByRole("button", { name: "Continue with Corp directory" }));
+  fireEvent.change(screen.getByLabelText("Directory username"), { target: { value: "jsmith" } });
+  for (const message of ["Incorrect directory username or password.", "Account exists; sign in and explicitly link this directory identity", "Too many attempts. Try again in 30 seconds."]) {
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "wrong" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+  }
+});
+
+it("keeps a refused directory password out of the mutation cache", async () => {
+  serve(directories, { "POST /auth/ldap/corp/sign-in": () => Promise.reject(new ApiError(401, "Invalid directory credentials")) });
+  const client = renderLogin();
+  fireEvent.click(await screen.findByRole("button", { name: "Continue with Corp directory" }));
+  fireEvent.change(screen.getByLabelText("Directory username"), { target: { value: "jsmith" } });
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "directory secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  expect(await screen.findByText("Incorrect directory username or password.")).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith("POST", "/auth/ldap/corp/sign-in", { email: "jsmith", password: "directory secret" });
+  const mutations = client.getMutationCache().getAll();
+  expect(mutations.length).toBeGreaterThan(0);
+  for (const mutation of mutations) expect(mutation.state.variables).toBeUndefined();
+});
+
+it("does not offer directory sign-in on the break-glass page", async () => {
+  router.search = { break_glass: true };
+  serve({ ...directories, password_enabled: false });
+  renderLogin();
+  expect(await screen.findByText("Break-glass password sign-in")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Continue with Corp directory" })).not.toBeInTheDocument();
+});
+
+it("keeps directory sign-in when local passwords are turned off", async () => {
+  serve({ ...directories, password_enabled: false });
+  renderLogin();
+  expect(await screen.findByText(/Local Cove passwords are turned off. Sign in with single sign-on, your organization's directory or a passkey./)).toBeInTheDocument();
+  expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Continue with Corp directory" })).toBeInTheDocument();
+});
+
+it("shows a malformed directory entry at the fields, apart from wrong credentials", async () => {
+  serve(directories, { "POST /auth/ldap/corp/sign-in": () => Promise.reject(new ApiError(400, "Invalid directory sign-in request")) });
+  renderLogin();
+  fireEvent.click(await screen.findByRole("button", { name: "Continue with Corp directory" }));
+  fireEvent.change(screen.getByLabelText("Directory username"), { target: { value: "jsmith" } });
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "x" } });
+  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  expect(await screen.findByText(/without line breaks or control characters/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Directory username")).toHaveAttribute("aria-invalid", "true");
+  expect(screen.queryByText("Incorrect directory username or password.")).not.toBeInTheDocument();
 });

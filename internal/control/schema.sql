@@ -1279,7 +1279,13 @@ $$;
 CREATE OR REPLACE FUNCTION cove_notify_audit_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE event_name text; event_message text; affected text:=''; resource text:=''; source_team text:=NEW.team_id;
 BEGIN
- IF NEW.action='authentication lockout' THEN event_name='security.lockout'; event_message='An account authentication lockout occurred.'; affected=NEW.actor;
+ IF NEW.action='identity membership reconciled' THEN event_name='identity.membership_changed'; event_message='Directory role claims changed. Review managed membership provenance.'; affected=NEW.subject;
+ ELSIF NEW.actor='SCIM' AND NEW.action IN ('POST SCIM users','PUT SCIM users','PATCH SCIM users','DELETE SCIM users') AND NEW.status<300 THEN
+  affected='';
+  IF EXISTS(SELECT 1 FROM users WHERE id=NEW.subject AND disabled) THEN event_name='identity.deprovisioned'; event_message='Provisioning disabled an account and revoked its owned access and automation.';
+  ELSE event_name='identity.provisioned'; event_message='Provisioning saved an account profile. Review its mapped access.'; END IF;
+ ELSIF NEW.action='identity sync failed' OR (NEW.actor='SCIM' AND NEW.action LIKE '% SCIM %' AND NEW.status>=400) OR (NEW.action IN ('POST /auth/ldap/{provider}/sign-in','POST /api/settings/ldap/providers/{provider}/test') AND NEW.status>=500) THEN event_name='identity.sync_failed'; event_message='Directory synchronization or provisioning did not finish. Review its audit activity.';
+ ELSIF NEW.action='authentication lockout' THEN event_name='security.lockout'; event_message='An account authentication lockout occurred.'; affected=NEW.actor;
  ELSIF NEW.action='account new device' THEN event_name='security.new_device'; event_message='An account signed in from a new browser. Review account login history.'; affected=NEW.actor;
  ELSIF NEW.action='DELETE /api/users/{id}/second-factor' AND NEW.status<300 THEN event_name='security.second_factor_reset'; event_message='An administrator reset an account second factor.'; affected=NEW.subject; source_team=NULL;
  ELSIF NEW.action='emergency deployment override' AND NEW.status<300 THEN event_name='deployment.freeze_override'; event_message='An administrator overrode deployment policy. Review the audit log.';
@@ -1501,3 +1507,86 @@ CREATE TABLE IF NOT EXISTS route_certificate_issuers (
 );
 CREATE INDEX IF NOT EXISTS route_certificate_issuers_due ON route_certificate_issuers(next_check_at) WHERE next_check_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS route_certificate_issuers_workload ON route_certificate_issuers(workload_id);
+
+CREATE TABLE IF NOT EXISTS identity_group_mappings (
+ source_kind text NOT NULL CHECK(source_kind IN ('github','scim','ldap')),
+ source_id text NOT NULL, group_id text NOT NULL,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE, role text NOT NULL,
+ PRIMARY KEY(source_kind,source_id,group_id,team_id)
+);
+CREATE TABLE IF NOT EXISTS identity_membership_bases (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ role text CHECK(role IN ('owner','admin','member')), grants jsonb NOT NULL DEFAULT '[]',
+ PRIMARY KEY(team_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS identity_membership_claims (
+ source_kind text NOT NULL CHECK(source_kind IN ('github','scim','ldap')),
+ source_id text NOT NULL, group_id text NOT NULL,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ role text NOT NULL CHECK(role IN ('owner','admin','member')), grants jsonb NOT NULL DEFAULT '[]',
+ PRIMARY KEY(source_kind,source_id,group_id,team_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS github_team_sync_sources (
+ id text PRIMARY KEY, configuration bytea NOT NULL, enabled boolean NOT NULL DEFAULT false,
+ version bigint NOT NULL DEFAULT 1, checked_at timestamptz, applied_at timestamptz,
+ next_check_at timestamptz NOT NULL DEFAULT now(), refresh_until timestamptz NOT NULL DEFAULT now(),
+ last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS scim_settings (
+ id integer PRIMARY KEY CHECK(id=1), enabled boolean NOT NULL DEFAULT false,
+ configuration bytea NOT NULL, rotated_at timestamptz, version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS scim_users (
+ id text PRIMARY KEY REFERENCES users(id), external_id text NOT NULL DEFAULT '',
+ user_name text NOT NULL UNIQUE, document jsonb NOT NULL,
+ oidc_provider_id text REFERENCES oidc_providers(id) ON DELETE SET NULL,
+ version bigint NOT NULL DEFAULT 1,
+ disabled_by_scim boolean NOT NULL DEFAULT false, deleted_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(), modified_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scim_users_external ON scim_users(external_id) WHERE external_id<>'';
+CREATE TABLE IF NOT EXISTS scim_groups (
+ id text PRIMARY KEY, external_id text NOT NULL DEFAULT '', name text NOT NULL UNIQUE,
+ version bigint NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(),
+ modified_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scim_groups_external ON scim_groups(external_id) WHERE external_id<>'';
+CREATE UNIQUE INDEX IF NOT EXISTS scim_groups_name ON scim_groups(lower(name));
+CREATE TABLE IF NOT EXISTS scim_group_members (
+ group_id text NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES scim_users(id) ON DELETE CASCADE,
+ PRIMARY KEY(group_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS ldap_providers (
+ id text PRIMARY KEY, configuration bytea NOT NULL, enabled boolean NOT NULL DEFAULT true,
+ version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS ldap_identities (
+ provider_id text NOT NULL REFERENCES ldap_providers(id) ON DELETE CASCADE,
+ subject text NOT NULL, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ username text NOT NULL,
+ PRIMARY KEY(provider_id,subject), UNIQUE(provider_id,user_id)
+);
+
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS directory_sync boolean NOT NULL DEFAULT false;
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS link_session_hash bytea;
+
+-- Owned automation is revalidated against the current catalogue and account policy.
+ALTER TABLE project_status_pages ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE project_status_shares ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_schedule_creator_id text REFERENCES users(id) ON DELETE SET NULL;
+CREATE TABLE IF NOT EXISTS scheduled_job_runs (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ creator_id text NOT NULL REFERENCES users(id), dispatch_started boolean NOT NULL DEFAULT false
+);
+ALTER TABLE scheduled_job_runs ADD COLUMN IF NOT EXISTS dispatch_started boolean NOT NULL DEFAULT false;
+CREATE OR REPLACE FUNCTION cove_automation_allowed(owner_id text,team text,project text,environment text,permission text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=owner_id AND u.email_verified AND NOT u.disabled
+ AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now())
+ AND (u.is_admin OR cove_permission(u.id,team,project,environment,permission))
+ AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR COALESCE((SELECT require_second_factor FROM teams WHERE id=team),false))
+ OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))
+$$;

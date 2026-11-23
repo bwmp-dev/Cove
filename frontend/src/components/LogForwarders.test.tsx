@@ -48,6 +48,27 @@ it("creates a Datadog forwarder and never keeps the key in the query cache", asy
   expect(JSON.stringify(client.getMutationCache().getAll().map((mutation) => mutation.state.variables))).not.toContain("secret-key");
 });
 
+it("keeps the key out of the mutation cache while saving and after a failed save", async () => {
+  const client = renderForwarders([]);
+  let fail: (error: unknown) => void = () => undefined;
+  vi.mocked(request).mockImplementation((method) => (method === "GET" ? Promise.resolve([]) : new Promise((_resolve, reject) => { fail = reject; })));
+  fireEvent.click(await screen.findByRole("button", { name: "New forwarder" }));
+  choose("Receiver", "Datadog");
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "DD" } });
+  fireEvent.change(screen.getByLabelText("Logs intake URL"), { target: { value: "https://http-intake.logs.example.test/api/v2/logs" } });
+  fireEvent.change(screen.getByLabelText("API key"), { target: { value: "secret-key" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create forwarder" }));
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/notifications/forwarders", expect.objectContaining({ token: "secret-key" })));
+  const cached = () => JSON.stringify(client.getMutationCache().getAll().map((mutation) => [mutation.state.variables, mutation.state.data]));
+  expect(client.getMutationCache().getAll().some((mutation) => mutation.state.status === "pending")).toBe(true);
+  expect(cached()).not.toContain("secret-key");
+  fail(new ApiError(400, "Log forwarder endpoint is not reachable"));
+  expect(await screen.findByText("Log forwarder endpoint is not reachable")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Create forwarder" })).toBeInTheDocument();
+  expect(client.getMutationCache().getAll().some((mutation) => mutation.state.status === "error")).toBe(true);
+  expect(cached()).not.toContain("secret-key");
+});
+
 it("edits with hidden saved values, sending blanks to keep them, and requires new ones after a kind change", async () => {
   renderForwarders([saved]);
   fireEvent.click(await screen.findByRole("button", { name: "Edit Grafana" }));

@@ -94,10 +94,14 @@ export const uptimeChecksQuery = (workloadId: string) =>
     refetchInterval: 60_000,
   });
 
+// ownership_required: the saved page has no currently authorised publisher, so the server reports it as off and does not
+// serve it. Every save makes the saving editor responsible; the server issues a new slug when that editor differs from the
+// previous (or unknown) one.
 export interface StatusPageSettings {
   enabled: boolean;
   title: string;
   slug: string;
+  ownership_required: boolean;
 }
 
 export const statusPageQuery = (projectId: string) =>

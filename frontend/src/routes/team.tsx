@@ -34,8 +34,9 @@ import { NodeStateLabel } from "../components/status";
 import { TeamTimezone } from "../components/TimezoneSettings";
 import { CustomRoles, TeamSecondFactor } from "../components/TeamSecurity";
 import { Button, EmptyState, Field, LoadingRows, Notice, PageHeader, QueryError, Section, SectionGrid, SettingRows } from "../components/ui";
+import { isManaged, provenanceLabel } from "../lib/directory";
 import { currentTeam, memberManagement, teamRoleDescriptions, teamRoleLabels, type MemberManagement } from "../lib/permissions";
-import { useOnline } from "../lib/hooks";
+import { useOnline, useReviewed } from "../lib/hooks";
 import { useSession, useSwitchTeam } from "../lib/session";
 import { inputClass, listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { TemplateRepositories } from "../components/TemplateRepositories";
@@ -82,10 +83,24 @@ function MemberEditor({ team, member, projects, customRoles, management, onClose
   );
 }
 
-function Members({ team, projects, customRoles, management }: { team: TeamMembership; projects: Project[]; customRoles?: CustomRole[]; management: MemberManagement }) {
+function PromoteDialog({ team, member, pending, onConfirm, onCancel }: { team: TeamMembership; member: Member; pending: boolean; onConfirm: () => void; onCancel: () => void }) {
+  const reviewed = useReviewed({ email: member.email, source: provenanceLabel(member.managed_by) });
+  return (
+    <ConfirmDialog open title={`Make ${reviewed.email} a local owner?`} confirmLabel="Make local owner" pending={pending} onCancel={onCancel} onConfirm={onConfirm}>
+      <p>
+        They become an owner of {team.name}, and stay one even if {reviewed.source} later removes their access. Use this to recover control of a team whose owners come only from a directory.
+      </p>
+    </ConfirmDialog>
+  );
+}
+
+export function Members({ team, projects, customRoles, management }: { team: TeamMembership; projects: Project[]; customRoles?: CustomRole[]; management: MemberManagement }) {
   const session = useSession();
   const members = useQuery(membersQuery(team.id));
   const remove = useRemoveMember(team.id);
+  const promote = useUpdateMember(team.id);
+  const [promoting, setPromoting] = useState<Member | null>(null);
+  const canPromote = team.role === "owner" || session?.is_admin === true;
   const online = useOnline();
   const [editing, setEditing] = useState<string | null>(null);
   const [removing, setRemoving] = useState<Member | null>(null);
@@ -100,6 +115,13 @@ function Members({ team, projects, customRoles, management }: { team: TeamMember
   }
   return (
     <>
+      {promote.isError && (
+        <div className="p-3">
+          <Notice tone="error" title="Could not make the member a local owner">
+            {errorMessage(promote.error)}
+          </Notice>
+        </div>
+      )}
       {remove.isError && (
         <div className="p-3">
           <Notice tone="error" title="Could not remove the member">
@@ -114,6 +136,8 @@ function Members({ team, projects, customRoles, management }: { team: TeamMember
           const lastOwner = member.role === "owner" && members.data.filter((item) => item.role === "owner").length === 1;
           // The API refuses delegated managers any change to owners and admins.
           const protectedMember = management !== "full" && member.role !== "member";
+          // The API refuses ordinary edits of directory-managed memberships; only an owner's promotion to local owner is allowed.
+          const managed = isManaged(member.managed_by);
           return (
             <li key={member.user_id}>
               <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2 px-4 py-3">
@@ -123,12 +147,22 @@ function Members({ team, projects, customRoles, management }: { team: TeamMember
                     {member.user_id === session?.user_id && <span className="ml-2 text-xs font-normal text-fg-subtle">You</span>}
                   </p>
                   <p className="text-xs break-all text-fg-muted">{member.email}</p>
+                  <p className="text-xs text-fg-subtle">{managed ? `Managed by ${provenanceLabel(member.managed_by)}` : "Added manually"}</p>
                 </div>
                 <div className="min-w-0 text-[13px] text-fg-muted sm:max-w-sm">
                   <p className="text-fg">{teamRoleLabels[member.role]}</p>
                   {member.role === "member" ? <GrantList grants={member.grants} projects={projects} teamName={team.name} customRoles={customRoles} /> : <p className="text-xs">Full team access</p>}
                 </div>
-                {protectedMember ? (
+                {managed ? (
+                  <div className="flex min-w-0 flex-col items-start gap-1.5 sm:max-w-56 sm:items-end">
+                    <p className="text-xs text-fg-muted sm:text-right">Change the directory's group mappings to edit or remove this member.</p>
+                    {canPromote && (
+                      <Button variant="ghost" size="sm" disabled={!online} pending={promote.isPending && promote.variables.userId === member.user_id} onClick={() => { promote.reset(); setPromoting(member); }}>
+                        Make local owner<span className="sr-only"> {member.email}</span>
+                      </Button>
+                    )}
+                  </div>
+                ) : protectedMember ? (
                   <p className="self-center text-xs text-fg-muted">Managed by owners and admins</p>
                 ) : (
                 <div className="flex gap-2">
@@ -150,6 +184,15 @@ function Members({ team, projects, customRoles, management }: { team: TeamMember
           );
         })}
       </ul>
+      {promoting && (
+        <PromoteDialog
+          team={team}
+          member={promoting}
+          pending={promote.isPending}
+          onCancel={() => setPromoting(null)}
+          onConfirm={() => promote.mutate({ userId: promoting.user_id, role: "owner", grants: [] }, { onSettled: () => setPromoting(null) })}
+        />
+      )}
       <ConfirmDialog
         open={removing !== null}
         title={removing?.user_id === session?.user_id ? `Leave ${team.name}?` : `Remove ${removing?.email ?? "member"}?`}
