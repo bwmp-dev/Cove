@@ -1,5 +1,6 @@
 import { SharedVariables } from "../components/SharedVariables";
 import { DeploymentPolicy } from "../components/DeploymentPolicy";
+import { ResourceDefaultsSection } from "../components/ResourceDefaults";
 import { DependencyMap } from "../components/DependencyMap";
 import { EnvironmentResources } from "../components/PrivateConnections";
 import { EnvironmentSuspensionSection } from "../components/EnvironmentSuspension";
@@ -452,6 +453,7 @@ export function EnvironmentPage() {
         <SectionGrid>
           <SharedVariables scope="environment" id={environment.id} collapsible />
           <DeploymentPolicy scope="environment" id={environment.id} />
+          <ResourceDefaultsSection target={{ scope: "environment", id: environment.id }} canEdit />
         </SectionGrid>
       )}
       {can(project.permissions, "read") && <ProjectCosts projectId={project.id} environmentId={environment.id} />}

@@ -17,8 +17,9 @@ import json, os, pathlib, shutil, sys, urllib.request
 root = pathlib.Path(os.environ["FIXTURE"])
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
-with (root / "calls").open("a") as log:
-    log.write(json.dumps([name] + args) + "\n")
+if name != "uname":
+    with (root / "calls").open("a") as log:
+        log.write(json.dumps([name] + args) + "\n")
 if name == "id":
     print("0")
 elif name == "cosign":
@@ -29,8 +30,15 @@ elif name == "systemctl":
 elif name == "apt-get":
     if "docker-ce" in args:
         shutil.copy(root / "helper", root / "bin/docker")
+elif name == "dnf":
+    if "docker-ce" in args:
+        shutil.copy(root / "helper", root / "bin/docker")
+    if "--add-repo" in args:
+        (root / "repos/docker-ce.repo").write_text("fixture official Docker repository")
+elif name == "uname":
+    print("Linux" if args == ["-s"] else os.environ.get("TEST_ARCH", "x86_64"))
 elif name == "dpkg":
-    print("amd64")
+    print("arm64" if os.environ.get("TEST_ARCH") == "aarch64" else "amd64")
 elif name == "ss":
     if os.environ.get("PORT_BUSY"):
         print("LISTEN 0 128 0.0.0.0:443")
@@ -97,18 +105,19 @@ class InstallerTests(unittest.TestCase):
         (self.root / "units").mkdir()
         (self.root / "systemd").mkdir()
         (self.root / "apt/sources.list.d").mkdir(parents=True)
+        (self.root / "repos").mkdir()
         (self.root / "os-release").write_text("ID=debian\nVERSION_CODENAME=bookworm\n")
         helper = "#!" + sys.executable + "\n" + HELPER
         (self.root / "helper").write_text(helper)
         (self.root / "helper").chmod(0o700)
-        for command in ["id", "apt-get", "cosign", "systemctl", "dpkg", "ss", "curl", "python3"]:
+        for command in ["id", "apt-get", "dnf", "uname", "cosign", "systemctl", "dpkg", "ss", "curl", "python3"]:
             shutil.copy(self.root / "helper", self.bin / command)
-        for command in ["sh", "uname", "install", "chmod", "grep", "openssl", "dirname", "mktemp", "ln", "rm", "cat", "mkdir"]:
+        for command in ["sh", "install", "chmod", "grep", "openssl", "dirname", "mktemp", "ln", "rm", "cat", "mkdir"]:
             executable = shutil.which(command)
             self.assertIsNotNone(executable, command)
             (self.bin / command).symlink_to(executable)
         script = (ROOT / "scripts/install.sh").read_text()
-        for old, new in [("/run/systemd/system", "systemd"), ("/etc/os-release", "os-release"), ("/etc/apt", "apt")]:
+        for old, new in [("/run/systemd/system", "systemd"), ("/etc/os-release", "os-release"), ("/etc/apt", "apt"), ("/etc/yum.repos.d", "repos")]:
             script = script.replace(old, str(self.root / new))
         self.script = self.root / "install.sh"
         self.script.write_text(script)
@@ -159,6 +168,38 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertFalse(any("docker-ce" in call for call in self.calls()))
+        self.assertNotIn(["systemctl", "enable", "--now", "docker"], self.calls())
+
+    def rpm_install(self, distribution, docker_distribution):
+        (self.root / "os-release").write_text(f"ID={distribution}\nVERSION_ID=9.6\n")
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        calls = self.calls()
+        self.assertIn(["dnf", "config-manager", "--add-repo", f"https://download.docker.com/linux/{docker_distribution}/docker-ce.repo"], calls)
+        self.assertIn(["dnf", "install", "-y", "docker-ce", "docker-ce-cli", "containerd.io", "docker-buildx-plugin", "docker-compose-plugin"], calls)
+        self.assertFalse(any(call[0] == "apt-get" for call in calls))
+        self.assertFalse(any("remove" in call or "--nogpgcheck" in call for call in calls))
+        self.assertTrue((self.root / "installation/scripts/panel-recovery.py").is_file())
+
+    def test_rhel_uses_official_rhel_repository(self): self.rpm_install("rhel", "rhel")
+    def test_alma_uses_compatible_docker_repository(self): self.rpm_install("almalinux", "centos")
+    def test_rocky_arm64_uses_compatible_docker_repository(self):
+        self.env["TEST_ARCH"] = "aarch64"
+        self.rpm_install("rocky", "centos")
+
+    def test_debian_arm64_repository_and_image_flow(self):
+        self.env["TEST_ARCH"] = "aarch64"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("arch=arm64", (self.root / "apt/sources.list.d/docker.list").read_text())
+
+    def test_existing_rpm_docker_is_not_reinstalled(self):
+        (self.root / "os-release").write_text("ID=rocky\nVERSION_ID=9.6\n")
+        shutil.copy(self.root / "helper", self.bin / "docker")
+        (self.root / "docker-running").touch()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(any("docker-ce" in call or "--add-repo" in call for call in self.calls()))
         self.assertNotIn(["systemctl", "enable", "--now", "docker"], self.calls())
 
     def test_refuses_existing_installation_before_changing_host(self):

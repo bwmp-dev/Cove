@@ -412,6 +412,12 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	}
 	if !driftPrepared {
 		if !r.InfrastructurePrepared {
+			if err := s.prepareGPUAssignments(ctx, r); err != nil {
+				return err
+			}
+			if err := s.prepareResourceDefaults(ctx, r); err != nil {
+				return err
+			}
 			var encrypted []byte
 			if err := s.DB.QueryRow(ctx, "SELECT kind='database',configuration FROM workloads WHERE id=$1", r.Workload).Scan(&r.ManagedDatabase, &encrypted); err != nil {
 				return err

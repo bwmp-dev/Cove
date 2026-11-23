@@ -20,3 +20,15 @@ func TestCapacityWarningsFromDeclaredLimits(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestCapacityAccountingIncludesInheritedDefaultsAndReplicas(t *testing.T) {
+	config := map[string]any{"services": map[string]any{"web": map[string]any{}, "sidecar": map[string]any{"cpus": "0.25", "mem_limit": float64(32 << 20)}}}
+	if err := applyDefaultLimits(config, &ServiceLimits{CPUs: 0.5, MemoryMB: 128}); err != nil {
+		t.Fatal(err)
+	}
+	applyCapacityReplicas(config, &RolloutOptions{Strategy: "rolling", Replicas: map[string]int{"web": 3}})
+	cpu, memory, unknownCPU, unknownMemory, err := declaredCapacity(config)
+	if err != nil || cpu != 1.75 || memory != float64(416<<20) || unknownCPU || unknownMemory {
+		t.Fatal("inherited replica totals", cpu, memory, unknownCPU, unknownMemory, err)
+	}
+}

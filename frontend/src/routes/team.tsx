@@ -4,6 +4,7 @@ import { Select } from "../components/Select";
 import { SharedVariables } from "../components/SharedVariables";
 import { TeamQuota } from "../components/TeamQuota";
 import { DeploymentPolicy } from "../components/DeploymentPolicy";
+import { ResourceDefaultsSection } from "../components/ResourceDefaults";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useId, useState, type FormEvent } from "react";
@@ -540,6 +541,7 @@ export function TeamPage() {
         {manager && <TeamTimezone key={team.id} teamId={team.id} />}
         {manager && <DeploymentPolicy scope="team" id={team.id} />}
         {manager && <TemplateRepositories scope={{ kind: "team", teamId: team.id }} />}
+        <ResourceDefaultsSection key={team.id} target={{ scope: "team" }} canEdit={manager} />
         <Section title="Create another team">
           <CreateTeam />
         </Section>

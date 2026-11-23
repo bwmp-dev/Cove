@@ -29,6 +29,15 @@ func (s *Server) renewEnrollment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
+	var rotating bool
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM node_identity_rotations WHERE node_id=$1 AND phase NOT IN ('succeeded','cancelled'))`, id).Scan(&rotating); err != nil {
+		http.Error(w, "identity state unavailable", 503)
+		return
+	}
+	if rotating {
+		http.Error(w, "finish or cancel SSH identity rotation before renewing enrollment", 409)
+		return
+	}
 	_, err = tx.Exec(r.Context(), "UPDATE enrollments SET consumed_at=now() WHERE node_id=$1 AND consumed_at IS NULL", id)
 	token := randomToken()
 	expiry := time.Now().Add(15 * time.Minute)

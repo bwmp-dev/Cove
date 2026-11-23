@@ -16,6 +16,7 @@ type PreflightCheck struct {
 	Message string `json:"message"`
 }
 type PreflightReport struct {
+	Usage    *ResourceUsage   `json:"usage,omitempty"`
 	Checks   []PreflightCheck `json:"checks"`
 	Revision string           `json:"revision,omitempty"`
 }
@@ -122,8 +123,16 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 		add("Compose", "error", "Compose reported warnings or could not produce a complete configuration. Check missing variables.")
 		return report
 	}
+	if err = applyDefaultLimits(config, r.DefaultLimits); err != nil {
+		add("Resource defaults", "error", "Default resource limits could not be applied.")
+		return report
+	}
 	if err = applyLimits(config, r.Limits); err != nil {
 		add("Resource limits", "error", "Limits reference invalid or missing services.")
+		return report
+	}
+	if err = e.validateGPUs(ctx, r.Limits); err != nil {
+		add("GPU assignments", "error", err.Error())
 		return report
 	}
 	if err = validateFileSecretTargets(config, r); err != nil {

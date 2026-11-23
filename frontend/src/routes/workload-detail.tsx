@@ -43,6 +43,7 @@ import { nodesQuery, operationQuery, workloadOperationsQuery, workloadQuery } fr
 import { ResourceExec } from "../components/ResourceExec";
 import type { Operation, Route, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
+import { PostgresPITR } from "../components/PostgresPITR";
 import { useCapacityGate } from "../components/CapacityCheck";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { DeployDialog } from "../components/DeployReview";
@@ -68,11 +69,12 @@ import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList,
 import { isWildcardHostname } from "../lib/certificates";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
-import { backupRights, can, currentTeam, managesTeam } from "../lib/permissions";
+import { backupRights, can, currentTeam, managesTeam, pitrRights } from "../lib/permissions";
+import { pitrApplies } from "../lib/pitr";
 import { useSession } from "../lib/session";
 import { actionLabels, activeOperation, allowedActions, isActive, isSuspensionAction, latestDeploymentOperation, resourceTypeLabel, stateLabels, workerResult, workloadKind } from "../lib/operations";
 import { holdBlocks, holdReason, type EnvironmentHold } from "../lib/suspension";
-import { idleBlocks, type IdleHold } from "../lib/idle";
+import { idleBlocks, idleReason, type IdleHold } from "../lib/idle";
 import { resultSummary } from "../lib/rollouts";
 import { ResourceIcon } from "../components/ResourceIcon";
 import { engineName } from "../lib/databases";
@@ -532,8 +534,9 @@ interface ResourceSection {
 }
 
 // Grouped by what the visitor is doing: watching the resource, configuring what runs, controlling releases, or managing its data and lifecycle.
-// File access is limited to instance administrators, like the node terminal; the control plane enforces this too.
-function resourceSections(workload: Workload, admin: boolean): { label: string; links: ResourceSection[] }[] {
+// File access needs Read secrets and Edit configuration on the resource, because it reads and changes application data
+// that may hold secrets; the control plane enforces this too.
+function resourceSections(workload: Workload, canEditFiles: boolean): { label: string; links: ResourceSection[] }[] {
   if (workload.kind === "database") return databaseSections();
   const service = workloadKind(workload.kind) === "service";
   return [
@@ -575,7 +578,7 @@ function resourceSections(workload: Workload, admin: boolean): { label: string; 
       label: "Manage",
       links: [
         ...(service ? [{ to: "/resources/$resourceId/backups" as const, label: "Backups", icon: Archive }] : []),
-        ...(admin ? [{ to: "/resources/$resourceId/files" as const, label: "Files", icon: FolderOpen }] : []),
+        ...(canEditFiles ? [{ to: "/resources/$resourceId/files" as const, label: "Files", icon: FolderOpen }] : []),
         { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
       ],
     },
@@ -688,7 +691,7 @@ function MobileResourceNav({ workload, groups }: { workload: Workload; groups: {
 }
 
 function ResourceNav({ workload }: { workload: Workload }) {
-  const groups = resourceSections(workload, Boolean(useSession()?.is_admin));
+  const groups = resourceSections(workload, can(workload.permissions, "read_secrets") && can(workload.permissions, "edit_configuration"));
   return (
     <>
       <MobileResourceNav workload={workload} groups={groups} />
@@ -867,13 +870,21 @@ export function ResourceBackups() {
   const nodes = useQuery(nodesQuery);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   const { hold } = useEnvironmentHold(workload);
+  const idle = useIdleState(workload);
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
-    <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} rights={backupRights(workload.permissions)} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} restoreHeld={holdReason(hold, "restore", "Restoring, verifying and copying backups")} verifyHeld={holdReason(hold, "drill", "Verifying and copying backups")} database={workload.database ?? undefined} />
-    </Section>
+    <>
+      <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
+        <Backups workloadId={workload.id} busy={Boolean(active)} rights={backupRights(workload.permissions)} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} restoreHeld={holdReason(hold, "restore", "Restoring, verifying and copying backups")} verifyHeld={holdReason(hold, "drill", "Verifying and copying backups")} database={workload.database ?? undefined} />
+      </Section>
+      {pitrApplies(workload) && (
+        <Section width="form" title="PostgreSQL point-in-time recovery" description="Continuous WAL capture with periodic base backups, restored to a chosen time as a new resource. Separate from the backups above.">
+          <PostgresPITR workloadId={workload.id} managed={Boolean(workload.database)} busy={Boolean(active)} rights={pitrRights(workload.permissions)} nodeName={node?.name} captureHeld={holdReason(hold, "restart", "Changing capture or taking a base backup") ?? idleReason(idle.hold, "deploy", "Changing capture or taking a base backup") ?? undefined} restoreHeld={holdReason(hold, "restore_copy", "Restoring to a new resource") ?? undefined} />
+        </Section>
+      )}
+    </>
   );
 }
 

@@ -6,11 +6,10 @@ import { EmptyState, LoadingRows, Notice } from "../components/ui";
 import { useOnline } from "../lib/hooks";
 import { activeOperation } from "../lib/operations";
 import { can } from "../lib/permissions";
-import { useSession } from "../lib/session";
 import { linkClass } from "../lib/styles";
 import { useResource } from "./workload-detail";
 
-function AdminFiles() {
+function EditorFiles() {
   const workload = useResource();
   const online = useOnline();
   const nodes = useQuery(nodesQuery);
@@ -48,23 +47,15 @@ function AdminFiles() {
           </Notice>
         </div>
       )}
-      <FileBrowser workloadId={workload.id} blocked={!online || Boolean(active) || operations.isPending} />
+      <FileBrowser workloadId={workload.id} blocked={!online || Boolean(active) || operations.isPending} offline={!online} transfersSupported={node ? Boolean(node.capabilities?.file_transfers) : true} />
     </>
   );
 }
 
 export function ResourceFiles() {
-  const session = useSession();
   const workload = useResource();
-  if (!session?.is_admin) {
-    return (
-      <EmptyState title="Instance administrators only">
-        File access reaches inside containers and volumes on a worker that other teams may share, so it is limited to instance administrators like the node terminal. Ask one for help with this resource's files.
-      </EmptyState>
-    );
-  }
   // The browser both reads (secrets may sit in files) and writes, so it needs Read secrets and Edit configuration on
-  // this resource as well as instance administration.
+  // this resource. Neither the legacy Edit level nor instance administration implies them.
   if (!can(workload.permissions, "read_secrets") || !can(workload.permissions, "edit_configuration")) {
     return (
       <EmptyState title="Read secrets and Edit configuration required">
@@ -72,5 +63,5 @@ export function ResourceFiles() {
       </EmptyState>
     );
   }
-  return <AdminFiles />;
+  return <EditorFiles />;
 }

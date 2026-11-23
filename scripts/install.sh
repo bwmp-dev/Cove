@@ -24,14 +24,27 @@ command -v cosign >/dev/null || fail 'Install a trusted Cosign v3+ before instal
 command -v systemctl >/dev/null || fail 'A systemd host is required.'
 [ -d /run/systemd/system ] || fail 'Systemd must be running.'
 . /etc/os-release
-case "$ID" in ubuntu|debian) ;; *) fail 'Automatic installation supports Ubuntu and Debian.';; esac
-command -v apt-get >/dev/null || fail 'APT is required.'
+case "$ID" in
+  ubuntu|debian) manager=apt; docker_distribution=$ID ;;
+  rhel) manager=dnf; docker_distribution=rhel ;;
+  almalinux|rocky|centos) manager=dnf; docker_distribution=centos ;;
+  *) fail 'Automatic installation supports Ubuntu, Debian, RHEL, AlmaLinux, Rocky Linux and CentOS Stream.' ;;
+esac
 
 echo 'Installing dashboard prerequisites...'
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y ca-certificates curl openssl python3 iproute2
+if [ "$manager" = apt ]; then
+  command -v apt-get >/dev/null || fail 'APT is required.'
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y ca-certificates curl openssl python3 iproute2
+else
+  command -v dnf >/dev/null || fail 'DNF is required.'
+  case "${VERSION_ID%%.*}" in 9|10) ;; *) fail 'Automatic RPM installation requires a supported EL 9 or 10 host.' ;; esac
+  dnf install -y ca-certificates openssl python3 iproute dnf-plugins-core
+  if ! command -v curl >/dev/null; then dnf install -y curl; fi
+fi
 if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
+ if [ "$manager" = apt ]; then
   install -d -m 0755 /etc/apt/keyrings
   curl --fail --silent --show-error --proto '=https' --tlsv1.2 "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
   chmod 0644 /etc/apt/keyrings/docker.asc
@@ -44,6 +57,16 @@ if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; t
   else
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   fi
+ else
+  if [ ! -e /etc/yum.repos.d/docker-ce.repo ]; then
+    dnf config-manager --add-repo "https://download.docker.com/linux/$docker_distribution/docker-ce.repo"
+  fi
+  if command -v docker >/dev/null; then
+    dnf install -y docker-compose-plugin
+  else
+    dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  fi
+ fi
 fi
 docker compose version >/dev/null || fail 'Docker Compose plugin is unavailable.'
 if ! docker info >/dev/null 2>&1; then systemctl enable --now docker; fi

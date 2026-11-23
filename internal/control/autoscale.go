@@ -307,7 +307,7 @@ func (s *Server) commitCPUScale(ctx context.Context, id string, request worker.R
 		return err
 	}
 	cpu, memory := configuredUsage(config)
-	if _, err = tx.Exec(ctx, `UPDATE workloads SET configuration=$2,configured_cpu=$3,configured_memory_mb=$4,cpu_samples='[]',cpu_scale_status='cooldown',cpu_scale_error='' WHERE id=$1`, request.Workload, encrypted, cpu, memory); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE workloads SET configuration=$2,configured_cpu=GREATEST(configured_cpu,$3),configured_memory_mb=GREATEST(configured_memory_mb,$4),cpu_samples='[]',cpu_scale_status='cooldown',cpu_scale_error='' WHERE id=$1`, request.Workload, encrypted, cpu, memory); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE operations SET state='succeeded',result=$2,updated_at=now() WHERE id=$1`, id, result); err != nil {

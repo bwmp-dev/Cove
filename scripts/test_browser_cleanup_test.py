@@ -38,6 +38,17 @@ class WorkerCleanupTests(unittest.TestCase):
         self.assertFalse(self.owned("container", {"cove.managed": "ingress-check", "cove.owner": "foreign"}, Mounts=mounts))
         self.assertFalse(fixture.owns_worker_resource("network", {"Name": "cove-link-mesh", "Labels": {"cove.managed": "link-mesh"}}, self.name, self.state, False))
 
+    def test_operations_helpers_without_managed_label_keep_exact_ownership(self):
+        for label in ("dev.cove.backup-owner", "dev.cove.pitr.owner"):
+            self.assertTrue(self.owned("container", {label: self.owner}))
+            self.assertTrue(self.owned("volume", {label: self.owner}))
+            self.assertFalse(self.owned("container", {label: "d" * 32}))
+            self.assertFalse(self.owned("container", {label: self.owner, "cove.owner": "d" * 32}))
+        self.assertTrue(self.owned("volume", {"cove.backup": "b" * 32}))
+        self.assertFalse(self.owned("volume", {"cove.backup": "d" * 32}))
+        self.assertTrue(self.owned("container", {"cove.managed": "files", "dev.cove.workload": "b" * 32}))
+        self.assertFalse(self.owned("container", {"cove.managed": "files", "dev.cove.workload": "d" * 32}))
+
     def test_build_cache_uses_exact_worker_nonce(self):
         builder = "buildx_buildkit_cove-" + self.owner + "0"
         self.assertTrue(self.owned("container", {}, name="/" + builder))

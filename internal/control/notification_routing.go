@@ -22,9 +22,16 @@ var notificationEvents = append([]string{
 	"node_unreachable.alert", "node_unreachable.recovered", "disk_low.alert", "disk_low.recovered",
 	"resource_unhealthy.alert", "resource_unhealthy.recovered", "backup_overdue.alert", "backup_overdue.recovered",
 	"threshold.alert", "threshold.recovered",
+	"host_key_changed.alert", "host_key_changed.recovered",
 }, channelOutcomeEvents...)
 
 func operationEvent(action, state string) string {
+	if action == "pitr_backup" {
+		return "backup." + state
+	}
+	if action == "pitr_restore" {
+		return "restore." + state
+	}
 	if action == "backup" || action == "restore" || action == "drill" {
 		return action + "." + state
 	}

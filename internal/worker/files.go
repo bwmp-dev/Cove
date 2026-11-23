@@ -52,6 +52,7 @@ type FileResponse struct {
 	Revision string       `json:"revision"`
 	Limited  bool         `json:"limited"`
 	MaxBytes int          `json:"max_bytes"`
+	Size     int64        `json:"size"`
 }
 
 func ValidateFileRequest(r FileRequest) error {
@@ -61,7 +62,7 @@ func ValidateFileRequest(r FileRequest) error {
 	if r.Action == "targets" {
 		return nil
 	}
-	if r.Action != "list" && r.Action != "read" && r.Action != "write" && r.Action != "delete" {
+	if r.Action != "list" && r.Action != "read" && r.Action != "write" && r.Action != "delete" && r.Action != "stat" {
 		return errors.New("invalid file action")
 	}
 	if r.Kind != "container" && r.Kind != "volume" || r.Kind == "container" && !fileContainerID.MatchString(r.Target) || r.Kind == "volume" && !fileVolumeName.MatchString(r.Target) {
@@ -100,17 +101,26 @@ func ValidateFileRequest(r FileRequest) error {
 }
 
 func (e *Engine) FileOperation(ctx context.Context, workload string, r FileRequest) (*FileResponse, error) {
+	return e.fileOperation(ctx, workload, r, nil)
+}
+
+func (e *Engine) fileOperation(ctx context.Context, workload string, r FileRequest, transfer *fileTransfer) (*FileResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if !workloadIdentifier.MatchString(workload) {
 		return nil, errors.New("invalid workload")
 	}
-	if err := ValidateFileRequest(r); err != nil {
+	validation := r
+	if transfer != nil && r.Action == "write" {
+		empty := []byte{}
+		validation.Data = &empty
+	}
+	if err := ValidateFileRequest(validation); err != nil {
 		return nil, err
 	}
 	e.mu.Lock()
-	busy := e.busy(workload) || e.draining || len(e.active) >= 4
+	busy := e.busy(workload) || e.draining || e.hostChanging || len(e.active) >= 4
 	for _, op := range e.pending {
 		if op.Workload == workload {
 			busy = true
@@ -138,7 +148,18 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 	if r.Action == "write" || r.Action == "delete" {
 		operationContext = context.WithoutCancel(ctx)
 	}
-	ctx, cancel := context.WithTimeout(operationContext, 30*time.Second)
+	duration := 30 * time.Second
+	commandDuration := 20 * time.Second
+	limit := int64(MaxFileBytes)
+	shellTimeout := "15"
+	if transfer != nil || r.Action == "stat" {
+		duration, commandDuration = 30*time.Minute, 30*time.Minute
+		shellTimeout = "1790"
+		if transfer != nil {
+			limit = transfer.limit
+		}
+	}
+	ctx, cancel := context.WithTimeout(operationContext, duration)
 	defer cancel()
 	containers, err := e.Containers(ctx, workload)
 	if err != nil {
@@ -191,7 +212,7 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 	if r.Kind == "container" && !ownedContainer || r.Kind == "volume" && !volumes[r.Target] {
 		return nil, errors.New("target is not a running resource container or an attached Cove-owned volume")
 	}
-	args := []string{"docker", "exec", "--interactive", "--user", "0", r.Target, "timeout", "-k", "2", "15", "sh", "-ec", fileScript, "cove", r.Action, r.Path, "/", r.Revision}
+	args := []string{"docker", "exec", "--interactive", "--user", "0", r.Target, "timeout", "-k", "2", shellTimeout, "sh", "-ec", fileScript, "cove", r.Action, r.Path, "/", r.Revision}
 	helper := ""
 	if r.Kind == "volume" {
 		if _, inspectErr := e.output(ctx, "docker", "image", "inspect", "restic/restic:0.19.1"); inspectErr != nil {
@@ -209,7 +230,7 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 			}
 		}
 		mount := "type=volume,source=" + r.Target + ",target=/data"
-		if r.Action == "read" || r.Action == "list" {
+		if r.Action == "read" || r.Action == "list" || r.Action == "stat" {
 			mount += ",readonly"
 		}
 		nonce := make([]byte, 12)
@@ -217,25 +238,36 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 			return nil, err
 		}
 		helper = "cove-files-" + hex.EncodeToString(nonce)
-		args = []string{"docker", "run", "--rm", "--interactive", "--name", helper, "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges", "--mount", mount, "--entrypoint", "timeout", "restic/restic:0.19.1", "-k", "2", "15", "sh", "-ec", fileScript, "cove", r.Action, r.Path, "/data", r.Revision}
+		args = []string{"docker", "run", "--rm", "--interactive", "--name", helper, "--label", "cove.managed=files", "--label", "dev.cove.workload=" + workload, "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--cap-add", "FOWNER", "--security-opt", "no-new-privileges", "--mount", mount, "--entrypoint", "timeout", "restic/restic:0.19.1", "-k", "2", shellTimeout, "sh", "-ec", fileScript, "cove", r.Action, r.Path, "/data", r.Revision}
 	}
 	out := &limitedBuffer{Limit: 256 * 1024}
-	expected := 0
+	expected := int64(0)
 	if r.Data != nil {
-		expected = len(*r.Data)
+		expected = int64(len(*r.Data))
 	}
-	args = append(args, strconv.Itoa(expected))
-	commandContext, commandCancel := context.WithTimeout(operationContext, 20*time.Second)
+	if r.Action == "stat" {
+		limit = MaxFileTransferBytes
+	}
+	streaming := "false"
+	if transfer != nil {
+		expected, streaming = transfer.size, "true"
+	}
+	args = append(args, strconv.FormatInt(expected, 10), strconv.FormatInt(limit, 10), streaming)
+	commandContext, commandCancel := context.WithTimeout(operationContext, commandDuration)
 	defer commandCancel()
-	if r.Action == "write" {
+	if transfer != nil || r.Action == "write" {
 		command := exec.CommandContext(commandContext, args[0], args[1:]...)
 		configureCommand(command)
 		command.Dir = e.Root
 		command.Env = os.Environ()
-		command.Stdin = bytes.NewReader(*r.Data)
-		command.Stdout = out
-		command.Stderr = out
-		err = command.Run()
+		if transfer != nil {
+			err = runFileTransfer(commandContext, command, transfer)
+		} else {
+			command.Stdin = bytes.NewReader(*r.Data)
+			command.Stdout = out
+			command.Stderr = out
+			err = command.Run()
+		}
 	} else {
 		err = e.Run(commandContext, e.Root, args, nil, out)
 	}
@@ -249,6 +281,9 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 		}
 		return nil, errors.New("file operation failed; verify the path, revision, permissions and required shell tools")
 	}
+	if transfer != nil {
+		return result, nil
+	}
 	if r.Action == "read" {
 		result.Data, err = base64.StdEncoding.DecodeString(strings.TrimSpace(out.data.String()))
 		if err != nil || len(result.Data) > MaxFileBytes {
@@ -260,6 +295,17 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 	if r.Action == "write" {
 		hash := sha256.Sum256(*r.Data)
 		result.Revision = hex.EncodeToString(hash[:])
+	}
+	if r.Action == "stat" {
+		fields := strings.Fields(out.data.String())
+		if len(fields) != 2 || !snapshotIdentifier.MatchString(fields[1]) {
+			return nil, errors.New("invalid file metadata")
+		}
+		result.Size, err = strconv.ParseInt(fields[0], 10, 64)
+		if err != nil || result.Size < 0 || result.Size > MaxFileTransferBytes {
+			return nil, errors.New("invalid file size")
+		}
+		result.Revision = fields[1]
 	}
 	if r.Action == "list" {
 		for _, line := range strings.Split(strings.TrimSpace(out.data.String()), "\n") {
@@ -286,7 +332,7 @@ func (e *Engine) FileOperation(ctx context.Context, workload string, r FileReque
 	return result, nil
 }
 
-const fileScript = `action=$1; relative=$2; root=$3; revision=$4; expected=$5
+const fileScript = `action=$1; relative=$2; root=$3; revision=$4; expected=$5; limit=$6; streaming=$7
 target="$root$relative"
 if [ "$root" = / ]; then target=$relative; fi
 part=$root
@@ -312,20 +358,27 @@ list)
   printf '%s\t%s\t%s\n' "$kind" "$size" "$encoded"
   count=$((count+1))
  done;;
-read)
- [ -f "$target" ] && [ "$(stat -c %s "$target")" -le 32768 ] || exit 1
- head -c 32769 "$target" | base64 | tr -d '\n';;
+read|stat)
+ [ -f "$target" ] || exit 1
+ exec 3< "$target"
+ [ -f /proc/self/fd/3 ] || exit 1
+ size=$(stat -Lc %s /proc/self/fd/3); [ "$size" -le "$limit" ] || exit 1
+ if [ "$streaming" = true ] || [ "$action" = stat ]; then
+  actual=$(sha256sum /proc/self/fd/3)
+  printf '%s %s\n' "$size" "${actual%% *}"
+  if [ "$action" != stat ]; then head -c "$size" <&3; fi
+ else head -c "$((limit+1))" <&3 | base64 | tr -d '\n'; fi;;
 write)
  parent=${target%/*}; [ -n "$parent" ] || parent=/; [ -d "$parent" ] || exit 1
  if [ -e "$target" ]; then
-  [ -f "$target" ] && [ "$(stat -c %s "$target")" -le 32768 ] && [ -n "$revision" ] || exit 1
+  [ -f "$target" ] && [ "$(stat -c %s "$target")" -le "$limit" ] && [ -n "$revision" ] || exit 1
   actual=$(sha256sum "$target"); [ "${actual%% *}" = "$revision" ] || exit 1
  else [ -z "$revision" ] || exit 1; fi
  umask 077
  tmp=$(mktemp "$parent/.cove-edit.XXXXXX")
  trap 'rm -f "$tmp"' EXIT HUP INT TERM
- head -c 32769 > "$tmp"
- [ "$(stat -c %s "$tmp")" -eq "$expected" ] && [ "$expected" -le 32768 ] || exit 1
+ head -c "$((limit+1))" > "$tmp"
+ [ "$(stat -c %s "$tmp")" -eq "$expected" ] && [ "$expected" -le "$limit" ] || exit 1
  if [ -n "$revision" ]; then
   [ -f "$target" ] && [ ! -L "$target" ] || exit 1
   # Keep the inode so ownership, ACLs, labels and hard links survive edits.
@@ -335,7 +388,11 @@ write)
   cat "$tmp" >&3
   truncate -s "$(stat -c %s "$tmp")" /proc/self/fd/3
   exec 3>&-
- else ln "$tmp" "$target"; fi;;
+ else ln "$tmp" "$target"; fi
+ if [ "$streaming" = true ]; then
+  actual=$(sha256sum "$tmp")
+  printf '%s %s\n' "$expected" "${actual%% *}"
+ fi;;
 delete)
  if [ -d "$target" ]; then rmdir "$target"; else [ -f "$target" ] && rm -f "$target"; fi;;
 *) exit 1;;

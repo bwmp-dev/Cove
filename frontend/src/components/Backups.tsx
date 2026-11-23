@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tan
 import { useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { errorMessage, request } from "../api/client";
+import { backupPolicyQuery, type BackupPolicy } from "../api/backups";
 import { connectionsQuery } from "../api/connections";
 import { keys } from "../api/queries";
 import type { DatabaseResource } from "../api/types";
@@ -17,7 +18,7 @@ import { RelativeTime } from "./RelativeTime";
 import { Button, Field, Notice, QueryError } from "./ui";
 import { VolumeSnapshotSettings } from "./VolumeSnapshotSettings";
 
-interface Policy { drill_interval_hours?: number; database?: DatabaseBackup; storage_id?: string; repository: string; keep_last: number; keep_daily?: number; keep_weekly?: number; keep_monthly?: number; interval_hours: number; ca_certificate?: string; volume_snapshot?: VolumeSnapshotPolicy | null }
+type Policy = BackupPolicy;
 interface Snapshot { verified_at?: string; verification?: string; id: string; created_at: string; repository: string; database?: DatabaseBackup; volume_method?: string; fallback_reason?: string }
 
 // Each flag is unknown when the worker's capabilities cannot be read; the API still refuses unsupported policies.
@@ -217,7 +218,7 @@ export function Backups({ workloadId, busy, rights, support, restoreHeld, verify
   const [restore, setRestore] = useState<Snapshot | null>(null);
   const online = useOnline();
   const client = useQueryClient();
-  const policy = useQuery({ queryKey: ["backup-policy", workloadId], queryFn: ({ signal }) => request<{ backup: Policy | null }>("GET", `/api/workloads/${workloadId}/backup-policy`, undefined, signal) });
+  const policy = useQuery(backupPolicyQuery(workloadId));
   const snapshots = useQuery({ queryKey: ["backups", workloadId], queryFn: ({ signal }) => request<{ backups: Snapshot[] }>("GET", `/api/workloads/${workloadId}/backups`, undefined, signal), refetchInterval: busy ? 3000 : 15000 });
   const action = useMutation({ mutationFn: (input: { action: "backup" | "restore" | "drill"; backup_id?: string }) => request("POST", `/api/workloads/${workloadId}/operations`, input), onSuccess: async () => { setRestore(null); await client.invalidateQueries({ queryKey: keys.operations }); } });
   if (policy.isError) return <QueryError what="backup policy" error={policy.error} onRetry={() => void policy.refetch()} />;

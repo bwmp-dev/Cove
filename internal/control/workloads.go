@@ -511,11 +511,8 @@ func (s *Server) nodeRPCUsing(ctx context.Context, db interface {
 		return s.workerRPC(ctx, nodeID, request)
 	}
 	var proxySupported bool
-	var address, mode string
-	var host *string
-	var port int
-	var encrypted []byte
-	err := db.QueryRow(ctx, "SELECT address,port,host_key,private_key,mode,COALESCE((capabilities->>'outbound_proxy')::boolean,false) FROM nodes WHERE id=$1", nodeID).Scan(&address, &port, &host, &encrypted, &mode, &proxySupported)
+	var mode string
+	err := db.QueryRow(ctx, "SELECT mode,COALESCE((capabilities->>'outbound_proxy')::boolean,false) FROM nodes WHERE id=$1", nodeID).Scan(&mode, &proxySupported)
 	if err != nil {
 		return worker.RPCResponse{}, err
 	}
@@ -528,14 +525,14 @@ func (s *Server) nodeRPCUsing(ctx context.Context, db interface {
 	if mode == "local" {
 		return s.localRPC(ctx, request)
 	}
-	if host == nil {
-		return worker.RPCResponse{}, errors.New("node is not enrolled")
-	}
-	seed, err := unseal(s.Key, encrypted)
+	ctx, cancel := context.WithTimeout(ctx, worker.RPCTimeout(request.Method))
+	defer cancel()
+	client, err := s.openNodeSSHUsing(ctx, db, nodeID, nil)
 	if err != nil {
 		return worker.RPCResponse{}, err
 	}
-	return callSSH(ctx, address, port, *host, seed, request)
+	defer client.Close()
+	return callSSHClient(client, request)
 }
 func (s *Server) operationLogs(w http.ResponseWriter, r *http.Request) {
 	var nodeID string
@@ -583,9 +580,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	timer := time.NewTicker(3 * time.Second)
 	defer timer.Stop()
 	telemetryContext, stopTelemetry := context.WithCancel(ctx)
-	telemetryDone := make(chan error, 3)
+	telemetryDone := make(chan error, 4)
 	var telemetryJobs sync.WaitGroup
-	for _, run := range []func(context.Context) error{s.runUptimeChecks, s.runLogForwards, s.runTrafficCollection} {
+	for _, run := range []func(context.Context) error{s.runUptimeChecks, s.runLogForwards, s.runTrafficCollection, s.runNodeProvisions} {
 		telemetryJobs.Go(func() { telemetryDone <- run(telemetryContext) })
 	}
 	defer func() { stopTelemetry(); telemetryJobs.Wait() }()
@@ -630,6 +627,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.dispatchOperations(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.reconcileIdentities(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.scheduleRestoreDrills(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -655,6 +655,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if err := s.scheduleBackups(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
+		if err := s.schedulePITR(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
 		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil {
@@ -755,6 +758,16 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if err != nil {
 		return s.failOperation(ctx, id, "Operation configuration could not be decrypted.")
 	}
+	var header struct {
+		Action string `json:"action"`
+	}
+	if json.Unmarshal(data, &header) == nil && header.Action == "move" {
+		var intent workloadMoveIntent
+		if json.Unmarshal(data, &intent) != nil {
+			return s.failOperation(ctx, id, "Move configuration is invalid.")
+		}
+		return s.processWorkloadMove(ctx, id, intent)
+	}
 	var request worker.Request
 	if json.Unmarshal(data, &request) != nil {
 		return s.failOperation(ctx, id, "Operation configuration is invalid.")
@@ -804,6 +817,11 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		}
 		if err = s.prepareAppDeployment(ctx, &request); err != nil {
 			return s.failOperation(ctx, id, "Git repository access unavailable; check the provider connection or SSH deploy key and reconnect the resource.")
+		}
+	}
+	if !cancelRequested {
+		if err = s.reserveInheritedLimits(ctx, node, request); err != nil {
+			return s.failOperation(ctx, id, err.Error())
 		}
 	}
 	method := "submit"
@@ -931,6 +949,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		return tx.Commit(ctx)
 	}
 	_, err = s.DB.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id)
+	if err == nil && state == "succeeded" && request.Action == "pitr_forget" {
+		_, err = s.DB.Exec(ctx, `DELETE FROM workload_pitr WHERE workload_id=$1 AND operation_id=$2`, request.Workload, id)
+	}
 	return err
 }
 

@@ -224,7 +224,7 @@ export function LoadingRows({ label, rows = 4 }: { label: string; rows?: number 
 }
 
 export function SectionGrid({ children }: { children: ReactNode }) {
-  return <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,30rem),1fr))] items-start gap-5 px-4 pt-5 sm:px-6 [&>div]:min-w-0 [&>div]:px-0 [&>div]:pt-0 [&>div>section]:px-0 [&>div>section]:pt-0 [&>section]:px-0 [&>section]:pt-0">{children}</div>;
+  return <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,30rem),1fr))] items-start gap-5 px-4 pt-5 sm:px-6 [&>div]:min-w-0 [&>div]:px-0 [&>div]:pt-0 [&>div>section]:px-0 [&>div>section]:pt-0 [&>div>form>section]:px-0 [&>div>form>section]:pt-0 [&>form>section]:px-0 [&>form>section]:pt-0 [&>section]:px-0 [&>section]:pt-0">{children}</div>;
 }
 
 interface SectionProps {

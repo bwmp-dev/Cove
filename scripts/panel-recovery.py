@@ -124,8 +124,8 @@ class Recovery:
         self.image = info['Image']
         origin = self.environment.get('COVE_PUBLIC_URL', '')
         parsed = urllib.parse.urlsplit(origin)
-        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
-            raise RuntimeError('The panel host requires an HTTPS origin')
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or len(parsed.path) > 200 or not re.fullmatch(r'(/[A-Za-z0-9_-]+)*', parsed.path) or parsed.path == '/healthz' or any(char in origin for char in "'\"\\?# \t\r\n\x00"):
+            raise RuntimeError('The panel host requires an HTTPS panel URL with an optional simple base path')
         pinned = read_json(self.root / 'origin.json')
         if pinned is None:
             private_json(self.root / 'origin.json', {'origin': origin})

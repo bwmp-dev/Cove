@@ -1590,3 +1590,77 @@ RETURNS boolean LANGUAGE sql STABLE AS $$
  AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR COALESCE((SELECT require_second_factor FROM teams WHERE id=team),false))
  OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))
 $$;
+
+-- Encrypted PostgreSQL PITR policies; collection is bounded to 256 resources globally.
+CREATE TABLE IF NOT EXISTS workload_pitr (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ configuration bytea NOT NULL,enabled boolean NOT NULL,next_backup_at timestamptz NOT NULL DEFAULT now(),
+ operation_id text REFERENCES operations(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS workload_pitr_due ON workload_pitr(next_backup_at) WHERE enabled;
+
+-- Streamed resource file transfer bounds; the text editor remains independently bounded.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS file_transfer_bytes bigint NOT NULL DEFAULT 67108864 CHECK(file_transfer_bytes BETWEEN 1048576 AND 1073741824);
+
+-- Separately pinned forwarding identities never relax a worker's restricted RPC key.
+CREATE TABLE IF NOT EXISTS ssh_bastions (
+ id text PRIMARY KEY,name text NOT NULL,address text NOT NULL,port integer NOT NULL CHECK(port BETWEEN 1 AND 65535),
+ login text NOT NULL,host_key text NOT NULL,public_key text NOT NULL,private_key bytea NOT NULL
+);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS bastion_id text REFERENCES ssh_bastions(id) ON DELETE RESTRICT;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS host_key_error text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS nodes_bastion ON nodes(bastion_id) WHERE bastion_id IS NOT NULL;
+
+-- One resumable SSH key change and last outcome per node, with sealed key material removed at completion.
+CREATE TABLE IF NOT EXISTS node_identity_rotations (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,id text NOT NULL,
+ phase text NOT NULL CHECK(phase IN ('queued','staged','switched','aborting','succeeded','cancelled')),
+ configuration bytea,last_error text NOT NULL DEFAULT '',next_attempt_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Instance-admin cloud credentials and bounded resumable server creation.
+CREATE TABLE IF NOT EXISTS node_providers (
+ id text PRIMARY KEY,
+ kind text NOT NULL CHECK(kind IN ('hetzner','digitalocean','vultr')),
+ name text NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+ secret bytea NOT NULL CHECK(octet_length(secret) BETWEEN 16 AND 8192),
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_provider_id text REFERENCES node_providers(id) ON DELETE SET NULL;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_kind text NOT NULL DEFAULT '' CHECK(cloud_kind IN ('','hetzner','digitalocean','vultr'));
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_server_id text NOT NULL DEFAULT '' CHECK(length(cloud_server_id)<=128);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_server_name text NOT NULL DEFAULT '' CHECK(length(cloud_server_name)<=128);
+CREATE TABLE IF NOT EXISTS node_provisions (
+ id text PRIMARY KEY,
+ provider_id text REFERENCES node_providers(id) ON DELETE SET NULL,
+ provider_kind text NOT NULL CHECK(provider_kind IN ('hetzner','digitalocean','vultr')),
+ provider_name text NOT NULL CHECK(length(provider_name) BETWEEN 1 AND 120),
+ team_id text NOT NULL REFERENCES teams(id),
+ node_id text REFERENCES nodes(id) ON DELETE SET NULL,
+ cloud_id text NOT NULL DEFAULT '' CHECK(length(cloud_id)<=128),
+ cloud_name text NOT NULL CHECK(length(cloud_name) BETWEEN 1 AND 128),
+ phase text NOT NULL DEFAULT 'queued' CHECK(phase IN ('queued','creating','server_pending','enrolling','succeeded','failed','uncertain','cancelled')),
+ configuration bytea NOT NULL CHECK(octet_length(configuration)<=16384),
+ last_error text NOT NULL DEFAULT '' CHECK(length(last_error)<=1024),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ next_check_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE node_provisions ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE node_provisions ADD COLUMN IF NOT EXISTS deadline timestamptz NOT NULL DEFAULT now()+interval '20 minutes';
+CREATE INDEX IF NOT EXISTS node_provision_active_idx ON node_provisions(next_check_at) WHERE phase IN ('queued','creating','server_pending','enrolling');
+
+-- Defaults are one bounded CPU/memory pair per existing team or environment.
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_cpu double precision NOT NULL DEFAULT 0 CHECK(resource_default_cpu=0 OR resource_default_cpu BETWEEN 0.01 AND 1024);
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_cpu double precision NOT NULL DEFAULT 0 CHECK(resource_default_cpu=0 OR resource_default_cpu BETWEEN 0.01 AND 1024);
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);
+
+CREATE TABLE IF NOT EXISTS workload_moves (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ source_node text REFERENCES nodes(id) ON DELETE SET NULL,
+ target_node text REFERENCES nodes(id) ON DELETE SET NULL,
+ phase text NOT NULL DEFAULT 'queued' CHECK(phase IN ('queued','freezing','exporting','transferring','starting','committing','cleaning','rolling_back','discarding','succeeded','rolled_back')),
+ last_error text NOT NULL DEFAULT '' CHECK(length(last_error)<=1024),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);

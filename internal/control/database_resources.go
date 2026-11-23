@@ -249,6 +249,11 @@ func validateDatabaseResource(config workloadInput) error {
 		return nil
 	}
 	d := config.Database
+	for _, limit := range config.Limits {
+		if limit.GPUs != nil && len(*limit.GPUs) > 0 {
+			return errors.New("managed database engines do not support GPU assignments")
+		}
+	}
 	engine, ok := findDatabaseEngine(d.Engine)
 	if config.ComposeBundle != nil || config.Autoscale != nil || config.Rollout != nil {
 		return errors.New("managed databases do not support Compose overrides, replica rollouts or autoscaling")

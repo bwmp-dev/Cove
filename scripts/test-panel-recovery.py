@@ -30,7 +30,7 @@ def main():
                        env=os.environ | {'GOOS': 'linux', 'GOARCH': 'amd64', 'CGO_ENABLED': '0'})
         try:
             run('docker', 'run', '-d', '--privileged', '--name', name, '--label', 'cove.test=panel-recovery',
-                '-e', 'DOCKER_TLS_CERTDIR=', 'docker:29-dind', '--host=unix:///var/run/docker.sock', stdout=subprocess.DEVNULL)
+                '-e', 'DOCKER_TLS_CERTDIR=', '-e', 'COVE_RECOVERY_BASE_PATH=' + os.environ.get('COVE_RECOVERY_BASE_PATH', ''), 'docker:29-dind', '--host=unix:///var/run/docker.sock', stdout=subprocess.DEVNULL)
             created = True
             for _ in range(60):
                 if subprocess.run(['docker', 'exec', name, 'docker', 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:

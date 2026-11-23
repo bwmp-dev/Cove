@@ -29,6 +29,7 @@ var assets embed.FS
 type Server struct {
 	requestGuardSlots     chan struct{}
 	outboundState         *outboundProxyState
+	ProviderTransport     http.RoundTripper
 	CloudflareTransport   http.RoundTripper
 	NotificationTransport http.RoundTripper
 	DB                    *pgxpool.Pool
@@ -236,6 +237,30 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	s.registerPanelRecovery(mux)
+	for _, pattern := range []string{"GET /api/workloads/{id}/node-move", "POST /api/workloads/{id}/node-move", "POST /api/workloads/{id}/node-move/preview"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.workloadMove)))
+	}
+	mux.Handle("GET /api/nodes/{id}/gpus", s.admin(http.HandlerFunc(s.gpuInventory)))
+	mux.Handle("GET /api/workloads/{id}/gpus", s.admin(http.HandlerFunc(s.gpuInventory)))
+	mux.Handle("GET /api/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("PUT /api/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("GET /api/environments/{id}/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("PUT /api/environments/{id}/resource-defaults", s.admin(http.HandlerFunc(s.resourceDefaults)))
+	mux.Handle("GET /api/placement-suggestions", s.admin(http.HandlerFunc(s.placementSuggestions)))
+	for _, pattern := range []string{"GET /api/node-providers", "POST /api/node-providers", "PUT /api/node-providers/{id}", "DELETE /api/node-providers/{id}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.nodeProviders)))
+	}
+	mux.Handle("GET /api/node-providers/{id}/catalog", s.admin(http.HandlerFunc(s.nodeProviderCatalog)))
+	for _, pattern := range []string{"GET /api/node-provisions", "POST /api/node-provisions", "DELETE /api/node-provisions/{id}"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.nodeProvisions)))
+	}
+	mux.Handle("POST /api/node-provisions/{id}/reconcile", s.admin(http.HandlerFunc(s.reconcileNodeProvision)))
+	mux.Handle("GET /api/nodes/{id}/cloud", s.admin(http.HandlerFunc(s.nodeCloudMetadata)))
+	mux.Handle("GET /api/nodes/{id}/firewall", s.admin(http.HandlerFunc(s.nodeFirewall)))
+	mux.Handle("POST /api/nodes/{id}/firewall/preview", s.admin(http.HandlerFunc(s.nodeFirewall)))
+	mux.Handle("POST /api/nodes/{id}/firewall", s.admin(http.HandlerFunc(s.nodeFirewall)))
+	mux.Handle("GET /api/nodes/{id}/host-maintenance", s.admin(http.HandlerFunc(s.nodeHostMaintenance)))
+	mux.Handle("PUT /api/nodes/{id}/host-maintenance", s.admin(http.HandlerFunc(s.nodeHostMaintenance)))
 	mux.HandleFunc("GET /metrics", s.prometheus)
 	mux.HandleFunc("GET /api/status/{slug}", s.publicStatusPage)
 	for _, pattern := range []string{"GET /api/settings/metrics-token", "POST /api/settings/metrics-token", "DELETE /api/settings/metrics-token"} {
@@ -428,6 +453,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/workloads/{id}/releases", s.admin(http.HandlerFunc(s.workloadReleases)))
 	mux.Handle("GET /api/workloads/{id}/images", s.admin(http.HandlerFunc(s.workloadImages)))
 	mux.Handle("GET /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.getBackupPolicy)))
+	mux.Handle("GET /api/workloads/{id}/pitr", s.admin(http.HandlerFunc(s.getPITR)))
+	mux.Handle("PUT /api/workloads/{id}/pitr", s.admin(http.HandlerFunc(s.changePITR)))
+	mux.Handle("DELETE /api/workloads/{id}/pitr", s.admin(http.HandlerFunc(s.changePITR)))
+	mux.Handle("POST /api/workloads/{id}/pitr/backup", s.admin(http.HandlerFunc(s.changePITR)))
+	mux.Handle("POST /api/workloads/{id}/pitr/restore-copy", s.admin(http.HandlerFunc(s.restorePITR)))
 	mux.Handle("GET /api/workloads/{id}/backups/snapshot-preview", s.admin(http.HandlerFunc(s.backupSnapshotPreview)))
 	mux.Handle("PUT /api/workloads/{id}/backup-policy", s.admin(http.HandlerFunc(s.setBackupPolicy)))
 	mux.Handle("GET /api/workloads/{id}/webhook", s.admin(http.HandlerFunc(s.getWebhook)))
@@ -539,9 +569,20 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/projects/{id}/costs", s.admin(http.HandlerFunc(s.projectCosts)))
 	mux.Handle("GET /api/workloads/{id}/observations", s.admin(http.HandlerFunc(s.workloadObservations)))
 	mux.Handle("GET /api/workloads/{id}/files", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("GET /api/bastions", s.admin(http.HandlerFunc(s.bastions)))
+	mux.Handle("GET /api/nodes/{id}/identity", s.admin(http.HandlerFunc(s.nodeIdentity)))
+	mux.Handle("POST /api/nodes/{id}/identity", s.admin(http.HandlerFunc(s.nodeIdentity)))
+	mux.Handle("POST /api/bastions", s.admin(http.HandlerFunc(s.bastions)))
+	mux.Handle("DELETE /api/bastions/{id}", s.admin(http.HandlerFunc(s.bastions)))
+	mux.Handle("GET /api/nodes/{id}/bastion", s.admin(http.HandlerFunc(s.nodeBastion)))
+	mux.Handle("PUT /api/nodes/{id}/bastion", s.admin(http.HandlerFunc(s.nodeBastion)))
 	mux.Handle("GET /api/workloads/{id}/files/targets", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("GET /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))
-	mux.Handle("GET /api/workloads/{id}/files/download", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("GET /api/workloads/{id}/files/metadata", s.admin(http.HandlerFunc(s.workloadFiles)))
+	mux.Handle("GET /api/workloads/{id}/files/limits", s.admin(http.HandlerFunc(s.fileTransferLimits)))
+	mux.Handle("GET /api/settings/file-transfer-limits", s.admin(http.HandlerFunc(s.fileTransferLimits)))
+	mux.Handle("PUT /api/settings/file-transfer-limits", s.admin(http.HandlerFunc(s.fileTransferLimits)))
+	mux.HandleFunc("GET /api/workloads/{id}/files/download", s.nativeFileDownload)
 	mux.Handle("PUT /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("POST /api/workloads/{id}/files/upload", s.admin(http.HandlerFunc(s.workloadFiles)))
 	mux.Handle("DELETE /api/workloads/{id}/files/content", s.admin(http.HandlerFunc(s.workloadFiles)))
@@ -733,7 +774,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) enrollment(r *http.Request) (string, string, error) {
 	var id, pub string
-	err := s.DB.QueryRow(r.Context(), "SELECT n.id,n.public_key FROM enrollments e JOIN nodes n ON n.id=e.node_id WHERE e.token_hash=$1 AND e.consumed_at IS NULL AND e.expires_at>now()", tokenHash(bearer(r))).Scan(&id, &pub)
+	err := s.DB.QueryRow(r.Context(), "SELECT n.id,n.public_key FROM enrollments e JOIN nodes n ON n.id=e.node_id WHERE e.token_hash=$1 AND e.consumed_at IS NULL AND e.expires_at>now() AND NOT EXISTS(SELECT 1 FROM node_identity_rotations i WHERE i.node_id=n.id AND i.phase NOT IN ('succeeded','cancelled'))", tokenHash(bearer(r))).Scan(&id, &pub)
 	return id, pub, err
 }
 func (s *Server) install(w http.ResponseWriter, r *http.Request) {
@@ -774,9 +815,18 @@ func (s *Server) binary(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		HostKey string `json:"host_key"`
+		HostKey         string `json:"host_key"`
+		EnrollmentError string `json:"enrollment_error"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if in.EnrollmentError != "" {
+		if in.EnrollmentError != "trusted_verifier_missing" || in.HostKey != "" {
+			http.Error(w, "invalid enrollment report", 400)
+			return
+		}
+		s.provisionVerifierMissing(w, r)
 		return
 	}
 	key, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(in.HostKey))
@@ -850,6 +900,10 @@ func (s *Server) verifyNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, probeErr := s.nodeRPC(r.Context(), r.PathValue("id"), worker.RPCRequest{Method: "probe"})
+	if err := s.noteHostIdentity(r.Context(), r.PathValue("id"), probeErr); err != nil {
+		http.Error(w, "could not save host identity observation", 503)
+		return
+	}
 	var p worker.Probe
 	if response.Probe != nil && response.Probe.Protocol == 1 {
 		p = *response.Probe

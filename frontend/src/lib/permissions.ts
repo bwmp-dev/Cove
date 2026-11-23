@@ -110,6 +110,22 @@ export function backupRights(permissions: readonly Permission[] | undefined) {
   return { backup: manage, configure: manage && edit && secrets, restore: manage && edit, download: manage && secrets, import: manage && secrets && edit };
 }
 
+export type PITRRights = ReturnType<typeof pitrRights>;
+
+// Saving PITR settings approves where the archive is stored, so it needs Read secrets as well. A recovery copy returns
+// new administrator credentials and creates a resource beside this one; the server also checks creation rights there.
+export function pitrRights(permissions: readonly Permission[] | undefined) {
+  const manage = can(permissions, "manage_backups");
+  const edit = can(permissions, "edit_configuration");
+  const secrets = can(permissions, "read_secrets");
+  return { configure: manage && edit && secrets, forget: manage && edit, backup: manage, restore: manage && secrets && edit };
+}
+
+// A physical node move copies the resource's volumes and secret configuration to another node.
+export function canMoveNode(permissions: readonly Permission[] | undefined) {
+  return can(permissions, "edit_configuration") && can(permissions, "read_secrets");
+}
+
 export interface RoleDraftErrors {
   name?: string;
   permissions?: string;

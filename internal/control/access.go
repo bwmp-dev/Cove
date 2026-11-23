@@ -281,6 +281,12 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return p.Admin || deny()
 	case path == "/api/templates" || path == "/api/templates/draft" || path == "/api/database-engines":
 		return true
+	case path == "/api/resource-defaults" || path == "/api/placement-suggestions":
+		return true
+	case path == "/api/node-providers" || strings.HasPrefix(path, "/api/node-providers/") || path == "/api/node-provisions" || strings.HasPrefix(path, "/api/node-provisions/"):
+		return p.Admin || deny()
+	case path == "/api/bastions" || strings.HasPrefix(path, "/api/bastions/"):
+		return p.Admin || deny()
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):
 		return true
 	case path == "/api/github/app" || path == "/api/github/app/connect" || strings.HasPrefix(path, "/api/github/app/installations/") && r.Method == "PUT":
@@ -363,6 +369,17 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return true
 	case strings.HasPrefix(path, "/api/nodes"):
+		if p.Admin && (r.Pattern == "PUT /api/nodes/{id}" || r.Pattern == "DELETE /api/nodes/{id}" || r.Method != "GET" && (strings.HasSuffix(path, "/identity") || strings.HasSuffix(path, "/bastion") || strings.HasSuffix(path, "/enrollment"))) {
+			var moving bool
+			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM workload_moves m JOIN operations o ON o.id=m.operation_id WHERE (m.source_node=$1 OR m.target_node=$1) AND o.state IN ('queued','running'))`, id).Scan(&moving); err != nil {
+				http.Error(w, "move state unavailable", 503)
+				return false
+			}
+			if moving {
+				http.Error(w, "finish the node move before changing either node's SSH connection or identity", 409)
+				return false
+			}
+		}
 		if r.Pattern == "GET /api/nodes" {
 			return true
 		}
@@ -429,6 +446,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return s.requireAccess(w, r, "project", id, 3)
 	case strings.HasPrefix(path, "/api/environments/"):
+		if strings.HasSuffix(path, "/resource-defaults") {
+			permission := "view"
+			if r.Method != "GET" {
+				permission = "edit_configuration"
+			}
+			return s.requirePermission(w, r, "environment", id, permission)
+		}
 		if r.Method == "GET" && r.Context().Value(apiRouteKey{}) != nil {
 			return s.requireAccess(w, r, "environment", id, 1)
 		}
@@ -545,8 +569,30 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 				needed = 3
 			}
 		}
+		if strings.Contains(path, "/pitr") {
+			needed = 1
+		}
 		if !s.requireAccess(w, r, "workload", id, needed) {
 			return false
+		}
+		if strings.Contains(path, "/pitr") {
+			permissions := []string{}
+			switch {
+			case r.Method == http.MethodGet:
+			case r.Method == http.MethodPut:
+				permissions = []string{"manage_backups", "edit_configuration", "read_secrets"}
+			case r.Method == http.MethodDelete:
+				permissions = []string{"manage_backups", "edit_configuration"}
+			case strings.HasSuffix(path, "/restore-copy"):
+				permissions = []string{"manage_backups", "read_secrets"}
+			default:
+				permissions = []string{"manage_backups"}
+			}
+			for _, permission := range permissions {
+				if !s.requirePermission(w, r, "workload", id, permission) {
+					return false
+				}
+			}
 		}
 		if (strings.Contains(path, "/database/") && r.Method != "GET") || strings.HasSuffix(path, "/database/credentials") || strings.Contains(path, "/object-buckets") && r.Method != "GET" {
 			if !s.requirePermission(w, r, "workload", id, "read_secrets") {
@@ -557,9 +603,12 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			http.Error(w, "finish or retry database maintenance or bucket provisioning before changing this resource", 409)
 			return false
 		}
+		if r.Method != "GET" && strings.Contains(path, "/node-move") && !s.requirePermission(w, r, "workload", id, "read_secrets") {
+			return false
+		}
 		if strings.Contains(path, "/files") {
-			if !p.Admin {
-				return deny()
+			if !s.requirePermission(w, r, "workload", id, "edit_configuration") {
+				return false
 			}
 			if !s.requirePermission(w, r, "workload", id, "read_secrets") {
 				return false

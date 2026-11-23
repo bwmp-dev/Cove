@@ -96,6 +96,7 @@ const subjects: Record<string, string> = {
   resource_unhealthy: "Unhealthy resource",
   backup_overdue: "Backup overdue",
   threshold: "Threshold condition",
+  host_key_changed: "SSH host key changed",
 };
 
 const outcomes: Record<string, string> = {

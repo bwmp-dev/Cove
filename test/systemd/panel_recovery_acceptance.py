@@ -43,6 +43,8 @@ LABEL org.opencontainers.image.version="fixture-before" org.opencontainers.image
 ENTRYPOINT ["/app/bin/cove"]
 ''')
     run(['docker', 'build', '-q', '-t', 'cove-panel-recovery-fixture:local', '/fixture'], stdout=subprocess.DEVNULL)
+    base = os.environ.get('COVE_RECOVERY_BASE_PATH', '')
+    public_url = 'https://localhost:8443' + base
     key = base64.b64encode(os.urandom(32)).decode()
     token = os.urandom(32).hex()
     gateway = json.loads(module.command(['docker', 'network', 'inspect', 'bridge']))[0]['IPAM']['Config'][0]['Gateway']
@@ -61,7 +63,7 @@ ENTRYPOINT ["/app/bin/cove"]
                          'healthcheck': {'test': ['CMD', 'pg_isready', '-U', 'cove'], 'interval': '1s', 'timeout': '1s', 'retries': 60}},
             'cove': {'image': 'cove-panel-recovery-fixture:local', 'read_only': True, 'tmpfs': ['/tmp'],
                      'environment': {'DATABASE_URL': 'postgres://cove:synthetic-panel-password@database:5432/cove?sslmode=disable',
-                                     'COVE_ENCRYPTION_KEY': key, 'COVE_ADMIN_TOKEN': token, 'COVE_PUBLIC_URL': 'https://localhost:8443',
+                                     'COVE_ENCRYPTION_KEY': key, 'COVE_ADMIN_TOKEN': token, 'COVE_PUBLIC_URL': public_url,
                                      'COVE_LISTEN': '0.0.0.0:8080'},
                      'ports': ['127.0.0.1:8081:8080'],
                      'depends_on': {'database': {'condition': 'service_healthy'}},
@@ -76,7 +78,7 @@ ENTRYPOINT ["/app/bin/cove"]
     info = json.loads(module.command(['docker', 'inspect', module.command([*cmd, 'ps', '-q', 'cove']).decode().strip()]))[0]
     assert info['Config']['User'] == 'cove'
     assert all(mount['Destination'] != '/var/run/docker.sock' for mount in info['Mounts'])
-    assert origin == 'https://localhost:8443'
+    assert origin == public_url
     sql = lambda value: module.command([*cmd, 'exec', '-T', 'database', 'psql', '-U', 'cove', '-d', 'cove', '-Atc', value]).decode().strip()
     sql("INSERT INTO projects(id,name,team_id) VALUES('before','Preserved','default')")
     config = {'enabled': True, 'interval_hours': 24, 'keep_last': 2, 'keep_days': 30, 'max_bytes': 64 << 20, 'storage_id': ''}

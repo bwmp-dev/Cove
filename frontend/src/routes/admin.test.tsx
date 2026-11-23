@@ -53,6 +53,7 @@ function mockUpdates(updates: Record<string, unknown>, put?: (body: unknown) => 
     if (path === "/api/storage-locations") return Promise.resolve([]);
     if (path === "/api/settings/panel-backup") return Promise.resolve({ config: { enabled: false, interval_hours: 24, keep_last: 7, keep_days: 30, max_bytes: 8589934592, storage_id: "" }, password_set: false, agent_id: "", checked_at: null, last_error: "", updates_paused: false, pending_recovery: false, offsite_pending: false, public_origin: "https://cove.example.com", snapshots: [], jobs: [] });
     if (path === "/api/settings/transfer-limits") return Promise.resolve({ backup_bytes: 1073741824, min_backup_bytes: 1048576, max_backup_bytes: 68719476736 });
+    if (path === "/api/settings/file-transfer-limits") return Promise.resolve({ file_bytes: 67108864, min_file_bytes: 1048576, max_file_bytes: 1073741824, editor_bytes: 32768 });
     if (path === "/api/settings/storage-usage") return Promise.resolve({ metrics: { rows: 0, bytes: 0, basis: "" }, logs: { rows: 0, bytes: 0, basis: "" }, audit: { rows: 0, bytes: 0, basis: "" }, operations: { rows: 0, bytes: 0, basis: "" } });
     return Promise.resolve(updates);
   });

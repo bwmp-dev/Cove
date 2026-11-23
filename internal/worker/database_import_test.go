@@ -21,9 +21,13 @@ type databaseImportFixture struct {
 	value     func() string
 }
 
-func newDatabaseImportFixture(t *testing.T, fixture, engine string) databaseImportFixture {
+func newDatabaseImportFixture(t *testing.T, fixture, engine string, lifetime ...time.Duration) databaseImportFixture {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	timeout := 4 * time.Minute
+	if len(lifetime) > 0 {
+		timeout = lifetime[0]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 	root := filepath.Join(fixture, "import-"+engine)
 	workload := "import-" + engine + "-" + filepath.Base(fixture)
@@ -47,6 +51,9 @@ func newDatabaseImportFixture(t *testing.T, fixture, engine string) databaseImpo
 		image, target, database = "postgres:17-alpine", "/var/lib/postgresql/data", "app"
 		command = []string{"postgres"}
 		values = map[string]string{"POSTGRES_PASSWORD": "synthetic-import-password", "POSTGRES_DB": "app"}
+		if os.Getenv("COVE_TEST_POSTGRES_18") == "1" {
+			image, target = "postgres:18-alpine", "/var/lib/postgresql"
+		}
 	case "mariadb":
 		image, target, database = "mariadb:11.8", "/var/lib/mysql", "app"
 		command = []string{"mariadbd"}

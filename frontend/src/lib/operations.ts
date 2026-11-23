@@ -92,6 +92,11 @@ export const actionLabels = {
   suspend: "Pause environment resource",
   resume: "Resume environment resource",
   idle_policy: "Change idle sleep policy",
+  pitr_configure: "Configure PITR",
+  pitr_backup: "PITR base backup",
+  pitr_forget: "Delete PITR history",
+  pitr_restore: "PITR restore copy",
+  move: "Move to another node",
 } as const satisfies Record<OperationAction, string>;
 
 export const stateLabels: Record<OperationState, string> = {

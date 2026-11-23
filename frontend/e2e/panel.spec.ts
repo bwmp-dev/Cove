@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { createHash, randomBytes } from "node:crypto";
 import { expect, test, type APIResponse, type Download, type Page, type TestInfo, type Locator } from "@playwright/test";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
 const compose = (marker: string) =>
@@ -16,7 +16,11 @@ test.afterEach(() => {
   const resources = execFileSync("docker", ["exec", database, "psql", "-U", "postgres", "-d", "cove", "-Atc", "UPDATE workloads w SET manually_stopped=true WHERE NOT EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running')) RETURNING w.id"], { encoding: "utf8" }).split(/\s+/).filter(value => /^[a-f0-9]{32}$/.test(value));
   for (const resource of resources) {
     const ids = execFileSync("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=cove-${resource}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
-    if (ids.length) execFileSync("docker", ["rm", "-f", "-v", ...ids]);
+    // PITR runners and their archive volumes are labelled for the resource rather than its Compose project.
+    const runners = execFileSync("docker", ["ps", "-aq", "--filter", `label=dev.cove.workload=${resource}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
+    if (ids.length || runners.length) execFileSync("docker", ["rm", "-f", "-v", ...ids, ...runners]);
+    const archives = execFileSync("docker", ["volume", "ls", "-q", "--filter", `name=cove-pitr-archive-${resource}`], { encoding: "utf8" }).split(/\s+/).filter(name => name === `cove-pitr-archive-${resource}`);
+    if (archives.length) execFileSync("docker", ["volume", "rm", ...archives]);
     const networks = execFileSync("docker", ["network", "ls", "-q", "--filter", `label=com.docker.compose.project=cove-${resource}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
     if (networks.length) execFileSync("docker", ["network", "rm", ...networks]);
   }
@@ -1074,6 +1078,219 @@ test("Redis complete-instance backups verify, restore in place and restore as a 
   expect(result.state, await (await page.request.get(`/api/operations/${operationID}/logs`)).text()).toBe("succeeded");
 });
 
+test("PostgreSQL point-in-time recovery captures WAL and restores a chosen time as a new resource", async ({ page }, testInfo) => {
+  test.setTimeout(2_400_000);
+  await page.goto("/projects"); await signIn(page);
+  await createProject(page, "PITR project");
+  const url = await createResource(page, "pitr-source");
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const origin = new URL(url).origin;
+  const config = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
+  // CodeMirror input is unreliable for exact YAML, so the Compose file is saved through the API.
+  const yaml = "services:\n  db:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_PASSWORD: fixture-pitr-admin-password\n    volumes: [pgdata:/var/lib/postgresql/data]\n    healthcheck:\n      test: [CMD, pg_isready, -U, postgres]\n      interval: 1s\nvolumes:\n  pgdata: {}\n";
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: config.name, node_id: config.node_id, kind: "service", compose: yaml } })).status()).toBe(200);
+  await deployFromHeader(page);
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 180_000 });
+
+  // Fail fast against a panel or worker built without this branch's PITR API.
+  const initial = await page.request.get(`/api/workloads/${id}/pitr`);
+  expect(initial.status(), await initial.text()).toBe(200);
+  expect(await initial.json()).toEqual({ configured: false, supported: true, settings: null, status: null });
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; capabilities: { postgres_pitr?: boolean } | null }[];
+  expect(nodes.find(node => node.id === config.node_id)?.capabilities?.postgres_pitr).toBe(true);
+
+  const psql = (resourceURL: string, statement: string) => {
+    const container = containers(resourceURL).split("\n")[0]?.split("|")[0] ?? "";
+    return execFileSync("docker", ["exec", container, "psql", "-U", "postgres", "-d", "postgres", "-Atc", statement], { encoding: "utf8" }).trim();
+  };
+  const markers = "SELECT string_agg(value, ',' ORDER BY value) FROM pitr_marker";
+  const seen = async () => new Set(((await (await page.request.get(`/api/operations?workload_id=${id}`)).json()) as { id: string }[]).map(item => item.id));
+  const finished = async (action: string, after: Set<string>, timeout = 300_000) => {
+    let operation: { id: string; action: string; state: string } | undefined;
+    try {
+      await expect.poll(async () => {
+        const operations = await (await page.request.get(`/api/operations?workload_id=${id}`)).json() as { id: string; action: string; state: string }[];
+        operation = operations.find(item => item.action === action && !after.has(item.id));
+        return operation && !["queued", "running"].includes(operation.state);
+      }, { timeout }).toBe(true);
+    } catch (error) {
+      await pitrDiagnostics(`${action} ${operation?.id ?? "missing"} did not finish`, operation ? await (await page.request.get(`/api/operations/${operation.id}`)).text() : "");
+      throw error;
+    }
+    const detail = await (await page.request.get(`/api/operations/${operation?.id}`)).text();
+    if (operation?.state !== "succeeded") await pitrDiagnostics(`${action} ${operation?.id ?? "missing"}`, detail);
+    expect(operation?.state, `${action} ${operation?.id}: ${detail} ${await (await page.request.get(`/api/operations/${operation?.id}/logs`)).text()}`).toBe("succeeded");
+  };
+  // Bounded evidence for this fixture resource only, written before teardown: file ownership and modes (never contents),
+  // runner container state and redacted stderr, and the PITR status response.
+  let diagnosticsCount = 0;
+  const pitrDiagnostics = async (label: string, detail: string, resources: string[] = [id]) => {
+    const redact = (value: string) => value.split("\n").filter(line => !/pass|secret|key|token|credential|aws_|authorization/i.test(line)).slice(-80).join("\n");
+    // Ownership listings carry only metadata, so they are kept whole; container output is redacted line by line.
+    const run = (args: string[], metadataOnly = false) => {
+      const result = spawnSync("docker", args, { encoding: "utf8", timeout: 30_000 });
+      const output = `${result.stdout}${result.stderr}`;
+      return `$ docker ${args.join(" ")}\nexit ${result.status}\n${metadataOnly ? output : redact(output)}`;
+    };
+    const worker = process.env.COVE_BROWSER_WORKER ?? "";
+    // API responses never include secrets by contract.
+    const sections = [`operation ${label}`, detail];
+    for (const resource of resources.filter(value => /^[a-f0-9]{32}$/.test(value))) {
+      sections.push(`resource ${resource}`);
+      if (/^cove-browser-[a-f0-9]+-worker$/.test(worker)) {
+        sections.push(run(["exec", worker, "sh", "-c", 'id; find "/var/lib/cove/pitr/$1" -maxdepth 4 -exec stat -c "%u:%g %a %s %F %n" {} +', "sh", resource], true));
+      }
+      const owned = new Set([`label=dev.cove.workload=${resource}`, `label=com.docker.compose.project=cove-${resource}`].flatMap(filter => execFileSync("docker", ["ps", "-aq", "--filter", filter], { encoding: "utf8" }).split(/\s+/).filter(Boolean)));
+      for (const container of owned) {
+        sections.push(run(["inspect", "--format", "{{.Name}} image={{.Config.Image}} status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}} restarts={{.RestartCount}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} user={{.Config.User}}", container]));
+        sections.push(run(["logs", "--tail", "80", container]));
+      }
+      sections.push(run(["volume", "ls", "--format", "{{.Name}}", "--filter", `name=${resource}`], true));
+      const status = await page.request.get(`/api/workloads/${resource}/pitr`);
+      sections.push(`GET /api/workloads/${resource}/pitr -> ${status.status()}\n${await status.text()}`);
+    }
+    diagnosticsCount++;
+    writeFileSync(testInfo.outputPath(`pitr-diagnostics-${diagnosticsCount}.txt`), sections.join("\n\n"));
+  };
+  interface Base { id: string; created_at: string; available_to?: string }
+  const pitr = async () => await (await page.request.get(`/api/workloads/${id}/pitr`)).json() as { configured: boolean; status: { state: string; bases: Base[] | null } | null };
+
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  const section = page.getByRole("region", { name: "PostgreSQL point-in-time recovery" });
+  await expect(section.getByText("Save a backup policy first", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Configure backups", exact: true }).click();
+  await chooseOption(page.getByLabel("Backup method"), "postgresql");
+  await page.getByLabel("Database Compose service", { exact: true }).fill("db");
+  await page.getByLabel("Database name", { exact: true }).fill("postgres");
+  await page.getByLabel("Encryption password", { exact: true }).fill("fixture-pitr-backup-password");
+  await page.getByLabel("Interval in hours", { exact: true }).fill("0");
+  await page.getByRole("button", { name: "Save policy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit policy", exact: true })).toBeVisible();
+
+  await section.getByRole("button", { name: "Set up point-in-time recovery", exact: true }).click();
+  await expect(section.getByLabel("PostgreSQL Compose service", { exact: true })).toHaveValue("db");
+  await expect(section.getByText(/A separate local Docker volume on this node/)).toBeVisible();
+  await section.getByLabel("Archive size cap (MiB)", { exact: true }).fill("1024");
+  await capture(page, testInfo, "pitr-setup");
+  let before = await seen();
+  await section.getByRole("button", { name: "Enable point-in-time recovery", exact: true }).click();
+  const enable = page.getByRole("dialog", { name: "Enable point-in-time recovery?" });
+  await expect(enable.getByText(/PostgreSQL restarts once/)).toBeVisible();
+  await enable.getByRole("button", { name: "Restart and enable", exact: true }).click();
+  await finished("pitr_configure", before);
+  expect(await (await page.request.get(`/api/workloads/${id}/pitr`)).text()).not.toMatch(/"key"|password|secret/i);
+
+  // The scheduler may queue the first base at the same moment; either path must leave a finished base.
+  before = await seen();
+  await expect(section.getByRole("button", { name: "Take base backup now", exact: true })).toBeEnabled({ timeout: 60_000 });
+  const manual = page.waitForResponse(response => response.url().endsWith(`/api/workloads/${id}/pitr/backup`));
+  await section.getByRole("button", { name: "Take base backup now", exact: true }).click();
+  expect([202, 409]).toContain((await manual).status());
+  await finished("pitr_backup", before, 600_000);
+  await expect.poll(async () => (await pitr()).status?.bases?.length ?? 0, { timeout: 120_000 }).toBeGreaterThan(0);
+
+  expect(psql(url, "CREATE TABLE pitr_marker(value text); INSERT INTO pitr_marker VALUES ('before')")).toContain("INSERT");
+  await page.waitForTimeout(3_000);
+  const target = Math.floor(Date.now() / 1000) * 1000;
+  await page.waitForTimeout(3_000);
+  expect(psql(url, "INSERT INTO pitr_marker VALUES ('after')")).toContain("INSERT");
+  // The worker archives a bounded heartbeat transaction about once a minute; available_to follows it within 90 seconds.
+  let base: Base | undefined;
+  await expect.poll(async () => {
+    base = (await pitr()).status?.bases?.find(item => item.available_to && Date.parse(item.created_at) < target && Date.parse(item.available_to) > target + 1000);
+    return Boolean(base);
+  }, { timeout: 120_000, intervals: [5_000] }).toBe(true);
+
+  await page.reload();
+  await expect(section.getByText("Capturing", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(section.getByRole("meter", { name: "Archive storage" })).toBeVisible({ timeout: 120_000 });
+  await capture(page, testInfo, "pitr-status");
+
+  // Restore from retained history with capture disabled, so the copy proves offline history is usable.
+  before = await seen();
+  await section.getByRole("button", { name: "Disable capture", exact: true }).click();
+  await page.getByRole("dialog", { name: "Disable capture?" }).getByRole("button", { name: "Restart and disable", exact: true }).click();
+  await finished("pitr_configure", before);
+  await page.reload();
+  await expect(section.getByText("Capture disabled", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(section.getByText("Not streaming", { exact: true })).toBeVisible();
+  const disabled = await (await page.request.get(`/api/workloads/${id}/pitr`)).json() as { status: { state: string; receiver: boolean; enabled: boolean } };
+  expect(disabled.status).toMatchObject({ state: "disabled", receiver: false, enabled: false });
+  await expect.poll(async () => {
+    const retained = (await pitr()).status?.bases?.find(item => item.id === base?.id);
+    return Boolean(retained?.available_to && Date.parse(retained.available_to) > target + 1000);
+  }, { timeout: 120_000, intervals: [5_000] }).toBe(true);
+  await page.reload();
+  await expect(section.getByRole("button", { name: "Delete PITR history", exact: true })).toBeEnabled({ timeout: 60_000 });
+  await capture(page, testInfo, "pitr-disabled");
+  const ordered = ((await pitr()).status?.bases ?? []).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const row = section.getByRole("list", { name: "Base backups" }).getByRole("listitem").nth(ordered.findIndex(item => item.id === base?.id));
+  await expect(row.getByRole("button", { name: "Restore to new resource", exact: true })).toBeEnabled({ timeout: 60_000 });
+  await row.getByRole("button", { name: "Restore to new resource", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Restore to a new PostgreSQL resource" });
+  await dialog.getByLabel("New resource name", { exact: true }).fill("PITR recovered copy");
+  const when = new Date(target);
+  await dialog.getByLabel("Recovery time (UTC)", { exact: true }).fill(when.toISOString().slice(0, 19));
+  await capture(page, testInfo, "pitr-restore-form");
+  const restoreResponse = page.waitForResponse(response => response.url().endsWith(`/api/workloads/${id}/pitr/restore-copy`));
+  await dialog.getByRole("button", { name: "Create recovery copy", exact: true }).click();
+  const accepted = await restoreResponse;
+  expect(accepted.status(), await accepted.text()).toBe(202);
+  expect(JSON.parse(accepted.request().postData() ?? "{}")).toEqual({ name: "PITR recovered copy", base: base?.id, timestamp: when.toISOString() });
+  expect(accepted.headers()["cache-control"]).toContain("no-store");
+  const { id: restoreOperation, resource_id: copyId, credentials } = await accepted.json() as { id: string; resource_id: string; credentials: { username: string; password: string } };
+  expect(credentials.username).not.toBe("");
+  expect(credentials.password.length).toBeGreaterThanOrEqual(16);
+  await expect(dialog.getByText("Open new resource", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/It will not be shown again/)).toBeVisible();
+  await expect(dialog.getByLabel("Administrator password", { exact: true })).toHaveAttribute("type", "password");
+  await expect(dialog.getByLabel("Administrator password", { exact: true })).toHaveValue(credentials.password);
+  await capture(page, testInfo, "pitr-restore-credentials");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByLabel("Administrator password", { exact: true })).toHaveCount(0);
+  for (const path of [`/api/workloads/${copyId}`, `/api/workloads/${id}/pitr`, `/api/workloads/${copyId}/pitr`]) {
+    expect(await (await page.request.get(path)).text()).not.toContain(credentials.password);
+  }
+  const restoreDetail = async () => await (await page.request.get(`/api/operations/${restoreOperation}`)).text();
+  try {
+    await expect.poll(async () => (await (await page.request.get(`/api/operations/${restoreOperation}`)).json() as { state: string }).state, { timeout: 1_800_000, intervals: [10_000] }).toMatch(/succeeded|failed/);
+  } catch (error) {
+    await pitrDiagnostics(`pitr_restore ${restoreOperation} did not finish`, await restoreDetail(), [id, copyId]);
+    throw error;
+  }
+  const result = await (await page.request.get(`/api/operations/${restoreOperation}`)).json() as { state: string };
+  if (result.state !== "succeeded") await pitrDiagnostics(`pitr_restore ${restoreOperation}`, await restoreDetail(), [id, copyId]);
+  expect(result.state, `pitr_restore ${restoreOperation}: ${await restoreDetail()} ${await (await page.request.get(`/api/operations/${restoreOperation}/logs`)).text()}`).toBe("succeeded");
+  expect(psql(url, markers)).toBe("after,before");
+
+  const copyURL = `${origin}/resources/${copyId}`;
+  await page.goto(copyURL);
+  await deployFromHeader(page);
+  try {
+    await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 300_000 });
+  } catch (error) {
+    await pitrDiagnostics("copy deploy did not succeed", "", [copyId]);
+    throw error;
+  }
+  await expect.poll(() => { try { return psql(copyURL, markers); } catch { return ""; } }, { timeout: 120_000 }).toBe("before");
+  expect(containers(copyURL)).not.toContain("routed");
+  // Password authentication over TCP proves the one-time credentials work for a normal administrator login.
+  const copyContainer = containers(copyURL).split("\n")[0]?.split("|")[0] ?? "";
+  expect(execFileSync("docker", ["exec", "-e", `PGPASSWORD=${credentials.password}`, copyContainer, "psql", "-h", "127.0.0.1", "-U", credentials.username, "-d", "postgres", "-Atc", "SELECT current_user"], { encoding: "utf8" }).trim()).toBe(credentials.username);
+
+  await page.goto(url);
+  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Backups", exact: true }).click();
+  await expect(section.getByRole("button", { name: "Delete PITR history", exact: true })).toBeEnabled({ timeout: 60_000 });
+  before = await seen();
+  await section.getByRole("button", { name: "Delete PITR history", exact: true }).click();
+  const remove = page.getByRole("dialog", { name: "Delete point-in-time recovery history?" });
+  await remove.getByLabel("Type db to confirm", { exact: true }).fill("db");
+  await remove.getByRole("button", { name: "Delete history", exact: true }).click();
+  await finished("pitr_forget", before);
+  await expect.poll(async () => (await pitr()).configured, { timeout: 60_000 }).toBe(false);
+  expect(psql(url, markers)).toBe("after,before");
+});
+
 test("resource bindings, hooks and promotion keep target configuration", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   await page.goto("/projects"); await signIn(page);
@@ -1182,6 +1399,20 @@ test("file secrets, build rotation and deployment approval", async ({ page }, te
   };
   const first = await deploy();
   expect(first.runtime).toBe("fixture-secret-one");
+  // The scheduler queues an image digest check right after the first successful deploy when the worker supports
+  // image lifecycle checks, and configuration changes are refused while any operation is queued or running.
+  const nodesResponse = await page.request.get("/api/nodes");
+  expect(nodesResponse.status()).toBe(200);
+  const nodes = await nodesResponse.json() as { id: string; capabilities: { image_lifecycle?: boolean } | null }[];
+  const expectImageCheck = nodes.find(node => node.id === resource.node_id)?.capabilities?.image_lifecycle === true;
+  await expect.poll(async () => {
+    const response = await page.request.get(`/api/operations?workload_id=${id}`);
+    if (response.status() !== 200) return [`GET operations ${response.status()}`];
+    const operations = await response.json() as { id: string; action: string; state: string }[];
+    const blocking = operations.filter(operation => operation.state === "queued" || operation.state === "running").map(operation => `${operation.action} ${operation.state} ${operation.id}`);
+    if (expectImageCheck && !operations.some(operation => operation.action === "image_check")) blocking.push("image_check not scheduled");
+    return blocking;
+  }, { timeout: 120_000, intervals: [1000], message: "operations still blocking the configuration change" }).toEqual([]);
   expect((await page.request.put(`/api/workloads/${id}`, { headers, data: { ...input, environment: { TOKEN: "fixture-secret-two" } } })).status()).toBe(200);
   const second = await deploy();
   expect(second.runtime).toBe("fixture-secret-two");
@@ -1262,9 +1493,10 @@ test("guarded deployment rejects an unhealthy candidate without replacing the ap
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60000 });
   const original = containers(url);
   await page.goto(`${url}/deployment-safety`);
-  await page.getByLabel("Enable guarded deployment", { exact: true }).check();
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
-  await expect(page.getByText("Saved. Changes apply on the next deploy.", { exact: true })).toBeVisible();
+  const safety = page.getByRole("region", { name: "Deployment safety", exact: true });
+  await safety.getByLabel("Enable guarded deployment", { exact: true }).check();
+  await safety.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(safety.getByText("Saved. Changes apply on the next deploy.", { exact: true })).toBeVisible();
   await capture(page, testInfo, "deployment-safety");
   const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string; compose: string };
   const headers = { Origin: new URL(url).origin };
@@ -1923,57 +2155,173 @@ test("Redis backups download as a verified RDB, import back through the panel an
   }
 });
 
-test("administrators browse, edit, download and delete container files on the real worker", async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
+test("scoped editors stream, replace and edit container files on the real worker while viewers cannot", async ({ page, browser, baseURL }, testInfo) => {
+  test.setTimeout(300_000);
   await page.goto("/projects");
   await signIn(page);
   await createProject(page, "Files project");
   const url = await createResource(page, "files-service");
+  const id = new URL(url).pathname.split("/")[2] ?? "";
+  const origin = new URL(url).origin;
   // This test covers Files, not Compose editor input, so store the exact Compose text before deploying.
-  const id = new URL(url).pathname.split("/")[2];
   const resource = await (await page.request.get(`/api/workloads/${id}`)).json() as { name: string; node_id: string };
-  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: new URL(url).origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: compose("files-service") } })).status()).toBe(200);
+  expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: compose("files-service") } })).status()).toBe(200);
   await page.reload();
   await deployFromHeader(page);
   await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
 
-  await page.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true }).click();
-  const files = page.getByRole("region", { name: "Files", exact: true });
-  await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
-  const root = files.getByRole("list", { name: "Contents of /" });
-  await expect(root.getByRole("button", { name: "tmp", exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(root.getByRole("button", { name: "proc", exact: true })).toHaveCount(0);
-  await root.getByRole("button", { name: "tmp", exact: true }).click();
-  await expect(files.getByRole("list", { name: "Contents of /tmp" }).or(files.getByText("This folder is empty.", { exact: true }))).toBeVisible();
+  // Fail fast against a panel or worker built without this branch's streamed file API.
+  const limits = await page.request.get(`/api/workloads/${id}/files/limits`);
+  expect(limits.status(), await limits.text()).toBe(200);
+  const configured = await limits.json() as { file_bytes: number; editor_bytes: number };
+  expect(configured.editor_bytes).toBe(32768);
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; capabilities: { file_transfers?: boolean } | null }[];
+  expect(nodes.find(node => node.id === resource.node_id)?.capabilities?.file_transfers).toBe(true);
 
-  await files.getByRole("button", { name: "New file", exact: true }).click();
-  const create = page.getByRole("dialog", { name: "New file" });
-  await create.getByLabel("File name", { exact: true }).fill("cove-browser.txt");
-  await create.getByRole("button", { name: "Create file", exact: true }).click();
-  const editor = page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true });
-  await expect(editor).toHaveValue("");
-  await editor.fill("hello from the browser\n");
-  await page.getByRole("button", { name: "Save file", exact: true }).click();
-  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await editor.fill("second revision\n");
-  await page.getByRole("button", { name: "Save file", exact: true }).click();
-  await expect(page.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await capture(page, testInfo, "resource-files");
+  const container = containers(url).split("\n")[0]?.split("|")[0] ?? "";
+  const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+  const write = (path: string, data: Buffer) => execFileSync("docker", ["exec", "-i", container, "sh", "-c", `cat > ${path}`], { input: data });
+  const remoteHash = (path: string) => execFileSync("docker", ["exec", container, "sha256sum", path], { encoding: "utf8" }).split(" ")[0];
+  const seed = randomBytes(40_000);
+  write("/tmp/seed.bin", seed);
 
-  const download = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download", exact: true }).click();
-  const saved = await download;
-  expect(saved.suggestedFilename()).toBe("cove-browser.txt");
-  expect(readFileSync(await saved.path(), "utf8")).toBe("second revision\n");
-  expect(page.url()).not.toContain("cove-browser");
-  expect(await page.evaluate(() => JSON.stringify({ ...window.localStorage }) + JSON.stringify({ ...window.sessionStorage }))).not.toContain("second revision");
+  const invite = async (email: string, role: string) => {
+    await page.goto("/team");
+    const form = page.getByRole("region", { name: "Invite someone" });
+    await form.getByLabel("Email", { exact: true }).fill(email);
+    await form.getByRole("button", { name: "Add grant", exact: true }).click();
+    await chooseOption(form.getByLabel("Scope", { exact: true }), { label: "Files project / production" });
+    await chooseOption(form.getByLabel("Role", { exact: true }), { label: role });
+    await form.getByRole("button", { name: "Create invitation", exact: true }).click();
+    const link = await form.getByLabel("Invitation link", { exact: true }).inputValue();
+    // The link is a bearer credential: dismiss it before any screenshot is written.
+    await form.getByRole("button", { name: "Done", exact: true }).click();
+    const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true, acceptDownloads: true });
+    const member = await context.newPage();
+    await member.goto(link.replace(/^https?:\/\/[^/]+/, ""));
+    await member.getByRole("button", { name: "Review invitation", exact: true }).click();
+    await member.getByLabel("Name", { exact: true }).fill(`Files ${role}`);
+    await member.getByLabel("Password", { exact: true }).fill("browser-files-member-password");
+    await member.getByLabel("Confirm password", { exact: true }).fill("browser-files-member-password");
+    await member.getByRole("button", { name: "Create account and join", exact: true }).click();
+    await expect(member.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+    return { context, member };
+  };
+  const suffix = Date.now();
+  const viewer = await invite(`files-viewer-${suffix}@example.test`, "Viewer");
+  const editor = await invite(`files-editor-${suffix}@example.test`, "Editor");
 
-  await page.getByRole("button", { name: "Delete cove-browser.txt", exact: true }).click();
-  const remove = page.getByRole("dialog", { name: "Delete cove-browser.txt?" });
-  await expect(remove).toContainText("/tmp/cove-browser.txt");
-  await remove.getByRole("button", { name: "Delete file", exact: true }).click();
-  await expect(page.getByText("Deleted cove-browser.txt.", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true })).toHaveCount(0);
+  try {
+    await viewer.member.goto(url);
+    await expect(viewer.member.getByRole("heading", { name: "files-service", exact: true })).toBeVisible();
+    await expect(viewer.member.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true })).toHaveCount(0);
+    await viewer.member.goto(`${url}/files`);
+    await expect(viewer.member.getByText("Read secrets and Edit configuration required", { exact: true })).toBeVisible();
+    expect((await viewer.member.request.get(`/api/workloads/${id}/files/targets`)).status()).toBe(403);
+    expect((await viewer.member.request.get(`/api/workloads/${id}/files/download?kind=container&target=${container}&path=%2Ftmp%2Fseed.bin`)).status()).toBe(403);
+
+    const member = editor.member;
+    await member.goto(url);
+    await member.getByRole("navigation", { name: "Resource sections" }).getByRole("link", { name: "Files", exact: true }).click();
+    const files = member.getByRole("region", { name: "Files", exact: true });
+    await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+    const root = files.getByRole("list", { name: "Contents of /" });
+    await expect(root.getByRole("button", { name: "tmp", exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(root.getByRole("button", { name: "proc", exact: true })).toHaveCount(0);
+    await root.getByRole("button", { name: "tmp", exact: true }).click();
+    const tmp = files.getByRole("list", { name: "Contents of /tmp" });
+    await expect(tmp.getByText("39.1 KiB · download or replace", { exact: true })).toBeVisible();
+
+    // The download is a native link opened in a new tab, so the browser writes it to disk without page buffering.
+    const link = tmp.getByRole("link", { name: "Download seed.bin", exact: true });
+    expect(await link.getAttribute("href")).toContain("team_id=");
+    const popupDownload = new Promise<Download>(resolve => editor.context.once("page", popup => popup.once("download", resolve)));
+    await link.click();
+    const saved = await Promise.race([popupDownload, member.waitForEvent("download")]);
+    expect(saved.suggestedFilename()).toBe("seed.bin");
+    expect(sha256(readFileSync(await saved.path()))).toBe(sha256(seed));
+    expect(member.url()).not.toContain("seed.bin");
+
+    // Larger than the editor: only the size and revision are read, then the exact revision guards the replacement.
+    await tmp.getByRole("button", { name: "seed.bin", exact: true }).click();
+    await expect(member.getByText("Larger than the 32.0 KiB editor", { exact: true })).toBeVisible();
+    await expect(member.getByText(sha256(seed).slice(0, 12), { exact: true })).toBeVisible();
+    const replacement = randomBytes(50_000);
+    const replaceInput = member.locator('input[type="file"]').last();
+
+    // A change made after Cove read the revision makes the replacement fail without touching the file.
+    const changed = Buffer.concat([seed, Buffer.from("changed")]);
+    write("/tmp/seed.bin", changed);
+    await replaceInput.setInputFiles({ name: "replacement.bin", mimeType: "application/octet-stream", buffer: replacement });
+    await member.getByRole("dialog", { name: "Replace seed.bin?" }).getByRole("button", { name: "Replace file", exact: true }).click();
+    await expect(member.getByText("Could not confirm the file change", { exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(remoteHash("/tmp/seed.bin")).toBe(sha256(changed));
+
+    await member.getByRole("button", { name: "Read again", exact: true }).click();
+    await expect(member.getByText(sha256(changed).slice(0, 12), { exact: true })).toBeVisible();
+    await replaceInput.setInputFiles({ name: "replacement.bin", mimeType: "application/octet-stream", buffer: replacement });
+    await member.getByRole("dialog", { name: "Replace seed.bin?" }).getByRole("button", { name: "Replace file", exact: true }).click();
+    await expect(member.getByText("Replaced seed.bin with replacement.bin.", { exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(remoteHash("/tmp/seed.bin")).toBe(sha256(replacement));
+    await expect(member.getByText(sha256(replacement).slice(0, 12), { exact: true })).toBeVisible();
+    await capture(member, testInfo, "resource-files-large");
+
+    // New uploads are create-only and streamed as the raw file.
+    const uploaded = randomBytes(60_000);
+    await files.locator('input[type="file"]').setInputFiles({ name: "upload.bin", mimeType: "application/octet-stream", buffer: uploaded });
+    await expect(member.getByText("Uploaded upload.bin (58.6 KiB).", { exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(remoteHash("/tmp/upload.bin")).toBe(sha256(uploaded));
+    await files.locator('input[type="file"]').setInputFiles({ name: "upload.bin", mimeType: "application/octet-stream", buffer: randomBytes(10) });
+    await expect(member.getByText(/upload\.bin already exists in this folder/)).toBeVisible();
+    const createOnly = await member.request.post(`/api/workloads/${id}/files/upload?kind=container&target=${container}&path=%2Ftmp%2Fupload.bin`, { headers: { Origin: origin, "Content-Type": "application/octet-stream", "X-Cove-Size": "3" }, data: Buffer.from("new") });
+    expect(createOnly.ok()).toBe(false);
+    expect(remoteHash("/tmp/upload.bin")).toBe(sha256(uploaded));
+
+    // The configured cap is exact and enforced before any bytes reach the worker.
+    expect((await page.request.put("/api/settings/file-transfer-limits", { headers: { Origin: origin }, data: { file_bytes: 1048576 } })).status()).toBe(200);
+    try {
+      await member.reload();
+      await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+      await files.getByRole("list", { name: "Contents of /" }).getByRole("button", { name: "tmp", exact: true }).click();
+      await files.locator('input[type="file"]').setInputFiles({ name: "too-big.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(1048577) });
+      await expect(member.getByText("too-big.bin is 1.00 MiB; files are limited to 1.00 MiB.", { exact: true })).toBeVisible();
+      const oversized = await member.request.post(`/api/workloads/${id}/files/upload?kind=container&target=${container}&path=%2Ftmp%2Ftoo-big.bin`, { headers: { Origin: origin, "Content-Type": "application/octet-stream", "X-Cove-Size": "1048577" }, data: Buffer.alloc(1048577) });
+      expect(oversized.status()).toBe(413);
+      expect(execFileSync("docker", ["exec", container, "sh", "-c", "test -e /tmp/too-big.bin && echo present || echo absent"], { encoding: "utf8" }).trim()).toBe("absent");
+    } finally {
+      expect((await page.request.put("/api/settings/file-transfer-limits", { headers: { Origin: origin }, data: { file_bytes: configured.file_bytes } })).status()).toBe(200);
+    }
+
+    // Small text files still use the 32 KiB editor with revision chaining.
+    await member.reload();
+    await chooseOption(files.getByLabel("Container or volume", { exact: true }), { index: 1 });
+    await files.getByRole("list", { name: "Contents of /" }).getByRole("button", { name: "tmp", exact: true }).click();
+    await files.getByRole("button", { name: "New file", exact: true }).click();
+    const create = member.getByRole("dialog", { name: "New file" });
+    await create.getByLabel("File name", { exact: true }).fill("cove-browser.txt");
+    await create.getByRole("button", { name: "Create file", exact: true }).click();
+    const text = member.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true });
+    await expect(text).toHaveValue("");
+    await text.fill("hello from the browser\n");
+    await member.getByRole("button", { name: "Save file", exact: true }).click();
+    await expect(member.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await text.fill("second revision\n");
+    await member.getByRole("button", { name: "Save file", exact: true }).click();
+    await expect(member.getByText("Saved.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    expect(remoteHash("/tmp/cove-browser.txt")).toBe(sha256(Buffer.from("second revision\n")));
+    await capture(member, testInfo, "resource-files");
+    expect(await member.evaluate(() => JSON.stringify({ ...window.localStorage }) + JSON.stringify({ ...window.sessionStorage }))).not.toContain("second revision");
+
+    await member.getByRole("button", { name: "Delete cove-browser.txt", exact: true }).click();
+    const remove = member.getByRole("dialog", { name: "Delete cove-browser.txt?" });
+    await expect(remove).toContainText("/tmp/cove-browser.txt");
+    await remove.getByRole("button", { name: "Delete file", exact: true }).click();
+    await expect(member.getByText("Deleted cove-browser.txt.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(member.getByLabel("Contents of /tmp/cove-browser.txt", { exact: true })).toHaveCount(0);
+  } finally {
+    await viewer.context.close();
+    await editor.context.close();
+  }
 });
 
 test("alert observations inspect a real service and certificate and container rules target it", async ({ page }, testInfo) => {
@@ -2167,10 +2515,18 @@ test("every page adapts to phone tablet laptop and wide desktop", async ({ page,
         await page.getByRole("button", { name: "Discard changes", exact: true }).click();
         await expect(page.getByLabel("Sample-organization-1: Default team", { exact: true })).toBeChecked();
         const github = await page.getByRole("region", { name: "GitHub App", exact: true }).boundingBox();
+        const gitProviders = await page.getByRole("region", { name: "Git providers", exact: true }).boundingBox();
+        const secretProviders = await page.getByRole("region", { name: "Secret providers", exact: true }).boundingBox();
         const cloudflare = await page.getByRole("region", { name: "Cloudflare DNS", exact: true }).boundingBox();
         if (width === 1920) {
-          expect(cloudflare!.x).toBeGreaterThan(github!.x + github!.width);
-          expect(Math.abs(cloudflare!.y - github!.y)).toBeLessThan(2);
+          // Two columns in source order: GitHub App | Git providers, then Secret providers | Cloudflare DNS.
+          expect(gitProviders!.x).toBeGreaterThan(github!.x + github!.width);
+          expect(Math.abs(gitProviders!.y - github!.y)).toBeLessThan(2);
+          expect(Math.abs(secretProviders!.x - github!.x)).toBeLessThan(2);
+          expect(secretProviders!.y).toBeGreaterThan(github!.y + github!.height);
+          expect(Math.abs(cloudflare!.x - gitProviders!.x)).toBeLessThan(2);
+          expect(cloudflare!.x).toBeGreaterThan(secretProviders!.x + secretProviders!.width);
+          expect(Math.abs(cloudflare!.y - secretProviders!.y)).toBeLessThan(2);
         }
         if (width <= 768) {
           await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
@@ -2227,6 +2583,337 @@ test("every page adapts to phone tablet laptop and wide desktop", async ({ page,
   } finally { await publicPage.close(); }
 });
 
+test("SSH bastion lifecycle, pinned host alerts and worker key rotation on the real worker", async ({ page }, testInfo) => {
+  test.setTimeout(420_000);
+  const worker = process.env.COVE_BROWSER_WORKER ?? "";
+  if (!/^cove-browser-[a-f0-9]+-worker$/.test(worker)) throw new Error("Isolated browser worker required");
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const authorizedKeys = () => execFileSync("docker", ["exec", worker, "cat", "/var/lib/cove/.ssh/authorized_keys"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+  // Read through docker exec, the fixture's trusted console, never from an SSH handshake.
+  const hostKey = execFileSync("docker", ["exec", worker, "cat", "/etc/ssh/ssh_host_ed25519_key.pub"], { encoding: "utf8" }).trim();
+  const bastionName = `e2e-jump-${randomBytes(3).toString("hex")}`;
+
+  await page.goto("/nodes"); await signIn(page);
+  const events = await (await page.request.get("/api/notifications/events")).json() as string[];
+  expect(events).toEqual(expect.arrayContaining(["host_key_changed.alert", "host_key_changed.recovered"]));
+  const bastions = page.getByRole("region", { name: "SSH bastions" });
+  await expect(bastions.getByText(/No bastions/)).toBeVisible();
+  await bastions.getByRole("button", { name: "Add bastion", exact: true }).click();
+  const create = page.getByRole("dialog", { name: "Add bastion" });
+  await create.getByLabel("Name", { exact: true }).fill(bastionName);
+  await create.getByLabel("SSH address", { exact: true }).fill("worker");
+  await create.getByLabel("Forwarding user", { exact: true }).fill("cove-jump");
+  await create.getByLabel("Verified bastion host public key", { exact: true }).fill(`worker ${hostKey}`);
+  await create.getByRole("button", { name: "Add bastion", exact: true }).click();
+  await expect(create.getByText(/known_hosts line/)).toBeVisible();
+  await create.getByLabel("Verified bastion host public key", { exact: true }).fill(hostKey);
+  await create.getByRole("button", { name: "Add bastion", exact: true }).click();
+  await expect(create).toBeHidden();
+  await expect(bastions.getByText("Generated public key", { exact: true })).toBeVisible();
+  await expect(bastions.getByText(/PermitOpen none/)).toBeVisible();
+  const saved = (await (await page.request.get("/api/bastions")).json() as { id: string; name: string; public_key: string; fingerprint: string }[]).find((item) => item.name === bastionName);
+  if (!saved) throw new Error("Created bastion missing from the API");
+  await expect(bastions.getByText(saved.public_key, { exact: true }).first()).toBeVisible();
+  await expect(bastions.getByText(saved.fingerprint).first()).toBeVisible();
+  await expect(page.getByText(/PRIVATE KEY/)).toHaveCount(0);
+  await capture(page, testInfo, "bastions");
+
+  await page.getByRole("link", { name: "ready-browser-worker", exact: true }).click();
+  const nodeId = new URL(page.url()).pathname.split("/")[2] ?? "";
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(nodeId)) throw new Error("Unexpected node URL");
+  const ssh = page.getByRole("region", { name: "SSH connection" });
+  await chooseOption(ssh.getByLabel("Connect through", { exact: true }), saved.id);
+  await expect(ssh.getByText(/must permit forwarding to worker:22/)).toBeVisible();
+  await ssh.getByRole("button", { name: "Save route", exact: true }).click();
+  await expect(ssh.getByText("Route saved", { exact: true })).toBeVisible();
+  expect(await (await page.request.get(`/api/nodes/${nodeId}/bastion`)).json()).toEqual({ bastion_id: saved.id, host_key_error: "" });
+
+  await page.goto("/nodes");
+  await bastions.getByRole("button", { name: new RegExp(`^${bastionName} `) }).click();
+  await expect(bastions.getByText(/PermitOpen worker:22/)).toBeVisible();
+  await expect(bastions.getByText(`restrict,port-forwarding,permitopen="worker:22",command="/bin/false" ${saved.public_key}`, { exact: true })).toBeVisible();
+  await bastions.getByRole("button", { name: `Delete ${bastionName}`, exact: true }).click();
+  const blocked = page.getByRole("dialog", { name: `Delete ${bastionName}?` });
+  await expect(blocked.getByText("Nodes still use this bastion", { exact: true })).toBeVisible();
+  await expect(blocked.getByRole("button", { name: "Delete bastion", exact: true })).toBeDisabled();
+  await blocked.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // Back to the direct route; the real worker must verify with its unchanged pin.
+  await page.getByRole("link", { name: "ready-browser-worker", exact: true }).click();
+  await chooseOption(ssh.getByLabel("Connect through", { exact: true }), "");
+  await ssh.getByRole("button", { name: "Save route", exact: true }).click();
+  await expect(ssh.getByText("Route saved", { exact: true })).toBeVisible();
+  await page.locator("main header").getByRole("button", { name: "Verify", exact: true }).click();
+  await expect(page.getByText("Verification finished: Ready", { exact: true })).toBeVisible({ timeout: 60_000 });
+
+  const before = authorizedKeys();
+  expect(before).toHaveLength(1);
+  await expect(ssh.getByText("Not rotated", { exact: true })).toBeVisible();
+  await ssh.getByRole("button", { name: "Rotate key", exact: true }).click();
+  const rotate = page.getByRole("dialog", { name: "Rotate this node's SSH key?" });
+  await expect(rotate.getByText(/never removes the old key before the new one is saved/)).toBeVisible();
+  await rotate.getByRole("button", { name: "Rotate key", exact: true }).click();
+  try {
+    await expect(ssh.getByText("Rotated", { exact: true })).toBeVisible({ timeout: 240_000 });
+  } catch (error) {
+    // Read-only evidence from this run's own fixture containers, kept with the test output.
+    const panel = worker.replace(/-worker$/, "-panel");
+    const command = (...args: string[]) => { const result = spawnSync("docker", args, { encoding: "utf8" }); return `$ docker ${args.join(" ")}\n${result.stdout}${result.stderr}`; };
+    writeFileSync(testInfo.outputPath("rotation-diagnostics.txt"), [
+      `identity ${JSON.stringify(await (await page.request.get(`/api/nodes/${nodeId}/identity`)).json())}`,
+      `node ${JSON.stringify((await (await page.request.get("/api/nodes")).json() as { id: string }[]).find((item) => item.id === nodeId))}`,
+      command("exec", worker, "ls", "-ln", "/var/lib/cove/.ssh"),
+      command("exec", worker, "cat", "/var/lib/cove/.ssh/authorized_keys"),
+      command("logs", "--tail", "200", worker),
+      command("logs", "--tail", "300", panel),
+    ].join("\n"));
+    throw error;
+  }
+  const after = authorizedKeys();
+  expect(after).toHaveLength(1);
+  expect(after[0]).not.toEqual(before[0]);
+  expect(after[0]).toMatch(/^restrict,command="[^"]+" ssh-ed25519 /);
+  expect(execFileSync("docker", ["exec", worker, "cat", "/etc/ssh/ssh_host_ed25519_key.pub"], { encoding: "utf8" }).trim()).toEqual(hostKey);
+  await page.locator("main header").getByRole("button", { name: "Verify", exact: true }).click();
+  await expect(page.getByText("Verification finished: Ready", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/PRIVATE KEY/)).toHaveCount(0);
+  await capture(page, testInfo, "node-ssh-rotated");
+
+  // Mismatch, switched and failure states come from intercepted responses so no saved pin or key changes.
+  await page.route(`**/api/nodes/${nodeId}/bastion`, (route) => route.fulfill({ json: { bastion_id: "", host_key_error: `worker host key mismatch: presented SHA256:Q2hhbmdlZEtleUZvckJyb3dzZXJUZXN0, pinned ${saved.fingerprint}` } }));
+  await page.route(`**/api/nodes/${nodeId}/identity`, (route) => route.request().method() === "GET"
+    ? route.fulfill({ json: { id: "f".repeat(32), state: "switched", error: "old key removal not yet confirmed: worker unreachable", updated_at: new Date().toISOString() } })
+    : route.fulfill({ status: 503, body: "identity rotation unavailable" }));
+  await page.reload();
+  await expect(ssh.getByText("SSH host identity mismatch", { exact: true })).toBeVisible();
+  await expect(ssh.getByText(/never accepts the key it observed/)).toBeVisible();
+  await expect(ssh.getByRole("button", { name: /accept|trust|replace/i })).toHaveCount(0);
+  await expect(ssh.getByText("Removing the old key", { exact: true })).toBeVisible();
+  await expect(ssh.getByText("Cleanup cannot be cancelled", { exact: true })).toBeVisible();
+  await expect(ssh.getByRole("button", { name: "Cancel rotation", exact: true })).toHaveCount(0);
+  await ssh.getByRole("button", { name: "Retry now", exact: true }).click();
+  await page.getByRole("dialog", { name: "Retry the pending step?" }).getByRole("button", { name: "Retry now", exact: true }).click();
+  await expect(ssh.getByText(/may or may not have been saved/)).toBeVisible();
+  await capture(page, testInfo, "node-ssh-mismatch-switched");
+  await page.unrouteAll({ behavior: "wait" });
+
+  await page.goto("/nodes");
+  await bastions.getByRole("button", { name: `Delete ${bastionName}`, exact: true }).click();
+  await page.getByRole("dialog", { name: `Delete ${bastionName}?` }).getByRole("button", { name: "Delete bastion", exact: true }).click();
+  await expect(bastions.getByText(/No bastions/)).toBeVisible();
+  expect(await (await page.request.get("/api/bastions")).json()).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("host security updates inspect the real worker host only on request and never change it from the browser", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const inspections: string[] = [];
+  const changes: string[] = [];
+  page.on("request", (request) => {
+    if (!request.url().endsWith("/host-maintenance")) return;
+    (request.method() === "GET" ? inspections : changes).push(request.method());
+  });
+
+  await page.goto("/nodes"); await signIn(page);
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; name: string; capabilities: { host_maintenance?: boolean } | null }[];
+  const node = nodes.find((item) => item.name === "ready-browser-worker");
+  if (!node) throw new Error("Fixture worker node missing");
+  expect(node.capabilities?.host_maintenance).toBe(true);
+
+  await page.goto(`/nodes/${node.id}`);
+  const section = page.getByRole("region", { name: "Host security updates" });
+  await expect(section.getByText(/Not inspected yet/)).toBeVisible();
+  expect(inspections).toEqual([]);
+
+  // The fixture's Docker host is whatever this machine runs; the expectations below follow what it actually reports.
+  const first = page.waitForResponse((response) => response.url().endsWith(`/api/nodes/${node.id}/host-maintenance`) && response.request().method() === "GET", { timeout: 120_000 });
+  await section.getByRole("button", { name: "Inspect", exact: true }).click();
+  const response = await first;
+  if (response.status() !== 200) {
+    // Keep the real refusal as evidence: the exact body, the error state the page shows and its captures.
+    const body = await response.text();
+    testInfo.annotations.push({ type: "host-maintenance-error", description: `${response.status()} ${body}` });
+    await expect(section.getByText("Could not load host security status", { exact: true })).toBeVisible();
+    await expect(section.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled();
+    await capture(page, testInfo, "host-security-updates-error");
+    expect(changes).toEqual([]);
+  }
+  expect(response.status()).toBe(200);
+  expect(response.headers()["cache-control"]).toBe("no-store");
+  const status = await response.json() as { os: string; version: string; manager: "apt" | "dnf" | "unsupported"; security_updates: number | null; packages: string[]; limited: boolean; metadata_at: string | null; reboot_required: boolean | null; automatic_reboot: boolean | null; policy_supported: boolean; policy_enabled: boolean; last_result: string; notices: string[]; checked_at: string };
+  testInfo.annotations.push({ type: "host-maintenance", description: JSON.stringify(status) });
+  expect(status.packages.length).toBeLessThanOrEqual(200);
+
+  await expect(section.getByText(/^Inspected/)).toBeVisible();
+  const system = [status.os, status.version].filter(Boolean).join(" ");
+  if (system) await expect(section.getByText(system, { exact: true })).toBeVisible();
+  await expect(section.getByText({ apt: "APT", dnf: "DNF", unsupported: "No supported provider" }[status.manager], { exact: true })).toBeVisible();
+  if (status.security_updates === null) {
+    await expect(section.getByText(/^Unknown/).first()).toBeVisible();
+    await expect(section.getByText(/None in cached metadata/)).toHaveCount(0);
+  } else {
+    await expect(section.getByText(status.security_updates === 0 ? "None in cached metadata" : `${status.security_updates} pending in cached metadata`, { exact: true })).toBeVisible();
+  }
+  if (status.metadata_at === null) await expect(section.locator("xpath=.//dt[normalize-space()='Metadata from']/following-sibling::dd[1]")).toHaveText("Unknown");
+  for (const notice of status.notices) await expect(section.getByText(notice, { exact: true })).toBeVisible();
+  if (status.last_result) await expect(section.locator("xpath=.//dt[normalize-space()='Last run']")).toBeVisible();
+  else await expect(section.locator("xpath=.//dt[normalize-space()='Last run']")).toHaveCount(0);
+
+  const toggle = section.getByRole("button", { name: status.policy_enabled ? "Disable schedule" : "Enable schedule", exact: true });
+  await expect(toggle).toBeVisible();
+  if (!status.policy_supported) {
+    await expect(section.getByText("Host prerequisites missing", { exact: true })).toBeVisible();
+    if (!status.policy_enabled) await expect(toggle).toBeDisabled();
+  }
+  if (status.packages.length > 0) {
+    await section.getByText(/^Packages \(/).click();
+    const packages = section.getByRole("region", { name: "Packages with pending security updates" });
+    await packages.focus();
+    await expect(packages).toBeFocused();
+  }
+  await capture(page, testInfo, "host-security-updates");
+
+  const second = page.waitForResponse((response) => response.url().endsWith(`/api/nodes/${node.id}/host-maintenance`) && response.request().method() === "GET", { timeout: 120_000 });
+  await section.getByRole("button", { name: "Inspect again", exact: true }).click();
+  const again = await (await second).json() as { checked_at: string };
+  expect(Date.parse(again.checked_at)).toBeGreaterThanOrEqual(Date.parse(status.checked_at));
+  await expect(section.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled();
+  expect(inspections).toHaveLength(2);
+  expect(changes).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+// Memory and CPU limits Docker applied to the running containers of a resource's Compose project.
+function runningLimits(resourceURL: string) {
+  const workload = new URL(resourceURL).pathname.split("/")[2] ?? "";
+  if (!/^[0-9a-f]{32}$/.test(workload)) throw new Error("Unexpected resource URL");
+  const ids = execFileSync("docker", ["ps", "-q", "--filter", `label=com.docker.compose.project=cove-${workload}`], { encoding: "utf8" }).split(/\s+/).filter(Boolean);
+  if (ids.length === 0) return "";
+  return execFileSync("docker", ["inspect", "--format", "{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}", ...ids], { encoding: "utf8" }).trim();
+}
+
+// Waits for the resource's next deploy operation and fails with the worker's result and log when it does not succeed.
+async function waitForNewDeploy(page: Page, workload: string, seen: string[]) {
+  type Operation = { id: string; action: string; state: string; result: unknown };
+  let operation: Operation | undefined;
+  await expect.poll(async () => {
+    const list = await (await page.request.get(`/api/operations?workload_id=${workload}`)).json() as Operation[];
+    operation = list.find((item) => item.action === "deploy" && !seen.includes(item.id));
+    return operation?.state ?? "missing";
+  }, { timeout: 180_000 }).toMatch(/^(succeeded|failed|interrupted|cancelled)$/);
+  if (!operation || operation.state !== "succeeded") {
+    const logs = operation ? await (await page.request.get(`/api/operations/${operation.id}/logs`)).text() : "";
+    const worker = process.env.COVE_BROWSER_WORKER ?? "";
+    // The panel only exposes a generic failure, so include the worker's own record of it.
+    const workerLogs = /^cove-browser-[a-f0-9]+-worker$/.test(worker) ? spawnSync("docker", ["logs", "--tail", "60", worker], { encoding: "utf8" }) : undefined;
+    const record = operation && worker ? spawnSync("docker", ["exec", worker, "sh", "-c", `find /var/lib/cove /tmp -name '*${operation.id}*' -type f 2>/dev/null | head -5 | xargs -r tail -c 3000`], { encoding: "utf8" }) : undefined;
+    throw new Error(`deploy ${operation?.state}: ${JSON.stringify(operation?.result)} ${logs.slice(0, 4000)}
+worker logs:
+${workerLogs?.stdout ?? ""}${workerLogs?.stderr ?? ""}
+worker record:
+${record?.stdout ?? ""}${record?.stderr ?? ""}`);
+  }
+  seen.push(operation.id);
+}
+
+test("team and environment resource defaults apply at deploy and placement advice never chooses the node", async ({ page }, testInfo) => {
+  test.setTimeout(300_000);
+  await page.goto("/projects");
+  await signIn(page);
+  const origin = new URL(page.url()).origin;
+  try {
+    await page.goto("/team");
+    const team = page.getByRole("region", { name: "Resource defaults", exact: true });
+    await team.getByLabel(/^CPU cores/).fill("0.001");
+    await team.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(team.getByText("Enter CPU cores from 0.01 to 1024, or leave blank.", { exact: true })).toBeVisible();
+    await expect(team.getByLabel(/^CPU cores/)).toHaveAttribute("aria-invalid", "true");
+    await team.getByLabel(/^CPU cores/).fill("");
+    await team.getByLabel(/^Memory \(MiB\)/).fill("128");
+    await expect(team.getByText("128 MiB memory", { exact: true })).toBeVisible();
+    await team.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(team.getByText("Saved. Applies at each resource's next deploy.", { exact: true })).toBeVisible();
+    // The packaged worker reports resource defaults support, so no upgrade warning is shown.
+    await expect(team.getByText("Some workers need an upgrade", { exact: true })).toHaveCount(0);
+    await capture(page, testInfo, "team-resource-defaults");
+
+    await createProject(page, "Defaults project");
+    await page.getByRole("link", { name: /production/ }).first().click();
+    const environment = page.getByRole("region", { name: "Resource defaults", exact: true });
+    await expect(environment.getByText("Blank inherits the team default of 128 MiB.", { exact: true })).toBeVisible();
+    await expect(environment.getByText("Blank inherits the team default, which is not set for CPU.", { exact: true })).toBeVisible();
+    await environment.getByLabel(/^Memory \(MiB\)/).fill("64");
+    await environment.getByRole("button", { name: "Save changes", exact: true }).click();
+    await expect(environment.getByText("Saved. Applies at each resource's next deploy.", { exact: true })).toBeVisible();
+    await expect(environment.getByText("64 MiB memory", { exact: true })).toBeVisible();
+    await capture(page, testInfo, "environment-resource-defaults");
+
+    await page.getByRole("link", { name: "New resource", exact: true }).first().click();
+    await page.getByRole("button", { name: "Custom Compose or Git" }).click();
+    await page.getByLabel("Name", { exact: true }).fill("defaults-service");
+    const node = page.getByLabel("Node", { exact: true });
+    await expect(node).toHaveText(/Select a node/);
+    await page.getByLabel(/^Estimated memory \(MiB\)/).fill("32");
+    // Enter inspects nodes; it must not submit the resource form.
+    await page.getByLabel(/^Estimated memory \(MiB\)/).press("Enter");
+    const advice = page.getByRole("list", { name: "Nodes by measured free capacity", exact: true });
+    const workerRow = advice.getByRole("listitem").filter({ hasText: "ready-browser-worker" });
+    await expect(workerRow).toBeVisible({ timeout: 30_000 });
+    await expect(workerRow.getByText(/^(Fits measured free capacity|Exceeds measured free capacity|Capacity unknown)$/)).toBeVisible();
+    await expect(page.getByText(/no explicit CPU requirement and at least 32 MiB memory free/)).toBeVisible();
+    await expect(page).toHaveURL(/\/resources\/new/);
+    await expect(node).toHaveText(/Select a node/);
+    await page.getByRole("button", { name: "Refresh advice", exact: true }).click();
+    await expect(workerRow).toBeVisible();
+    await expect(node).toHaveText(/Select a node/);
+    await capture(page, testInfo, "placement-advice");
+    await chooseOption(node, { label: "ready-browser-worker" });
+    await expect(workerRow.getByText("Selected", { exact: true })).toBeVisible();
+    await page.getByLabel("Compose file", { exact: true }).fill(compose("defaults-service"));
+    await page.getByRole("button", { name: "Create resource", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "defaults-service", exact: true })).toBeVisible();
+    const url = page.url();
+    const workload = new URL(url).pathname.split("/")[2] ?? "";
+    const deploys: string[] = [];
+    // The CodeMirror editor can store non-breaking spaces from fill(), so set the exact ASCII Compose through the API.
+    const services = compose("defaults-service");
+    const created = await (await page.request.get(`/api/workloads/${workload}`)).json() as { name: string; node_id: string; environment_id?: string };
+    expect(created.environment_id).toBeTruthy();
+    expect((await page.request.put(`/api/workloads/${workload}`, { headers: { Origin: origin }, data: { name: created.name, node_id: created.node_id, kind: "service", compose: services } })).status()).toBe(200);
+    const stored = await (await page.request.get(`/api/workloads/${workload}`)).json() as { compose: string; environment_id?: string };
+    expect(stored.compose).toBe(services);
+    expect(stored.environment_id).toBe(created.environment_id);
+    await page.reload();
+
+    await deployFromHeader(page);
+    await waitForNewDeploy(page, workload, deploys);
+    // Environment memory overrides the team value; no CPU default anywhere, so Docker gets no CPU limit.
+    await expect.poll(() => runningLimits(url), { timeout: 120_000 }).toBe(`${64 * 1048576} 0`);
+
+    await page.goto(`${url}/limits`);
+    await expect(page.getByText(/Current environment and team defaults: 64 MiB memory\./)).toBeVisible();
+    await page.getByRole("button", { name: "Add service limit", exact: true }).click();
+    await page.getByLabel("Compose service", { exact: true }).fill("app");
+    await page.getByLabel("CPU cores", { exact: true }).fill("0.5");
+    await page.getByRole("button", { name: "Save changes", exact: true }).click();
+    // Saving refetches the resource and remounts the form, so check the stored limit rather than a transient status.
+    await expect.poll(async () => ((await (await page.request.get(`/api/workloads/${workload}`)).json()) as { limits?: Record<string, { cpus: number; memory_mb: number }> }).limits?.app?.cpus, { timeout: 15_000 }).toBe(0.5);
+    await page.reload();
+    await expect(page.getByLabel("CPU cores", { exact: true })).toHaveValue("0.5");
+    await expect(page.getByLabel("Memory (MiB)", { exact: true })).toHaveValue("");
+    await capture(page, testInfo, "resource-limits-defaults");
+    await deployFromHeader(page);
+    await waitForNewDeploy(page, workload, deploys);
+    // The explicit Cove CPU limit wins; memory still inherits the environment default because the service sets none.
+    await expect.poll(() => runningLimits(url), { timeout: 120_000 }).toBe(`${64 * 1048576} 500000000`);
+  } finally {
+    expect((await page.request.put("/api/resource-defaults", { headers: { Origin: origin }, data: { cpus: 0, memory_mb: 0 } })).status()).toBe(200);
+  }
+});
+
 test("administrator password rotation signs out every session", async ({ page }) => {
   await page.goto("/account");
   await signIn(page);
@@ -2249,4 +2936,341 @@ test("administrator password rotation signs out every session", async ({ page })
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
   await signIn(page);
   await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+});
+
+// Browser checks never send a firewall change to a real host: supported states are mocked, and the real worker is only inspected.
+const firewallPath = /\/api\/nodes\/[^/]+\/firewall(?:\/preview)?$/;
+
+async function fixtureNode(page: Page) {
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; name: string; capabilities: { firewall?: boolean } | null }[];
+  const node = nodes.find((item) => item.name === "ready-browser-worker");
+  if (!node) throw new Error("Fixture worker node missing");
+  return node;
+}
+
+test("host firewall previews, applies with typed confirmation and reverts pending changes in every mocked state", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/nodes"); await signIn(page);
+  const node = await fixtureNode(page);
+  expect(node.capabilities?.firewall).toBe(true);
+
+  const base = {
+    supported: true, active: true, revision: "", limited: false, notice: "", last_error: "",
+    rules: [{ protocol: "tcp", port: 8080, sources: ["192.0.2.0/24"] }],
+    available: [{ protocol: "tcp", port: 8080 }, { protocol: "udp", port: 5353 }, { protocol: "tcp", port: 2222 }],
+    reserved: [22, 80, 443, 2222],
+    ufw: "Status: active\nLogging: on (low)\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n\nTo                         Action      From\n--                         ------      ----\n22/tcp                     ALLOW IN    Anywhere",
+    nftables: "table inet filter {\n chain input {\n  type filter hook input priority filter; policy accept;\n }\n}",
+  };
+  const revision = "b".repeat(64);
+  let current: Record<string, unknown> = base;
+  const posts: { url: string; body: unknown }[] = [];
+  let releaseApply: (() => void) | undefined;
+  let applyResponse: { status: number; body: unknown } = { status: 200, body: base };
+  await page.route(firewallPath, async (route) => {
+    const request = route.request();
+    if (request.method() === "GET") return route.fulfill({ json: current, headers: { "Cache-Control": "no-store" } });
+    const body = request.postDataJSON() as { rules?: unknown[]; revert?: boolean };
+    posts.push({ url: new URL(request.url()).pathname, body });
+    if (request.url().endsWith("/preview")) return route.fulfill({ json: { ...current, rules: body.rules, revision } });
+    if (!body.revert) await new Promise<void>((resolve) => { releaseApply = resolve; });
+    if (applyResponse.status !== 200) return route.fulfill({ status: applyResponse.status, contentType: "text/plain", body: String(applyResponse.body) });
+    return route.fulfill({ json: applyResponse.body });
+  });
+
+  await page.goto(`/nodes/${node.id}`);
+  const section = page.getByRole("region", { name: "Host firewall" });
+  await expect(section.getByText(/Not inspected yet/)).toBeVisible();
+  await section.scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "firewall-not-inspected");
+  await section.getByRole("button", { name: "Inspect", exact: true }).click();
+  await expect(section.getByRole("list", { name: "Current Cove rules" })).toContainText("192.0.2.0/24");
+  await expect(section.getByText("(protected)")).toBeVisible();
+  await section.getByText("UFW status", { exact: true }).click();
+  const ufw = section.getByRole("region", { name: "UFW status" });
+  await ufw.focus();
+  await expect(ufw).toBeFocused();
+  await capture(page, testInfo, "firewall-inspected");
+
+  // At phone width the host output keeps its columns and scrolls inside its own region, not the page.
+  await page.setViewportSize({ width: 390, height: 900 });
+  await ufw.scrollIntoViewIfNeeded();
+  const layout = await ufw.evaluate((region) => {
+    const pre = region.querySelector("pre")!;
+    const text = pre.firstChild as Text;
+    const left = (needle: string) => {
+      const range = document.createRange();
+      const start = text.data.indexOf(needle);
+      range.setStart(text, start);
+      range.setEnd(text, start + needle.length);
+      return range.getBoundingClientRect().left;
+    };
+    return {
+      renderedLines: Math.round(pre.getBoundingClientRect().height / parseFloat(getComputedStyle(pre).lineHeight)),
+      sourceLines: text.data.split("\n").length,
+      actionColumn: left("Action"), allowColumn: left("ALLOW IN"),
+      fromColumn: left("From"), anywhereColumn: left("Anywhere"),
+      regionRight: region.getBoundingClientRect().right,
+      clientWidth: region.clientWidth, scrollWidth: region.scrollWidth, scrollLeft: region.scrollLeft,
+    };
+  });
+  expect(layout.renderedLines, "no host output line wraps").toBe(layout.sourceLines);
+  expect(Math.abs(layout.actionColumn - layout.allowColumn)).toBeLessThan(1);
+  expect(Math.abs(layout.fromColumn - layout.anywhereColumn)).toBeLessThan(1);
+  expect(layout.scrollWidth, "long output overflows its region").toBeGreaterThan(layout.clientWidth);
+  expect(layout.regionRight).toBeLessThanOrEqual(390);
+  expect(layout.scrollLeft).toBe(0);
+  await expectNoHorizontalScroll(page);
+  await ufw.focus();
+  await expect(ufw).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect.poll(() => ufw.evaluate((region) => region.scrollLeft), { message: "ArrowRight scrolls the focused output" }).toBeGreaterThan(0);
+  await expectNoHorizontalScroll(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Edit, preview, then change a field: the earlier preview must be discarded and a new one requested.
+  await section.getByRole("button", { name: "Edit rules", exact: true }).click();
+  const sources = section.getByLabel("Allowed sources");
+  await sources.fill("198.51.100.0/24\n2001:db8::/32");
+  await section.getByRole("button", { name: "Add rule", exact: true }).click();
+  await expect(section.getByLabel("Port")).toHaveCount(2);
+  await capture(page, testInfo, "firewall-editor");
+  await section.getByRole("button", { name: "Preview change", exact: true }).click();
+  let dialog = page.getByRole("dialog", { name: "Apply this firewall policy?" });
+  await expect(dialog).toContainText("2001:db8::/32");
+  await expect(dialog).toContainText("Denies all new connections");
+  await capture(page, testInfo, "firewall-preview");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await section.getByRole("button", { name: /Remove rule for UDP 5353/ }).click();
+  await section.getByRole("button", { name: "Preview change", exact: true }).click();
+  dialog = page.getByRole("dialog", { name: "Apply this firewall policy?" });
+  await expect(dialog).not.toContainText("Denies all new connections");
+  expect(posts.map((post) => post.url)).toEqual([`/api/nodes/${node.id}/firewall/preview`, `/api/nodes/${node.id}/firewall/preview`]);
+
+  // The typed node name gates the keyboard path as well as the button.
+  const confirm = dialog.getByLabel(`Type ${node.name} to confirm`);
+  await confirm.fill(node.name.slice(0, -1));
+  await confirm.press("Enter");
+  await expect(dialog.getByRole("button", { name: "Apply firewall change", exact: true })).toBeDisabled();
+  expect(posts).toHaveLength(2);
+  await confirm.fill(node.name);
+  applyResponse = { status: 200, body: { ...base, rules: [{ protocol: "tcp", port: 8080, sources: ["198.51.100.0/24", "2001:db8::/32"] }] } };
+  await confirm.press("Enter");
+  await expect(section.getByText("Applying the firewall change", { exact: true })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Inspect again", exact: true })).toBeDisabled();
+  await capture(page, testInfo, "firewall-applying");
+  expect(posts[2]).toEqual({ url: `/api/nodes/${node.id}/firewall`, body: { rules: [{ protocol: "tcp", port: 8080, sources: ["198.51.100.0/24", "2001:db8::/32"] }], revision, confirm: true } });
+  current = applyResponse.body as Record<string, unknown>;
+  releaseApply?.();
+  await expect(section.getByText("Firewall change confirmed", { exact: true })).toBeVisible();
+  await expect(section.getByText(/protected boot service restores this policy/)).toBeVisible();
+  await capture(page, testInfo, "firewall-confirmed");
+
+  // An ambiguous failure re-inspects once, finds the unconfirmed change and never retries by itself.
+  await section.getByRole("button", { name: "Edit rules", exact: true }).click();
+  await section.getByLabel("Allowed sources").fill("203.0.113.0/24");
+  await section.getByRole("button", { name: "Preview change", exact: true }).click();
+  dialog = page.getByRole("dialog", { name: "Apply this firewall policy?" });
+  await dialog.getByLabel(`Type ${node.name} to confirm`).fill(node.name);
+  applyResponse = { status: 502, body: "firewall confirmation could not be verified; refresh before retrying and inspect the recovery deadline" };
+  await dialog.getByRole("button", { name: "Apply firewall change", exact: true }).click();
+  await expect(section.getByText("Applying the firewall change", { exact: true })).toBeVisible();
+  current = { ...base, rules: [{ protocol: "tcp", port: 8080, sources: ["203.0.113.0/24"] }], pending: { id: "c".repeat(32), deadline: new Date(Date.now() + 120_000).toISOString() } };
+  releaseApply?.();
+  await expect(section.getByText("The firewall change could not be confirmed", { exact: true })).toBeVisible();
+  await expect(section.getByText(/may or may not have been applied/)).toBeVisible();
+  await expect(section.getByText("Unconfirmed firewall change", { exact: true })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Edit rules", exact: true })).toBeDisabled();
+  await capture(page, testInfo, "firewall-pending");
+  const applies = posts.filter((post) => post.url === `/api/nodes/${node.id}/firewall`);
+  expect(applies).toHaveLength(2);
+
+  // Revert needs explicit confirmation; cancelling sends nothing.
+  await section.getByRole("button", { name: "Revert change", exact: true }).click();
+  const revertDialog = page.getByRole("dialog", { name: "Revert the unconfirmed firewall change?" });
+  await revertDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(posts.filter((post) => (post.body as { revert?: boolean }).revert)).toHaveLength(0);
+  await section.getByRole("button", { name: "Revert change", exact: true }).click();
+  const reverted = { ...base, last_error: "The unconfirmed firewall change was reverted." };
+  applyResponse = { status: 200, body: reverted };
+  current = reverted;
+  await revertDialog.getByRole("button", { name: "Revert change", exact: true }).click();
+  await expect(section.getByText("Unconfirmed change reverted", { exact: true })).toBeVisible();
+  await expect(section.getByText("Last recovery note", { exact: true })).toBeVisible();
+  expect(posts.at(-1)?.body).toEqual({ revert: true, confirm: true });
+  await capture(page, testInfo, "firewall-reverted");
+
+  // Long policies wrap inside the section; unsupported hosts stay read-only.
+  current = {
+    ...base,
+    rules: Array.from({ length: 32 }, (_, index) => ({ protocol: index % 2 ? "udp" : "tcp", port: 10000 + index, sources: index === 0 ? Array.from({ length: 32 }, (_, n) => `2001:db8:${n.toString(16)}:ffff:ffff:ffff:ffff:0/112`) : index % 3 ? [`198.51.${index}.0/24`] : [] })),
+    available: Array.from({ length: 40 }, (_, index) => ({ protocol: index % 2 ? "udp" : "tcp", port: 10000 + index })),
+    nftables: "table inet filter {}\n".repeat(400), limited: true,
+  };
+  await section.getByRole("button", { name: "Inspect again", exact: true }).click();
+  await expect(section.getByRole("list", { name: "Current Cove rules" }).locator(":scope > li")).toHaveCount(32);
+  await expect(section.getByText(/clipped at the inspection limit/)).toBeVisible();
+  await capture(page, testInfo, "firewall-long");
+  current = { ...base, supported: false, active: false, rules: null, available: null, reserved: null, notice: "A running host systemd manager is required for independent timed firewall recovery." };
+  await section.getByRole("button", { name: "Inspect again", exact: true }).click();
+  await expect(section.getByText("Firewall changes are unavailable on this host", { exact: true })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Edit rules", exact: true })).toBeDisabled();
+  await capture(page, testInfo, "firewall-unsupported");
+  expect(errors).toEqual([]);
+});
+
+test("host firewall inspects the real worker read-only and the browser never sends a change", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const inspections: number[] = [];
+  const blocked: string[] = [];
+  // Any write is aborted before it leaves the browser, so this test cannot change the real host's firewall.
+  await page.route(firewallPath, (route) => {
+    if (route.request().method() === "GET") return route.continue();
+    blocked.push(route.request().url());
+    return route.abort();
+  });
+  page.on("response", (response) => { if (firewallPath.test(new URL(response.url()).pathname) && response.request().method() === "GET") inspections.push(response.status()); });
+
+  await page.goto("/nodes"); await signIn(page);
+  const node = await fixtureNode(page);
+  expect(node.capabilities?.firewall).toBe(true);
+  await page.goto(`/nodes/${node.id}`);
+  const section = page.getByRole("region", { name: "Host firewall" });
+  await expect(section.getByText(/Not inspected yet/)).toBeVisible();
+  expect(inspections).toEqual([]);
+
+  const first = page.waitForResponse((response) => response.url().endsWith(`/api/nodes/${node.id}/firewall`) && response.request().method() === "GET", { timeout: 120_000 });
+  await section.getByRole("button", { name: "Inspect", exact: true }).click();
+  const response = await first;
+  expect(response.headers()["cache-control"]).toBe("no-store");
+  if (response.status() !== 200) {
+    // A refusal such as a busy or unsupported worker is shown as an error with its message and is never retried automatically.
+    testInfo.annotations.push({ type: "firewall", description: `${response.status()} ${await response.text()}` });
+    await expect(section.getByText("Could not load the firewall status", { exact: true })).toBeVisible();
+  } else {
+    const status = await response.json() as { supported: boolean; active: boolean; rules: unknown[] | null; available: unknown[] | null; reserved: number[] | null; notice: string; pending?: unknown; limited: boolean };
+    testInfo.annotations.push({ type: "firewall", description: JSON.stringify({ ...status, ufw: undefined, nftables: undefined }) });
+    if (!status.supported) {
+      await expect(section.getByText("Firewall changes are unavailable on this host", { exact: true })).toBeVisible();
+      await expect(section.getByRole("button", { name: "Edit rules", exact: true })).toBeDisabled();
+      if (status.notice) await expect(section.getByText(status.notice, { exact: false }).first()).toBeVisible();
+    }
+    expect(status.pending).toBeUndefined();
+    for (const port of status.reserved ?? []) await expect(section.getByText(String(port), { exact: true }).first()).toBeVisible();
+    await section.getByText("nftables ruleset", { exact: true }).click();
+    await expect(section.getByRole("region", { name: "nftables ruleset" })).toBeVisible();
+  }
+  await section.scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "firewall-real");
+  await expect(section.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled();
+  await page.waitForTimeout(1_000);
+  expect(inspections).toHaveLength(1);
+  expect(blocked).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+// GPU inventory is only read from the real worker; the browser never deploys a GPU selection or changes host drivers.
+interface GPUInventoryReport { checked_at: string; devices: { id: string; name: string; driver: string; memory_mb: number | null; assignable: boolean; notice: string }[]; limited: boolean; notices: string[] }
+
+async function expectInventoryShown(section: Locator, response: Awaited<ReturnType<Page["waitForResponse"]>>, collapsed: boolean) {
+  if (response.status() !== 200) {
+    // A worker without native GPU tooling may refuse inspection; the page must show that refusal, not an empty inventory.
+    expect([409, 502]).toContain(response.status());
+    await expect(section.getByText(response.status() === 409 ? "The worker cannot inspect GPUs yet" : "GPU inspection failed on the node", { exact: true })).toBeVisible();
+    await expect(section.getByRole("list", { name: "Observed GPUs" })).toHaveCount(0);
+    return null;
+  }
+  expect(response.headers()["cache-control"]).toBe("no-store");
+  const inventory = await response.json() as GPUInventoryReport;
+  await expect(section.getByText(/^Inspected/)).toBeVisible();
+  if (inventory.devices.length === 0) {
+    await expect(section.getByText(/does not mean the host has no GPU hardware/).first()).toBeVisible();
+  } else {
+    if (collapsed) await section.getByText(/^Observed devices \(/).click();
+    await expect(section.getByRole("list", { name: "Observed GPUs" }).getByRole("listitem")).toHaveCount(inventory.devices.length);
+  }
+  for (const notice of inventory.notices) await expect(section.getByText(notice, { exact: true })).toBeVisible();
+  return inventory;
+}
+
+test("GPU inventory is inspected only on request and per-service GPU settings save without touching CPU or memory", async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const inspections: string[] = [];
+  page.on("request", (request) => {
+    if (/\/api\/(nodes|workloads)\/[^/]+\/gpus$/.test(new URL(request.url()).pathname)) inspections.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  });
+
+  await page.goto("/nodes"); await signIn(page);
+  const nodes = await (await page.request.get("/api/nodes")).json() as { id: string; name: string; capabilities: { gpu_assignments?: boolean } | null }[];
+  const node = nodes.find((item) => item.name === "ready-browser-worker");
+  if (!node) throw new Error("Fixture worker node missing");
+  expect(node.capabilities?.gpu_assignments).toBe(true);
+
+  await page.goto(`/nodes/${node.id}`);
+  const nodeSection = page.getByRole("region", { name: "GPUs", exact: true });
+  await expect(nodeSection.getByText("Not inspected yet.", { exact: true })).toBeVisible();
+  expect(inspections).toEqual([]);
+  const nodeResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/nodes/${node.id}/gpus`, { timeout: 120_000 });
+  await nodeSection.getByRole("button", { name: "Inspect GPUs", exact: true }).click();
+  const nodeInventory = await expectInventoryShown(nodeSection, await nodeResponse, false);
+  testInfo.annotations.push({ type: "node-gpus", description: JSON.stringify(nodeInventory) });
+  await expect(nodeSection.getByRole("button", { name: "Inspect again", exact: true })).toBeEnabled();
+  await nodeSection.scrollIntoViewIfNeeded();
+  await capture(page, testInfo, "gpus-node");
+
+  await createProject(page, "GPU project");
+  const resourceURL = await createResource(page, "gpu-service");
+  const workload = new URL(resourceURL).pathname.split("/")[2] ?? "";
+  const saved = async () => (await (await page.request.get(`/api/workloads/${workload}`)).json() as { limits?: Record<string, unknown> }).limits ?? {};
+  await page.goto(`${resourceURL}/limits`);
+  const gpus = page.getByRole("region", { name: "GPU assignments", exact: true });
+  const limits = page.getByRole("region", { name: "Resource limits", exact: true });
+  await expect(gpus.getByText("Every service inherits GPU requests from Compose.", { exact: true })).toBeVisible();
+  expect(inspections).toEqual([`GET /api/nodes/${node.id}/gpus`]);
+
+  const resourceResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/workloads/${workload}/gpus`, { timeout: 120_000 });
+  await gpus.getByRole("button", { name: "Inspect GPUs", exact: true }).click();
+  const resourceInventory = await expectInventoryShown(gpus, await resourceResponse, true);
+  testInfo.annotations.push({ type: "resource-gpus", description: JSON.stringify(resourceInventory) });
+
+  // Selecting devices without choosing any is refused in the browser and focuses the problem.
+  await gpus.getByRole("button", { name: "Add service GPU setting", exact: true }).click();
+  await gpus.getByLabel("Compose service", { exact: true }).fill("app");
+  await gpus.getByRole("button", { name: "Save GPU assignments", exact: true }).click();
+  await expect(gpus.getByText("Select at least one device, or choose No standard GPU requests.", { exact: true })).toBeVisible();
+  await expect(gpus.getByRole("radio", { name: /Select devices/ })).toBeFocused();
+  await capture(page, testInfo, "gpus-resource-invalid");
+
+  // No standard GPU requests is saved as an explicit empty list.
+  await gpus.getByRole("radio", { name: /No standard GPU requests/ }).check();
+  await gpus.getByRole("button", { name: "Save GPU assignments", exact: true }).click();
+  await expect(gpus.getByText("Saved. Changes apply on the next deploy.", { exact: true })).toBeVisible();
+  await expect.poll(saved).toEqual({ app: { cpus: 0, memory_mb: 0, gpus: [] } });
+
+  // Saving CPU for the same service keeps its GPU setting.
+  await limits.getByRole("button", { name: "Add service limit", exact: true }).click();
+  await limits.getByLabel("Compose service", { exact: true }).fill("app");
+  await limits.getByLabel("CPU cores", { exact: true }).fill("0.5");
+  await limits.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect.poll(saved).toEqual({ app: { cpus: 0.5, memory_mb: 0, gpus: [] } });
+  await page.reload();
+  await expect(gpus.getByRole("radio", { name: /No standard GPU requests/ })).toBeChecked();
+  await expect(limits.getByLabel("CPU cores", { exact: true })).toHaveValue("0.5");
+  await capture(page, testInfo, "gpus-resource-saved");
+
+  // Returning to Inherit Compose removes the GPU setting and keeps CPU.
+  await gpus.getByRole("radio", { name: /Inherit Compose/ }).check();
+  await gpus.getByRole("button", { name: "Save GPU assignments", exact: true }).click();
+  await expect.poll(saved).toEqual({ app: { cpus: 0.5, memory_mb: 0 } });
+
+  // Reloading never re-inspects on its own.
+  expect(inspections).toEqual([`GET /api/nodes/${node.id}/gpus`, `GET /api/workloads/${workload}/gpus`]);
+  expect(errors).toEqual([]);
 });

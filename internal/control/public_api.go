@@ -61,6 +61,12 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/workloads/{id}/pitr", "workloads:read", "Read PITR configuration metadata and verified recovery windows without keys", nil, map[string]any{}, 200, s.getPITR},
+		{"PUT", "/workloads/{id}/pitr", "pitr:configure", "Configure PostgreSQL capture after explicit restart confirmation", pitrSettingsInput{}, apiID{}, 202, s.changePITR},
+		{"DELETE", "/workloads/{id}/pitr", "pitr:forget", "Delete disabled PITR history after confirmation", pitrSettingsInput{}, apiID{}, 202, s.changePITR},
+		{"POST", "/workloads/{id}/pitr/backup", "pitr:backup", "Queue a PITR base backup", nil, apiID{}, 202, s.changePITR},
+		{"POST", "/workloads/{id}/pitr/restore-copy", "pitr:restore", "Recover a separate offline resource; source backup and secret-read plus destination create permissions apply; credentials returned once", pitrCopyInput{}, map[string]any{}, 202, s.restorePITR},
+
 		{"GET", "/settings/directory/teams", "directory:manage", "List directory mapping targets; instance administrators only", nil, map[string]any{}, 200, s.directoryTeams},
 		{"GET", "/settings/github-team-sync", "directory:manage", "Read sealed GitHub directory source metadata; instance administrators only", nil, []githubTeamSource{}, 200, s.githubTeamSources},
 		{"POST", "/settings/github-team-sync", "directory:manage", "Create a GitHub group source; instance administrators only", githubTeamSourceInput{}, apiID{}, 200, s.githubTeamSources},
@@ -358,7 +364,7 @@ func (s *Server) openAPIDocument() map[string]any {
 		}
 		entry[strings.ToLower(route.Method)] = operation
 	}
-	document := map[string]any{"openapi": "3.1.0", "info": map[string]string{"title": "Cove public API", "version": "1.0.0", "description": "Scopes limit tokens; every request also revalidates its creator's current grants. Errors are plain text. Deployment is explicit and asynchronous. Secret values appear only in audited exports."}, "servers": []any{map[string]string{"url": s.panelBasePath() + "/api/v1"}}, "paths": paths, "components": map[string]any{"securitySchemes": map[string]any{"bearer": map[string]string{"type": "http", "scheme": "bearer"}}}}
+	document := map[string]any{"openapi": "3.1.0", "info": map[string]string{"title": "Cove public API", "version": "1.0.0", "description": "Scopes limit tokens; every request also revalidates its creator's current grants. Errors are plain text. Deployment is explicit and asynchronous. Secret values require explicit scoped operations or audited exports."}, "servers": []any{map[string]string{"url": s.panelBasePath() + "/api/v1"}}, "paths": paths, "components": map[string]any{"securitySchemes": map[string]any{"bearer": map[string]string{"type": "http", "scheme": "bearer"}}}}
 	s.documentSCIM(document)
 	return document
 }

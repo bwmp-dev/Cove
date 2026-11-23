@@ -18,29 +18,33 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
-	Database       *DatabaseInspectionRequest `json:"database_inspection,omitempty"`
-	Bucket         *ObjectBucket              `json:"object_bucket,omitempty"`
-	Diff           *ReleaseComparisonRequest  `json:"release_comparison,omitempty"`
-	Proxy          *outbound.Config           `json:"outbound_proxy,omitempty"`
-	Adoption       *AdoptionRequest           `json:"adoption,omitempty"`
-	Exec           *ExecRequest               `json:"exec,omitempty"`
-	Links          *LinkConfig                `json:"links,omitempty"`
-	Ingress        *IngressConfigRequest      `json:"ingress,omitempty"`
-	Tunnel         *TunnelRequest             `json:"tunnel,omitempty"`
-	Promotion      *PromotionExport           `json:"promotion,omitempty"`
-	Registry       *Registry                  `json:"registry,omitempty"`
-	Storage        *StorageLocation           `json:"storage,omitempty"`
-	Terminal       *TerminalRequest           `json:"terminal,omitempty"`
-	Method         string                     `json:"method"`
-	Request        *Request                   `json:"request,omitempty"`
-	ID             string                     `json:"id,omitempty"`
-	Snapshot       *VolumeSnapshotConfig      `json:"snapshot,omitempty"`
-	Stream         *StreamRequest             `json:"stream,omitempty"`
-	TrafficControl *ProxyTrafficControl       `json:"traffic_control,omitempty"`
-	CleanupControl *CleanupControl            `json:"cleanup_control,omitempty"`
-	JournalPrune   *JournalPruneRequest       `json:"journal_prune,omitempty"`
-	Files          *FileRequest               `json:"files,omitempty"`
-	Telemetry      *TelemetryRequest          `json:"telemetry,omitempty"`
+	Database        *DatabaseInspectionRequest `json:"database_inspection,omitempty"`
+	Bucket          *ObjectBucket              `json:"object_bucket,omitempty"`
+	Diff            *ReleaseComparisonRequest  `json:"release_comparison,omitempty"`
+	Proxy           *outbound.Config           `json:"outbound_proxy,omitempty"`
+	Adoption        *AdoptionRequest           `json:"adoption,omitempty"`
+	Exec            *ExecRequest               `json:"exec,omitempty"`
+	Links           *LinkConfig                `json:"links,omitempty"`
+	Ingress         *IngressConfigRequest      `json:"ingress,omitempty"`
+	Tunnel          *TunnelRequest             `json:"tunnel,omitempty"`
+	Promotion       *PromotionExport           `json:"promotion,omitempty"`
+	Registry        *Registry                  `json:"registry,omitempty"`
+	Storage         *StorageLocation           `json:"storage,omitempty"`
+	Terminal        *TerminalRequest           `json:"terminal,omitempty"`
+	Method          string                     `json:"method"`
+	Request         *Request                   `json:"request,omitempty"`
+	ID              string                     `json:"id,omitempty"`
+	Snapshot        *VolumeSnapshotConfig      `json:"snapshot,omitempty"`
+	Stream          *StreamRequest             `json:"stream,omitempty"`
+	TrafficControl  *ProxyTrafficControl       `json:"traffic_control,omitempty"`
+	CleanupControl  *CleanupControl            `json:"cleanup_control,omitempty"`
+	JournalPrune    *JournalPruneRequest       `json:"journal_prune,omitempty"`
+	Files           *FileRequest               `json:"files,omitempty"`
+	Telemetry       *TelemetryRequest          `json:"telemetry,omitempty"`
+	Move            *MoveRequest               `json:"move,omitempty"`
+	Firewall        *FirewallControl           `json:"firewall,omitempty"`
+	HostMaintenance *HostMaintenanceRequest    `json:"host_maintenance,omitempty"`
+	Identity        *IdentityRequest           `json:"identity,omitempty"`
 }
 type RPCResponse struct {
 	Database        *DatabaseInspection   `json:"database_inspection,omitempty"`
@@ -84,6 +88,12 @@ type RPCResponse struct {
 	Idle            *IdleStatus           `json:"idle,omitempty"`
 	Rollout         *RolloutStatus        `json:"rollout,omitempty"`
 	Suspension      *SuspensionStatus     `json:"suspension,omitempty"`
+	Move            *MoveState            `json:"move,omitempty"`
+	GPUs            *GPUInventory         `json:"gpus,omitempty"`
+	Firewall        *FirewallResult       `json:"firewall,omitempty"`
+	HostPatches     *HostPatchStatus      `json:"host_patches,omitempty"`
+	Identity        *IdentityState        `json:"identity,omitempty"`
+	PITR            *PITRStatus           `json:"pitr,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
@@ -215,6 +225,58 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: "retained release comparison unavailable: " + err.Error()}
 		}
 		return RPCResponse{Comparison: comparison}
+	case "move":
+		if r.Move == nil {
+			return RPCResponse{Error: "move request required"}
+		}
+		state, err := e.Move(ctx, *r.Move)
+		response := RPCResponse{Move: state}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
+	case "gpus":
+		state, err := e.GPUs(ctx)
+		response := RPCResponse{GPUs: state}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
+	case "firewall":
+		if r.Firewall == nil {
+			return RPCResponse{Error: "firewall options required"}
+		}
+		state, err := e.ConfigureFirewall(ctx, *r.Firewall)
+		response := RPCResponse{Firewall: state}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
+	case "host_maintenance":
+		if r.HostMaintenance == nil {
+			return RPCResponse{Error: "host maintenance options required"}
+		}
+		status, err := e.HostMaintenance(ctx, *r.HostMaintenance)
+		response := RPCResponse{HostPatches: status}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return response
+	case "pitr_status":
+		status, err := e.PITRStatus(ctx, r.ID)
+		if err != nil {
+			return RPCResponse{Error: "PITR status unavailable; verify worker metadata and capture state"}
+		}
+		return RPCResponse{PITR: &status}
+	case "pitr_copy_plan":
+		if r.Request == nil {
+			return RPCResponse{Error: "PITR copy request required"}
+		}
+		plan, err := e.PlanPITRCopy(ctx, *r.Request)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{RestoreCopy: plan}
 	case "snapshot_preview":
 		if r.Snapshot == nil {
 			return RPCResponse{Error: "snapshot options required"}
@@ -277,6 +339,15 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: err.Error()}
 		}
 		return RPCResponse{Files: result}
+	case "identity":
+		if r.Identity == nil {
+			return RPCResponse{Error: "identity change required"}
+		}
+		result, err := e.ChangeIdentity(*r.Identity)
+		if err != nil {
+			return RPCResponse{Error: "SSH identity change failed; inspect its pending state and authorized key restrictions"}
+		}
+		return RPCResponse{Identity: result}
 	case "capacity":
 		if r.Request == nil {
 			return RPCResponse{Error: "deployment request required"}
@@ -621,7 +692,9 @@ func RPCTimeout(method string) time.Duration {
 		return 40 * time.Second
 	}
 	switch method {
-	case "stream":
+	case "host_maintenance", "firewall", "gpus":
+		return 90 * time.Second
+	case "stream", "move":
 		return 30 * time.Minute
 	case "ingress_config_change":
 		return 5 * time.Minute

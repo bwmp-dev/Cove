@@ -25,6 +25,14 @@ type Probe struct {
 	OutboundProxy       bool         `json:"outbound_proxy"`
 	ReleaseDiff         bool         `json:"release_diff"`
 	BinarySHA256        string       `json:"binary_sha256"`
+	WorkloadMoves       bool         `json:"workload_moves"`
+	GPUAssignments      bool         `json:"gpu_assignments"`
+	ResourceDefaults    bool         `json:"resource_defaults"`
+	Firewall            bool         `json:"firewall"`
+	HostMaintenance     bool         `json:"host_maintenance"`
+	SSHIdentity         bool         `json:"ssh_identity"`
+	FileTransfers       bool         `json:"file_transfers"`
+	PostgresPITR        bool         `json:"postgres_pitr"`
 	FilesystemSnapshots bool         `json:"filesystem_snapshots"`
 	BackupTransfers     bool         `json:"backup_transfers"`
 	StreamedBackups     bool         `json:"extended_logical_backups"`
@@ -90,6 +98,7 @@ func Inspect(ctx context.Context) Probe {
 	p.OutboundProxy = true
 	p.ManagedDatabases = true
 	p.ReleaseDiff = true
+	p.WorkloadMoves = runtime.GOOS == "linux"
 	p.Previews = true
 	p.Imports = true
 	p.Adoption = true
@@ -98,9 +107,16 @@ func Inspect(ctx context.Context) Probe {
 	p.StreamedBackups = true
 	p.BackupTransfers = true
 	p.FilesystemSnapshots = runtime.GOOS == "linux"
+	p.PostgresPITR = runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64")
 	p.BackblazeB2 = true
 	p.FileBrowser = true
+	p.FileTransfers = true
+	p.SSHIdentity = runtime.GOOS == "linux"
+	p.HostMaintenance = runtime.GOOS == "linux"
+	p.Firewall = runtime.GOOS == "linux"
 	p.CapacityAdvice = true
+	p.ResourceDefaults = true
+	p.GPUAssignments = runtime.GOOS == "linux"
 	p.TrafficLogs = runtime.GOOS == "linux"
 	p.StructuredLogs = true
 	p.AlertObservations = true

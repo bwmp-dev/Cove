@@ -35,6 +35,9 @@ type Request struct {
 	OutboundProxy          *outbound.Config     `json:"outbound_proxy,omitempty"`
 	resolvedPublicBuiltins map[string]string
 	resolvedSecrets        []string
+	DefaultLimits          *ServiceLimits `json:"default_limits,omitempty"`
+	PITR                   *PITRPolicy    `json:"pitr,omitempty"`
+	PITRRestore            *PITRRestore   `json:"pitr_restore,omitempty"`
 	snapshotMounts         []backupMount
 	snapshotCheck          func(context.Context) error
 	volumeMethod           string
@@ -142,6 +145,7 @@ type Engine struct {
 	adoptedProjects  map[string]adoptedProject
 	execRunning      int
 	comparisonMu     sync.Mutex
+	moveMu           sync.Mutex
 	hostHelperBinary string
 	observationMu    sync.Mutex
 	tailSlots        chan struct{}
@@ -153,6 +157,7 @@ type Engine struct {
 	preflightMu   sync.Mutex
 	buildMu       sync.Mutex
 	storageMu     sync.Mutex
+	helperOwnerMu sync.Mutex
 	terminalMu    sync.Mutex
 	terminals     map[string]*terminalSession
 	ACMEDirectory string
@@ -169,6 +174,7 @@ type Engine struct {
 	pending       []Operation
 	fatal         chan error
 	draining      bool
+	hostChanging  bool
 	cancels       map[string]context.CancelFunc
 	recovering    map[string]routeRecovery
 	// A custom proxy configuration change that did not commit is restored until it settles.
@@ -288,6 +294,14 @@ func ValidateRequest(r Request) error {
 	if err := ValidateLimits(r.Limits); err != nil {
 		return err
 	}
+	if r.DefaultLimits != nil {
+		if r.DefaultLimits.GPUs != nil {
+			return errors.New("GPU selection cannot be inherited as a resource default")
+		}
+		if err := ValidateLimits(map[string]ServiceLimits{"default": *r.DefaultLimits}); err != nil {
+			return err
+		}
+	}
 	if err := ValidatePrivateNetwork(r.Private); err != nil {
 		return err
 	}
@@ -325,6 +339,23 @@ func ValidateRequest(r Request) error {
 		}
 	}
 	switch r.Action {
+	case "pitr_restore":
+		if r.PITRRestore == nil || !workloadIdentifier.MatchString(r.PITRRestore.Source) || r.PITRRestore.Source == r.Workload || len(r.PITRRestore.Base) != 62 || !snapshotOwnerID.MatchString(r.PITRRestore.Base[:32]) || r.PITRRestore.Base[32] != '_' || !pitrBaseName.MatchString(r.PITRRestore.Base[33:]) || r.PITRRestore.Timestamp.IsZero() || r.PITRRestore.Timestamp.After(time.Now().Add(time.Minute)) || len(r.Compose) == 0 || len(r.Compose) > 1<<20 || len(r.Environment["COVE_PITR_PASSWORD"]) < 32 {
+			return errors.New("invalid PITR recovery copy")
+		}
+	case "pitr_configure", "pitr_backup", "pitr_forget":
+		if r.PITR == nil || r.Backup == nil || r.Kind == "job" {
+			return errors.New("configure PITR storage for a PostgreSQL service")
+		}
+		if err := ValidatePITR(r.PITR.Settings); err != nil {
+			return err
+		}
+		if !snapshotOwnerID.MatchString(r.PITR.Archive) || len(r.PITR.Key) != 64 {
+			return errors.New("invalid PITR archive identity")
+		}
+		if key, err := hex.DecodeString(r.PITR.Key); err != nil || len(key) != 32 {
+			return errors.New("invalid PITR encryption key")
+		}
 	case "preview_data", "environment_preview_remove":
 	case "preview_remove":
 		if !r.Preview {
@@ -470,6 +501,9 @@ func (e *Engine) Submit(r Request) (Operation, error) {
 	return e.submitLocked(r)
 }
 func (e *Engine) submitLocked(r Request) (Operation, error) {
+	if e.moving(r.Workload) {
+		return Operation{}, errors.New("resource is fenced by an unfinished node move")
+	}
 	if err := ValidateRequest(r); err != nil {
 		return Operation{}, err
 	}
@@ -642,6 +676,9 @@ func (e *Engine) Serve(ctx context.Context) error {
 	if err := e.recoverDrills(ctx); err != nil {
 		return err
 	}
+	if err := e.recoverPITRCopies(ctx); err != nil {
+		return err
+	}
 	if err := e.recoverStorage(ctx); err != nil {
 		return err
 	}
@@ -701,7 +738,7 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 		e.customRunning = true
 		jobs.Go(func() { e.runCustomRecovery(ctx) })
 	}
-	if e.draining {
+	if e.draining || e.hostChanging {
 		return nil
 	}
 	sort.Slice(e.pending, func(i, j int) bool { return e.pending[i].CreatedAt.Before(e.pending[j].CreatedAt) })
@@ -1127,6 +1164,36 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 	} else if pending != nil && pending.Phase == "waiting" && r.Action != "stop" && r.Action != "start" && r.Action != "restart" {
 		return errors.New("promote or abort the staged rollout before this operation")
 	}
+	if r.Action == "pitr_configure" {
+		return e.configurePITR(ctx, r)
+	}
+	if r.Action == "pitr_restore" {
+		return e.performPITRCopy(ctx, r, log)
+	}
+	if r.Action == "pitr_backup" {
+		return e.backupPITR(ctx, r)
+	}
+	if r.Action == "pitr_forget" {
+		return e.forgetPITR(ctx, r)
+	}
+	if r.Action == "restore" {
+		state, readErr := e.loadPITR(r.Workload)
+		if readErr == nil && (state.Config.Policy.Settings.Enabled || state.Configuring) {
+			return errors.New("disable PITR capture before restoring this resource")
+		}
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+	}
+	if r.Action == "deploy" || r.Action == "rollback" {
+		state, readErr := e.loadPITR(r.Workload)
+		if readErr == nil && (state.Config.Policy.Settings.Enabled || state.Configuring) {
+			return errors.New("disable PITR capture before redeploying or rolling back this PostgreSQL resource; its retained recovery history remains available")
+		}
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+	}
 	if r.Action == "backup" || r.Action == "restore" {
 		err := e.performBackup(ctx, r, log)
 		if err == nil && r.Action == "backup" {
@@ -1416,7 +1483,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
-		if len(r.Limits) > 0 {
+		if len(r.Limits) > 0 || r.DefaultLimits != nil {
 			composePath, err = e.prepareLimits(ctx, r, dir, args, env, log)
 			if err != nil {
 				return err

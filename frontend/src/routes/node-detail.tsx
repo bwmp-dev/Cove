@@ -19,6 +19,11 @@ import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
 import { nodeStates } from "../lib/nodes";
 import { NodeCost } from "../components/NodeCost";
+import { NodeCloudOrigin } from "../components/NodeProviders";
+import { NodeSSH } from "../components/NodeSSH";
+import { HostSecurityUpdates } from "../components/HostSecurityUpdates";
+import { NodeFirewall } from "../components/NodeFirewall";
+import { NodeGPUs } from "../components/GPUs";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Meter, MeterGroup, Notice, PageHeader, QueryError, Section, SectionGrid } from "../components/ui";
 import { projectsQuery } from "../api/projects";
 import { findPlacement } from "../lib/hierarchy";
@@ -214,6 +219,7 @@ function NodeDetail({ node }: { node: Node }) {
         </Section>
 
         {admin && <NodeUsage node={node} />}
+        {admin && <HostSecurityUpdates node={node} />}
         <Section title="Capabilities" description="Reported by the worker during the last verification.">
           <Capabilities node={node} />
         </Section>
@@ -237,6 +243,10 @@ function NodeDetail({ node }: { node: Node }) {
             ]}
           />
         </Section>}
+
+        {admin && <NodeSSH node={node} verify={verify} />}
+
+        {admin && <NodeCloudOrigin nodeId={node.id} />}
 
         {admin && <NodeCost nodeId={node.id} />}
 
@@ -264,6 +274,8 @@ function NodeDetail({ node }: { node: Node }) {
       </SectionGrid>
       {admin && <ComposeAdoption node={node} initialReview={reviewFromHash(hash)} />}
       {admin && <NodeMounts node={node} />}
+      {admin && <NodeFirewall node={node} />}
+      {admin && <NodeGPUs node={node} />}
       {admin && (
         <Section title="Usage history" description="Host usage recorded by Cove from this node's worker." flush>
           <NodeMetricHistory nodeId={node.id} />

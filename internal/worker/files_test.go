@@ -36,7 +36,7 @@ func TestFileRequestBoundaries(t *testing.T) {
 }
 
 func TestFileBrowserDocker(t *testing.T) {
-	if os.Getenv("COVE_TEST_FILES_DOCKER") != "1" {
+	if os.Getenv("COVE_TEST_FILES_DOCKER") != "1" && os.Getenv("COVE_DATABASE_FIXTURE") == "" {
 		t.Skip("COVE_TEST_FILES_DOCKER=1 required; creates disposable Docker resources")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

@@ -30,10 +30,12 @@ func capacityNumber(value any) float64 {
 	return 0
 }
 
-func capacityChecks(config map[string]any, sample *NodeMetrics) []PreflightCheck {
-	if sample == nil || sample.MemoryTotal == 0 || sample.CPUs < 1 {
-		return []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Worker free resources could not be measured."}}
-	}
+type ResourceUsage struct {
+	CPUs     float64 `json:"cpus"`
+	MemoryMB int64   `json:"memory_mb"`
+}
+
+func declaredCapacity(config map[string]any) (float64, float64, bool, bool, error) {
 	cpu, memory := float64(0), float64(0)
 	unknownCPU, unknownMemory := false, false
 	services, _ := config["services"].(map[string]any)
@@ -46,13 +48,13 @@ func capacityChecks(config map[string]any, sample *NodeMetrics) []PreflightCheck
 		if count, ok := deploy["replicas"]; ok {
 			replicas = capacityNumber(count)
 			if replicas < 0 || replicas > 10000 {
-				return []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Replica capacity could not be estimated."}}
+				return 0, 0, false, false, fmt.Errorf("replica capacity could not be estimated")
 			}
 		}
 		if count, ok := service["scale"]; ok {
 			replicas = capacityNumber(count)
 			if replicas < 0 || replicas > 10000 {
-				return []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Replica capacity could not be estimated."}}
+				return 0, 0, false, false, fmt.Errorf("replica capacity could not be estimated")
 			}
 		}
 		cores := capacityNumber(service["cpus"])
@@ -79,6 +81,20 @@ func capacityChecks(config map[string]any, sample *NodeMetrics) []PreflightCheck
 		}
 		cpu += max(0, cores) * replicas
 		memory += max(0, bytes) * replicas
+	}
+	if math.IsNaN(cpu) || math.IsInf(cpu, 0) || math.IsNaN(memory) || math.IsInf(memory, 0) || memory/(1<<20) >= math.MaxInt64 {
+		return 0, 0, false, false, fmt.Errorf("declared capacity exceeds accounting limits")
+	}
+	return cpu, memory, unknownCPU, unknownMemory, nil
+}
+
+func capacityChecks(config map[string]any, sample *NodeMetrics) []PreflightCheck {
+	if sample == nil || sample.MemoryTotal == 0 || sample.CPUs < 1 {
+		return []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Worker free resources could not be measured."}}
+	}
+	cpu, memory, unknownCPU, unknownMemory, err := declaredCapacity(config)
+	if err != nil {
+		return []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Replica capacity could not be estimated."}}
 	}
 	freeCPU := float64(sample.CPUs) * max(0, 1-sample.CPUPercent/100)
 	cpuState, memoryState := "pass", "pass"
@@ -139,10 +155,13 @@ func (e *Engine) Capacity(ctx context.Context, r Request) (report PreflightRepor
 	out := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", compose, "config", "--format", "json"}, env, out)
 	var config map[string]any
-	if err != nil || json.Unmarshal(out.data.Bytes(), &config) != nil || applyLimits(config, r.Limits) != nil {
+	if err != nil || json.Unmarshal(out.data.Bytes(), &config) != nil || applyDefaultLimits(config, r.DefaultLimits) != nil || applyLimits(config, r.Limits) != nil {
 		return PreflightReport{Checks: []PreflightCheck{{Name: "Capacity", State: "warning", Message: "Cannot resolve Compose resource limits."}}}
 	}
 	applyCapacityReplicas(config, r.Rollout)
+	if cpu, memory, _, _, err := declaredCapacity(config); err == nil {
+		report.Usage = &ResourceUsage{CPUs: cpu, MemoryMB: int64(math.Ceil(memory / (1 << 20)))}
+	}
 	report.Checks = capacityChecks(config, inspectMetrics(ctx, e.Root))
 	return report
 }

@@ -29,6 +29,8 @@ func readBackupRecoveryFile(path string, value any) error {
 }
 
 func (e *Engine) backupHelperOwner(create bool) (string, error) {
+	e.helperOwnerMu.Lock()
+	defer e.helperOwnerMu.Unlock()
 	if e.Root == "" {
 		if create {
 			return "", errors.New("worker state directory required")

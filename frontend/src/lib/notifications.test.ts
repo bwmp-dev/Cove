@@ -148,3 +148,12 @@ describe("resource owner email", () => {
     expect(description).toContain("no verified email address");
   });
 });
+
+it("labels paired SSH host key events for health routing and incident providers", () => {
+  const catalogue = ["host_key_changed.alert", "host_key_changed.recovered"];
+  expect(groupNotificationEvents(catalogue)[0]?.events).toEqual([
+    { value: "host_key_changed.alert", label: "SSH host key changed: alert" },
+    { value: "host_key_changed.recovered", label: "SSH host key changed: recovered" },
+  ]);
+  expect(incidentConditions(catalogue)).toEqual([{ value: "host_key_changed", label: "SSH host key changed" }]);
+});

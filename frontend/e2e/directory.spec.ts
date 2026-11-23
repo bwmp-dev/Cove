@@ -17,6 +17,8 @@ const ldap = {
   email: process.env.COVE_IDENTITY_LDAP_EMAIL ?? "",
 };
 const githubMemberId = process.env.COVE_IDENTITY_MEMBER_ID ?? "";
+const base = process.env.COVE_BROWSER_BASE_PATH ?? "";
+const panelPath = (route: string) => `${base}${route}`;
 
 const directoryName = "Corp directory";
 const groupDN = "cn=engineering,ou=groups,dc=example,dc=invalid";
@@ -86,7 +88,7 @@ async function choose(page: Page, combobox: Locator, option: string) {
 }
 
 async function signInAdmin(page: Page) {
-  await page.goto("/login");
+  await page.goto(panelPath("/login"));
   await page.getByLabel("Email", { exact: true }).fill(adminEmail);
   await page.getByLabel("Password", { exact: true }).fill(adminPassword);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -94,7 +96,7 @@ async function signInAdmin(page: Page) {
 }
 
 async function directorySignIn(page: Page, password: string) {
-  await page.goto("/login");
+  await page.goto(panelPath("/login"));
   await page.getByRole("button", { name: `Continue with ${directoryName}`, exact: true }).click();
   await expect(page.getByRole("heading", { name: `Sign in with ${directoryName}`, exact: true })).toBeVisible();
   await page.getByLabel("Directory username", { exact: true }).fill(ldap.user);
@@ -105,7 +107,7 @@ async function directorySignIn(page: Page, password: string) {
 }
 
 async function members(api: APIRequestContext, team: string) {
-  const response = await api.get(`/api/teams/${team}/members`);
+  const response = await api.get(panelPath(`/api/teams/${team}/members`));
   expect(response.status()).toBe(200);
   return (await response.json()) as Member[];
 }
@@ -137,14 +139,14 @@ test.describe("directory identity integrations", () => {
     const contexts: BrowserContext[] = [];
     const isolated: APIRequestContext[] = [];
     const team = "default";
-    const teams = (await (await page.request.get("/api/settings/directory/teams")).json()) as { teams: { id: string; name: string }[] };
+    const teams = (await (await page.request.get(panelPath("/api/settings/directory/teams"))).json()) as { teams: { id: string; name: string }[] };
     const teamName = teams.teams.find((item) => item.id === team)?.name ?? "";
     expect(teamName).not.toBe("");
 
     try {
       let providerId = "";
       await test.step("configure an LDAP directory and test the saved connection", async () => {
-        await page.goto("/admin");
+        await page.goto(panelPath("/admin"));
         const section = page.getByRole("region", { name: "LDAP directories", exact: true });
         await section.getByRole("button", { name: "Add directory", exact: true }).click();
         const form = section.getByRole("form", { name: "New LDAP directory", exact: true });
@@ -174,7 +176,7 @@ test.describe("directory identity integrations", () => {
         await expect(section.getByText("Directory saved", { exact: true })).toBeVisible();
         await expect(form).toHaveCount(0);
 
-        const saved = (await (await page.request.get("/api/settings/ldap/providers")).json()) as { providers: { id: string; enabled: boolean; password_configured: boolean; configuration: { display_name: string; bind_password?: string } }[] };
+        const saved = (await (await page.request.get(panelPath("/api/settings/ldap/providers"))).json()) as { providers: { id: string; enabled: boolean; password_configured: boolean; configuration: { display_name: string; bind_password?: string } }[] };
         const provider = saved.providers.find((item) => item.configuration.display_name === directoryName);
         expect(provider?.enabled).toBe(true);
         expect(provider?.password_configured).toBe(true);
@@ -196,40 +198,40 @@ test.describe("directory identity integrations", () => {
       await test.step("directory sign-in, then Cove's own second factor", async () => {
         await directorySignIn(alice, ldap.password);
         await expect(alice).not.toHaveURL(/\/login(?:[?#]|$)/);
-        const session = (await (await alice.request.get("/api/session")).json()) as { user_id: string; email: string; teams: { id: string }[] };
+        const session = (await (await alice.request.get(panelPath("/api/session"))).json()) as { user_id: string; email: string; teams: { id: string }[] };
         expect(session.email).toBe(ldap.email);
         expect(session.teams.map((item) => item.id)).toContain(team);
         aliceId = session.user_id;
-        expect((await alice.request.get("/api/projects")).status()).toBe(200);
+        expect((await alice.request.get(panelPath("/api/projects"))).status()).toBe(200);
         const granted = (await members(page.request, team)).find((item) => item.user_id === aliceId);
         expect(granted?.managed_by?.map((source) => source.source_kind)).toContain("ldap");
 
-        const begin = await alice.request.post("/api/account/totp", { headers, data: { current_password: "" } });
+        const begin = await alice.request.post(panelPath("/api/account/totp"), { headers, data: { current_password: "" } });
         expect(begin.status()).toBe(201);
         const secret = new URL(((await begin.json()) as { provisioning_uri: string }).provisioning_uri).searchParams.get("secret") ?? "";
         expect(secret).not.toBe("");
         const enrolled = currentStep();
-        expect((await alice.request.post("/api/account/totp/confirm", { headers, data: { code: totp(secret, enrolled) } })).status()).toBe(200);
-        expect((await alice.request.post("/auth/logout", { headers })).ok()).toBe(true);
+        expect((await alice.request.post(panelPath("/api/account/totp/confirm"), { headers, data: { code: totp(secret, enrolled) } })).status()).toBe(200);
+        expect((await alice.request.post(panelPath("/auth/logout"), { headers })).ok()).toBe(true);
 
         await directorySignIn(alice, ldap.password);
         const code = alice.getByLabel("Authenticator or recovery code", { exact: true });
         await expect(code).toBeVisible();
-        expect((await alice.request.get("/api/session")).status()).toBe(401);
-        expect((await alice.request.get("/api/projects")).status()).toBe(401);
+        expect((await alice.request.get(panelPath("/api/session"))).status()).toBe(401);
+        expect((await alice.request.get(panelPath("/api/projects"))).status()).toBe(401);
         await capture(alice, testInfo, "directory-second-factor");
         const step = await nextStep(alice, enrolled);
         await code.fill(totp(secret, step));
         await alice.getByRole("button", { name: "Verify and sign in", exact: true }).click();
         await expect(alice).not.toHaveURL(/\/login(?:[?#]|$)/);
-        expect((await alice.request.get("/api/session")).status()).toBe(200);
+        expect((await alice.request.get(panelPath("/api/session"))).status()).toBe(200);
       });
 
       await test.step("lockout after repeated wrong directory passwords", async () => {
         const attacker = await playwrightRequest.newContext({ baseURL: origin, ignoreHTTPSErrors: true });
         isolated.push(attacker);
         for (let attempt = 0; attempt < 10; attempt += 1) {
-          const response = await attacker.post(`/auth/ldap/${providerId}/sign-in`, { headers, data: { email: ldap.user, password: `wrong-${attempt}` } });
+          const response = await attacker.post(panelPath(`/auth/ldap/${providerId}/sign-in`), { headers, data: { email: ldap.user, password: `wrong-${attempt}` } });
           expect(response.status()).toBe(401);
         }
         const lockedContext = await browser.newContext({ ignoreHTTPSErrors: true });
@@ -244,13 +246,13 @@ test.describe("directory identity integrations", () => {
         sql(`DELETE FROM authentication_failures WHERE key='account:${aliceId}'`);
       });
 
-      const scimBase = `${origin}/scim/v2`;
+      const scimBase = `${origin}${base}/scim/v2`;
       const scim = await playwrightRequest.newContext({ ignoreHTTPSErrors: true });
       isolated.push(scim);
       let scimUserId = "";
       let scimGroupId = "";
       await test.step("SCIM token is shown once, provisioning, group mapping with a stale save, rotation and deprovisioning", async () => {
-        await page.goto("/admin");
+        await page.goto(panelPath("/admin"));
         const section = page.getByRole("region", { name: "SCIM provisioning", exact: true });
         await section.getByRole("button", { name: "Generate token", exact: true }).click();
         const tokenField = section.getByLabel("New SCIM bearer token", { exact: true });
@@ -263,7 +265,7 @@ test.describe("directory identity integrations", () => {
         await expect(section.getByText("Configured", { exact: true })).toBeVisible();
         await expect(section.getByLabel("New SCIM bearer token", { exact: true })).toHaveCount(0);
         expect(await page.locator("body").innerText()).not.toContain(firstToken);
-        expect(JSON.stringify(await (await page.request.get("/api/settings/scim")).json())).not.toContain(firstToken);
+        expect(JSON.stringify(await (await page.request.get(panelPath("/api/settings/scim"))).json())).not.toContain(firstToken);
 
         await section.getByRole("switch", { name: "Accept provisioning requests", exact: true }).check();
         await section.getByRole("button", { name: "Save changes", exact: true }).click();
@@ -316,10 +318,10 @@ test.describe("directory identity integrations", () => {
         expect(provisioned?.managed_by?.find((source) => source.source_kind === "scim")?.display_name).toBe("SCIM provisioning");
 
         // Provenance is checked while the provisioned person is active: deactivation removes their derived team access.
-        await page.goto("/team");
+        await page.goto(panelPath("/team"));
         const teamMembers = page.getByRole("region", { name: "Members", exact: true });
         await expect(teamMembers.getByRole("listitem").filter({ hasText: scimEmail }).getByText("Managed by SCIM provisioning", { exact: true })).toBeVisible();
-        await page.goto("/admin");
+        await page.goto(panelPath("/admin"));
 
         // Escape cancels the rotation; nothing is rotated until the dialog is confirmed.
         await section.getByRole("button", { name: "Rotate token", exact: true }).click();
@@ -355,7 +357,7 @@ test.describe("directory identity integrations", () => {
         await expect(activity.getByRole("listitem").filter({ hasText: "Created group" }).first()).toContainText(scimGroupName);
         await capture(page, testInfo, "directory-scim", section);
 
-        await page.goto("/users");
+        await page.goto(panelPath("/users"));
         const row = page.getByRole("listitem").filter({ hasText: scimEmail });
         await expect(row.getByText("Deactivated by the identity provider: signed out everywhere and API tokens revoked.", { exact: true })).toBeVisible();
         await expect(row).toContainText("Provisioned by SCIM");
@@ -363,7 +365,7 @@ test.describe("directory identity integrations", () => {
 
         // The disabled account and its SCIM ownership stay, but its directory-only team membership is removed.
         expect((await members(page.request, team)).some((item) => item.user_id === scimUserId)).toBe(false);
-        await page.goto("/team");
+        await page.goto(panelPath("/team"));
         const remaining = page.getByRole("region", { name: "Members", exact: true });
         await expect(remaining.getByRole("listitem").filter({ hasText: ldap.email })).toBeVisible();
         await expect(remaining.getByRole("listitem").filter({ hasText: scimEmail })).toHaveCount(0);
@@ -371,7 +373,7 @@ test.describe("directory identity integrations", () => {
 
       await test.step("GitHub team sync: owner consent, preview, apply, stale refusal and removal", async () => {
         await setRoster([]);
-        await page.goto("/admin");
+        await page.goto(panelPath("/admin"));
         const section = page.getByRole("region", { name: "GitHub team sync", exact: true });
         await section.getByRole("button", { name: "Add source", exact: true }).click();
         const form = section.getByRole("form", { name: "New GitHub team sync source", exact: true });
@@ -391,7 +393,7 @@ test.describe("directory identity integrations", () => {
         // Only GitHub's authorization page is stood in for; the callback performs the real exchange against the fixture provider.
         await page.route("https://github.com/login/oauth/authorize**", async (route) => {
           const state = new URL(route.request().url()).searchParams.get("state") ?? "";
-          await route.fulfill({ status: 302, headers: { Location: `${origin}/auth/github/callback?state=${encodeURIComponent(state)}&code=fixture` } });
+          await route.fulfill({ status: 302, headers: { Location: `${origin}${base}/auth/github/callback?state=${encodeURIComponent(state)}&code=fixture` } });
         });
         await section.getByRole("button", { name: `Authorize organization access for ${sourceName}`, exact: true }).click();
         await section.getByLabel("Current password", { exact: true }).fill(adminPassword);
@@ -401,7 +403,7 @@ test.describe("directory identity integrations", () => {
         await expect.poll(() => new URL(page.url()).search).toBe("");
         expect(new URL(page.url()).hash).toBe("#github-team-sync");
         await page.unroute("https://github.com/login/oauth/authorize**");
-        const sources = (await (await page.request.get("/api/settings/github-team-sync")).json()) as { sources: { configuration: { name: string }; credential_configured: boolean }[] };
+        const sources = (await (await page.request.get(panelPath("/api/settings/github-team-sync"))).json()) as { sources: { configuration: { name: string }; credential_configured: boolean }[] };
         expect(sources.sources.find((item) => item.configuration.name === sourceName)?.credential_configured).toBe(true);
 
         await setRoster(fixtureMember);
@@ -441,7 +443,7 @@ test.describe("directory identity integrations", () => {
       });
 
       await test.step("member provenance and local owner recovery", async () => {
-        await page.goto("/team");
+        await page.goto(panelPath("/team"));
         const list = page.getByRole("region", { name: "Members", exact: true });
         const aliceRow = list.getByRole("listitem").filter({ hasText: ldap.email });
         await expect(aliceRow.getByText(`Managed by LDAP — ${directoryName}`, { exact: true })).toBeVisible();
@@ -464,7 +466,7 @@ test.describe("directory identity integrations", () => {
         expect(asAdmin.find((item) => item.user_id === aliceId)?.managed_by?.find((source) => source.source_kind === "ldap")?.display_name).toBe(directoryName);
 
         // Removing the directory's mapping and reconciling on the next directory sign-in keeps the local owner.
-        await page.goto("/admin");
+        await page.goto(panelPath("/admin"));
         const section = page.getByRole("region", { name: "LDAP directories", exact: true });
         await section.getByRole("button", { name: `Edit ${directoryName}`, exact: true }).click();
         const form = section.getByRole("form", { name: `Edit ${directoryName}`, exact: true });
@@ -474,7 +476,7 @@ test.describe("directory identity integrations", () => {
         await expect(section.getByText("Directory saved", { exact: true })).toBeVisible();
         const reconcile = await playwrightRequest.newContext({ baseURL: origin, ignoreHTTPSErrors: true });
         isolated.push(reconcile);
-        const signedIn = await reconcile.post(`/auth/ldap/${providerId}/sign-in`, { headers, data: { email: ldap.user, password: ldap.password } });
+        const signedIn = await reconcile.post(panelPath(`/auth/ldap/${providerId}/sign-in`), { headers, data: { email: ldap.user, password: ldap.password } });
         expect(signedIn.status()).toBe(200);
         expect(((await signedIn.json()) as { second_factor_required: boolean }).second_factor_required).toBe(true);
         expect((await members(page.request, team)).find((item) => item.user_id === aliceId)?.role).toBe("owner");

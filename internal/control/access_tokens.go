@@ -21,6 +21,11 @@ type apiScope struct {
 }
 
 var apiScopes = []apiScope{
+	{[]string{"view", "manage_backups", "edit_configuration", "read_secrets"}, "pitr:configure", 3, "Configure encrypted PostgreSQL PITR capture and its required restart.", false, false},
+	{[]string{"view", "manage_backups"}, "pitr:backup", 2, "Queue a PostgreSQL PITR base backup.", false, false},
+	{[]string{"view", "manage_backups", "edit_configuration"}, "pitr:forget", 3, "Delete disabled PITR history after confirmation.", false, false},
+	{[]string{"view", "manage_backups", "read_secrets", "edit_configuration"}, "pitr:restore", 3, "Recover an isolated offline PostgreSQL copy; destination create permission is rechecked separately.", false, false},
+
 	{[]string{"view", "edit_configuration", "read_secrets"}, "directory:manage", 3, "Instance administrators only: configure directory sign-in and provisioning; personal tokens only.", true, true},
 	{[]string{"view", "edit_configuration"}, "certificates:write", 3, "Upload certificates and manage issuers using secret-write permission; no key material is returned.", false, false},
 	{[]string{"view", "edit_configuration", "read_secrets"}, "databases:manage", 3, "Manage database credentials, settings, copies and bucket provisioning; cut-over also requires team administration.", false, false},

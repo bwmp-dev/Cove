@@ -154,6 +154,13 @@ describe("requests under a panel prefix", () => {
     expect(transfers.backupDownloadUrl("w1", "b1")).toBe("/control/cove/api/workloads/w1/backups/b1/download");
   });
 
+  it("prefixes browser-handled file download links", async () => {
+    document.head.insertAdjacentHTML("afterbegin", '<meta name="cove-base-path" content="/control/cove">');
+    vi.resetModules();
+    const files = await import("./files");
+    expect(files.fileDownloadUrl("w1", { kind: "volume", target: "data", path: "/a b.txt" })).toMatch(/^\/control\/cove\/api\/workloads\/w1\/files\/download\?kind=volume&target=data&path=%2Fa\+b\.txt/);
+  });
+
   it.each(["/api", "/projects"])("prefixes requests under %s even when the path starts with it", async (base) => {
     document.head.insertAdjacentHTML("afterbegin", `<meta name="cove-base-path" content="${base}">`);
     vi.resetModules();

@@ -5,6 +5,11 @@ export type NodeState = "pending" | "enrolled" | "unreachable" | "ssh_verified" 
 export interface MountMetric { path: string; filesystem: string; total: number; available: number; known: boolean; error?: string }
 export interface NodeMetrics { sampled_at: string; cpu_percent: number; memory_total: number; memory_available: number; disk_total: number; disk_available: number; network_rx?: number; network_tx?: number; cpus?: number; mounts?: MountMetric[] | null; mounts_limited?: boolean }
 export interface Capabilities {
+  workload_moves?: boolean;
+  // Protocol support for per-service GPU selections; it does not mean the host has a GPU.
+  gpu_assignments?: boolean;
+  firewall?: boolean;
+  host_maintenance?: boolean;
   metrics?: NodeMetrics;
   shared_host?: { coolify_detected: boolean; cleanup_verified: boolean };
   resource_limits?: boolean;
@@ -18,6 +23,7 @@ export interface Capabilities {
   backup_transfers?: boolean;
   backblaze_b2?: boolean;
   file_browser?: boolean;
+  file_transfers?: boolean;
   alert_observations?: boolean;
   scheduled_cleanup?: boolean;
   journal_retention?: boolean;
@@ -46,6 +52,8 @@ export interface Capabilities {
   idle_sleep?: boolean;
   // The worker reports per-service CPU samples, so the panel can scale rolling services between replica bounds.
   cpu_autoscale?: boolean;
+  ssh_identity?: boolean;
+  resource_defaults?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -186,6 +194,8 @@ export interface DatabasePublicAccess {
 export type DatabaseEngineId = "postgresql" | "mysql" | "mariadb" | "mongodb" | "redis" | "valkey" | "clickhouse";
 
 export interface ServiceLimits { cpus: number; memory_mb: number }
+// Null or omitted gpus inherit Compose GPU requests, [] clears them, and IDs replace them. Resource defaults never carry gpus.
+export interface WorkloadServiceLimits extends ServiceLimits { gpus?: string[] | null }
 
 export interface DeploymentHook { service: string; command: string }
 export interface DeploymentAssertions {
@@ -230,7 +240,7 @@ export interface Workload {
   guarded_deploy?: boolean;
   file_secrets?: FileSecret[];
   hooks?: DeploymentHooks;
-  limits?: Record<string, ServiceLimits>;
+  limits?: Record<string, WorkloadServiceLimits>;
   manually_stopped: boolean;
   // The environment's requested pause state. It is intent, not proof that every container has stopped.
   environment_paused?: boolean;
@@ -263,7 +273,7 @@ export interface WorkloadInput {
   guarded_deploy?: boolean;
   file_secrets?: FileSecret[];
   hooks?: DeploymentHooks;
-  limits?: Record<string, ServiceLimits>;
+  limits?: Record<string, WorkloadServiceLimits>;
   // Accepted on create only; placement changes go through the reviewed move endpoint.
   project_id?: string;
   environment_id?: string;
@@ -384,7 +394,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "adopt" | "image_check" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "adopt" | "image_check" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy" | "pitr_configure" | "pitr_backup" | "pitr_forget" | "pitr_restore" | "move";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {

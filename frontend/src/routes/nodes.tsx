@@ -12,6 +12,8 @@ import { nodeStates } from "../lib/nodes";
 import { ClientPagination } from "../components/ListPagination";
 import { Button, EmptyState, LoadingRows, PageHeader, QueryError, Section } from "../components/ui";
 import { SharedNodeWarning } from "../components/Access";
+import { Bastions } from "../components/Bastions";
+import { CloudServers, ProviderTokens } from "../components/NodeProviders";
 import { countLabel } from "../lib/hierarchy";
 import { useSession } from "../lib/session";
 import { buttonClass, listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
@@ -213,6 +215,9 @@ export function NodesPage() {
           </Section>
         </>
       )}
+      {admin && <CloudServers />}
+      {admin && <ProviderTokens />}
+      {admin && <Bastions />}
     </>
   );
 }
