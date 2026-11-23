@@ -1,5 +1,7 @@
 """Run browser acceptance against disposable packaged Cove and PostgreSQL containers."""
 import base64
+from contextlib import contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,43 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@contextmanager
+def browser_fixture_lock():
+    # Proxy/link names and worker state are shared across worktrees on the same Docker host.
+    path = Path(tempfile.gettempdir()) / "cove-browser-fixture.lock"
+    with path.open("a+b") as lock:
+        lock.seek(0, os.SEEK_END)
+        if lock.tell() == 0:
+            lock.write(b"\0")
+            lock.flush()
+        waiting = False
+        while True:
+            lock.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if not waiting:
+                    print("Waiting for another Cove browser fixture to finish...", flush=True)
+                    waiting = True
+                time.sleep(3)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def run(*args, **kwargs):
@@ -201,4 +240,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with browser_fixture_lock():
+        main()
