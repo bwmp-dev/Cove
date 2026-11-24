@@ -3,11 +3,13 @@ import { Link } from "@tanstack/react-router";
 import { Hammer } from "lucide-react";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { buildNodeQuery, choiceName, type BuildNodeSettings } from "../api/build-nodes";
+import { buildRecipeQuery } from "../api/build-recipes";
 import { errorMessage, isStatus } from "../api/client";
 import { connectionsQuery } from "../api/connections";
 import { useQueueOperation } from "../api/mutations";
 import { nodesQuery, workloadOperationsQuery, workloadRegistryQuery } from "../api/queries";
 import type { Node, Operation, Workload } from "../api/types";
+import { engineLabel, isRecipeEngine, recordedEngine } from "../lib/build-recipes";
 import { buildHistory, repositoryError, repositoryMaxLength } from "../lib/builds";
 import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, stateLabels } from "../lib/operations";
@@ -47,6 +49,7 @@ function LatestAttempt({ operation, hasSuccess, node }: { operation: Operation; 
           Started <RelativeTime value={operation.created_at} />
         </span>
         {node}
+        <span>{recordedEngine(operation)}</span>
         <OperationLink operation={operation}>{active ? "View build progress" : "View build"}</OperationLink>
       </p>
       {error && (
@@ -77,6 +80,7 @@ function SuccessfulBuild({ operation, node }: { operation: Operation; node: Reac
             Published <RelativeTime value={finished} />
           </span>
           {node}
+          <span>{recordedEngine(operation)}</span>
           {operation.result?.revision && (
             <span className="font-mono" title={operation.result.revision}>
               {operation.result.revision.slice(0, 7)}
@@ -108,6 +112,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   const registry = useQuery(workloadRegistryQuery(workload.id));
   const registries = useQuery(connectionsQuery("registries"));
   const settings = useQuery(buildNodeQuery(workload.id));
+  const recipe = useQuery(buildRecipeQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
   const statusId = useId();
@@ -124,13 +129,17 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   const eligible = choice?.eligible === true;
   const ready = node?.state === "ready";
   const supported = node?.capabilities?.build_publish === true;
-  const unreadable = settings.isPending || settings.isError || nodes.isPending || nodes.isError || operations.isPending || operations.isError || registry.isPending || registry.isError;
+  // Ordinary Compose builds are unaffected; a saved explicit recipe the server reports as unusable refuses the build.
+  const savedRecipe = recipe.isError ? undefined : recipe.data;
+  const recipeEngine = savedRecipe?.recipe.engine ?? "compose";
+  const recipeBlocked = savedRecipe !== undefined && recipeEngine !== "compose" && (!isRecipeEngine(recipeEngine) || !savedRecipe.supported || savedRecipe.reason !== "");
+  const unreadable = recipe.isPending || recipe.isError || settings.isPending || settings.isError || nodes.isPending || nodes.isError || operations.isPending || operations.isError || registry.isPending || registry.isError;
   const registryId = registry.data?.registry_id ?? "";
   const server = registries.data?.find((item) => item.id === registryId)?.registry?.server;
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const history = operations.data ? buildHistory(operations.data, workload.id) : undefined;
   const latestAttempt = history?.attempt && history.attempt !== history.success ? history.attempt : undefined;
-  const blocked = !online || unreadable || !eligible || !registryId || Boolean(active) || queue.isPending;
+  const blocked = !online || unreadable || recipeBlocked || !eligible || !registryId || Boolean(active) || queue.isPending;
   const executionNode = (operation: Operation) => <ExecutionNode operation={operation} settings={settings.data} nodes={nodes.data} />;
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -145,7 +154,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   return (
     <Section
       title="Build and publish"
-      description="Builds every Compose service that has a build section on the build node and pushes the images to this resource's registry. Nothing is deployed, started or routed."
+      description="Builds every Compose service that has a build section, or the service chosen in the build recipe, on the build node and pushes the images to this resource's registry. Nothing is deployed, started or routed."
       flush
     >
       <div id={statusId} className="space-y-3 border-b border-line px-4 py-3 empty:hidden sm:px-6">
@@ -162,6 +171,13 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
               node page
             </Link>
             .
+          </Notice>
+        )}
+        {canOperate && savedRecipe && recipeBlocked && (
+          <Notice tone="warn" title="The build recipe cannot build">
+            <span className="break-words">
+              {engineLabel(savedRecipe.recipe.engine)}: {savedRecipe.reason || (isRecipeEngine(savedRecipe.recipe.engine) ? "The build worker does not support this recipe." : "This panel does not recognise the saved engine.")} Change the build recipe above or resolve the problem to build.
+            </span>
           </Notice>
         )}
         {canOperate && registry.data && !registryId && (
@@ -207,18 +223,19 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
           </Notice>
         )}
       </div>
-      {(settings.isError || nodes.isError || registry.isError || (operations.isError && operations.data)) && (
+      {(settings.isError || recipe.isError || nodes.isError || registry.isError || (operations.isError && operations.data)) && (
         <div className="border-b border-line p-4 sm:px-6">
           <QueryError
-            what={settings.isError ? "the build node" : nodes.isError ? "node status" : registry.isError ? "registry" : "the latest builds"}
-            error={settings.error ?? nodes.error ?? registry.error ?? operations.error}
+            what={settings.isError ? "the build node" : recipe.isError ? "the build recipe" : nodes.isError ? "node status" : registry.isError ? "registry" : "the latest builds"}
+            error={settings.error ?? recipe.error ?? nodes.error ?? registry.error ?? operations.error}
             onRetry={() => {
               void settings.refetch();
+              void recipe.refetch();
               void nodes.refetch();
               void registry.refetch();
               void operations.refetch();
             }}
-            retrying={settings.isFetching || nodes.isFetching || registry.isFetching || operations.isFetching}
+            retrying={settings.isFetching || recipe.isFetching || nodes.isFetching || registry.isFetching || operations.isFetching}
           />
         </div>
       )}

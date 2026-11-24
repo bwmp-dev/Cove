@@ -87,7 +87,7 @@ func (s *Server) saveBuildOutcome(ctx context.Context, id string, request worker
 }
 
 func (s *Server) deferBuildResult(ctx context.Context, id string) error {
-	_, err := s.DB.Exec(ctx, `UPDATE operations SET updated_at=now(),result=jsonb_build_object('error','Waiting for the original build worker to confirm the operation. Verify that worker or cancel; its inputs and execution node will not be changed.') WHERE id=$1`, id)
+	_, err := s.DB.Exec(ctx, `UPDATE operations SET updated_at=now(),result=result||jsonb_build_object('error','Waiting for the original build worker to confirm the operation. Verify that worker or cancel; its inputs and execution node will not be changed.') WHERE id=$1`, id)
 	return err
 }
 

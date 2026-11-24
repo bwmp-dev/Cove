@@ -43,6 +43,8 @@ export interface Capabilities {
   file_secrets?: boolean;
   // The worker can verify and enforce a hard build-cache cap on a dedicated filesystem. Linux workers only.
   build_cache_limits?: boolean;
+  // The worker can build with explicit static output and Railpack recipes. The build recipe read decides whether a resource can use them.
+  build_recipes?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -375,6 +377,15 @@ export interface Route {
 export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "image_scan" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy" | "registry_maintenance";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
+// The engine stays a plain string so a value this panel does not know is shown as recorded, not as Compose.
+export interface OperationBuildRecipe {
+  engine: string;
+  service?: string;
+  version?: string;
+  pinned_images?: string[];
+  static_runtime?: string;
+}
+
 export interface WorkerOperation {
   id: string;
   workload: string;
@@ -387,6 +398,8 @@ export interface WorkerOperation {
   image_check?: ImageCheck;
   image_scan?: ImageScan;
   build?: BuildResult;
+  // The build engine this build used, recorded even when it fails. Builds from older control planes omit it.
+  build_recipe?: OperationBuildRecipe;
   rollout?: RolloutStatus;
   // Reported only by workers with the job_runs capability.
   job?: JobResult;

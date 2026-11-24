@@ -22,6 +22,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if runBuildRecipeTestProcess() {
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "registry-storage" {
 		file, err := os.Open("/config/registry.json")
 		if err == nil {

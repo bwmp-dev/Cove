@@ -19,8 +19,9 @@ import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
 import { resultSummary } from "../lib/rollouts";
 import { linkClass } from "../lib/styles";
+import { recordedEngine } from "../lib/build-recipes";
 import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
-import type { ManagedRegistryResult, SuspensionResult, WorkloadSummary } from "../api/types";
+import type { ManagedRegistryResult, Operation, SuspensionResult, WorkloadSummary } from "../api/types";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
@@ -80,6 +81,27 @@ function BuildNodeValue({ id, name }: { id?: string; name?: string }) {
     <Link to="/nodes/$nodeId" params={{ nodeId: id }} className={linkClass}>
       {name}
     </Link>
+  );
+}
+
+// The engine recorded by this build, never the current setting. Command text is not part of the record.
+function BuildEngineValue({ operation }: { operation: Operation }) {
+  const recipe = operation.result?.build_recipe;
+  if (!recipe?.engine) return <span className="text-fg-muted">{recordedEngine(operation)}</span>;
+  return (
+    <div className="space-y-1">
+      <p className="break-words">{recordedEngine(operation)}</p>
+      {recipe.static_runtime && <p className="font-mono text-xs break-all text-fg-muted">{recipe.static_runtime}</p>}
+      {recipe.pinned_images && recipe.pinned_images.length > 0 && (
+        <ul aria-label="Pinned build images" className="space-y-0.5">
+          {recipe.pinned_images.map((image) => (
+            <li key={image} className="font-mono text-xs break-all text-fg-muted">
+              {image}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -265,6 +287,7 @@ export function OperationPage() {
                   ]
                 : []),
               ...(operation.action === "build" ? [{ term: "Build node", value: <BuildNodeValue id={operation.execution_node_id} name={nodes.data?.find((node) => node.id === operation.execution_node_id)?.name} /> }] : []),
+              ...(operation.action === "build" ? [{ term: "Build engine", value: <BuildEngineValue operation={operation} /> }] : []),
               { term: "Action", value: actionLabels[operation.action] ?? operation.action },
               { term: "Queued", value: formatAbsolute(operation.created_at) },
               ...(result?.finished_at ? [{ term: "Finished", value: formatAbsolute(result.finished_at) }] : []),

@@ -367,6 +367,9 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if err := s.prepareBuildRecipe(ctx, r); err != nil {
+		return err
+	}
 	if r.Action == "registry_maintenance" {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT n.state='ready' AND COALESCE((n.capabilities->>'managed_registry')::boolean,false) FROM workloads w JOIN nodes n ON n.id=w.node_id JOIN managed_registries m ON m.id=w.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {

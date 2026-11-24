@@ -176,11 +176,14 @@ def main():
     image_scans = "--image-scans" in sys.argv[1:]
     managed_registry = "--managed-registry" in sys.argv[1:]
     build_nodes = "--build-nodes" in sys.argv[1:]
+    build_recipes = "--build-recipes" in sys.argv[1:]
     if build_nodes and not managed_registry:
         raise ValueError("Build-node acceptance requires the managed-registry TLS fixture")
+    if build_recipes and (not managed_registry or build_nodes):
+        raise ValueError("Recipe acceptance requires its own managed-registry fixture")
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes", "--build-recipes")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
@@ -344,6 +347,9 @@ def main():
                 containers.append(worker)
             if managed_registry_config:
                 managed_registry_config.install(worker_image, worker)
+            if build_recipes:
+                from build_recipes_fixture import install_build_recipes_fixture
+                install_build_recipes_fixture(run, name, worker, env)
 
             def api(method, path, body=None, credential=None, raw=False):
                 request = urllib.request.Request(origin+path, method=method,

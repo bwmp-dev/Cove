@@ -23,6 +23,7 @@ import { ImageUpdatePolicy } from "../components/ImageUpdatePolicy";
 import { ResourceImages } from "../components/ResourceImages";
 import { ResourceBuild } from "../components/ResourceBuild";
 import { BuildNodeSetting } from "../components/BuildNode";
+import { BuildRecipeSetting } from "../components/BuildRecipe";
 import { supportsBuildPublish } from "../lib/builds";
 import { supportsImageLifecycle } from "../lib/images";
 import { RouteEditor } from "../components/RouteEditor";
@@ -874,7 +875,7 @@ export function ResourceNetworking() {
 export function ResourceRegistryPage() {
   const workload = useResource();
   const active = useActiveOperation(workload.id);
-  return <div className="space-y-6"><ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />{supportsBuildPublish(workload) && <BuildNodeSetting workload={workload} />}{supportsBuildPublish(workload) && <ResourceBuild workload={workload} />}{supportsImageLifecycle(workload) && <ResourceImages workload={workload} />}<ImageScans workload={workload} /><ImageUpdatePolicy workload={workload} /><RegistryWebhook workload={workload} /></div>;
+  return <div className="space-y-6"><ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />{supportsBuildPublish(workload) && <BuildNodeSetting workload={workload} />}{supportsBuildPublish(workload) && <BuildRecipeSetting workload={workload} />}{supportsBuildPublish(workload) && <ResourceBuild workload={workload} />}{supportsImageLifecycle(workload) && <ResourceImages workload={workload} />}<ImageScans workload={workload} /><ImageUpdatePolicy workload={workload} /><RegistryWebhook workload={workload} /></div>;
 }
 
 export function ResourceLimits() {

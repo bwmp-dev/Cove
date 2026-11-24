@@ -6,11 +6,21 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 )
 
 func main() {
-	if len(os.Args) != 2 && !((len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "cloudflare-probe") && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "certificate-probe")) {
+	if filepath.Base(os.Args[0]) == "mise-"+worker.RailpackMiseVersion {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := worker.RunRailpackMise(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) != 2 && !((len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "cloudflare-probe") && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "certificate-probe" || os.Args[1] == "build-recipe-output")) {
 		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|idle-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
@@ -18,6 +28,18 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "build-recipe-output":
+		if len(os.Args) != 3 {
+			err = fmt.Errorf("planner output kind required")
+		} else {
+			err = worker.ReadRailpackOutput(os.Args[2], os.Stdout)
+		}
+	case "build-recipe-plan":
+		err = worker.RunRailpackPlanner(ctx)
+	case "build-recipe-egress":
+		err = worker.RunBuildRecipeEgress(ctx)
+	case "static-site":
+		err = worker.ServeStaticSite(ctx)
 	case "build-cache-filesystem":
 		err = worker.BuildCacheFilesystem(os.Stdout)
 	case "registry-storage":

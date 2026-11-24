@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	BuildRecipe            *BuildRecipe              `json:"build_recipe,omitempty"`
 	BuildPlatform          string                    `json:"build_platform,omitempty"`
 	ManagedRegistry        *ManagedRegistryOperation `json:"managed_registry,omitempty"`
 	ImageUpdates           *ImageUpdateOptions       `json:"image_updates,omitempty"`
@@ -63,6 +64,7 @@ type Request struct {
 	JobService             string                    `json:"job_service,omitempty"`
 }
 type Operation struct {
+	BuildRecipe             *BuildRecipeInfo       `json:"build_recipe,omitempty"`
 	RegistryRecoveryPending bool                   `json:"registry_recovery_pending,omitempty"`
 	ManagedRegistry         *ManagedRegistryResult `json:"managed_registry,omitempty"`
 	Scale                   *CPUScaleOptions       `json:"scale,omitempty"`
@@ -250,6 +252,17 @@ func ValidateRequest(r Request) error {
 	}
 	if r.Build != nil && r.Action != "build" {
 		return errors.New("build options require a build operation")
+	}
+	if r.BuildRecipe != nil {
+		if r.Action != "build" {
+			return errors.New("build recipes require an explicit build and publish operation")
+		}
+		if err := ValidateRecipeSource(*r.BuildRecipe, r.Source, r.Compose, r.Kind); err != nil {
+			return err
+		}
+		if err := ValidateRecipeSecrets(*r.BuildRecipe, r.FileSecrets); err != nil {
+			return err
+		}
 	}
 	if r.BuildPlatform != "" && (r.Action != "build" || !buildPlatformPattern.MatchString(r.BuildPlatform)) {
 		return errors.New("build platform must name the runtime Linux architecture")
@@ -460,6 +473,9 @@ func (e *Engine) submitLocked(r Request) (Operation, error) {
 		return Operation{}, err
 	}
 	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC(), Scale: r.Scale}, Request: r, Digest: digest}
+	if r.Action == "build" {
+		j.Operation.BuildRecipe = BuildRecipeSummary(r.BuildRecipe)
+	}
 	if err = writeJSON(e.path(r.ID), j); err != nil {
 		return Operation{}, err
 	}
@@ -854,6 +870,7 @@ func (e *Engine) execute(parent context.Context, j journal) {
 		j.Operation.Rollout = persisted.Operation.Rollout
 		j.RolloutChange = persisted.RolloutChange
 		j.Operation.Build = persisted.Operation.Build
+		j.Operation.BuildRecipe = persisted.Operation.BuildRecipe
 		j.CancelRequested = persisted.CancelRequested
 		committed = persisted.RouteChange != nil && persisted.RouteChange.Committed
 	}

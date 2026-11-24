@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	BuildRecipes         bool         `json:"build_recipes"`
 	BuildCacheLimits     bool         `json:"build_cache_limits"`
 	RemoteBuilds         bool         `json:"remote_builds"`
 	ManagedRegistry      bool         `json:"managed_registry"`
@@ -95,6 +96,7 @@ func Inspect(ctx context.Context) Probe {
 		p.Compose = strings.TrimSpace(string(out))
 	}
 	p.BuildCacheLimits = runtime.GOOS == "linux" && p.BuildPublish
+	p.BuildRecipes = runtime.GOOS == "linux" && p.BuildPublish && recipeDockerIsolation(p.Docker)
 	p.RemoteBuilds = p.BuildPublish
 	p.JobImageLifecycle = p.ImageLifecycle
 	p.ImageUpdates = p.ImageLifecycle
