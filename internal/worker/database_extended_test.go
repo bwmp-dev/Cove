@@ -158,13 +158,17 @@ func TestExtendedDatabaseRoundTrip(t *testing.T) {
 			if err != nil || len(records) != 1 || records[0].DataSnapshot == "" || records[0].VerifiedAt == nil {
 				t.Fatal(records, err)
 			}
+			backupID := "backup"
+			if engine == "redis" || engine == "valkey" {
+				backupID = legacyRDBBackupForTest(t, ctx, e, r, name)
+			}
 			if engine == "mongodb" {
 				query(`db.getSiblingDB("app").markers.updateOne({_id:1},{$set:{value:"after"}})`)
 			} else {
 				run("docker", "exec", name, "sh", "-ec", redisAuth+redisCLI(engine)+" SET marker after")
 			}
 			drill := r
-			drill.ID, drill.Action, drill.BackupID = "drill", "drill", "backup"
+			drill.ID, drill.Action, drill.BackupID = "drill", "drill", backupID
 			if err = e.performDrill(ctx, drill, &log); err != nil {
 				t.Fatal("restore drill", err, log.String())
 			}
@@ -172,7 +176,7 @@ func TestExtendedDatabaseRoundTrip(t *testing.T) {
 				t.Fatal("drill stopped source")
 			}
 			copyRequest := r
-			copyRequest.ID, copyRequest.Action, copyRequest.BackupID, copyRequest.Workload = "copy", "restore_copy", "backup", workload+"-copy"
+			copyRequest.ID, copyRequest.Action, copyRequest.BackupID, copyRequest.Workload = "copy", "restore_copy", backupID, workload+"-copy"
 			copyRequest.RestoreCopy = &RestoreCopy{Source: workload}
 			plan, err := e.PlanRestoreCopy(ctx, copyRequest, workload)
 			if err != nil {
@@ -226,7 +230,7 @@ func TestExtendedDatabaseRoundTrip(t *testing.T) {
 			}
 			r.ID = "restore-failed"
 			r.Action = "restore"
-			r.BackupID = "backup"
+			r.BackupID = backupID
 			injected := false
 			e.Run = func(ctx context.Context, dir string, args, env []string, out io.Writer) error {
 				joined := strings.Join(args, " ")

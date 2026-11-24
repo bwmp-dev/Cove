@@ -202,7 +202,11 @@ func (e *Engine) backupDownload(ctx context.Context, r Request, limit int64) (fi
 		command = []string{"dump", databaseDataSnapshot(manifest), "/data/000/database.dump"}
 	}
 	digest := sha256.New()
-	if err = e.resticInput(ctx, r, nil, false, strings.NewReader(""), &sizeBoundWriter{Writer: io.MultiWriter(file, digest), remaining: budget}, command...); err != nil {
+	output, finish := databaseDumpOutput(manifest.Record.Database, io.MultiWriter(file, digest), budget)
+	if err = e.resticInput(ctx, r, nil, false, strings.NewReader(""), output, command...); err != nil {
+		return file, response, cleanup, err
+	}
+	if err = finish(); err != nil {
 		return file, response, cleanup, err
 	}
 	info, err := file.Stat()

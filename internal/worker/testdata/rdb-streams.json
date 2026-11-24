@@ -1,0 +1,45 @@
+{
+  "description": "Synthetic stock-image RDBs containing only marker=synthetic-before. stdout retains the diskless transfer EOF marker; file is the CLI file output. Captured with default checksum verification, no credentials.",
+  "cases": [
+    {
+      "image": "redis:8-alpine",
+      "version": "8.12.0",
+      "image_digest": "sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483",
+      "engine": "redis",
+      "stdout": "UkVESVMwMDE3+glyZWRpcy12ZXIGOC4xMi4w+gpyZWRpcy1iaXRzwED6BWN0aW1lwjnQBWv6CHVzZWQtbWVtwmCUGAD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoOWRhZjczNzY5ODU0ZmU3MThjYmE5ODRlZDAwYzA5MzEzZWZmNDgwM/oLcmVwbC1vZmZzZXTAAfoIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf883v6yGLgS5TlmNzg3ZjlhZWRhMDZmMzM2YTIzMWU2YTczOThhNjRhNDVlMjZmMWM=",
+      "file": "UkVESVMwMDE3+glyZWRpcy12ZXIGOC4xMi4w+gpyZWRpcy1iaXRzwED6BWN0aW1lwj7QBWv6CHVzZWQtbWVtwnjkGAD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoOWRhZjczNzY5ODU0ZmU3MThjYmE5ODRlZDAwYzA5MzEzZWZmNDgwM/oLcmVwbC1vZmZzZXTAD/oIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf9QyUDD8V4UkA=="
+    },
+    {
+      "image": "redis:8.10.3-alpine",
+      "version": "8.10.3",
+      "image_digest": "sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3",
+      "engine": "redis",
+      "stdout": "UkVESVMwMDE1+glyZWRpcy12ZXIGOC4xMC4z+gpyZWRpcy1iaXRzwED6BWN0aW1lwkfQBWv6CHVzZWQtbWVtwqD5FgD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoYThiYTU5NGUwMDllZDdhMzFhOTJkNzJiZDQ5NjI1NWFjM2RjNmUwZPoLcmVwbC1vZmZzZXTAAfoIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf8M3LnrSPQmLThkZWFiNzMzY2JhZmFkYWQwOGFjOGNlOTY1NmI4ZmNkZWZkNTExMmM=",
+      "file": "UkVESVMwMDE1+glyZWRpcy12ZXIGOC4xMC4z+gpyZWRpcy1iaXRzwED6BWN0aW1lwkzQBWv6CHVzZWQtbWVtwrhJFwD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoYThiYTU5NGUwMDllZDdhMzFhOTJkNzJiZDQ5NjI1NWFjM2RjNmUwZPoLcmVwbC1vZmZzZXTAD/oIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf/8coyq19gExw=="
+    },
+    {
+      "image": "valkey/valkey:8-alpine",
+      "version": "8.1.12",
+      "image_digest": "sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc",
+      "engine": "valkey",
+      "stdout": "UkVESVMwMDEx+gp2YWxrZXktdmVyBjguMS4xMvoKcmVkaXMtYml0c8BA+gVjdGltZcJV0AVr+gh1c2VkLW1lbcJo/A4A+g5yZXBsLXN0cmVhbS1kYsAA+gdyZXBsLWlkKGJkZDZjNzA2M2QyNjM5ZWVlODY5OWJiNTM3Y2MwZmE3ZTQzODA3YmH6C3JlcGwtb2Zmc2V0wAH6CGFvZi1iYXNlwAD+APsBAAAGbWFya2VyEHN5bnRoZXRpYy1iZWZvcmX/2CuD59L/89M4OWEwZmUwMmUwYTFiN2QwZmRmMjFiZmViNWE4Y2ZmYjg0NDFlZDhi",
+      "file": "UkVESVMwMDEx+gp2YWxrZXktdmVyBjguMS4xMvoKcmVkaXMtYml0c8BA+gVjdGltZcJa0AVr+gh1c2VkLW1lbcKATA8A+g5yZXBsLXN0cmVhbS1kYsAA+gdyZXBsLWlkKGJkZDZjNzA2M2QyNjM5ZWVlODY5OWJiNTM3Y2MwZmE3ZTQzODA3YmH6C3JlcGwtb2Zmc2V0wA/6CGFvZi1iYXNlwAD+APsBAAAGbWFya2VyEHN5bnRoZXRpYy1iZWZvcmX/1VLtDlIWtbc="
+    },
+    {
+      "image": "valkey/valkey:9.1.2-alpine",
+      "version": "9.1.2",
+      "image_digest": "sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11",
+      "engine": "valkey",
+      "stdout": "UkVESVMwMDEx+gp2YWxrZXktdmVyBTkuMS4y+gpyZWRpcy1iaXRzwED6BWN0aW1lwmPQBWv6CHVzZWQtbWVtwtC1DwD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoZGJmNzcyYTFkMzkxMTMwZDE1YWRkODcwYzQzNjQxYTczN2Y5M2ZiZvoLcmVwbC1vZmZzZXTAAfoIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf9ab+BXXqh8XDY0Yjc0N2ZlNjBhZTcyMWQ5YzhiYmYwNThmZGNlMDgxOTk0NDlmMjA=",
+      "file": "UkVESVMwMDEx+gp2YWxrZXktdmVyBTkuMS4y+gpyZWRpcy1iaXRzwED6BWN0aW1lwmjQBWv6CHVzZWQtbWVtwugFEAD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoZGJmNzcyYTFkMzkxMTMwZDE1YWRkODcwYzQzNjQxYTczN2Y5M2ZiZvoLcmVwbC1vZmZzZXTAD/oIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf8jO2OklifU2g=="
+    },
+    {
+      "image": "valkey/valkey:9.2.0-alpine",
+      "version": "9.2.0",
+      "image_digest": "sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882",
+      "engine": "valkey",
+      "stdout": "UkVESVMwMDEx+gp2YWxrZXktdmVyBTkuMi4w+gpyZWRpcy1iaXRzwED6BWN0aW1lwnHQBWv6CHVzZWQtbWVtwnj8EgD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoYzQ3OGU3OTIzYTRhMDEyNDNmNmM5YmMwZTUxMWMzYzBmZjc1N2Y5OPoLcmVwbC1vZmZzZXTAAfoIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf/n96Q+tuHzzGY2NGVjZTY2YzFmYjdiODc3MmVlY2JlMjM4Y2VkMzJlN2U1ODQwZDA=",
+      "file": "UkVESVMwMDEx+gp2YWxrZXktdmVyBTkuMi4w+gpyZWRpcy1iaXRzwED6BWN0aW1lwnfQBWv6CHVzZWQtbWVtwpBMEwD6DnJlcGwtc3RyZWFtLWRiwAD6B3JlcGwtaWQoYzQ3OGU3OTIzYTRhMDEyNDNmNmM5YmMwZTUxMWMzYzBmZjc1N2Y5OPoLcmVwbC1vZmZzZXTAD/oIYW9mLWJhc2XAAP4A+wEAAAZtYXJrZXIQc3ludGhldGljLWJlZm9yZf9OZXoiNvfx5g=="
+    }
+  ]
+}

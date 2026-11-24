@@ -74,7 +74,11 @@ func (e *Engine) streamDatabaseSnapshot(ctx context.Context, r Request, containe
 	reader, writer := io.Pipe()
 	produced := make(chan error, 1)
 	go func() {
-		err := runInput(ctx, e.Root, args, nil, nil, &sizeBoundWriter{Writer: writer, remaining: maxDatabaseDumpBytes})
+		output, finish := databaseDumpOutput(r.Backup.Database, writer, maxDatabaseDumpBytes)
+		err := runInput(ctx, e.Root, args, nil, nil, output)
+		if err == nil {
+			err = finish()
+		}
 		writer.CloseWithError(err)
 		produced <- err
 	}()
@@ -119,7 +123,11 @@ func (e *Engine) readDatabaseSnapshot(ctx context.Context, r Request, m backupMa
 	if err != nil {
 		return err
 	}
-	err = e.resticInput(ctx, r, nil, false, strings.NewReader(""), &sizeBoundWriter{Writer: file, remaining: maxDatabaseDumpBytes}, "dump", databaseDataSnapshot(m), "/data/000/database.dump")
+	output, finish := databaseDumpOutput(m.Record.Database, file, maxDatabaseDumpBytes)
+	err = e.resticInput(ctx, r, nil, false, strings.NewReader(""), output, "dump", databaseDataSnapshot(m), "/data/000/database.dump")
+	if err == nil {
+		err = finish()
+	}
 	closeErr := file.Close()
 	if err != nil || closeErr != nil {
 		return errors.New("could not retrieve bounded database dump")

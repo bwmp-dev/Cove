@@ -214,6 +214,9 @@ func TestDatabaseDumpImportDocker(t *testing.T) {
 			if f.value() != "before" {
 				t.Fatal("imported backup restored wrong data")
 			}
+			if engine == "redis" || engine == "valkey" {
+				testRDBFramedImport(t, f)
+			}
 		})
 	}
 }

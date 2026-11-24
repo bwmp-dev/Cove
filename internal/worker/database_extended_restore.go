@@ -70,6 +70,11 @@ func (e *Engine) verifyExtendedDatabase(ctx context.Context, r Request, source, 
 	}()
 	args := []string{"docker", "create", "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=2", "--name", name, "--label", "dev.cove.database-verify=" + r.ID, "--label", "dev.cove.backup-owner=" + owner, "--network", "none", "--restart", "no", "--memory", "2g", "--cpus", "2", "--pids-limit", "512", image}
 	engine := r.Backup.Database.Engine
+	if engine == "redis" || engine == "valkey" {
+		if err := normalizeStagedRDB(dump); err != nil {
+			return nil, err
+		}
+	}
 	if engine == "mongodb" {
 		args = append(args, "mongod", "--bind_ip", "127.0.0.1")
 	} else {
