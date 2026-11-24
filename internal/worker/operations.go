@@ -25,70 +25,74 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
-	ImageUpdates           *ImageUpdateOptions      `json:"image_updates,omitempty"`
-	Certificates           []RouteCertificate       `json:"certificates,omitempty"`
-	Scale                  *CPUScaleOptions         `json:"scale,omitempty"`
-	Idle                   *IdlePolicy              `json:"idle,omitempty"`
-	Suspension             *SuspensionOptions       `json:"suspension,omitempty"`
-	ResumeSuspended        bool                     `json:"resume_suspended,omitempty"`
-	Job                    *JobOptions              `json:"job,omitempty"`
-	Rollout                *RolloutOptions          `json:"rollout,omitempty"`
-	Build                  *BuildOptions            `json:"build,omitempty"`
-	PullLatest             bool                     `json:"pull_latest,omitempty"`
-	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
-	Preview                bool                     `json:"preview,omitempty"`
-	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
-	RestoreCopy            *RestoreCopy             `json:"restore_copy,omitempty"`
-	FileSecrets            []FileSecret             `json:"file_secrets,omitempty"`
-	ImagePins              map[string]string        `json:"image_pins,omitempty"`
-	Hooks                  *DeploymentHooks         `json:"hooks,omitempty"`
-	Limits                 map[string]ServiceLimits `json:"limits,omitempty"`
-	Private                *PrivateNetwork          `json:"private,omitempty"`
-	InfrastructurePrepared bool                     `json:"infrastructure_prepared,omitempty"`
-	Registry               *Registry                `json:"registry,omitempty"`
-	Networks               []NetworkAttachment      `json:"networks,omitempty"`
-	Backup                 *BackupConfig            `json:"backup,omitempty"`
-	BackupID               string                   `json:"backup_id,omitempty"`
-	Routes                 []Route                  `json:"routes,omitempty"`
-	Release                string                   `json:"release,omitempty"`
-	ID                     string                   `json:"id"`
-	Workload               string                   `json:"workload"`
-	Action                 string                   `json:"action"`
-	Compose                string                   `json:"compose,omitempty"`
-	Environment            map[string]string        `json:"environment,omitempty"`
-	Source                 *GitSource               `json:"source,omitempty"`
-	Kind                   string                   `json:"kind,omitempty"`
-	JobService             string                   `json:"job_service,omitempty"`
+	ManagedRegistry        *ManagedRegistryOperation `json:"managed_registry,omitempty"`
+	ImageUpdates           *ImageUpdateOptions       `json:"image_updates,omitempty"`
+	Certificates           []RouteCertificate        `json:"certificates,omitempty"`
+	Scale                  *CPUScaleOptions          `json:"scale,omitempty"`
+	Idle                   *IdlePolicy               `json:"idle,omitempty"`
+	Suspension             *SuspensionOptions        `json:"suspension,omitempty"`
+	ResumeSuspended        bool                      `json:"resume_suspended,omitempty"`
+	Job                    *JobOptions               `json:"job,omitempty"`
+	Rollout                *RolloutOptions           `json:"rollout,omitempty"`
+	Build                  *BuildOptions             `json:"build,omitempty"`
+	PullLatest             bool                      `json:"pull_latest,omitempty"`
+	EnvironmentPreview     *EnvironmentPreview       `json:"environment_preview,omitempty"`
+	Preview                bool                      `json:"preview,omitempty"`
+	GuardedDeploy          *bool                     `json:"guarded_deploy,omitempty"`
+	RestoreCopy            *RestoreCopy              `json:"restore_copy,omitempty"`
+	FileSecrets            []FileSecret              `json:"file_secrets,omitempty"`
+	ImagePins              map[string]string         `json:"image_pins,omitempty"`
+	Hooks                  *DeploymentHooks          `json:"hooks,omitempty"`
+	Limits                 map[string]ServiceLimits  `json:"limits,omitempty"`
+	Private                *PrivateNetwork           `json:"private,omitempty"`
+	InfrastructurePrepared bool                      `json:"infrastructure_prepared,omitempty"`
+	Registry               *Registry                 `json:"registry,omitempty"`
+	Networks               []NetworkAttachment       `json:"networks,omitempty"`
+	Backup                 *BackupConfig             `json:"backup,omitempty"`
+	BackupID               string                    `json:"backup_id,omitempty"`
+	Routes                 []Route                   `json:"routes,omitempty"`
+	Release                string                    `json:"release,omitempty"`
+	ID                     string                    `json:"id"`
+	Workload               string                    `json:"workload"`
+	Action                 string                    `json:"action"`
+	Compose                string                    `json:"compose,omitempty"`
+	Environment            map[string]string         `json:"environment,omitempty"`
+	Source                 *GitSource                `json:"source,omitempty"`
+	Kind                   string                    `json:"kind,omitempty"`
+	JobService             string                    `json:"job_service,omitempty"`
 }
 type Operation struct {
-	Scale      *CPUScaleOptions  `json:"scale,omitempty"`
-	Suspension *SuspensionStatus `json:"suspension,omitempty"`
-	Job        *JobResult        `json:"job,omitempty"`
-	Rollout    *RolloutStatus    `json:"rollout,omitempty"`
-	Build      *BuildResult      `json:"build,omitempty"`
-	ImageCheck *ImageCheck       `json:"image_check,omitempty"`
-	ImageScan  *ImageScan        `json:"image_scan,omitempty"`
-	ID         string            `json:"id"`
-	Workload   string            `json:"workload"`
-	Action     string            `json:"action"`
-	State      string            `json:"state"`
-	CreatedAt  time.Time         `json:"created_at"`
-	FinishedAt *time.Time        `json:"finished_at,omitempty"`
-	Error      string            `json:"error,omitempty"`
-	Revision   string            `json:"revision,omitempty"`
-	Preview    *PreviewReport    `json:"environment_preview,omitempty"`
+	RegistryRecoveryPending bool                   `json:"registry_recovery_pending,omitempty"`
+	ManagedRegistry         *ManagedRegistryResult `json:"managed_registry,omitempty"`
+	Scale                   *CPUScaleOptions       `json:"scale,omitempty"`
+	Suspension              *SuspensionStatus      `json:"suspension,omitempty"`
+	Job                     *JobResult             `json:"job,omitempty"`
+	Rollout                 *RolloutStatus         `json:"rollout,omitempty"`
+	Build                   *BuildResult           `json:"build,omitempty"`
+	ImageCheck              *ImageCheck            `json:"image_check,omitempty"`
+	ImageScan               *ImageScan             `json:"image_scan,omitempty"`
+	ID                      string                 `json:"id"`
+	Workload                string                 `json:"workload"`
+	Action                  string                 `json:"action"`
+	State                   string                 `json:"state"`
+	CreatedAt               time.Time              `json:"created_at"`
+	FinishedAt              *time.Time             `json:"finished_at,omitempty"`
+	Error                   string                 `json:"error,omitempty"`
+	Revision                string                 `json:"revision,omitempty"`
+	Preview                 *PreviewReport         `json:"environment_preview,omitempty"`
 }
 type journal struct {
-	ImageScanCleanup bool              `json:"image_scan_cleanup,omitempty"`
-	IdleChange       *idleChange       `json:"idle_change,omitempty"`
-	SuspensionChange *suspensionChange `json:"suspension_change,omitempty"`
-	JobRun           *jobRun           `json:"job_run,omitempty"`
-	RolloutChange    *rolloutChange    `json:"rollout_change,omitempty"`
-	CancelRequested  bool              `json:"cancel_requested,omitempty"`
-	RouteChange      *routeChange      `json:"route_change,omitempty"`
-	Operation        Operation         `json:"operation"`
-	Request          Request           `json:"request"`
-	Digest           string            `json:"digest"`
+	RegistryCleanup  *managedRegistryCleanup `json:"registry_cleanup,omitempty"`
+	ImageScanCleanup bool                    `json:"image_scan_cleanup,omitempty"`
+	IdleChange       *idleChange             `json:"idle_change,omitempty"`
+	SuspensionChange *suspensionChange       `json:"suspension_change,omitempty"`
+	JobRun           *jobRun                 `json:"job_run,omitempty"`
+	RolloutChange    *rolloutChange          `json:"rollout_change,omitempty"`
+	CancelRequested  bool                    `json:"cancel_requested,omitempty"`
+	RouteChange      *routeChange            `json:"route_change,omitempty"`
+	Operation        Operation               `json:"operation"`
+	Request          Request                 `json:"request"`
+	Digest           string                  `json:"digest"`
 }
 
 // routeChange is journaled by a route operation before it changes the proxy. Until Committed, the
@@ -199,6 +203,9 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if err := validateManagedRegistryOperation(r); err != nil {
+		return err
+	}
 	if r.Action == "image_scan" {
 		minimal := Request{ID: r.ID, Workload: r.Workload, Action: r.Action, Kind: r.Kind, JobService: r.JobService}
 		if !reflect.DeepEqual(r, minimal) {
@@ -288,6 +295,7 @@ func ValidateRequest(r Request) error {
 		return errors.New("invalid operation or workload ID")
 	}
 	switch r.Action {
+	case "registry_maintenance":
 	case "preview_data", "environment_preview_remove":
 	case "preview_remove":
 		if !r.Preview {
@@ -457,6 +465,7 @@ func (e *Engine) Status(id string) (Operation, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	j, err := e.read(id)
+	j.Operation.RegistryRecoveryPending = j.RegistryCleanup != nil
 	return j.Operation, err
 }
 func (e *Engine) Logs(id string) (string, error) {
@@ -506,6 +515,20 @@ func (e *Engine) Recover() error {
 		j, err := e.read(id)
 		if err != nil {
 			return err
+		}
+		if j.RegistryCleanup != nil {
+			cleanup, stop := context.WithTimeout(context.Background(), 2*time.Minute)
+			e.mu.Unlock()
+			err := e.recoverManagedRegistry(cleanup, j)
+			e.mu.Lock()
+			stop()
+			if err != nil {
+				return err
+			}
+			j, err = e.read(id)
+			if err != nil {
+				return err
+			}
 		}
 		if j.ImageScanCleanup {
 			cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
@@ -812,6 +835,8 @@ func (e *Engine) execute(parent context.Context, j journal) {
 		j.Operation.Preview = persisted.Operation.Preview
 		j.Operation.ImageCheck = persisted.Operation.ImageCheck
 		j.Operation.ImageScan = persisted.Operation.ImageScan
+		j.Operation.ManagedRegistry = persisted.Operation.ManagedRegistry
+		j.RegistryCleanup = persisted.RegistryCleanup
 		j.ImageScanCleanup = persisted.ImageScanCleanup
 		j.Operation.Rollout = persisted.Operation.Rollout
 		j.RolloutChange = persisted.RolloutChange
@@ -951,6 +976,13 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		err := e.updateRoutes(ctx, r, dir, log)
 		if err != nil {
 			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "registry_maintenance" {
+		err := e.performManagedRegistry(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, "Registry maintenance failed:", err)
 		}
 		return err
 	}

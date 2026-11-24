@@ -82,6 +82,9 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request, isEnvironme
 }
 
 func groupError(w http.ResponseWriter, err error) {
+	if managedRegistryAdmissionError(w, err) {
+		return
+	}
 	var constraint *pgconn.PgError
 	if errors.As(err, &constraint) && (constraint.Code == "23505" || constraint.Code == "23503") {
 		http.Error(w, "name already exists, group is in use, or referenced group no longer exists", 409)

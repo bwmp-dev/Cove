@@ -192,7 +192,7 @@ const pemInput = { autoComplete: "off", autoCapitalize: "none", autoCorrect: "of
 
 // Certificate material lives only in this component's state. It is never put in the URL, browser storage, the query
 // cache or logs, and the mutation is reset as soon as its outcome is read so its variables are dropped too.
-function UploadForm({ workloadId, full }: { workloadId: string; full: boolean }) {
+export function UploadForm({ workloadId, full, afterUpload = "Select it on a route above and save to serve it." }: { workloadId: string; full: boolean; afterUpload?: string }) {
   const id = useId();
   const upload = useUploadCertificate(workloadId);
   const online = useOnline();
@@ -293,7 +293,7 @@ function UploadForm({ workloadId, full }: { workloadId: string; full: boolean })
       )}
       {uploaded && (
         <Notice tone="success" title="Certificate uploaded">
-          {uploaded} is stored for this resource. Select it on a route above and save to serve it.
+          {uploaded} is stored for this resource. {afterUpload}
         </Notice>
       )}
       {!online && <Notice tone="warn" title="You are offline">Certificates can be uploaded when the connection returns.</Notice>}

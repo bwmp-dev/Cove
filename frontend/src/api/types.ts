@@ -35,6 +35,10 @@ export interface Capabilities {
   cloudflare_publishing?: boolean;
   // The worker can discover newer image tags and digests for image update policies and deploy exact pinned images.
   image_updates?: boolean;
+  // The worker can run and maintain a team-owned managed registry. Creating one also needs file_secrets.
+  managed_registry?: boolean;
+  // The worker mounts saved variables as files under /run/secrets.
+  file_secrets?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -364,7 +368,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "image_scan" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "image_check" | "image_scan" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy" | "registry_maintenance";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {
@@ -386,6 +390,17 @@ export interface WorkerOperation {
   suspension?: SuspensionResult;
   // Present on a deploy the panel's CPU scaler queued: a rolling replacement of the current release with new replica counts.
   scale?: ScaleResult;
+  // Reported by registry_maintenance operations of a managed registry.
+  managed_registry?: ManagedRegistryResult;
+}
+
+// Counts of manifests, not bytes: the worker does not measure reclaimed space.
+export interface ManagedRegistryResult {
+  storage?: { hard_cap_verified: boolean; reason: string };
+  manifests: number;
+  deleted: number;
+  removed: boolean;
+  data_retained: boolean;
 }
 
 export interface ScaleResult {
@@ -552,7 +567,7 @@ export type WorkloadImages =
 
 export interface OperationRequest {
   // Only the panel's health monitor queues restart_unhealthy, only environment pause and resume queue suspend and resume, and idle policy changes have their own endpoint; the API rejects them here.
-  action: Exclude<OperationAction, "routes" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy">;
+  action: Exclude<OperationAction, "routes" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy" | "registry_maintenance">;
   // Deploy only: pull the configured tags before building and replacing containers.
   pull_latest?: boolean;
   build?: BuildOptions;

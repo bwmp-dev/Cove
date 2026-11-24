@@ -22,6 +22,18 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "registry-storage" {
+		file, err := os.Open("/config/registry.json")
+		if err == nil {
+			err = RunManagedRegistryStorage("/registry", file, os.Stdout)
+			_ = file.Close()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) >= 2 && (os.Args[1] == "cloudflare-connector-origin-probe" || os.Args[1] == "cloudflare-origin" || os.Args[1] == "cloudflare-origin-probe" || os.Args[1] == "cloudflare-probe" || os.Args[1] == "cloudflare-fake-edge" || os.Args[1] == "cloudflare-fixture-client" || os.Args[1] == "tunnel" && os.Getenv("COVE_TEST_FAKE_EDGE_URL") != "") {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 		defer stop()

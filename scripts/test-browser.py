@@ -170,9 +170,10 @@ def main():
     cloudflare_tunnel = "--cloudflare-tunnel" in sys.argv[1:]
     registry_hooks = "--registry-webhooks" in sys.argv[1:]
     image_scans = "--image-scans" in sys.argv[1:]
+    managed_registry = "--managed-registry" in sys.argv[1:]
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
@@ -180,6 +181,7 @@ def main():
     ingress = []
     worker_state_owned = False
     certificate_config = None
+    managed_registry_config = None
     extra_images = []
     tunnel_bridges = []
     env = os.environ.copy()
@@ -217,6 +219,10 @@ def main():
             "http":{"routers":{"panel":{"rule":"Host(`localhost`)","entryPoints":["websecure"],"service":"panel","tls":{}}},
                     "services":{"panel":{"loadBalancer":{"servers":[{"url":"http://panel:8080"}]}}}},
             "tls":{"certificates":[{"certFile":"/fixture/cert.pem","keyFile":"/fixture/key.pem"}]}}))
+        if managed_registry:
+            from managed_registry_fixture import ManagedRegistryFixture, REGISTRY_PIN
+            run("docker", "image", "inspect", REGISTRY_PIN, stdout=subprocess.DEVNULL)
+            managed_registry_config = ManagedRegistryFixture(run, fixture, name, openssl, env)
         try:
             run("docker", "build", "-t", panel_image, ".")
             run("docker", "network", "create", *(["--internal"] if cloudflare_tunnel else []), name, stdout=subprocess.DEVNULL)
@@ -328,6 +334,8 @@ def main():
                     "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
             if worker not in containers:
                 containers.append(worker)
+            if managed_registry_config:
+                managed_registry_config.install(worker_image, worker)
 
             def api(method, path, body=None, credential=None, raw=False):
                 request = urllib.request.Request(origin+path, method=method,
@@ -361,6 +369,16 @@ def main():
             if cloudflare_tunnel:
                 env.update(COVE_BROWSER_TUNNEL_PROVIDER=certificate_config["provider"],COVE_BROWSER_TUNNEL_TOKEN=certificate_config["token"],COVE_BROWSER_TUNNEL_ROOT=str(fixture / "cert.pem"))
             subprocess.run([shutil.which("pnpm"), "test:e2e", *browser_args], cwd=ROOT / "frontend", env=env, check=True)
+        except subprocess.CalledProcessError:
+            if managed_registry_config and worker_state_owned:
+                try:
+                    for operation in api("GET", "/api/operations"):
+                        if operation["state"] in ("failed", "interrupted", "cancelled"):
+                            diagnostic = api("GET", "/api/operations/" + operation["id"] + "/logs")
+                            print("Managed registry fixture operation:", operation["id"], operation["state"], diagnostic, flush=True)
+                except Exception:
+                    print("Managed registry fixture operation diagnostics unavailable", flush=True)
+            raise
         finally:
             for bridge in reversed(tunnel_bridges):
                 bridge.stop()
@@ -409,6 +427,11 @@ def main():
                         if not re.fullmatch(r"[0-9a-f]{32}", network): raise RuntimeError("Unexpected fixture network ID")
                         subprocess.run(["docker", "network", "rm", "cove-shared-"+network], check=True, stdout=subprocess.DEVNULL)
             finally:
+                if managed_registry_config:
+                    try:
+                        managed_registry_config.cleanup(worker_image)
+                    except Exception as error:
+                        cleanup_errors.append("managed registry fixture trust cleanup failed: " + str(error))
                 for container in reversed(containers):
                     subprocess.run(["docker", "rm", "-f", "-v", container], check=False, stdout=subprocess.DEVNULL)
                 try:

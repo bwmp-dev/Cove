@@ -17,9 +17,10 @@ export function isActive(state: OperationState) {
 }
 
 // Image checks, vulnerability scans and builds never change what is deployed, environment pause and resume only stop and start the
-// deployed containers, and idle policy changes only configure sleep, so deployment summaries and release lists skip them. Operation lists, details and active progress still show them.
+// deployed containers, idle policy changes only configure sleep, and registry maintenance only prunes or removes a managed registry,
+// so deployment summaries and release lists skip them. Operation lists, details and active progress still show them.
 export function isHousekeeping(operation: Operation) {
-  return operation.action === "image_check" || operation.action === "image_scan" || operation.action === "build" || operation.action === "idle_policy" || isSuspensionAction(operation.action);
+  return operation.action === "image_check" || operation.action === "image_scan" || operation.action === "build" || operation.action === "idle_policy" || operation.action === "registry_maintenance" || isSuspensionAction(operation.action);
 }
 
 // Queued only by the control plane when an environment is paused or resumed; people cannot queue or cancel them.
@@ -79,6 +80,7 @@ export const actionLabels = {
   suspend: "Pause environment resource",
   resume: "Resume environment resource",
   idle_policy: "Change idle sleep policy",
+  registry_maintenance: "Registry maintenance",
 } as const satisfies Record<OperationAction, string>;
 
 export const stateLabels: Record<OperationState, string> = {

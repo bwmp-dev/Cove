@@ -98,21 +98,22 @@ func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
 	team := actor(r).Team
 	id := r.PathValue("id")
 	if r.Method == "GET" {
-		rows, err := s.DB.Query(r.Context(), `SELECT id,configuration FROM infrastructure_connections WHERE team_id=$1 AND kind=$2 ORDER BY name`, team, kind)
+		rows, err := s.DB.Query(r.Context(), `SELECT c.id,c.configuration,COALESCE(m.id,'') FROM infrastructure_connections c LEFT JOIN managed_registries m ON m.connection_id=c.id WHERE c.team_id=$1 AND c.kind=$2 ORDER BY c.name`, team, kind)
 		if err != nil {
 			http.Error(w, "connections unavailable", 503)
 			return
 		}
 		defer rows.Close()
 		type item struct {
-			ID string `json:"id"`
+			ID              string `json:"id"`
+			ManagedRegistry string `json:"managed_registry_id,omitempty"`
 			connectionConfig
 		}
 		items := []item{}
 		for rows.Next() {
 			var v item
 			var enc []byte
-			if rows.Scan(&v.ID, &enc) != nil {
+			if rows.Scan(&v.ID, &enc, &v.ManagedRegistry) != nil {
 				http.Error(w, "connections unavailable", 503)
 				return
 			}
@@ -139,6 +140,15 @@ func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var old connectionConfig
 	if id != "" {
+		var managed bool
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM managed_registries WHERE connection_id=$1)`, id).Scan(&managed); err != nil {
+			http.Error(w, "connection ownership unavailable", 503)
+			return
+		}
+		if managed {
+			http.Error(w, "this connection is managed by its registry", 409)
+			return
+		}
 		var encrypted []byte
 		err = tx.QueryRow(r.Context(), `SELECT configuration FROM infrastructure_connections WHERE id=$1 AND team_id=$2 AND kind=$3 FOR UPDATE`, id, team, kind).Scan(&encrypted)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -347,6 +357,9 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
+		if managedRegistryAdmissionError(w, err) {
+			return
+		}
 		http.Error(w, "could not update registry", 503)
 		return
 	}
@@ -354,6 +367,16 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if r.Action == "registry_maintenance" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT n.state='ready' AND COALESCE((n.capabilities->>'managed_registry')::boolean,false) FROM workloads w JOIN nodes n ON n.id=w.node_id JOIN managed_registries m ON m.id=w.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("managed registry maintenance requires a ready supported worker")
+		}
+		return nil
+	}
 	if r.Action == "image_scan" {
 		return s.requireImageScanning(ctx, r.Workload)
 	}

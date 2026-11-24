@@ -492,7 +492,7 @@ function hasControlCharacter(value: string): boolean {
 const proxyHeaders = new Set(["x-cove-auth-hop", "keep-alive", "proxy-connection", "host", "forwarded", "connection", "upgrade", "transfer-encoding", "content-length", "te", "trailer", "proxy-authorization", "proxy-authenticate"]);
 const presetHeaders = new Set(["strict-transport-security", "x-content-type-options", "x-frame-options", "referrer-policy"]);
 
-function isHostname(value: string) {
+export function isHostname(value: string) {
   return value.length <= 253 && value.includes(".") && value.split(".").every((label) => domainLabel.test(label));
 }
 

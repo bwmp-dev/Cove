@@ -18,6 +18,13 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "registry-storage":
+		var file *os.File
+		file, err = os.Open("/config/registry.json")
+		if err == nil {
+			defer file.Close()
+			err = worker.RunManagedRegistryStorage("/registry", file, os.Stdout)
+		}
 	case "cloudflare-connector-origin-probe":
 		err = worker.RunCloudflareConnectorOriginProbe(ctx)
 	case "cloudflare-origin-probe":

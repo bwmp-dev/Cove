@@ -1,0 +1,51 @@
+package worker
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"time"
+)
+
+func VerifyManagedRegistry(ctx context.Context, registry *Registry, certificate string) error {
+	if registry == nil {
+		return errors.New("registry verification requires explicit credentials")
+	}
+	if err := ValidateRegistry(registry); err != nil {
+		return err
+	}
+	if len(certificate) > 128<<10 {
+		return errors.New("registry certificate exceeds verification limit")
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil {
+		return errors.New("registry TLS trust roots unavailable")
+	}
+	if certificate != "" && !roots.AppendCertsFromPEM([]byte(certificate)) {
+		return errors.New("selected registry certificate unavailable")
+	}
+	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second, MaxResponseHeaderBytes: 16 << 10}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	request, err := http.NewRequestWithContext(ctx, "GET", "https://"+registry.Server+"/v2/", nil)
+	if err != nil {
+		return errors.New("registry verification request unavailable")
+	}
+	request.SetBasicAuth(registry.Username, registry.Password)
+	response, err := client.Do(request)
+	if err != nil {
+		return errors.New("registry authenticated HTTPS verification failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 || response.Header.Get("Docker-Distribution-Api-Version") != "registry/2.0" {
+		return errors.New("registry authenticated HTTPS endpoint refused verification")
+	}
+	if _, err = io.Copy(io.Discard, io.LimitReader(response.Body, 4096)); err != nil {
+		return errors.New("registry verification response unavailable")
+	}
+	return nil
+}

@@ -20,7 +20,7 @@ import { findPlacement } from "../lib/hierarchy";
 import { resultSummary } from "../lib/rollouts";
 import { linkClass } from "../lib/styles";
 import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
-import type { SuspensionResult, WorkloadSummary } from "../api/types";
+import type { ManagedRegistryResult, SuspensionResult, WorkloadSummary } from "../api/types";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
@@ -86,6 +86,18 @@ function SuspensionOutcome({ suspension }: { suspension: SuspensionResult }) {
         {suspension.captured} {suspension.captured === 1 ? "container" : "containers"} captured, {suspension.previously_running} running {before}.
         {suspension.phase === "stopped" && (idle ? " It was stopped manually while asleep, so it was left stopped." : " It was stopped manually while paused, so the resume left it stopped.")}
       </p>
+    </div>
+  );
+}
+
+const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
+
+// Manifest counts only: reclaimed space is not measured, and a removal reports whether the data volume was kept.
+function RegistryMaintenanceOutcome({ result }: { result: ManagedRegistryResult }) {
+  return (
+    <div className="space-y-1">
+      <p>{result.removed ? (result.data_retained ? "Registry removed; its data volume was kept on the node" : "Registry removed; no data volume was kept") : `${plural(result.deleted, "manifest")} deleted of ${plural(result.manifests, "manifest")} found`}</p>
+      {result.storage?.hard_cap_verified !== true && <p className="text-xs text-fg-muted">The registry storage has no verified hard cap.</p>}
     </div>
   );
 }
@@ -273,6 +285,7 @@ export function OperationPage() {
                 : operation.action === "image_scan" && result && !active
                   ? [{ term: "Vulnerability scan", value: <span className="text-fg-muted">No report was recorded.</span> }]
                   : []),
+              ...(result?.managed_registry ? [{ term: "Registry maintenance", value: <RegistryMaintenanceOutcome result={result.managed_registry} /> }] : []),
               ...(result?.suspension ? [{ term: suspensionTerms[result.suspension.reason], value: <SuspensionOutcome suspension={result.suspension} /> }] : []),
               ...(result?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{result.revision}</span> }] : []),
               ...(!result ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),

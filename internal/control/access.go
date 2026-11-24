@@ -208,6 +208,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
+	case strings.HasPrefix(path, "/api/managed-registries"):
+		return r.Method == "GET" || s.teamAdmin(r, p.Team) || deny()
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):
 		return true
 	case path == "/api/github/app" || path == "/api/github/app/connect" || strings.HasPrefix(path, "/api/github/app/installations/") && r.Method == "PUT":
@@ -353,6 +355,18 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case strings.HasPrefix(path, "/api/workloads/"):
 		if r.Method != "GET" {
+			var managedRegistry bool
+			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM managed_registries WHERE id=$1)`, id).Scan(&managedRegistry); err != nil {
+				http.Error(w, "authorization unavailable", 503)
+				return false
+			}
+			if managedRegistry && !strings.HasSuffix(path, "/certificates") && !strings.Contains(path, "/certificates/") {
+				http.Error(w, "this resource is managed by its registry; use the managed registry actions", 409)
+				return false
+			}
+			if managedRegistry && !s.teamAdmin(r, p.Team) {
+				return deny()
+			}
 			var preview bool
 			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM previews WHERE workload_id=$1)`, id).Scan(&preview); err != nil {
 				http.Error(w, "authorization unavailable", 503)
