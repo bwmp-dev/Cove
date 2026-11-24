@@ -133,10 +133,18 @@ func (s *Server) deliverNotification(ctx context.Context, operation, connection 
 	status := "sent"
 	message := ""
 	n := c.Notification
-	if !n.Enabled || state == "succeeded" && !n.Success || state != "succeeded" && !n.Failure {
+	scanEvent, scanSummary, scanAllowed, scanErr := s.scanNotification(ctx, operation, action)
+	if scanErr != nil {
+		return scanErr
+	}
+	if !n.Enabled || !scanAllowed || state == "succeeded" && !n.Success || state != "succeeded" && !n.Failure {
 		status = "skipped"
 	} else {
 		event := map[string]string{"delivery_id": operation + ":" + connection, "event": "operation." + state, "operation_id": operation, "resource": name, "action": action, "state": state, "url": s.PublicURL + "/operations/" + operation, "message": "Cove: " + action + " " + state + " for " + name + ". " + s.PublicURL + "/operations/" + operation}
+		if scanEvent != "" {
+			event["event"] = scanEvent
+			event["message"] = "Cove: vulnerability scan for " + name + ". " + scanSummary + " " + event["url"]
+		}
 		var updateSummary string
 		updateErr := s.DB.QueryRow(ctx, `SELECT summary FROM image_update_events WHERE operation_id=$1`, operation).Scan(&updateSummary)
 		if updateErr != nil && !errors.Is(updateErr, pgx.ErrNoRows) {

@@ -354,6 +354,9 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if r.Action == "image_scan" {
+		return s.requireImageScanning(ctx, r.Workload)
+	}
 	if err := checkRouteProtocol(ctx, s.DB, r.Workload, r.Routes); err != nil {
 		return err
 	}

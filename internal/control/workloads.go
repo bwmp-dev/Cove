@@ -182,7 +182,7 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch in.Action {
-	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check", "build", "rollout_promote", "rollout_abort":
+	case "deploy", "stop", "start", "restart", "rollback", "backup", "restore", "drill", "image_check", "image_scan", "build", "rollout_promote", "rollout_abort":
 	default:
 		http.Error(w, "unsupported action", 400)
 		return
@@ -287,6 +287,17 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		request = worker.Request{ID: id, Workload: request.Workload, Action: "build", Build: in.Build, Compose: config.Compose, Source: config.Source, Environment: config.Environment, FileSecrets: config.FileSecrets, Kind: config.Kind, JobService: config.JobService}
+	}
+	if in.Action == "image_scan" {
+		if in.PullLatest || in.Release != "" || in.BackupID != "" {
+			http.Error(w, "a vulnerability scan only inspects retained deployed images", 400)
+			return
+		}
+		if err = s.requireImageScanning(r.Context(), request.Workload); err != nil {
+			http.Error(w, "image scanning requires node-operator and team/node opt-in on a ready worker", 409)
+			return
+		}
+		request = worker.Request{ID: id, Workload: request.Workload, Action: "image_scan", Kind: config.Kind, JobService: config.JobService}
 	}
 	if in.Action == "image_check" {
 		if in.PullLatest {
@@ -685,6 +696,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
 	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
+			if request.Action == "image_scan" {
+				return s.failOperation(ctx, id, "Image scanning is no longer enabled for this team and ready worker.")
+			}
 			if errors.Is(err, errSharedVariables) {
 				return s.failOperation(ctx, id, "Shared variable resolution failed; check for missing names in this resource's team, project, and environment, or values exceeding 64 KiB.")
 			}

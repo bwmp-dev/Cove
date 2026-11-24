@@ -67,6 +67,7 @@ type Operation struct {
 	Rollout    *RolloutStatus    `json:"rollout,omitempty"`
 	Build      *BuildResult      `json:"build,omitempty"`
 	ImageCheck *ImageCheck       `json:"image_check,omitempty"`
+	ImageScan  *ImageScan        `json:"image_scan,omitempty"`
 	ID         string            `json:"id"`
 	Workload   string            `json:"workload"`
 	Action     string            `json:"action"`
@@ -78,6 +79,7 @@ type Operation struct {
 	Preview    *PreviewReport    `json:"environment_preview,omitempty"`
 }
 type journal struct {
+	ImageScanCleanup bool              `json:"image_scan_cleanup,omitempty"`
 	IdleChange       *idleChange       `json:"idle_change,omitempty"`
 	SuspensionChange *suspensionChange `json:"suspension_change,omitempty"`
 	JobRun           *jobRun           `json:"job_run,omitempty"`
@@ -118,6 +120,7 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	scanMu        sync.Mutex
 	helperImageMu sync.Mutex
 	idleMu        sync.Mutex
 	// Stream runs a command with separate output streams; tests replace it.
@@ -196,6 +199,12 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.Action == "image_scan" {
+		minimal := Request{ID: r.ID, Workload: r.Workload, Action: r.Action, Kind: r.Kind, JobService: r.JobService}
+		if !reflect.DeepEqual(r, minimal) {
+			return errors.New("image scanning accepts no deployment or credential inputs")
+		}
+	}
 	if r.ImageUpdates != nil {
 		if r.Action != "image_check" || r.Kind == "job" {
 			return errors.New("image update discovery requires a service image check")
@@ -323,7 +332,7 @@ func ValidateRequest(r Request) error {
 		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
 			return errors.New("rollout actions require a service outside managed previews")
 		}
-	case "image_check":
+	case "image_scan", "image_check":
 		if r.Preview || r.EnvironmentPreview != nil {
 			return errors.New("image checks require a resource outside managed previews")
 		}
@@ -497,6 +506,18 @@ func (e *Engine) Recover() error {
 		j, err := e.read(id)
 		if err != nil {
 			return err
+		}
+		if j.ImageScanCleanup {
+			cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
+			err := e.recoverImageScan(cleanup, j.Request)
+			stop()
+			if err != nil {
+				return err
+			}
+			j.ImageScanCleanup = false
+			if err = writeJSON(e.path(id), j); err != nil {
+				return err
+			}
 		}
 		if j.Operation.State == "running" && (j.SuspensionChange != nil || j.IdleChange != nil) {
 			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
@@ -790,6 +811,8 @@ func (e *Engine) execute(parent context.Context, j journal) {
 		j.Operation.Revision = persisted.Operation.Revision
 		j.Operation.Preview = persisted.Operation.Preview
 		j.Operation.ImageCheck = persisted.Operation.ImageCheck
+		j.Operation.ImageScan = persisted.Operation.ImageScan
+		j.ImageScanCleanup = persisted.ImageScanCleanup
 		j.Operation.Rollout = persisted.Operation.Rollout
 		j.RolloutChange = persisted.RolloutChange
 		j.Operation.Build = persisted.Operation.Build
@@ -935,6 +958,13 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		err := e.performImageCheck(ctx, r, env, log)
 		if err != nil {
 			fmt.Fprintln(log, "Image check failed:", err)
+		}
+		return err
+	}
+	if r.Action == "image_scan" {
+		err := e.performImageScan(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, "Vulnerability scan failed or was interrupted.")
 		}
 		return err
 	}

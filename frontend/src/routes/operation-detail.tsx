@@ -26,6 +26,7 @@ import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
 import { idleReason } from "../lib/idle";
 import { ScaleOutcome } from "../components/CpuAutoscale";
+import { ScanOutcome } from "../components/ImageScans";
 
 const route = getRouteApi("/app/operations/$operationId");
 
@@ -267,6 +268,11 @@ export function OperationPage() {
                   ]
                 : []),
               ...(result?.scale ? [{ term: "CPU scaling", value: <ScaleOutcome scale={result.scale} /> }] : []),
+              ...(result?.image_scan
+                ? [{ term: "Vulnerability scan", value: <ScanOutcome scan={result.image_scan} workloadId={workload?.id} /> }]
+                : operation.action === "image_scan" && result && !active
+                  ? [{ term: "Vulnerability scan", value: <span className="text-fg-muted">No report was recorded.</span> }]
+                  : []),
               ...(result?.suspension ? [{ term: suspensionTerms[result.suspension.reason], value: <SuspensionOutcome suspension={result.suspension} /> }] : []),
               ...(result?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{result.revision}</span> }] : []),
               ...(!result ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),
