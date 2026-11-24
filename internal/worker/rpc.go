@@ -17,6 +17,7 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
+	RefreshScanDatabase bool                    `json:"refresh_scan_database,omitempty"`
 	BuildCache          *BuildCacheSettings     `json:"build_cache,omitempty"`
 	RegistryCertificate string                  `json:"registry_certificate,omitempty"`
 	Publishing          *CloudflarePublishing   `json:"publishing,omitempty"`
@@ -33,6 +34,8 @@ type RPCRequest struct {
 	ID                  string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	ScanDatabase       *ScanDatabaseStatus         `json:"scan_database,omitempty"`
+	ScanObservation    *ScanObservation            `json:"scan_observation,omitempty"`
 	BuildCache         *BuildCacheStatus           `json:"build_cache,omitempty"`
 	RegistryReferences []string                    `json:"registry_references,omitempty"`
 	Publishing         *CloudflarePublishingStatus `json:"publishing,omitempty"`
@@ -64,6 +67,29 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "retire_image_scan":
+		if r.Request == nil {
+			return RPCResponse{Error: "automatic scan request required"}
+		}
+		if err := e.retireImageScan(ctx, *r.Request); err != nil {
+			return RPCResponse{Error: "automatic scan cleanup has not settled"}
+		}
+		return RPCResponse{}
+	case "image_scan_database":
+		status, err := e.scanDatabaseStatus(r.RefreshScanDatabase)
+		if err != nil {
+			return RPCResponse{Error: "automatic vulnerability database state is unavailable"}
+		}
+		return RPCResponse{ScanDatabase: &status}
+	case "image_scan_observe":
+		if r.Request == nil {
+			return RPCResponse{Error: "scan resource required"}
+		}
+		observation, err := e.observeScan(ctx, *r.Request)
+		if err != nil {
+			return RPCResponse{Error: "automatic scan resource state is unavailable"}
+		}
+		return RPCResponse{ScanObservation: &observation}
 	case "build_cache":
 		status := e.BuildCacheStatus(ctx)
 		return RPCResponse{BuildCache: &status}
@@ -383,7 +409,7 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit_build_recipe", "submit_build_v2", "submit_image_updates", "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
+	case "submit_automatic_image_scan", "submit_build_recipe", "submit_build_v2", "submit_image_updates", "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
 		}
@@ -414,6 +440,9 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 		if r.Request.BuildRecipe != nil {
 			expected = "submit_build_recipe"
+		}
+		if r.Request.AutomaticScan != nil {
+			expected = "submit_automatic_image_scan"
 		}
 		if r.Method != expected {
 			return RPCResponse{Error: "request requires its dedicated submission method"}

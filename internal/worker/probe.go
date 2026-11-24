@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	AutomaticImageScans  bool                `json:"automatic_image_scans"`
 	Nixpacks             bool                `json:"nixpacks"`
 	NixpacksReason       string              `json:"nixpacks_reason,omitempty"`
 	Buildpacks           bool                `json:"buildpacks"`
@@ -128,6 +129,7 @@ func Inspect(ctx context.Context) Probe {
 	p.JobImageLifecycle = p.ImageLifecycle
 	p.ImageUpdates = p.ImageLifecycle
 	p.ImageScanning = runtime.GOOS == "linux" && scannerEnabled()
+	p.AutomaticImageScans = p.ImageScanning
 	p.Metrics = inspectMetrics(ctx, "/var/lib/cove")
 	p.SharedHost = inspectSharedHost(ctx, RunCommand, "/")
 	p.Ready = p.OS == "linux" && p.Docker != "" && p.Compose != ""

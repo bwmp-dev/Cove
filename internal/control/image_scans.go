@@ -29,6 +29,7 @@ func (s *Server) scanNotification(ctx context.Context, id, action string) (event
 	event, summary = "image.scan_unknown", "Coverage is unknown; inspect the scan operation."
 	var operation worker.Operation
 	if len(data) > 2*1024*1024 || json.Unmarshal(data, &operation) != nil || operation.ImageScan == nil {
+		allowed = false
 		return
 	}
 	report := operation.ImageScan
@@ -39,20 +40,28 @@ func (s *Server) scanNotification(ctx context.Context, id, action string) (event
 	if current && report.Complete(time.Now().UTC()) {
 		event, summary = "image.scan_completed", "Scan completed; review findings and coverage."
 	}
+	if !current || !report.Database.Fresh(time.Now().UTC()) {
+		return "", "", false, nil
+	}
+	newFindings, err := s.newScanFindings(ctx, id, report)
+	if err != nil {
+		return "", "", false, err
+	}
+	if len(newFindings) == 0 {
+		return "", "", false, nil
+	}
+	summary += " Newly appeared stored findings."
 	ids := map[string]bool{}
 	counts := map[string]int{}
 	findings := false
-	for _, image := range report.Images {
-		for severity, count := range image.Counts {
-			if count > 0 {
-				counts[severity] += min(count, 32768)
-				findings = true
-			}
+	for _, finding := range newFindings {
+		switch finding.Severity {
+		case "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN":
+			counts[finding.Severity]++
+			findings = true
 		}
-		for _, finding := range image.Findings {
-			if scanSummaryCVE.MatchString(finding.ID) {
-				ids[finding.ID] = true
-			}
+		if scanSummaryCVE.MatchString(finding.ID) {
+			ids[finding.ID] = true
 		}
 	}
 	if findings {
@@ -94,8 +103,9 @@ func (s *Server) imageScanning(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var input struct {
-			Enabled *bool `json:"enabled"`
-			Notify  *bool `json:"notify"`
+			Enabled   *bool `json:"enabled"`
+			Notify    *bool `json:"notify"`
+			Automatic *bool `json:"automatic"`
 		}
 		if !decode(w, r, &input) {
 			return
@@ -108,13 +118,20 @@ func (s *Server) imageScanning(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "the node operator must enable scanning and verify a ready worker first", 409)
 			return
 		}
-		if _, err := s.DB.Exec(r.Context(), `INSERT INTO image_scanning_settings(team_id,node_id,enabled,notify) VALUES($1,$2,$3,$4) ON CONFLICT(team_id,node_id) DO UPDATE SET enabled=$3,notify=$4`, team, node, *input.Enabled, *input.Notify); err != nil {
+		if input.Automatic != nil && *input.Automatic {
+			var capable bool
+			if err := s.DB.QueryRow(r.Context(), `SELECT COALESCE((capabilities->>'automatic_image_scans')::boolean,false) FROM nodes WHERE id=$1`, node).Scan(&capable); err != nil || !*input.Enabled || !ready || !supported || !capable {
+				http.Error(w, "enable scanning on an upgraded ready worker before enabling automatic scans", 409)
+				return
+			}
+		}
+		if _, err := s.DB.Exec(r.Context(), `INSERT INTO image_scanning_settings(team_id,node_id,enabled,notify,automatic) VALUES($1,$2,$3,$4,COALESCE($5,false)) ON CONFLICT(team_id,node_id) DO UPDATE SET enabled=$3,notify=$4,automatic=COALESCE($5,image_scanning_settings.automatic)`, team, node, *input.Enabled, *input.Notify, input.Automatic); err != nil {
 			http.Error(w, "could not save image scanning settings", 503)
 			return
 		}
 	}
-	var enabled, notify bool
-	err := s.DB.QueryRow(r.Context(), `SELECT enabled,notify FROM image_scanning_settings WHERE team_id=$1 AND node_id=$2`, team, node).Scan(&enabled, &notify)
+	var enabled, notify, automatic bool
+	err := s.DB.QueryRow(r.Context(), `SELECT enabled,notify,automatic FROM image_scanning_settings WHERE team_id=$1 AND node_id=$2`, team, node).Scan(&enabled, &notify, &automatic)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "image scanning settings unavailable", 503)
 		return
@@ -124,7 +141,14 @@ func (s *Server) imageScanning(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "active operations unavailable", 503)
 		return
 	}
-	respond(w, 200, map[string]any{"enabled": enabled, "notify": notify, "can_manage": manage, "node_id": node, "worker_supported": supported, "node_ready": ready, "active_operation_id": active, "scanner_image": worker.ScannerImage, "java_archives": "not_scanned", "database_limit_bytes": int64(2 * 1024 * 1024 * 1024), "database_max_age_hours": 24})
+	var automaticSupported, automaticRunning bool
+	var nextCheck *time.Time
+	var automaticMessage string
+	if err = s.DB.QueryRow(r.Context(), `SELECT COALESCE((capabilities->>'automatic_image_scans')::boolean,false),EXISTS(SELECT 1 FROM automatic_image_scans a WHERE a.workload_id=$2),(SELECT next_check_at FROM image_scan_automation_state WHERE workload_id=$2),COALESCE((SELECT last_error FROM image_scan_automation_state WHERE workload_id=$2),'') FROM nodes WHERE id=$1`, node, id).Scan(&automaticSupported, &automaticRunning, &nextCheck, &automaticMessage); err != nil {
+		http.Error(w, "automatic scan status unavailable", 503)
+		return
+	}
+	respond(w, 200, map[string]any{"enabled": enabled, "notify": notify, "automatic": automatic, "automatic_supported": automaticSupported, "automatic_running": automaticRunning, "next_automatic_check_at": nextCheck, "automatic_message": automaticMessage, "can_manage": manage, "node_id": node, "worker_supported": supported, "node_ready": ready, "active_operation_id": active, "scanner_image": worker.ScannerImage, "java_archives": "not_scanned", "database_limit_bytes": int64(2 * 1024 * 1024 * 1024), "database_max_age_hours": 24})
 }
 
 func (s *Server) requireImageScanning(ctx context.Context, id string) error {
@@ -141,7 +165,7 @@ func (s *Server) requireImageScanning(ctx context.Context, id string) error {
 func (s *Server) workloadImageScans(w http.ResponseWriter, r *http.Request) {
 	var id, state string
 	var data []byte
-	err := s.DB.QueryRow(r.Context(), `SELECT id,state,result FROM operations WHERE workload_id=$1 AND action='image_scan' AND state NOT IN ('queued','running') ORDER BY updated_at DESC LIMIT 1`, r.PathValue("id")).Scan(&id, &state, &data)
+	err := s.DB.QueryRow(r.Context(), `SELECT id,state,result FROM operations WHERE workload_id=$1 AND action='image_scan' AND state NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 1`, r.PathValue("id")).Scan(&id, &state, &data)
 	if errors.Is(err, pgx.ErrNoRows) {
 		respond(w, 200, map[string]any{"state": "unknown", "stale": true, "operation_id": nil, "result": nil, "message": "No vulnerability scan has completed."})
 		return
@@ -167,5 +191,5 @@ func (s *Server) workloadImageScans(w http.ResponseWriter, r *http.Request) {
 	if state == "succeeded" && operation.ImageScan != nil && operation.ImageScan.Complete(time.Now().UTC()) && !stale {
 		effective = "complete"
 	}
-	respond(w, 200, map[string]any{"state": effective, "operation_state": state, "stale": stale, "operation_id": id, "result": operation.ImageScan})
+	respond(w, 200, map[string]any{"state": effective, "operation_state": state, "origin": operation.ScanOrigin, "stale": stale, "operation_id": id, "result": operation.ImageScan})
 }

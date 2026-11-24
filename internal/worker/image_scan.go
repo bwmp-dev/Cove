@@ -26,6 +26,7 @@ type ScanFinding struct {
 type ScannedImage struct {
 	Service      string         `json:"service"`
 	ImageID      string         `json:"image_id"`
+	Identity     string         `json:"image_identity,omitempty"`
 	ConfigDigest string         `json:"config_digest"`
 	State        string         `json:"state"`
 	Message      string         `json:"message,omitempty"`

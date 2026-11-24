@@ -27,7 +27,7 @@ import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
 import { idleReason } from "../lib/idle";
 import { ScaleOutcome } from "../components/CpuAutoscale";
-import { ScanOutcome } from "../components/ImageScans";
+import { ScanOutcome, ScanSource } from "../components/ImageScans";
 
 const route = getRouteApi("/app/operations/$operationId");
 
@@ -320,6 +320,7 @@ export function OperationPage() {
                   ]
                 : []),
               ...(result?.scale ? [{ term: "CPU scaling", value: <ScaleOutcome scale={result.scale} /> }] : []),
+              ...(operation.action === "image_scan" && result ? [{ term: "Scan source", value: <ScanSource origin={result.scan_origin} /> }] : []),
               ...(result?.image_scan
                 ? [{ term: "Vulnerability scan", value: <ScanOutcome scan={result.image_scan} workloadId={workload?.id} /> }]
                 : operation.action === "image_scan" && result && !active

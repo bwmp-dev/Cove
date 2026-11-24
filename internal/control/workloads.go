@@ -592,6 +592,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	tunnelDone := make(chan struct{})
 	go func() { defer close(tunnelDone); s.runCloudflareTunnels(dnsContext) }()
 	defer func() { stopDNS(); <-tunnelDone }()
+	scanDone := make(chan struct{})
+	go func() { defer close(scanDone); s.runAutomaticImageScans(dnsContext) }()
+	defer func() { stopDNS(); <-scanDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {

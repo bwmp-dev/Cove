@@ -233,7 +233,7 @@ test("image scans: an opted-in team scans a running service's retained image and
   await page.keyboard.press("Enter");
   const saved = await put;
   expect(saved.status(), await saved.text()).toBe(200);
-  expect(saved.request().postDataJSON()).toEqual({ enabled: true, notify: false });
+  expect(saved.request().postDataJSON()).toEqual({ enabled: true, notify: false, automatic: false });
   await expect(section.getByText("Scanning settings saved", { exact: true })).toBeVisible();
 
   // Queues exactly one image_scan from the keyboard and waits for its terminal state.
@@ -321,7 +321,7 @@ test("image scans: an opted-in team scans a running service's retained image and
   await expect(page.getByRole("dialog")).toHaveCount(0);
   const disabled = await off;
   expect(disabled.status(), await disabled.text()).toBe(200);
-  expect(disabled.request().postDataJSON()).toEqual({ enabled: false, notify: false });
+  expect(disabled.request().postDataJSON()).toEqual({ enabled: false, notify: false, automatic: false });
   await expect(scanButton).toBeDisabled();
   const refused = await page.request.post(`/api/workloads/${go}/operations`, { headers, data: { action: "image_scan" } });
   expect(refused.status(), await refused.text()).toBe(409);

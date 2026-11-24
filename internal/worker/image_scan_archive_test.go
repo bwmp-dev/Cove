@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,13 +29,18 @@ func TestImageScanArchiveIdentityAndJavaCoverage(t *testing.T) {
 			writer.Close()
 			payload = buffer.Bytes()
 		}
+		config := []byte(`{"architecture":"amd64"}`)
+		configDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(config))
+		platform := []byte(`{"config":{"digest":"` + configDigest + `"}}`)
+		platformDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(platform))
 		var archive bytes.Buffer
 		writer := tar.NewWriter(&archive)
 		for _, entry := range []struct {
 			name string
 			data []byte
 		}{
-			{"config.json", []byte(`{"architecture":"amd64"}`)},
+			{"config.json", config},
+			{"platform.json", platform},
 			{"layer.tar", payload},
 			{"manifest.json", []byte(`[{"Config":"config.json","Layers":["layer.tar"]}]`)},
 		} {
@@ -46,7 +53,7 @@ func TestImageScanArchiveIdentityAndJavaCoverage(t *testing.T) {
 			t.Fatal(err)
 		}
 		result, err := inspectScanArchive(context.Background(), file)
-		if err != nil || !result.JavaArchives || !imageDigest.MatchString(result.ConfigDigest) {
+		if err != nil || !result.JavaArchives || !imageDigest.MatchString(result.ConfigDigest) || result.Manifests[platformDigest] != result.ConfigDigest {
 			t.Fatal(result, err)
 		}
 		image := ScannedImage{State: "complete", Counts: map[string]int{"HIGH": 3}, Coverage: ScanCoverage{OS: "scanned", OtherLanguages: "scanned"}}

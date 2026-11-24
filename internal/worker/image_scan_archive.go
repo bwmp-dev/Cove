@@ -3,6 +3,7 @@ package worker
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -31,6 +32,7 @@ func (r scanContextReader) Read(data []byte) (int, error) {
 type scanArchive struct {
 	ConfigDigest string
 	JavaArchives bool
+	Manifests    map[string]string
 }
 
 func inspectScanArchive(ctx context.Context, filename string) (scanArchive, error) {
@@ -52,6 +54,7 @@ func inspectScanArchive(ctx context.Context, filename string) (scanArchive, erro
 	manifestSeen := false
 	digests := map[string]string{}
 	layers := map[string]tar.Header{}
+	manifests := map[string]string{}
 	for entries := 0; ; entries++ {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
@@ -74,16 +77,25 @@ func inspectScanArchive(ctx context.Context, filename string) (scanArchive, erro
 			continue
 		}
 		hash := sha256.New()
-		if _, err = io.Copy(hash, reader); err != nil {
+		var small bytes.Buffer
+		var destination io.Writer = hash
+		if header.Size <= 65536 {
+			destination = io.MultiWriter(hash, &small)
+		}
+		if _, err = io.Copy(destination, reader); err != nil {
 			return scanArchive{}, err
 		}
 		digests[header.Name] = "sha256:" + hex.EncodeToString(hash.Sum(nil))
+		var platform struct{ Config struct{ Digest string } }
+		if json.Unmarshal(small.Bytes(), &platform) == nil && imageDigest.MatchString(platform.Config.Digest) {
+			manifests[digests[header.Name]] = platform.Config.Digest
+		}
 		layers[header.Name] = *header
 	}
 	if len(manifest) != 1 || len(manifest[0].Layers) > 512 || !imageDigest.MatchString(digests[manifest[0].Config]) || layers[manifest[0].Config].Size > 1024*1024 {
 		return scanArchive{}, errors.New("image archive must identify one bounded image configuration")
 	}
-	result := scanArchive{ConfigDigest: digests[manifest[0].Config]}
+	result := scanArchive{ConfigDigest: digests[manifest[0].Config], Manifests: manifests}
 	wanted := map[string]bool{}
 	for _, name := range manifest[0].Layers {
 		if !imageDigest.MatchString(digests[name]) || wanted[name] {

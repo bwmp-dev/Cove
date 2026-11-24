@@ -15,7 +15,7 @@ func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
 	var cancelRequested bool
 	var approvalRequired bool
 	var approvedAt *time.Time
-	err := s.DB.QueryRow(r.Context(), "SELECT id,workload_id,action,state,result,created_at,cancel_requested,approval_required,approved_at,CASE WHEN action='build' THEN COALESCE(execution_node_id,'') ELSE (SELECT node_id FROM workloads WHERE id=operations.workload_id) END FROM operations WHERE id=$1", r.PathValue("id")).Scan(&id, &workload, &action, &state, &result, &created, &cancelRequested, &approvalRequired, &approvedAt, &executionNode)
+	err := s.DB.QueryRow(r.Context(), "SELECT id,workload_id,action,state,result,created_at,cancel_requested,approval_required,approved_at,CASE WHEN action='build' OR (action='image_scan' AND execution_node_id IS NOT NULL) THEN COALESCE(execution_node_id,'') ELSE (SELECT node_id FROM workloads WHERE id=operations.workload_id) END FROM operations WHERE id=$1", r.PathValue("id")).Scan(&id, &workload, &action, &state, &result, &created, &cancelRequested, &approvalRequired, &approvedAt, &executionNode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return

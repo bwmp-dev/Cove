@@ -27,6 +27,19 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var active bool
+	requested, err := tx.Exec(r.Context(), `UPDATE automatic_image_scans SET cancel_requested=true WHERE workload_id=$1`, r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "automatic scan cleanup unavailable", 503)
+		return
+	}
+	if requested.RowsAffected() > 0 {
+		if err := tx.Commit(r.Context()); err != nil {
+			http.Error(w, "automatic scan cancellation could not be saved", 503)
+			return
+		}
+		http.Error(w, "automatic scan cancellation was requested; retry deletion after its owned cleanup finishes", 409)
+		return
+	}
 	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM route_certificate_issuers WHERE workload_id=$1)`, r.PathValue("id")).Scan(&active); err != nil {
 		http.Error(w, "certificate issuers unavailable", 503)
 		return
@@ -80,6 +93,10 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime cleanup finished; build worker cleanup is pending or unavailable, so the resource record is kept. Retry deletion when the build worker is available", 409)
 		return
 	}
+	if err = s.retireRemoteScans(r.Context(), tx, r.PathValue("id"), node); err != nil {
+		http.Error(w, "runtime cleanup finished; recorded scan-worker cleanup is pending, so the resource record is kept. Retry when that worker is available", 409)
+		return
+	}
 	if err = deleteWorkloadRecords(r.Context(), tx, r.PathValue("id")); err != nil {
 		http.Error(w, "could not delete workload", 500)
 		return
@@ -127,12 +144,12 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var used bool
-	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workloads WHERE node_id=$1) OR EXISTS(SELECT 1 FROM workload_build_nodes WHERE node_id=$1) OR EXISTS(SELECT 1 FROM operations WHERE execution_node_id=$1)", id).Scan(&used); err != nil {
+	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workloads WHERE node_id=$1) OR EXISTS(SELECT 1 FROM workload_build_nodes WHERE node_id=$1) OR EXISTS(SELECT 1 FROM operations WHERE execution_node_id=$1) OR EXISTS(SELECT 1 FROM automatic_image_scans WHERE node_id=$1)", id).Scan(&used); err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	if used {
-		http.Error(w, "delete this node's workloads and clear build assignments or retained build operation history first", 409)
+		http.Error(w, "delete this node's workloads, clear build assignments and recorded operation history, and finish automatic scan cleanup first", 409)
 		return
 	}
 	if _, err = tx.Exec(r.Context(), "DELETE FROM enrollments WHERE node_id=$1", id); err == nil {
