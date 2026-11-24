@@ -33,6 +33,7 @@ func TestExecutableWorkerDispatch(t *testing.T) {
 		"link-gateway": 0, "idle-gateway": 0, "route-helper": 0,
 		"snapshot-host": 0, "host-gpus": 0, "host-firewall": 0, "host-maintenance": 0,
 		"pitr-fetch": 0, "pitr-forget": 0, "pitr-base": 0, "pitr-runner": 0,
+		"cloudflare-origin": 0, "cloudflare-origin-probe": 0, "cloudflare-connector-origin-probe": 0,
 	} {
 		t.Run(command, func(t *testing.T) {
 			for count := 0; count <= arguments+1; count++ {
@@ -48,6 +49,20 @@ func TestExecutableWorkerDispatch(t *testing.T) {
 			}
 		})
 	}
+	t.Run("cloudflare probe arity", func(t *testing.T) {
+		for count := 0; count <= 3; count++ {
+			args := append([]string{"cloudflare-probe"}, strings.Fields(strings.Repeat("invalid ", count))...)
+			output, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+			var exit *exec.ExitError
+			want := 2
+			if count == 1 || count == 2 {
+				want = 1
+			}
+			if !errors.As(err, &exit) || exit.ExitCode() != want || strings.Contains(string(output), "panic:") {
+				t.Fatalf("%v: %v\n%s", args, err, output)
+			}
+		}
+	})
 	t.Run("certificate probe optional file", func(t *testing.T) {
 		file := filepath.Join(t.TempDir(), "probes.json")
 		if err := os.WriteFile(file, []byte("[]"), 0600); err != nil {

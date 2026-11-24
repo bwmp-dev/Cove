@@ -56,6 +56,8 @@ export interface Capabilities {
   resource_defaults?: boolean;
   // The worker can manage the shared proxy's public bindings, HTTP/3 and extra listeners. Only Linux workers report it.
   ingress_exposures?: boolean;
+  // The worker can run a locally managed Cloudflare Tunnel connector for this node's public HTTP routes.
+  cloudflare_publishing?: boolean;
   protocol: number;
   os: string;
   arch: string;

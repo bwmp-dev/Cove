@@ -19,6 +19,10 @@ class WorkerCleanupTests(unittest.TestCase):
         return fixture.owns_worker_resource(kind, {"Name": name, "Labels": labels, **extra}, self.name, self.state, True)
 
     def test_scopes_every_managed_helper_to_fixture_identity(self):
+        for kind in ("container", "network"):
+            self.assertTrue(self.owned(kind, {"cove.managed": "cloudflare-tunnel", "cove.cloudflare-tunnel-owner": self.owner}))
+            self.assertFalse(self.owned(kind, {"cove.managed": "cloudflare-tunnel", "cove.cloudflare-tunnel-owner": "d" * 32}))
+        self.assertTrue(self.owned("container", {"cove.managed": "cloudflare-probe", "cove.cloudflare-tunnel-owner": self.owner}))
         self.assertTrue(self.owned("container", {"cove.managed": "route-aux", "cove.route-aux-owner": self.owner}))
         self.assertTrue(self.owned("network", {"cove.managed": "idle", "cove.idle-workload": "b" * 32}))
         self.assertTrue(self.owned("volume", {"cove.managed": "copy", "dev.cove.operation": "c" * 32}))

@@ -6,6 +6,7 @@ import { nodesQuery } from "../api/queries";
 import { proxyConfigQuery, unsettled, type ProxyConfig } from "../api/proxy";
 import type { Node } from "../api/types";
 import { ProxyTraffic } from "../components/ProxyTraffic";
+import { CloudflareTunnel } from "../components/CloudflareTunnel";
 import { ManagedListeners } from "../components/ManagedListeners";
 import { ChangeOutcome, LastChange, ProxyFileEditor, ProxyFiles, StaticSettings } from "../components/ProxyConfig";
 import { Breadcrumbs, Button, EmptyState, LoadingRows, Notice, PageHeader, QueryError, Section } from "../components/ui";
@@ -119,6 +120,7 @@ function ProxyConfiguration({ node }: { node: Node }) {
     <>
       <DynamicConfiguration node={node} config={config} />
       <ManagedListeners node={node} />
+      <CloudflareTunnel node={node} />
       {config.isSuccess && config.data.available && (
         <Section
           title="Static configuration"

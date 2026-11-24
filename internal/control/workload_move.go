@@ -64,6 +64,9 @@ func (s *Server) planWorkloadMove(ctx context.Context, workload, target string) 
 	if err != nil || json.Unmarshal(plain, &config) != nil {
 		return preview, nil, errors.New("move configuration is unavailable")
 	}
+	if err := s.checkMoveTunnelReservations(ctx, s.DB, preview.SourceID, target, config.Routes); err != nil {
+		return preview, nil, err
+	}
 	preview.ListenerRevision, err = s.moveRouteDestination(ctx, s.DB, target, config.Routes)
 	if err != nil {
 		return preview, nil, err
@@ -157,6 +160,10 @@ func (s *Server) workloadMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "move configuration unavailable", 503)
 		return
 	}
+	if err := s.checkMoveTunnelReservations(r.Context(), tx, preview.SourceID, preview.TargetID, config.Routes); err != nil {
+		http.Error(w, err.Error(), 409)
+		return
+	}
 	listenerRevision, err := s.moveRouteDestination(r.Context(), tx, preview.TargetID, config.Routes)
 	if err != nil || listenerRevision != preview.ListenerRevision {
 		http.Error(w, "destination route listeners changed; review a fresh move plan", 409)
@@ -204,6 +211,43 @@ func (s *Server) workloadMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, 202, map[string]string{"id": operation})
+}
+
+func (s *Server) checkMoveTunnelReservations(ctx context.Context, db interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, source, target string, routes []worker.Route) error {
+	hosts := map[string]bool{}
+	for _, route := range routes {
+		if route.Domain != "" {
+			hosts[route.Domain] = true
+		}
+	}
+	rows, err := db.Query(ctx, `SELECT hostnames,state FROM node_cloudflare_tunnels WHERE node_id IN ($1,$2)`, source, target)
+	if err != nil {
+		return errors.New("tunnel publication reservations unavailable")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var selected []string
+		var encrypted []byte
+		if err := rows.Scan(&selected, &encrypted); err != nil {
+			return err
+		}
+		plain, err := unseal(s.Key, encrypted)
+		var state nodeTunnelPrivate
+		if err != nil || json.Unmarshal(plain, &state) != nil {
+			return errors.New("tunnel DNS cleanup ownership is unavailable")
+		}
+		for host := range state.Records {
+			selected = append(selected, host)
+		}
+		for _, host := range selected {
+			if hosts[host] {
+				return errors.New("remove this resource's hostnames from Tunnel publishing and finish DNS cleanup before moving between nodes; configure publishing on the destination afterwards")
+			}
+		}
+	}
+	return rows.Err()
 }
 
 func (s *Server) moveRouteDestination(ctx context.Context, db interface {

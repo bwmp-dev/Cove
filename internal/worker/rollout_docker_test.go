@@ -22,6 +22,37 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) >= 2 && (os.Args[1] == "cloudflare-connector-origin-probe" || os.Args[1] == "cloudflare-origin" || os.Args[1] == "cloudflare-origin-probe" || os.Args[1] == "cloudflare-probe" || os.Args[1] == "cloudflare-fake-edge" || os.Args[1] == "cloudflare-fixture-client" || os.Args[1] == "tunnel" && os.Getenv("COVE_TEST_FAKE_EDGE_URL") != "") {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+		defer stop()
+		var err error
+		switch os.Args[1] {
+		case "cloudflare-connector-origin-probe":
+			err = RunCloudflareConnectorOriginProbe(ctx)
+		case "cloudflare-origin":
+			err = RunCloudflareOrigin(ctx)
+		case "cloudflare-origin-probe":
+			err = RunCloudflareOriginProbe(ctx)
+		case "cloudflare-probe":
+			revision := ""
+			if len(os.Args) > 3 {
+				revision = os.Args[3]
+			}
+			err = RunCloudflareProbe(ctx, os.Args[2], revision)
+		case "cloudflare-fake-edge":
+			err = runCloudflareFakeEdge(ctx)
+		case "cloudflare-fixture-client":
+			err = runCloudflareFixtureClient(ctx)
+		case "tunnel":
+			err = runCloudflareFakeConnector(ctx)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	if len(os.Args) == 4 && os.Args[1] == "transport-route-probe" {
 		if err := runTransportRouteProbe(); err != nil {
 			fmt.Fprintln(os.Stderr, err)

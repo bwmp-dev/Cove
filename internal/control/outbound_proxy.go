@@ -81,6 +81,17 @@ func (s *Server) outboundProxy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "valid HTTP(S) proxy origins and NO_PROXY list required", 400)
 			return
 		}
+		if c.HTTP != "" || c.HTTPS != "" {
+			var publishing bool
+			if err := s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM node_cloudflare_tunnels)").Scan(&publishing); err != nil {
+				http.Error(w, "tunnel cleanup status unavailable", 503)
+				return
+			}
+			if publishing {
+				http.Error(w, "disable and finish Cloudflare Tunnel cleanup before enabling an HTTP outbound proxy", 409)
+				return
+			}
+		}
 		plain, e := json.Marshal(c)
 		if e == nil {
 			plain, e = seal(s.Key, plain)

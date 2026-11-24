@@ -116,6 +116,16 @@ func (s *Server) checkIngressListenerClaims(ctx context.Context, tx pgx.Tx, node
 }
 
 func (s *Server) checkRouteListenerSelection(w http.ResponseWriter, r *http.Request, node string, routes []worker.Route) bool {
+	var tunnelHold bool
+	if err := s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM node_cloudflare_tunnels WHERE node_id=$1) AND NOT COALESCE((SELECT (capabilities->>'cloudflare_publishing')::boolean FROM nodes WHERE id=$1),false)", node).Scan(&tunnelHold); err != nil {
+		http.Error(w, "tunnel route protection status unavailable", 503)
+		return false
+	}
+	if tunnelHold {
+		http.Error(w, "upgrade and verify this worker before changing routes while managed Tunnel state remains", 409)
+		return false
+	}
+
 	private := false
 	for _, route := range routes {
 		if route.IsTransportRoute() || route.Policy != nil && (route.Policy.Visibility == "lan" || route.Policy.Visibility == "tailscale" || route.Policy.Timeouts != nil) {

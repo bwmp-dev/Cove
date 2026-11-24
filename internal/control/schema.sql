@@ -1727,3 +1727,30 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS cove_certificate_notifications ON route_certificate_issuers;
 CREATE TRIGGER cove_certificate_notifications AFTER UPDATE OF phase ON route_certificate_issuers FOR EACH ROW EXECUTE FUNCTION cove_notify_certificate_outcome();
+
+CREATE TABLE IF NOT EXISTS node_cloudflare_tunnels (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE RESTRICT,
+ id text NOT NULL UNIQUE,
+ zone_id text NOT NULL REFERENCES cloudflare_zones(zone_id) ON DELETE RESTRICT,
+ connection_id text NOT NULL REFERENCES cloudflare_accounts(id) ON DELETE RESTRICT,
+ owner_id text NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ hostnames text[] NOT NULL,
+ image text NOT NULL,
+ phase text NOT NULL DEFAULT 'pending',
+ state bytea NOT NULL,
+ cleanup_requested boolean NOT NULL DEFAULT false,
+ last_error text NOT NULL DEFAULT '',
+ next_check_at timestamptz DEFAULT now(),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION cove_notify_tunnel_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.last_error<>'' AND (OLD.last_error='' OR OLD.phase IS DISTINCT FROM NEW.phase) THEN
+  PERFORM cove_queue_channel_event('tunnel.failed','Managed Tunnel publishing or cleanup needs attention. Review the node Proxy page.',NULL,'','tunnel:'||NEW.id||':'||NEW.updated_at::text,'');
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_tunnel_notifications ON node_cloudflare_tunnels;
+CREATE TRIGGER cove_tunnel_notifications AFTER UPDATE OF phase,last_error ON node_cloudflare_tunnels FOR EACH ROW EXECUTE FUNCTION cove_notify_tunnel_outcome();

@@ -717,6 +717,7 @@ func (e *Engine) Serve(ctx context.Context) error {
 	jobs.Go(func() { e.cleanupLoop(ctx) })
 	jobs.Go(func() { e.linkLoop(ctx) })
 	jobs.Go(func() { e.idleLoop(ctx) })
+	jobs.Go(func() { e.cloudflarePublishingLoop(ctx) })
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {

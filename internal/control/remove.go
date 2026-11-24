@@ -121,6 +121,15 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
+	var publishing bool
+	if err := tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM node_cloudflare_tunnels WHERE node_id=$1)", id).Scan(&publishing); err != nil {
+		http.Error(w, "tunnel cleanup state unavailable", 503)
+		return
+	}
+	if publishing {
+		http.Error(w, "disable and finish this node's Cloudflare Tunnel cleanup before deleting the node", 409)
+		return
+	}
 	var used bool
 	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workloads WHERE node_id=$1) OR EXISTS(SELECT 1 FROM workload_moves m JOIN operations o ON o.id=m.operation_id WHERE (m.source_node=$1 OR m.target_node=$1) AND o.state IN ('queued','running'))", id).Scan(&used); err != nil {
 		http.Error(w, "database unavailable", 503)

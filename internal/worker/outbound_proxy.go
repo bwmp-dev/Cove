@@ -37,6 +37,15 @@ func (e *Engine) configureOutbound(ctx context.Context, config *outbound.Config)
 	}
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
+	if config.HTTP != "" || config.HTTPS != "" {
+		publishing, err := e.readCloudflarePublishing()
+		if err != nil {
+			return err
+		}
+		if publishing.Desired != nil || publishing.Active != nil || publishing.Candidate != nil || len(publishing.Retired) > 0 {
+			return errors.New("disable and finish Cloudflare Tunnel cleanup before enabling an HTTP outbound proxy; its edge transport cannot use that proxy")
+		}
+	}
 	path := filepath.Join(e.Root, "outbound-proxy.json")
 	previous, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {

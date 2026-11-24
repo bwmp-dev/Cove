@@ -61,6 +61,10 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/nodes/{id}/cloudflare-tunnel", "nodes:manage", "Inspect sealed tunnel publishing metadata; instance administrators only", nil, nodeTunnelStatus{}, 200, s.nodeCloudflareTunnel},
+		{"PUT", "/nodes/{id}/cloudflare-tunnel", "nodes:manage", "Configure public exact-host tunnel publishing with an owned Cloudflare connection", nodeTunnelConfiguration{}, nodeTunnelStatus{}, 202, s.nodeCloudflareTunnel},
+		{"DELETE", "/nodes/{id}/cloudflare-tunnel", "nodes:manage", "Disable the connector and clean up only proven owned provider resources", nil, nodeTunnelStatus{}, 202, s.nodeCloudflareTunnel},
+		{"POST", "/nodes/{id}/cloudflare-tunnel/retry", "nodes:manage", "Reconcile saved tunnel ownership without repeating uncertain creates", nil, nodeTunnelStatus{}, 202, s.nodeCloudflareTunnel},
 		{"GET", "/nodes/{id}/ingress-listeners", "nodes:manage", "Inspect shared node listener metadata; instance administrators only", nil, worker.IngressExposureStatus{}, 200, s.ingressExposures},
 		{"POST", "/nodes/{id}/ingress-listeners/initialize", "nodes:manage", "Initialize or recover the shared node proxy; instance administrators only", nil, worker.IngressExposureStatus{}, 200, s.initializeIngressExposures},
 		{"POST", "/nodes/{id}/ingress-listeners/plan", "nodes:manage", "Review shared listener changes without applying them", worker.IngressExposureSettings{}, worker.IngressExposurePlan{}, 200, s.planIngressExposures},

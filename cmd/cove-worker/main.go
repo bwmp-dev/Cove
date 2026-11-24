@@ -13,6 +13,11 @@ func main() {
 	expectedArgs := 2
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "cloudflare-probe":
+			expectedArgs = 3
+			if len(os.Args) == 4 {
+				expectedArgs = 4
+			}
 		case "certificate-probe":
 			if len(os.Args) == 3 {
 				expectedArgs = 3
@@ -55,6 +60,18 @@ func main() {
 		err = worker.RunFilesystemSnapshotReaper(ctx, os.Args[2], false)
 	case "snapshot-host":
 		err = worker.RunFilesystemSnapshotHost(ctx, os.Stdin, os.Stdout)
+	case "cloudflare-connector-origin-probe":
+		err = worker.RunCloudflareConnectorOriginProbe(ctx)
+	case "cloudflare-origin-probe":
+		err = worker.RunCloudflareOriginProbe(ctx)
+	case "cloudflare-origin":
+		err = worker.RunCloudflareOrigin(ctx)
+	case "cloudflare-probe":
+		revision := ""
+		if len(os.Args) == 4 {
+			revision = os.Args[3]
+		}
+		err = worker.RunCloudflareProbe(ctx, os.Args[2], revision)
 	case "healthcheck":
 		err = worker.HTTPHealth(ctx, os.Args[2])
 	case "tunnel":

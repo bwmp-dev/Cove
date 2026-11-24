@@ -401,6 +401,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/nodes/{id}", s.admin(http.HandlerFunc(s.updateNode)))
 	mux.Handle("DELETE /api/nodes/{id}", s.admin(http.HandlerFunc(s.deleteNode)))
 	mux.Handle("POST /api/nodes/{id}/enrollment", s.admin(http.HandlerFunc(s.renewEnrollment)))
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		mux.Handle(method+" /api/nodes/{id}/cloudflare-tunnel", s.admin(http.HandlerFunc(s.nodeCloudflareTunnel)))
+	}
+	mux.Handle("POST /api/nodes/{id}/cloudflare-tunnel/retry", s.admin(http.HandlerFunc(s.nodeCloudflareTunnel)))
 	mux.Handle("GET /api/nodes/{id}/ingress-listeners", s.admin(http.HandlerFunc(s.ingressExposures)))
 	mux.Handle("POST /api/nodes/{id}/ingress-listeners/initialize", s.admin(http.HandlerFunc(s.initializeIngressExposures)))
 	mux.Handle("POST /api/nodes/{id}/ingress-listeners/plan", s.admin(http.HandlerFunc(s.planIngressExposures)))

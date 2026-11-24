@@ -612,6 +612,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	directoryDone := make(chan struct{})
 	go func() { defer close(directoryDone); s.runGithubTeamSync(directoryCtx) }()
 	defer func() { stopDirectories(); <-directoryDone }()
+
+	tunnelDone := make(chan struct{})
+	go func() { defer close(tunnelDone); s.runCloudflareTunnels(dnsContext) }()
+	defer func() { stopDNS(); <-tunnelDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {
