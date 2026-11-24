@@ -17,6 +17,8 @@ export interface Capabilities {
   job_image_lifecycle?: boolean;
   // Buildx, the Compose builder and pushing the local platform are available, so the worker can build and publish images.
   build_publish?: boolean;
+  // With build_publish, the worker can build for resources that run on another node and clean those builds up.
+  remote_builds?: boolean;
   // The worker supports rolling, blue/green and canary replacements with promote and abort.
   rollouts?: boolean;
   // The worker enforces job timeouts, reports job results and stops every service a job run started.
@@ -584,6 +586,8 @@ export interface Operation {
   state: OperationState;
   result: WorkerOperation | null;
   created_at: string;
+  // The worker that ran the operation: recorded for builds, the runtime node otherwise. Older control planes omit it.
+  execution_node_id?: string;
 }
 
 // Automatic restart of unhealthy containers. Attempts and the window cover the last 60 minutes; window_started_at is the

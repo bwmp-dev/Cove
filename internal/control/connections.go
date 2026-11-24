@@ -396,12 +396,8 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		}
 	}
 	if r.Action == "build" {
-		var supported bool
-		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'build_publish')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+		if _, err := buildExecutionNode(ctx, s.DB, r.Workload, r.ID); err != nil {
 			return err
-		}
-		if !supported {
-			return errors.New("upgrade and verify the worker before building images")
 		}
 	}
 	if r.ImageUpdates != nil {

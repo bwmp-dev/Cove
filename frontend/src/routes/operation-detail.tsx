@@ -6,7 +6,7 @@ import { errorMessage, request } from "../api/client";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useOnline } from "../lib/hooks";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
-import { operationQuery, workloadsQuery } from "../api/queries";
+import { nodesQuery, operationQuery, workloadsQuery } from "../api/queries";
 import { projectsQuery } from "../api/projects";
 import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
@@ -72,6 +72,17 @@ const idleSuspensionPhases: Record<SuspensionResult["phase"], string> = {
   stopped: "Left stopped",
 };
 
+// The node recorded for this build. It stays the same when the resource's build node changes later, and older control planes omit it.
+function BuildNodeValue({ id, name }: { id?: string; name?: string }) {
+  if (!id) return <span className="text-fg-muted">Not recorded</span>;
+  if (!name) return <span className="font-mono text-xs break-all">{id}</span>;
+  return (
+    <Link to="/nodes/$nodeId" params={{ nodeId: id }} className={linkClass}>
+      {name}
+    </Link>
+  );
+}
+
 const suspensionTerms: Record<SuspensionResult["reason"], string> = { idle: "Idle sleep", environment: "Environment pause", manual_stop: "Manual stop" };
 
 // A manual Start can wake an app that idle sleep stopped, so its result is not an environment resume.
@@ -120,6 +131,7 @@ export function OperationPage() {
   const online = useOnline();
   const operations = useQuery(operationQuery(operationId));
   const workloads = useQuery(workloadsQuery);
+  const nodes = useQuery({ ...nodesQuery, enabled: operations.data?.action === "build" });
   const projects = useQuery(projectsQuery);
   const back = <Breadcrumbs><Link to="/operations" className="rounded hover:text-fg">Operations</Link>{shortId(operationId)}</Breadcrumbs>;
 
@@ -243,7 +255,7 @@ export function OperationPage() {
               ...(workload
                 ? [
                     {
-                      term: "Node",
+                      term: operation.action === "build" ? "Runtime node" : "Node",
                       value: (
                         <Link to="/nodes/$nodeId" params={{ nodeId: workload.node_id }} className={linkClass}>
                           {workload.node}
@@ -252,6 +264,7 @@ export function OperationPage() {
                     },
                   ]
                 : []),
+              ...(operation.action === "build" ? [{ term: "Build node", value: <BuildNodeValue id={operation.execution_node_id} name={nodes.data?.find((node) => node.id === operation.execution_node_id)?.name} /> }] : []),
               { term: "Action", value: actionLabels[operation.action] ?? operation.action },
               { term: "Queued", value: formatAbsolute(operation.created_at) },
               ...(result?.finished_at ? [{ term: "Finished", value: formatAbsolute(result.finished_at) }] : []),

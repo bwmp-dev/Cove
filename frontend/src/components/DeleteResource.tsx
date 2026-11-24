@@ -11,8 +11,8 @@ const copy = {
   node: {
     label: "node",
     path: "nodes",
-    description: "Cove stops managing this node and removes its credentials. The node must have no resources. The installed worker is not uninstalled.",
-    confirm: "The node must have no resources. Cove removes its credentials and stops managing it. The installed worker is not uninstalled.",
+    description: "Cove stops managing this node and removes its credentials. The node must have no resources, build node assignments or builds still recorded for a resource. The installed worker is not uninstalled.",
+    confirm: "The node must have no resources, build node assignments or builds still recorded for a resource. Cove removes its credentials and stops managing it. The installed worker is not uninstalled.",
   },
   workload: {
     label: "resource",

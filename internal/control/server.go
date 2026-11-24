@@ -210,6 +210,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/workloads/{id}/logs", s.admin(http.HandlerFunc(s.workloadLogs)))
 	mux.Handle("GET /api/workloads/{id}/backups", s.admin(http.HandlerFunc(s.workloadBackups)))
 	mux.Handle("GET /api/workloads/{id}/releases", s.admin(http.HandlerFunc(s.workloadReleases)))
+	mux.Handle("GET /api/workloads/{id}/build-node", s.admin(http.HandlerFunc(s.buildNode)))
+	mux.Handle("PUT /api/workloads/{id}/build-node", s.admin(http.HandlerFunc(s.buildNode)))
 	mux.Handle("GET /api/workloads/{id}/images", s.admin(http.HandlerFunc(s.workloadImages)))
 	mux.Handle("GET /api/workloads/{id}/image-scanning", s.admin(http.HandlerFunc(s.imageScanning)))
 	mux.Handle("PUT /api/workloads/{id}/image-scanning", s.admin(http.HandlerFunc(s.imageScanning)))

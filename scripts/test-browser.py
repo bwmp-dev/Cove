@@ -171,9 +171,12 @@ def main():
     registry_hooks = "--registry-webhooks" in sys.argv[1:]
     image_scans = "--image-scans" in sys.argv[1:]
     managed_registry = "--managed-registry" in sys.argv[1:]
+    build_nodes = "--build-nodes" in sys.argv[1:]
+    if build_nodes and not managed_registry:
+        raise ValueError("Build-node acceptance requires the managed-registry TLS fixture")
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
@@ -182,6 +185,7 @@ def main():
     worker_state_owned = False
     certificate_config = None
     managed_registry_config = None
+    build_nodes_config = None
     extra_images = []
     tunnel_bridges = []
     env = os.environ.copy()
@@ -356,6 +360,10 @@ def main():
                 api("POST", "/api/nodes/"+enrollment["id"]+"/verify")
                 time.sleep(1)
             else: raise RuntimeError("Browser worker did not become ready")
+            if build_nodes:
+                from build_nodes_fixture import BuildNodesFixture
+                build_nodes_config = BuildNodesFixture(run, name, fixture, env, containers)
+                build_nodes_config.start(worker_image, api, managed_registry_config.hostname)
             client_binary=fixture / ("cove.exe" if os.name == "nt" else "cove")
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
@@ -427,6 +435,11 @@ def main():
                         if not re.fullmatch(r"[0-9a-f]{32}", network): raise RuntimeError("Unexpected fixture network ID")
                         subprocess.run(["docker", "network", "rm", "cove-shared-"+network], check=True, stdout=subprocess.DEVNULL)
             finally:
+                if build_nodes_config:
+                    try:
+                        build_nodes_config.cleanup()
+                    except Exception as error:
+                        cleanup_errors.append("build worker fixture cleanup failed: " + str(error))
                 if managed_registry_config:
                     try:
                         managed_registry_config.cleanup(worker_image)

@@ -11,6 +11,7 @@ import (
 )
 
 type Probe struct {
+	RemoteBuilds         bool         `json:"remote_builds"`
 	ManagedRegistry      bool         `json:"managed_registry"`
 	ImageScanning        bool         `json:"image_scanning"`
 	ImageUpdates         bool         `json:"image_updates"`
@@ -92,6 +93,7 @@ func Inspect(ctx context.Context) Probe {
 	if out, err := exec.CommandContext(ctx, "docker", "compose", "version", "--short").Output(); err == nil {
 		p.Compose = strings.TrimSpace(string(out))
 	}
+	p.RemoteBuilds = p.BuildPublish
 	p.JobImageLifecycle = p.ImageLifecycle
 	p.ImageUpdates = p.ImageLifecycle
 	p.ImageScanning = runtime.GOOS == "linux" && scannerEnabled()

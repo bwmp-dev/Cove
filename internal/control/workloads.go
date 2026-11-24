@@ -272,9 +272,15 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "build options require a build operation", 400)
 		return
 	}
+	executionNode := ""
 	if in.Action == "build" {
+		executionNode, err = buildExecutionNode(r.Context(), tx, request.Workload, "")
+		if err != nil {
+			http.Error(w, err.Error(), 409)
+			return
+		}
 		var supported, connected, preview bool
-		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'build_publish')::boolean,false), EXISTS(SELECT 1 FROM workload_connections c WHERE c.workload_id=w.id AND c.kind='registry'), EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, request.Workload).Scan(&supported, &connected, &preview); err != nil {
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((n.capabilities->>'build_publish')::boolean,false), EXISTS(SELECT 1 FROM workload_connections c WHERE c.workload_id=w.id AND c.kind='registry'), EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) FROM nodes n JOIN workloads w ON w.id=$1 WHERE n.id=$2`, request.Workload, executionNode).Scan(&supported, &connected, &preview); err != nil {
 			http.Error(w, "build configuration unavailable", 503)
 			return
 		}
@@ -287,6 +293,15 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		request = worker.Request{ID: id, Workload: request.Workload, Action: "build", Build: in.Build, Compose: config.Compose, Source: config.Source, Environment: config.Environment, FileSecrets: config.FileSecrets, Kind: config.Kind, JobService: config.JobService}
+		var remoteBuild bool
+		var platform string
+		if err = tx.QueryRow(r.Context(), `SELECT w.node_id<>$2,COALESCE(n.capabilities->>'os','')||'/'||COALESCE(n.capabilities->>'arch','') FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1`, request.Workload, executionNode).Scan(&remoteBuild, &platform); err != nil {
+			http.Error(w, "runtime platform unavailable", 409)
+			return
+		}
+		if remoteBuild {
+			request.BuildPlatform = platform
+		}
 	}
 	if in.Action == "image_scan" {
 		if in.PullLatest || in.Release != "" || in.BackupID != "" {
@@ -373,7 +388,7 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not protect operation", 500)
 		return
 	}
-	_, err = tx.Exec(r.Context(), "INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,$3,$4)", id, request.Workload, in.Action, payload)
+	_, err = tx.Exec(r.Context(), "INSERT INTO operations(id,workload_id,action,payload,execution_node_id) VALUES($1,$2,$3,$4,NULLIF($5,''))", id, request.Workload, in.Action, payload, executionNode)
 	if managedRegistryAdmissionError(w, err) {
 		return
 	}
@@ -429,24 +444,25 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	respond(w, 202, map[string]string{"id": id, "state": "queued"})
 }
 func (s *Server) listOperations(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), "SELECT o.id,o.workload_id,o.action,o.state,o.result,o.created_at FROM operations o JOIN workloads w ON w.id=o.workload_id LEFT JOIN environments e ON e.id=w.environment_id WHERE ($1='' OR o.workload_id=$1) AND w.team_id=$3 AND ($4 OR cove_access($2,w.team_id,w.project_id,COALESCE(e.id,''))>0) ORDER BY o.created_at DESC LIMIT 100", r.URL.Query().Get("workload_id"), actor(r).ID, actor(r).Team, actor(r).Admin)
+	rows, err := s.DB.Query(r.Context(), "SELECT o.id,o.workload_id,o.action,o.state,o.result,o.created_at,CASE WHEN o.action='build' THEN COALESCE(o.execution_node_id,'') ELSE w.node_id END FROM operations o JOIN workloads w ON w.id=o.workload_id LEFT JOIN environments e ON e.id=w.environment_id WHERE ($1='' OR o.workload_id=$1) AND w.team_id=$3 AND ($4 OR cove_access($2,w.team_id,w.project_id,COALESCE(e.id,''))>0) ORDER BY o.created_at DESC LIMIT 100", r.URL.Query().Get("workload_id"), actor(r).ID, actor(r).Team, actor(r).Admin)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	defer rows.Close()
 	type item struct {
-		ID       string          `json:"id"`
-		Workload string          `json:"workload_id"`
-		Action   string          `json:"action"`
-		State    string          `json:"state"`
-		Result   json.RawMessage `json:"result"`
-		Created  time.Time       `json:"created_at"`
+		ExecutionNode string          `json:"execution_node_id"`
+		ID            string          `json:"id"`
+		Workload      string          `json:"workload_id"`
+		Action        string          `json:"action"`
+		State         string          `json:"state"`
+		Result        json.RawMessage `json:"result"`
+		Created       time.Time       `json:"created_at"`
 	}
 	out := []item{}
 	for rows.Next() {
 		var v item
-		if rows.Scan(&v.ID, &v.Workload, &v.Action, &v.State, &v.Result, &v.Created) != nil {
+		if rows.Scan(&v.ID, &v.Workload, &v.Action, &v.State, &v.Result, &v.Created, &v.ExecutionNode) != nil {
 			http.Error(w, "could not read operations", 500)
 			return
 		}
@@ -485,7 +501,7 @@ func (s *Server) nodeRPC(ctx context.Context, nodeID string, request worker.RPCR
 func (s *Server) operationLogs(w http.ResponseWriter, r *http.Request) {
 	var nodeID string
 	var state string
-	err := s.DB.QueryRow(r.Context(), "SELECT w.node_id,o.state FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1", r.PathValue("id")).Scan(&nodeID, &state)
+	err := s.DB.QueryRow(r.Context(), "SELECT COALESCE(o.execution_node_id,w.node_id),o.state FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1", r.PathValue("id")).Scan(&nodeID, &state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -624,7 +640,7 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	}
 }
 func (s *Server) dispatchOperations(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, "SELECT o.id,w.node_id,o.payload FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.state IN ('queued','running') ORDER BY o.updated_at LIMIT 32")
+	rows, err := s.DB.Query(ctx, "SELECT o.id,COALESCE(o.execution_node_id,w.node_id),o.payload FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.state IN ('queued','running') ORDER BY o.updated_at LIMIT 32")
 	if err != nil {
 		return err
 	}
@@ -691,9 +707,30 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		return s.failOperation(ctx, id, "Operation configuration is invalid.")
 	}
 	// Re-submission is safe only because the worker persists the immutable ID and input digest before acknowledging.
-	var cancelRequested bool
-	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested FROM operations WHERE id=$1", id).Scan(&cancelRequested); err != nil {
+	var cancelRequested, buildPrepared, legacyBuild bool
+	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested,build_prepared,build_legacy FROM operations WHERE id=$1", id).Scan(&cancelRequested, &buildPrepared, &legacyBuild); err != nil {
 		return err
+	}
+	if request.Action == "build" && !buildPrepared {
+		// An older controller may already have submitted inputs that were not saved
+		// in the database. Reconcile that journal without resolving new credentials.
+		if existing, readErr := s.nodeRPC(ctx, node, worker.RPCRequest{Method: "status", ID: id}); readErr == nil && existing.Operation != nil {
+			if cancelRequested {
+				cancelled, cancelErr := s.cancelBuild(ctx, node, request)
+				if cancelErr == nil && cancelled.Operation != nil {
+					existing = cancelled
+				}
+			}
+			return s.saveBuildOutcome(ctx, id, request, existing)
+		}
+		if legacyBuild {
+			if cancelRequested {
+				if cancelled, cancelErr := s.cancelBuild(ctx, node, request); cancelErr == nil && cancelled.Operation != nil {
+					return s.saveBuildOutcome(ctx, id, request, cancelled)
+				}
+			}
+			return s.deferBuildResult(ctx, id)
+		}
 	}
 	if !cancelRequested {
 		if err := s.prepareRouteCertificates(ctx, &request); err != nil {
@@ -701,7 +738,7 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		}
 	}
 	// Route changes use no connections, and failing one here could release hostnames while the worker still applies it.
-	if !cancelRequested && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
+	if !cancelRequested && !(request.Action == "build" && buildPrepared) && request.Scale == nil && request.Action != "routes" && request.Action != "suspend" && request.Action != "resume" && request.Action != "idle_policy" {
 		if err = s.prepareInfrastructure(ctx, &request); err != nil {
 			if request.Action == "image_scan" {
 				return s.failOperation(ctx, id, "Image scanning is no longer enabled for this team and ready worker.")
@@ -715,7 +752,19 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 			return s.failOperation(ctx, id, "GitHub repository access unavailable; check the app installation and reconnect the resource.")
 		}
 	}
+	if request.Action == "build" && !buildPrepared {
+		prepared, prepareErr := s.sealJSON(request)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		if _, err = s.DB.Exec(ctx, `UPDATE operations SET payload=$2,build_prepared=true WHERE id=$1`, id, prepared); err != nil {
+			return err
+		}
+	}
 	method := "submit"
+	if request.BuildPlatform != "" {
+		method = "submit_build_v2"
+	}
 	if request.ImageUpdates != nil {
 		method = "submit_image_updates"
 	}
@@ -739,8 +788,26 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if cancelRequested {
 		method = "cancel"
+		if request.Action == "build" {
+			method = "cancel_build"
+		}
 	}
 	response, err := s.nodeRPC(ctx, node, worker.RPCRequest{Method: method, Request: &request})
+	if request.Action == "build" && cancelRequested && err != nil {
+		var remote *RemoteError
+		if errors.As(err, &remote) {
+			response, err = s.nodeRPC(ctx, node, worker.RPCRequest{Method: "cancel", Request: &request})
+		}
+	}
+	if request.Action == "build" && err != nil {
+		response, err = s.nodeRPC(ctx, node, worker.RPCRequest{Method: "status", ID: id})
+		if err != nil {
+			return s.deferBuildResult(ctx, id)
+		}
+	}
+	if request.Action == "build" {
+		return s.saveBuildOutcome(ctx, id, request, response)
+	}
 	if err != nil && cancelRequested {
 		// A failed cancellation is not evidence that execution stopped. Keep the
 		// workload locked until the worker reports a terminal operation state.

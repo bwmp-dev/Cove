@@ -14,10 +14,13 @@ import (
 )
 
 func TestBuildPublicationPreservesRelease(t *testing.T) {
-	for _, failure := range []string{"", "manifest", "build", "verify", "cancel"} {
+	for _, failure := range []string{"", "manifest", "build", "verify", "cancel", "platform"} {
 		t.Run(failure, func(t *testing.T) {
 			e, _ := NewEngine(t.TempDir())
 			r := Request{ID: "publish", Workload: "app", Action: "build", Compose: "services:\n  app:\n    build: .\n", Build: &BuildOptions{Repository: "team/app", NoCache: true}, Registry: &Registry{Server: "registry.example.com", Username: "fixture", Password: "registry-secret"}, Environment: map[string]string{"BUILD_TOKEN": "build-secret"}, FileSecrets: []FileSecret{{Name: "TOKEN", Variable: "BUILD_TOKEN", BuildServices: []string{"app"}}}}
+			if failure == "platform" {
+				r.BuildPlatform = "linux/arm64"
+			}
 			dir := filepath.Join(e.Root, "workloads", r.Workload)
 			os.MkdirAll(dir, 0700)
 			current := []byte(`{"release":"production","routes":[{"domain":"example.com"}]}`)
@@ -86,6 +89,9 @@ func TestBuildPublicationPreservesRelease(t *testing.T) {
 				t.Fatal("release changed", string(data), err)
 			}
 			for _, cmd := range commands {
+				if failure == "platform" && strings.HasPrefix(cmd, "docker push ") {
+					t.Fatal("mismatched platform published", cmd)
+				}
 				if strings.Contains(cmd, " up ") || strings.Contains(cmd, " down") || strings.Contains(cmd, "docker network") {
 					t.Fatal("runtime changed", cmd)
 				}

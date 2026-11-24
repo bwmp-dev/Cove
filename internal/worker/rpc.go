@@ -62,6 +62,33 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "cancel_build":
+		if r.Request == nil || r.Request.Action != "build" || !identifier.MatchString(r.Request.ID) || !workloadIdentifier.MatchString(r.Request.Workload) {
+			return RPCResponse{Error: "build request required"}
+		}
+		e.mu.Lock()
+		j, err := e.read(r.Request.ID)
+		e.mu.Unlock()
+		request := *r.Request
+		if err == nil {
+			if j.Request.Workload != request.Workload || j.Request.Action != "build" {
+				return RPCResponse{Error: "build ownership mismatch"}
+			}
+			request = j.Request
+		}
+		op, err := e.Cancel(request)
+		if err != nil {
+			return RPCResponse{Error: "build cancellation remains pending"}
+		}
+		return RPCResponse{Operation: &op}
+	case "retire_build":
+		if r.Request == nil {
+			return RPCResponse{Error: "build request required"}
+		}
+		if err := e.RetireBuild(ctx, *r.Request); err != nil {
+			return RPCResponse{Error: "build cleanup has not settled"}
+		}
+		return RPCResponse{}
 	case "managed_registry_verify":
 		if err := VerifyManagedRegistry(ctx, r.Registry, r.RegistryCertificate); err != nil {
 			return RPCResponse{Error: err.Error()}
@@ -338,11 +365,14 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit_image_updates", "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
+	case "submit_build_v2", "submit_image_updates", "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
 		}
 		expected := "submit"
+		if r.Request.BuildPlatform != "" {
+			expected = "submit_build_v2"
+		}
 		if r.Request.ImageUpdates != nil {
 			expected = "submit_image_updates"
 		}

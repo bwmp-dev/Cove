@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +21,69 @@ type BuildOptions struct {
 	Repository string `json:"repository"`
 	NoCache    bool   `json:"no_cache,omitempty"`
 }
+
+const protectedBuildPlatform = "cove-build-platform-v1"
+
+func (b *BuildOptions) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Repository    string          `json:"repository"`
+		NoCache       json.RawMessage `json:"no_cache"`
+		StoredNoCache *bool           `json:"cove_no_cache,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return errors.New("invalid build options JSON")
+	}
+	var marker string
+	noCache := false
+	if json.Unmarshal(wire.NoCache, &marker) == nil && marker == protectedBuildPlatform {
+		if wire.StoredNoCache == nil {
+			return errors.New("invalid protected build options")
+		}
+		noCache = *wire.StoredNoCache
+	} else {
+		if wire.StoredNoCache != nil {
+			return errors.New("unexpected protected build metadata")
+		}
+		if len(wire.NoCache) > 0 {
+			if err := json.Unmarshal(wire.NoCache, &noCache); err != nil {
+				return err
+			}
+		}
+	}
+	*b = BuildOptions{Repository: wire.Repository, NoCache: noCache}
+	return nil
+}
+
+func protectPersistedBuild(document any) bool {
+	root, ok := document.(map[string]any)
+	if !ok {
+		return false
+	}
+	request, ok := root["request"].(map[string]any)
+	if !ok || request["action"] != "build" {
+		return false
+	}
+	platform, _ := request["build_platform"].(string)
+	if platform == "" {
+		return false
+	}
+	build, ok := request["build"].(map[string]any)
+	if !ok {
+		return false
+	}
+	noCache, _ := build["no_cache"].(bool)
+	// A bool-shaped field makes older journal readers refuse the unknown platform instead of executing without it.
+	build["no_cache"] = protectedBuildPlatform
+	build["cove_no_cache"] = noCache
+	return true
+}
+
+var buildPlatformPattern = regexp.MustCompile(`^linux/[a-z0-9]+$`)
 
 type BuiltImage struct {
 	Service   string `json:"service"`
@@ -147,12 +212,15 @@ func (e *Engine) performBuild(ctx context.Context, r Request, dir string, env []
 		if !imageDigest.MatchString(image.ID) || image.OS == "" || image.Architecture == "" {
 			return errors.New("built image identity or platform unavailable")
 		}
+		if r.BuildPlatform != "" && image.OS+"/"+image.Architecture != r.BuildPlatform {
+			return errors.New("built image platform does not match the runtime node; publication refused")
+		}
 		if err = e.Run(ctx, dir, []string{"docker", "push", "--platform", image.OS + "/" + image.Architecture, tag}, env, out); err != nil {
 			return err
 		}
 		var manifest registryManifest
 		if err = e.imageJSON(ctx, env, &manifest, "docker", "buildx", "imagetools", "inspect", "--format", "{{json .Manifest}}", tag); err != nil {
-			return err
+			return fmt.Errorf("published manifest lookup from the build worker failed; check registry access and TLS trust: %w", err)
 		}
 		if !imageDigest.MatchString(manifest.Digest) {
 			return errors.New("published build did not return an immutable registry digest")
@@ -160,7 +228,7 @@ func (e *Engine) performBuild(ctx context.Context, r Request, dir string, env []
 		reference := r.Registry.Server + "/" + r.Build.Repository + "@" + manifest.Digest
 		var verified registryManifest
 		if err = e.imageJSON(ctx, env, &verified, "docker", "buildx", "imagetools", "inspect", "--raw", reference); err != nil {
-			return err
+			return fmt.Errorf("published immutable manifest could not be verified from the build worker: %w", err)
 		}
 		if !imageDigest.MatchString(verified.Config.Digest) || (verified.Config.Digest != image.ID && manifest.Digest != image.ID) {
 			return fmt.Errorf("published build configuration %q does not match local image %q", verified.Config.Digest, image.ID)
