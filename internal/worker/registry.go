@@ -19,6 +19,13 @@ type Registry struct {
 	Password string `json:"password"`
 }
 
+func ValidateRegistryRepository(repository string) error {
+	if len(repository) > 200 || !repositoryPath.MatchString(repository) {
+		return errors.New("use a lowercase repository path of at most 200 characters, without a registry host or tag")
+	}
+	return nil
+}
+
 func ValidateRegistry(r *Registry) error {
 	if r == nil {
 		return nil

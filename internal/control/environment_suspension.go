@@ -102,6 +102,9 @@ func (s *Server) environmentSuspension(w http.ResponseWriter, r *http.Request) {
 		if err == nil && *in.Paused {
 			_, err = tx.Exec(r.Context(), `DELETE FROM webhook_deliveries d USING workloads w WHERE d.workload_id=w.id AND w.environment_id=$1 AND d.operation_id IS NULL`, id)
 		}
+		if err == nil && *in.Paused {
+			_, err = tx.Exec(r.Context(), `UPDATE registry_webhooks h SET pending_at=NULL,last_ignored_reason='Environment paused; pending push ignored.' FROM workloads w WHERE h.workload_id=w.id AND w.environment_id=$1`, id)
+		}
 		if err == nil {
 			err = tx.Commit(r.Context())
 		}

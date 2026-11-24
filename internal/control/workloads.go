@@ -398,6 +398,10 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "could not pause automatic deployments", 500)
 				return
 			}
+			if _, err = tx.Exec(r.Context(), "UPDATE registry_webhooks SET pending_at=NULL,last_ignored_reason='Resource manually stopped; pending push ignored.' WHERE workload_id=$1", request.Workload); err != nil {
+				http.Error(w, "could not pause registry deployments", 503)
+				return
+			}
 		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -561,6 +565,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
+		if err := s.dispatchRegistryWebhooks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
 		if err := s.dispatchNotifications(ctx); err != nil && ctx.Err() == nil {

@@ -259,6 +259,17 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not protect configuration", 500)
 		return
 	}
+	var registryHook bool
+	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM registry_webhooks WHERE workload_id=$1)", r.PathValue("id")).Scan(&registryHook); err != nil {
+		http.Error(w, "registry webhook state unavailable", 503)
+		return
+	}
+	if registryHook {
+		if _, err = s.registryWebhookDeployment(r.PathValue("id"), encrypted); err != nil {
+			http.Error(w, "remove the registry webhook before changing this resource to a job, Git/build source or pinned-only images", 409)
+			return
+		}
+	}
 	cpu, memory := configuredUsage(in)
 	_, err = tx.Exec(r.Context(), "UPDATE workloads SET name=$1,configuration=$2,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END,job_pending_at=CASE WHEN $4='job' THEN job_pending_at ELSE NULL END,job_overlap_policy=CASE WHEN $4='job' THEN job_overlap_policy ELSE 'skip' END,job_timeout_seconds=CASE WHEN $4='job' THEN job_timeout_seconds ELSE 1800 END WHERE id=$3", in.Name, encrypted, r.PathValue("id"), in.Kind, cpu, memory)
 	if quotaError(w, err) {

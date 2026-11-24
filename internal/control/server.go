@@ -305,6 +305,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/notifications/history", s.admin(http.HandlerFunc(s.notificationHistory)))
 	mux.Handle("GET /api/workloads/{id}/registry", s.admin(http.HandlerFunc(s.resourceRegistry)))
 	mux.Handle("PUT /api/workloads/{id}/registry", s.admin(http.HandlerFunc(s.resourceRegistry)))
+	for _, pattern := range []string{"GET /api/workloads/{id}/registry-webhook", "PUT /api/workloads/{id}/registry-webhook", "DELETE /api/workloads/{id}/registry-webhook", "POST /api/workloads/{id}/registry-webhook/rotate"} {
+		mux.Handle(pattern, s.admin(http.HandlerFunc(s.registryWebhook)))
+	}
+	mux.HandleFunc("POST /hooks/registry/{hook}", s.receiveRegistryWebhook)
 	mux.Handle("POST /api/terminal", s.admin(http.HandlerFunc(s.terminalOpen)))
 	mux.Handle("GET /api/terminal/{id}", s.admin(http.HandlerFunc(s.terminalSession)))
 	mux.Handle("POST /api/terminal/{id}/input", s.admin(http.HandlerFunc(s.terminalSession)))

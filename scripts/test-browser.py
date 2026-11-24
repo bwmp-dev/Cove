@@ -17,6 +17,8 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
+REGISTRY_HOOK_PIN = "registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+REGISTRY_HOOK_CONFIG = "sha256:26b2eb03618e749084668eaff68cff8f81dda12d06ac641be7a6398b82a6f25b"
 
 
 @contextmanager
@@ -166,9 +168,10 @@ def cleanup_worker_resources(fixture, state, root_owned, kinds=("container", "ne
 def main():
     certificate_dns = "--certificate-dns" in sys.argv[1:]
     cloudflare_tunnel = "--cloudflare-tunnel" in sys.argv[1:]
+    registry_hooks = "--registry-webhooks" in sys.argv[1:]
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
@@ -179,6 +182,12 @@ def main():
     extra_images = []
     tunnel_bridges = []
     env = os.environ.copy()
+    if registry_hooks:
+        identity = run("docker", "image", "inspect", "--format", "{{.Id}}", "registry:2.8.3", capture_output=True, text=True).stdout.strip()
+        # Docker Desktop reports the manifest ID; docker save/load on classic engines reports the config ID.
+        if identity not in (REGISTRY_HOOK_PIN.split("@", 1)[1], REGISTRY_HOOK_CONFIG):
+            raise RuntimeError("Cached registry fixture does not match the pinned manifest/config; refusing execution")
+        env.update(COVE_BROWSER_REGISTRY_HOOKS="1", COVE_BROWSER_REGISTRY_IMAGE=identity, COVE_BROWSER_REGISTRY_PIN=REGISTRY_HOOK_PIN)
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_TOKEN=secrets.token_hex(32),
