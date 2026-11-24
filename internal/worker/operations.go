@@ -125,6 +125,7 @@ type deployedState struct {
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	cacheProbeMu  sync.Mutex
 	scanMu        sync.Mutex
 	helperImageMu sync.Mutex
 	idleMu        sync.Mutex
@@ -629,6 +630,14 @@ func (e *Engine) Recover() error {
 	return nil
 }
 func (e *Engine) Serve(ctx context.Context) error {
+	e.buildMu.Lock()
+	cacheCtx, cacheCancel := context.WithTimeout(ctx, 2*time.Minute)
+	_, cacheErr := e.recoverBuildCache(cacheCtx, os.Stderr, false)
+	cacheCancel()
+	e.buildMu.Unlock()
+	if cacheErr != nil {
+		fmt.Fprintln(os.Stderr, "Cove build-cache verification or cleanup is pending; builds remain paused:", cacheErr)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	var jobs sync.WaitGroup
 	defer func() { cancel(); jobs.Wait() }()
@@ -876,6 +885,9 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	if err != nil {
 		j.Operation.State = "failed"
 		j.Operation.Error = "Operation failed; inspect the operation log."
+		if errors.Is(err, errBuildCacheFull) {
+			j.Operation.Error = "The verified build cache filesystem is full. Owned cache cleanup was requested; check the node before retrying."
+		}
 		if ctx.Err() != nil {
 			j.Operation.State = "interrupted"
 			j.Operation.Error = "Execution interrupted; inspect workload before retrying."

@@ -18,6 +18,8 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "build-cache-filesystem":
+		err = worker.BuildCacheFilesystem(os.Stdout)
 	case "registry-storage":
 		var file *os.File
 		file, err = os.Open("/config/registry.json")

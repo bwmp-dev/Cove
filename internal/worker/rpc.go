@@ -17,6 +17,7 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
+	BuildCache          *BuildCacheSettings     `json:"build_cache,omitempty"`
 	RegistryCertificate string                  `json:"registry_certificate,omitempty"`
 	Publishing          *CloudflarePublishing   `json:"publishing,omitempty"`
 	Exposures           *IngressExposureRequest `json:"exposures,omitempty"`
@@ -32,6 +33,7 @@ type RPCRequest struct {
 	ID                  string                  `json:"id,omitempty"`
 }
 type RPCResponse struct {
+	BuildCache         *BuildCacheStatus           `json:"build_cache,omitempty"`
 	RegistryReferences []string                    `json:"registry_references,omitempty"`
 	Publishing         *CloudflarePublishingStatus `json:"publishing,omitempty"`
 	Exposures          *IngressExposureStatus      `json:"exposures,omitempty"`
@@ -62,6 +64,22 @@ type RPCResponse struct {
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	switch r.Method {
+	case "build_cache":
+		status := e.BuildCacheStatus(ctx)
+		return RPCResponse{BuildCache: &status}
+	case "build_cache_configure":
+		if r.BuildCache == nil {
+			return RPCResponse{Error: "build-cache settings required"}
+		}
+		status, err := e.ConfigureBuildCache(ctx, *r.BuildCache)
+		if err != nil {
+			var pathError *os.PathError
+			if errors.As(err, &pathError) {
+				return RPCResponse{Error: "build-cache state or cleanup could not be saved; check worker storage and permissions"}
+			}
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{BuildCache: &status}
 	case "cancel_build":
 		if r.Request == nil || r.Request.Action != "build" || !identifier.MatchString(r.Request.ID) || !workloadIdentifier.MatchString(r.Request.Workload) {
 			return RPCResponse{Error: "build request required"}
@@ -497,7 +515,7 @@ func RPCTimeout(method string) time.Duration {
 		return 5 * time.Minute
 	case "links_apply":
 		return 4 * time.Minute
-	case "ingress_exposures_initialize", "ingress_exposures_plan", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
+	case "build_cache_configure", "ingress_exposures_initialize", "ingress_exposures_plan", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
 		return 3 * time.Minute
 	}
 	return 30 * time.Second

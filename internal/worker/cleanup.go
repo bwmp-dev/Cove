@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,14 +18,8 @@ func (e *Engine) buildOwner() (string, error) {
 	path := filepath.Join(e.Root, "build-owner.json")
 	data, err := os.ReadFile(path)
 	if err == nil {
-		var owner string
-		if json.Unmarshal(data, &owner) != nil || len(owner) != 32 {
-			return "", errors.New("invalid build owner")
-		}
-		if _, err := hex.DecodeString(owner); err != nil {
-			return "", err
-		}
-		return owner, nil
+		owner, _, err := decodeBuildOwner(data)
+		return owner, err
 	}
 	if !os.IsNotExist(err) {
 		return "", err
@@ -78,21 +71,31 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 		return err
 	}
 	buildEnv := append(append([]string{}, env...), "BUILDX_CONFIG="+filepath.Join(e.Root, "buildx"), "BUILDKIT_PROGRESS=plain")
+	location, err := e.recoverBuildCache(ctx, out, true)
+	if err != nil {
+		return err
+	}
+	builder := "cove-" + owner
+	if location != nil {
+		builder = cacheBuilderName(*location)
+	}
 	marker := filepath.Join(e.Root, "builder-ready.json")
-	if _, err := os.Stat(marker); os.IsNotExist(err) {
-		if err := e.Run(ctx, dir, []string{"docker", "buildx", "create", "--name", "cove-" + owner, "--driver", "docker-container", "--driver-opt", "default-load=true"}, buildEnv, out); err != nil {
-			// Creation can succeed before persisting the marker fails. Recover only our named private builder.
-			inspected := &limitedBuffer{Limit: 4096}
-			inspectErr := e.Run(ctx, dir, []string{"docker", "buildx", "inspect", "cove-" + owner, "--format", "{{.Driver}}"}, buildEnv, inspected)
-			if inspectErr != nil || strings.TrimSpace(inspected.data.String()) != "docker-container" {
+	if location == nil {
+		if _, err := os.Stat(marker); os.IsNotExist(err) {
+			if err := e.Run(ctx, dir, []string{"docker", "buildx", "create", "--name", "cove-" + owner, "--driver", "docker-container", "--driver-opt", "default-load=true"}, buildEnv, out); err != nil {
+				// Creation can succeed before persisting the marker fails. Recover only our named private builder.
+				inspected := &limitedBuffer{Limit: 4096}
+				inspectErr := e.Run(ctx, dir, []string{"docker", "buildx", "inspect", "cove-" + owner, "--format", "{{.Driver}}"}, buildEnv, inspected)
+				if inspectErr != nil || strings.TrimSpace(inspected.data.String()) != "docker-container" {
+					return err
+				}
+			}
+			if err := writeJSON(marker, true); err != nil {
 				return err
 			}
-		}
-		if err := writeJSON(marker, true); err != nil {
+		} else if err != nil {
 			return err
 		}
-	} else if err != nil {
-		return err
 	}
 	for name := range services {
 		services[name] = map[string]any{"build": map[string]any{"labels": map[string]string{"dev.cove.build-owner": owner}}}
@@ -101,12 +104,17 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 	if err := writeJSON(override, map[string]any{"services": services}); err != nil {
 		return err
 	}
-	buildArgs := append(append([]string{}, args...), "--file", override, "build", "--builder", "cove-"+owner)
+	buildArgs := append(append([]string{}, args...), "--file", override, "build", "--builder", builder)
 	// BuildKit does not include secret contents in its cache key.
 	if secretBuild || noCache {
 		buildArgs = append(buildArgs, "--no-cache")
 	}
-	return e.Run(ctx, dir, buildArgs, buildEnv, out)
+	if location == nil {
+		return e.Run(ctx, dir, buildArgs, buildEnv, out)
+	}
+	var tail cacheDiagnosticTail
+	failure := e.Run(ctx, dir, buildArgs, buildEnv, io.MultiWriter(out, &tail))
+	return e.finishCappedBuild(ctx, *location, failure, tail, out)
 }
 
 func (e *Engine) cleanupBuilds(ctx context.Context, out io.Writer) error {
@@ -122,9 +130,23 @@ func (e *Engine) cleanupBuilds(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	location, err := e.recoverBuildCache(ctx, out, false)
+	if err != nil {
+		return err
+	}
 	// Without --all Docker retains tagged releases and images used by any container.
 	if err := e.Run(ctx, e.Root, []string{"docker", "image", "prune", "--force", "--filter", "label=dev.cove.build-owner=" + owner, "--filter", "until=168h"}, nil, out); err != nil {
 		return err
+	}
+	if location != nil {
+		container, err := e.cacheContainer(ctx, *location)
+		if err != nil || container == nil {
+			return err
+		}
+		if err = e.cacheBuildx(ctx, *location, out); err != nil {
+			return err
+		}
+		return e.Run(ctx, e.Root, []string{"docker", "buildx", "prune", "--builder", cacheBuilderName(*location), "--force", "--filter", "until=168h"}, []string{"BUILDX_CONFIG=" + filepath.Join(e.Root, "buildx")}, out)
 	}
 	if _, err := os.Stat(filepath.Join(e.Root, "builder-ready.json")); os.IsNotExist(err) {
 		return nil

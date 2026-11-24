@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
 import { CleanupPreview } from "../components/CleanupPreview";
+import { BuildCacheSection } from "../components/BuildCache";
 import { getRouteApi, Link } from "@tanstack/react-router";
 import { KeyRound, Network, Pencil, RefreshCw, Server } from "lucide-react";
 import { useState } from "react";
@@ -211,6 +212,7 @@ function NodeDetail({ node }: { node: Node }) {
         <Section title="Capabilities" description="Reported by the worker during the last verification.">
           <Capabilities node={node} />
         </Section>
+        <BuildCacheSection node={node} />
 
         </div>
         <div className="space-y-5">
