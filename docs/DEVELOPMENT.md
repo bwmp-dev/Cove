@@ -133,7 +133,7 @@ Traefik acceptance passed real Pebble challenge validation, trusted issuance, re
 
 Project deployment sequences can be saved and reused. GitHub-triggered sequences require all steps to have automatic deployment enabled for the same repository and branch; each uses the pushed commit. A stopped or unmatched step suppresses the entire sequence. Failed or cancelled prerequisites cancel later operations; migration effects are not automatically reversed.
 
-Same-host Coolify migration uses explicit staged ingress, cold storage copies, per-domain bridges and a recoverable proxy handover. See [the internal migration runbook in BookStack](https://tower.tailee0a9.ts.net:8443/link/131) for prerequisites, commands and the rollback boundary. The operator tools never start legacy application containers or overwrite their source storage.
+Same-host Coolify migration uses explicit staged ingress, cold storage copies, per-domain bridges and a recoverable proxy handover. See the operator's internal migration runbook for prerequisites, commands and the rollback boundary. The operator tools never start legacy application containers or overwrite their source storage.
 
 
 ### Operational safety checks
