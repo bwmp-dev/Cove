@@ -177,14 +177,17 @@ def main():
     managed_registry = "--managed-registry" in sys.argv[1:]
     build_nodes = "--build-nodes" in sys.argv[1:]
     buildpacks = "--buildpacks" in sys.argv[1:]
-    build_recipes = "--build-recipes" in sys.argv[1:] or buildpacks
+    nixpacks = "--nixpacks" in sys.argv[1:]
+    build_recipes = "--build-recipes" in sys.argv[1:] or buildpacks or nixpacks
+    if buildpacks and nixpacks:
+        raise ValueError("Choose one isolated Buildpacks or Nixpacks source fixture")
     if build_nodes and not managed_registry:
         raise ValueError("Build-node acceptance requires the managed-registry TLS fixture")
     if build_recipes and (not managed_registry or build_nodes):
         raise ValueError("Recipe acceptance requires its own managed-registry fixture")
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes", "--build-recipes", "--buildpacks")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes", "--build-recipes", "--buildpacks", "--nixpacks")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image, worker_image = name + "-panel:test", name + "-worker:test"
     containers = []
@@ -194,6 +197,7 @@ def main():
     certificate_config = None
     managed_registry_config = None
     build_nodes_config = None
+    nixpacks_mirror = ""
     extra_images = []
     tunnel_bridges = []
     env = os.environ.copy()
@@ -356,6 +360,10 @@ def main():
             if buildpacks:
                 from buildpacks_fixture import install_buildpacks_fixture
                 install_buildpacks_fixture(run, name, worker, env, fixture)
+            if nixpacks:
+                from nixpacks_fixture import install_nixpacks_fixture
+                nixpacks_mirror = name + "-nixpacks-mirror"
+                install_nixpacks_fixture(run, name, worker, env, fixture)
 
             def api(method, path, body=None, credential=None, raw=False):
                 request = urllib.request.Request(origin+path, method=method,
@@ -463,6 +471,12 @@ def main():
                         cleanup_errors.append("managed registry fixture trust cleanup failed: " + str(error))
                 for container in reversed(containers):
                     subprocess.run(["docker", "rm", "-f", "-v", container], check=False, stdout=subprocess.DEVNULL)
+                if nixpacks_mirror:
+                    current = inspect_cleanup_resource("container", nixpacks_mirror)
+                    if current and (current.get("Labels") or {}).get("cove.browser-fixture") != name:
+                        cleanup_errors.append("refusing to remove a Nixpacks mirror with different ownership")
+                    elif current:
+                        run("docker", "rm", "-f", "-v", nixpacks_mirror, stdout=subprocess.DEVNULL)
                 try:
                     cleanup_worker_resources(name, state, root_proved)
                 except Exception as error:

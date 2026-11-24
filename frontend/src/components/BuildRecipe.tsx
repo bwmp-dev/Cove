@@ -5,7 +5,7 @@ import { buildRecipeQuery, useSaveBuildRecipe, type BuildRecipe, type BuildRecip
 import { errorMessage, isStatus } from "../api/client";
 import { workloadOperationsQuery } from "../api/queries";
 import type { Operation, Workload } from "../api/types";
-import { composeServices, engineLabel, engineLabels, formatCPU, formatGB, formatMemory, isRecipeEngine, railpackDisclosure, recipeEngines, recipeErrors, recipePayload, sameRecipe, savedRecipeBlocker, type RecipeErrors } from "../lib/build-recipes";
+import { composeServices, engineLabel, engineLabels, formatCPU, formatGB, formatMB, formatMemory, isRecipeEngine, railpackDisclosure, recipeEngines, recipeErrors, recipePayload, sameRecipe, savedRecipeBlocker, type RecipeErrors } from "../lib/build-recipes";
 import { useOnline } from "../lib/hooks";
 import { activeOperation } from "../lib/operations";
 import { can } from "../lib/permissions";
@@ -25,6 +25,12 @@ const engineHints: Record<string, string> = {
   railpack: "Railpack plans and builds the image for the selected service from its source directory. Other services keep their Compose builds.",
   buildpacks:
     "The pinned Paketo builder's normal detection order builds the image for the selected service from its source directory; a Procfile there can set its launch process. Other services keep their Compose builds.",
+  nixpacks: "The pinned Nixpacks planner plans the image for the selected service from its source directory, and Cove builds the generated Dockerfile. Other services keep their Compose builds.",
+};
+
+const commandHints: Record<string, { build: string; start: string; plan: string }> = {
+  railpack: { build: "Overrides the build command Railpack plans. Leave empty to use its plan.", start: "Overrides the start command Railpack plans. Leave empty to use its plan.", plan: "Railpack plan" },
+  nixpacks: { build: "Overrides the build command Nixpacks plans. Leave empty to use its plan.", start: "Overrides the start command Nixpacks plans. Leave empty to use its plan.", plan: "Nixpacks plan" },
 };
 
 function saveBlocker(settings: UseQueryResult<BuildRecipeSettings>, operations: UseQueryResult<Operation[]>, active: boolean, online: boolean) {
@@ -45,6 +51,10 @@ function engineUnavailable(engine: string, data: BuildRecipeSettings, isJob: boo
   if (engine === "buildpacks") {
     if (!data.buildpacks) return "eligibility not reported";
     return data.buildpacks.supported ? undefined : "unavailable on the build node";
+  }
+  if (engine === "nixpacks") {
+    if (!data.nixpacks) return "eligibility unknown";
+    return data.nixpacks.supported ? undefined : "unavailable on the build node";
   }
   if (!data.supported) return "the build worker does not support it";
   return undefined;
@@ -167,6 +177,7 @@ function RecipeBody({ workload, settings, value, editable, errors, disabled, onC
       {editable ? <RecipeEditor workload={workload} settings={settings} value={value} errors={errors} disabled={disabled} onChange={onChange} /> : <RecipeSummary settings={settings} />}
       {value.engine === "railpack" && <RailpackDetails settings={settings} />}
       {value.engine === "buildpacks" && <BuildpacksDetails settings={settings} />}
+      {value.engine === "nixpacks" && <NixpacksDetails settings={settings} />}
     </>
   );
 }
@@ -190,6 +201,9 @@ function EngineChange({ from, to }: { from: BuildRecipe; to: BuildRecipe }) {
       {to.engine === "static" && <p>The static runtime runs as a non-root user on a read-only filesystem and cannot use mounts, devices or added capabilities.</p>}
       {to.engine === "buildpacks" && (
         <p>The pinned Paketo builder detects the app, and a Procfile in the source directory can set its launch process. Its lifecycle OCI-layout export is experimental upstream.</p>
+      )}
+      {to.engine === "nixpacks" && (
+        <p>Nixpacks is in maintenance mode upstream, which recommends Railpack. Its builds download Nix, system and language packages that the pins do not cover, and outbound build proxies are unavailable.</p>
       )}
       <p>This changes future builds only. Nothing is built, deployed or restarted now.</p>
     </div>
@@ -279,7 +293,8 @@ function RecipeEditor({ workload, settings, value, errors, disabled, onChange }:
   const services = composeServices(workload.compose);
   const serviceMissing = value.service !== "" && !services.includes(value.service);
   const engine = value.engine;
-  const showsFields = engine === "static" || engine === "railpack" || engine === "buildpacks";
+  const showsFields = engine === "static" || engine === "railpack" || engine === "buildpacks" || engine === "nixpacks";
+  const commands = commandHints[engine];
   return (
     <SettingRows>
       <Field id="build-recipe-engine" label="Build engine" hint={engineHints[engine] ?? "Cove does not know this engine and will not build with it."} layout="row">
@@ -320,10 +335,10 @@ function RecipeEditor({ workload, settings, value, errors, disabled, onChange }:
           {engine === "static" && (
             <PathField id="build-recipe-output" label="Output directory" hint="The already-built public files, relative to the source directory. Use . for the source directory itself." value={value.output} error={errors.output} disabled={disabled} onChange={(output) => onChange({ output })} />
           )}
-          {engine === "railpack" && (
+          {commands && (
             <>
-              <CommandField id="build-recipe-build-command" label="Build command" hint="Overrides the build command Railpack plans. Leave empty to use its plan." value={value.build_command} error={errors.build_command} disabled={disabled} onChange={(build_command) => onChange({ build_command })} />
-              <CommandField id="build-recipe-start-command" label="Start command" hint="Overrides the start command Railpack plans. Leave empty to use its plan." value={value.start_command} error={errors.start_command} disabled={disabled} onChange={(start_command) => onChange({ start_command })} />
+              <CommandField id="build-recipe-build-command" label="Build command" hint={commands.build} value={value.build_command} error={errors.build_command} disabled={disabled} onChange={(build_command) => onChange({ build_command })} />
+              <CommandField id="build-recipe-start-command" label="Start command" hint={commands.start} value={value.start_command} error={errors.start_command} disabled={disabled} onChange={(start_command) => onChange({ start_command })} />
             </>
           )}
         </>
@@ -336,6 +351,7 @@ function EngineAvailability({ workload, settings, isJob }: { workload: Workload;
   const engineBlocked = engineUnavailable("railpack", settings, isJob);
   // A saved Cloud Native Buildpacks recipe already explains its refusal above the form.
   const buildpacksBlocked = settings.source_ready && settings.recipe.engine !== "buildpacks" && Boolean(engineUnavailable("buildpacks", settings, isJob));
+  const nixpacksBlocked = settings.source_ready && settings.recipe.engine !== "nixpacks" && Boolean(engineUnavailable("nixpacks", settings, isJob));
   return (
     <>
       {engineBlocked && (
@@ -344,7 +360,7 @@ function EngineAvailability({ workload, settings, isJob }: { workload: Workload;
             <>Static output and Railpack need a build worker that supports them. Upgrade and verify the build node.</>
           ) : (
             <>
-              Static output, Railpack and Cloud Native Buildpacks need a Git source that uses the saved Compose configuration. Change it on the{" "}
+              Static output, Railpack, Cloud Native Buildpacks and Nixpacks need a Git source that uses the saved Compose configuration. Change it on the{" "}
               <Link to="/resources/$resourceId/source" params={{ resourceId: workload.id }} className={linkClass}>
                 Source page
               </Link>
@@ -356,6 +372,11 @@ function EngineAvailability({ workload, settings, isJob }: { workload: Workload;
       {buildpacksBlocked && (
         <p className="text-xs break-words text-fg-muted">
           Cloud Native Buildpacks is unavailable: {settings.buildpacks ? settings.buildpacks.reason || "the build node cannot run it." : "this server did not report its eligibility, so Cove treats it as unavailable."}
+        </p>
+      )}
+      {nixpacksBlocked && (
+        <p className="text-xs break-words text-fg-muted">
+          Nixpacks is unavailable: {settings.nixpacks ? settings.nixpacks.reason || "the build node cannot run it." : "this server did not report usable eligibility, so Cove treats it as unavailable."}
         </p>
       )}
     </>
@@ -405,7 +426,8 @@ function CommandField({ id, label, hint, value, error, disabled, onChange }: { i
 // Readers never see command text, only whether an override is saved.
 function RecipeSummary({ settings }: { settings: BuildRecipeSettings }) {
   const recipe = settings.recipe;
-  const override = (set: boolean) => (set ? "Custom command saved" : "Railpack plan");
+  const commands = commandHints[recipe.engine];
+  const override = (set: boolean) => (set ? "Custom command saved" : (commands?.plan ?? ""));
   return (
     <SettingRows>
       <SettingRow label="Build engine" description={engineHints[recipe.engine]}>
@@ -426,7 +448,7 @@ function RecipeSummary({ settings }: { settings: BuildRecipeSettings }) {
           <span className="font-mono break-all">{recipe.output}</span>
         </SettingRow>
       )}
-      {recipe.engine === "railpack" && (
+      {commands && (
         <>
           <SettingRow label="Build command">{override(settings.build_command_set)}</SettingRow>
           <SettingRow label="Start command">{override(settings.start_command_set)}</SettingRow>
@@ -539,6 +561,86 @@ function BuildpacksDetails({ settings }: { settings: BuildRecipeSettings }) {
           </>
         ) : (
           <p>This server did not report the resource needs, versions or pinned images for Cloud Native Buildpacks.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Versions, pins, sizes and planner limits come only from the server's read, which differs by build node architecture.
+function NixpacksDetails({ settings }: { settings: BuildRecipeSettings }) {
+  const nixpacks = settings.nixpacks;
+  return (
+    <div className="space-y-3">
+      <Notice tone="warn" title="Nixpacks is in maintenance mode">
+        <p>Nixpacks is in maintenance mode upstream, and its maintainers recommend Railpack instead. Cove still supports it as an explicit choice.</p>
+        <p className="mt-1">
+          Cove pins the Nixpacks planner archive and the official Ubuntu base image, but normal builds download Nix, system and language packages from upstream. Those dependencies are not covered
+          by the pins, so Nixpacks builds are neither reproducible nor fully pinned.
+        </p>
+      </Notice>
+      <Notice tone="info" title="How Cove plans and builds with Nixpacks">
+        <p>
+          Planning runs offline in an unprivileged, bounded container with no Docker socket, no Git, registry or host credentials and no Cove secret values. Only the generated Dockerfile and
+          support files are returned, and Cove validates them. Repository build commands never run on the worker host, and the generated build.sh is never executed.
+        </p>
+        <p className="mt-1">
+          Build steps run in Cove&apos;s own BuildKit builder. Default build networking is supported. A build network of none is enforced for the generated RUN steps, so dependency downloads can
+          fail. Outbound build proxies are unavailable because the shared builder cannot enforce proxy-only egress; Cove refuses to save or build a Nixpacks recipe while one is configured. Host or
+          custom build networks and Compose build args on the selected service are refused.
+        </p>
+        <p className="mt-1">
+          Selected build secrets are files under <span className="font-mono">/run/secrets/&lt;name&gt;</span> in build steps, never planner inputs or ordinary ARG or ENV values; commands can copy
+          them into the output, as in any other build. Cove does not forward environment variables as Nixpacks variables. Public configuration and variables in the repository remain repository
+          inputs.
+        </p>
+        <p className="mt-1">
+          <span className="font-mono">.nixpacks</span> is reserved for generated output, so source that contains it is refused. Generated Dockerfiles that override the build or runtime image, copy
+          from external images, change the parser, frontend, mounts or network, use heredocs or contain other unsupported instructions are refused with the server&apos;s error. Cove does not accept
+          arbitrary Dockerfiles here.
+        </p>
+      </Notice>
+      <div className="space-y-1.5 text-xs text-fg-muted">
+        {nixpacks ? (
+          <>
+            <p className="font-medium text-fg">Resources on the build node</p>
+            <ul aria-label="Nixpacks resource limits" className="list-disc space-y-0.5 pl-4">
+              <li>
+                Planning is limited to <Value>{formatMemory(nixpacks.planner_memory_bytes)}</Value> of memory, <Value>{formatCPU(nixpacks.planner_cpu)}</Value> and{" "}
+                <Value>{`${nixpacks.planner_timeout_seconds.toLocaleString("en-US")} seconds`}</Value>.
+              </li>
+              <li>
+                Up to <Value>{formatMemory(nixpacks.planner_output_bytes)}</Value> of planner output is held in temporary memory within that limit; it is not the build cache limit. The generated
+                files Cove accepts are bounded further.
+              </li>
+              <li>
+                {nixpacks.planner_sha256 ? (
+                  <>
+                    The planner archive is about <Value>{formatMB(nixpacks.planner_download_bytes)}</Value> to download and the base image about <Value>{formatGB(nixpacks.base_download_bytes)}</Value>.
+                  </>
+                ) : (
+                  <>No planner archive is pinned for this build node&apos;s architecture, so download sizes are not known.</>
+                )}
+              </li>
+            </ul>
+            <p className="pt-1">
+              Nixpacks <span className="font-mono text-fg">{nixpacks.version}</span>, with these pins:
+            </p>
+            <dl aria-label="Nixpacks pins" className="space-y-1">
+              {nixpacks.planner_sha256 && (
+                <div>
+                  <dt>Planner archive checksum</dt>
+                  <dd className="font-mono break-all text-fg">{nixpacks.planner_sha256}</dd>
+                </div>
+              )}
+              <div>
+                <dt>Base image</dt>
+                <dd className="font-mono break-all text-fg">{nixpacks.base_image}</dd>
+              </div>
+            </dl>
+          </>
+        ) : (
+          <p>This server did not report usable Nixpacks eligibility, versions, pins or planner limits, so Cove treats Nixpacks as unavailable.</p>
         )}
       </div>
     </div>

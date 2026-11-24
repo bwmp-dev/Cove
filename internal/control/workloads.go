@@ -311,6 +311,12 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			if recipe.Engine == "nixpacks" {
+				if err := requireNixpacks(r.Context(), tx, executionNode); err != nil {
+					http.Error(w, err.Error(), 409)
+					return
+				}
+			}
 		}
 		var remoteBuild bool
 		var platform string
@@ -318,7 +324,7 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "runtime platform unavailable", 409)
 			return
 		}
-		if remoteBuild || recipe.Engine == "buildpacks" {
+		if remoteBuild || recipe.Engine == "buildpacks" || recipe.Engine == "nixpacks" {
 			request.BuildPlatform = platform
 		}
 	}

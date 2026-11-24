@@ -28,6 +28,12 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "nixpacks-plan":
+		err = worker.RunNixpacksPlanner(ctx)
+	case "nixpacks-output":
+		err = worker.ReadNixpacksOutput(os.Stdout)
+	case "nixpacks-exit":
+		err = worker.ReadRailpackOutput("exit", os.Stdout)
 	case "buildpacks-helper":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("buildpacks helper action required")
