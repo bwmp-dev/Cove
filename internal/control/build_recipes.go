@@ -72,10 +72,18 @@ func (s *Server) buildRecipe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	customBuild, customStart := recipe.BuildCommand != "", recipe.StartCommand != ""
+	buildpacks, err := readBuildpacksSupport(r.Context(), s.DB, node)
+	if err != nil {
+		http.Error(w, "build recipe capabilities unavailable", 503)
+		return
+	}
+	if recipe.Engine == "buildpacks" && reason == "" && !buildpacks.Supported {
+		reason = buildpacks.Reason
+	}
 	if level < 3 {
 		recipe.BuildCommand, recipe.StartCommand = "", ""
 	}
-	respond(w, 200, map[string]any{"recipe": recipe, "can_edit": level >= 3, "source_ready": sourceReady, "supported": supported, "reason": reason, "build_node_id": node, "active_operation_id": active, "build_command_set": customBuild, "start_command_set": customStart, "railpack_version": worker.RailpackVersion, "pinned_images": []string{worker.RailpackFrontendImage, worker.RailpackBuilderImage, worker.RailpackRuntimeImage}})
+	respond(w, 200, map[string]any{"recipe": recipe, "can_edit": level >= 3, "source_ready": sourceReady, "supported": supported, "reason": reason, "build_node_id": node, "active_operation_id": active, "build_command_set": customBuild, "start_command_set": customStart, "railpack_version": worker.RailpackVersion, "pinned_images": []string{worker.RailpackFrontendImage, worker.RailpackBuilderImage, worker.RailpackRuntimeImage}, "buildpacks": buildpacks})
 }
 
 func (s *Server) saveBuildRecipe(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +136,12 @@ func (s *Server) saveBuildRecipe(w http.ResponseWriter, r *http.Request) {
 		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((capabilities->>'build_recipes')::boolean,false) FROM nodes WHERE id=$1`, node).Scan(&supported); err != nil || !supported {
 			http.Error(w, "upgrade and verify the effective build worker before using build recipes", 409)
 			return
+		}
+		if recipe.Engine == "buildpacks" {
+			if err := requireBuildpacks(r.Context(), tx, node); err != nil {
+				http.Error(w, err.Error(), 409)
+				return
+			}
 		}
 		protected, problem := s.sealJSON(recipe)
 		if problem != nil {
@@ -182,6 +196,11 @@ func (s *Server) prepareBuildRecipe(ctx context.Context, request *worker.Request
 	var supported bool
 	if err = s.DB.QueryRow(ctx, `SELECT COALESCE((capabilities->>'build_recipes')::boolean,false) FROM nodes WHERE id=$1`, node).Scan(&supported); err != nil || !supported {
 		return errors.New("upgrade and verify the effective build worker before using build recipes")
+	}
+	if recipe.Engine == "buildpacks" {
+		if err := requireBuildpacks(ctx, s.DB, node); err != nil {
+			return err
+		}
 	}
 	request.BuildRecipe = &recipe
 	return nil

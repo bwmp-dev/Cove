@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
 import type { BuildNodeSettings } from "../api/build-nodes";
-import type { BuildRecipeSettings } from "../api/build-recipes";
+import type { BuildRecipeSettings, BuildpacksSettings } from "../api/build-recipes";
 import type { Node, Operation, OperationBuildRecipe, Workload } from "../api/types";
 import { ResourceBuild } from "./ResourceBuild";
 
@@ -275,4 +275,113 @@ it("shows the engine each build recorded and never assumes Compose for older bui
   expect(await screen.findByText("Railpack 0.43.1 for web")).toBeInTheDocument();
   expect(screen.getByText("Build engine not recorded")).toBeInTheDocument();
   expect(screen.queryByText(/Existing Compose/)).not.toBeInTheDocument();
+});
+
+const cnbRecipe = { engine: "buildpacks", service: "web", directory: ".", output: "", build_command: "", start_command: "" };
+
+function buildpacks(overrides: Partial<BuildpacksSettings> = {}): BuildpacksSettings {
+  return {
+    supported: true,
+    reason: "",
+    lifecycle_version: "0.21.29",
+    builder_version: "0.0.230",
+    platform_api: "0.13",
+    pinned_images: ["lifecycle@sha256:a", "builder@sha256:b", "run@sha256:c"],
+    work_storage: "disk",
+    work_hard_cap: false,
+    work_target_bytes: 3221225472,
+    minimum_phase_memory_bytes: 2147483648,
+    maximum_phase_memory_bytes: 4294967296,
+    memory_safety_bytes: 2147483648,
+    required_available_memory_bytes: 4294967296,
+    required_docker_disk_bytes: 25769803776,
+    required_worker_disk_bytes: 10737418240,
+    quota_memory_mb: 4352,
+    quota_cpu: 2.5,
+    builder_download_bytes: 1446326381,
+    builder_unpacked_bytes: 5108638067,
+    experimental: true,
+    ...overrides,
+  };
+}
+
+it("builds a saved Cloud Native Buildpacks recipe with the unchanged build payload", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: cnbRecipe, supported: false, buildpacks: buildpacks() })) });
+  renderBuild();
+  const button = screen.getByRole("button", { name: "Build and publish" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "team/app" } });
+  fireEvent.click(button);
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/workloads/w1/operations", { action: "build", build: { repository: "team/app", no_cache: false } }));
+});
+
+it.each([
+  ["the server omits its eligibility", recipeSettings({ recipe: cnbRecipe }), /did not report Cloud Native Buildpacks eligibility/],
+  ["the build node cannot run it", recipeSettings({ recipe: cnbRecipe, buildpacks: buildpacks({ supported: false, reason: "the build node has 6 GiB available; Cloud Native Buildpacks needs 9 GiB" }) }), /needs 9 GiB/],
+  ["the server refuses the saved recipe", recipeSettings({ recipe: cnbRecipe, reason: "the selected service is absent from saved Compose", buildpacks: buildpacks() }), /absent from saved Compose/],
+])("refuses to build a saved Cloud Native Buildpacks recipe when %s", async (_case, read, reason) => {
+  serve({ recipe: () => Promise.resolve(read) });
+  renderBuild();
+  expect(await screen.findByText("The build recipe cannot build")).toBeInTheDocument();
+  expect(screen.getByText(reason)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
+});
+
+it("keeps Compose builds available when Cloud Native Buildpacks eligibility is unknown", async () => {
+  serve();
+  renderBuild();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Build and publish" })).toBeEnabled());
+  expect(screen.queryByText("The build recipe cannot build")).not.toBeInTheDocument();
+});
+
+it("blocks building after a failed refresh of a usable Cloud Native Buildpacks recipe and offers Retry", async () => {
+  let fail = false;
+  serve({ recipe: () => (fail ? Promise.reject(new Error("down")) : Promise.resolve(recipeSettings({ recipe: cnbRecipe, buildpacks: buildpacks() }))) });
+  const client = renderBuild();
+  const button = screen.getByRole("button", { name: "Build and publish" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fail = true;
+  await client.refetchQueries({ queryKey: ["workloads", "w1", "build-recipe"] });
+  expect(await screen.findByText("Could not load the build recipe")).toBeInTheDocument();
+  expect(button).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+});
+
+it("shows the Cloud Native Buildpacks versions a build recorded, whatever the current recipe is", async () => {
+  serve({
+    recipe: () => Promise.resolve(recipeSettings()),
+    operations: [build("cnb", "succeeded", true, "n1", { engine: "buildpacks", service: "web", version: "0.21.29", builder_version: "0.0.230", platform_api: "0.13", pinned_images: ["a", "b", "c"] })],
+  });
+  renderBuild();
+  expect(await screen.findByText("Cloud Native Buildpacks (lifecycle 0.21.29, builder 0.0.230, platform API 0.13) for web")).toBeInTheDocument();
+});
+
+it("shows the phase memory limit a Cloud Native Buildpacks build recorded, independent of the current settings", async () => {
+  serve({
+    recipe: () => Promise.resolve(recipeSettings({ recipe: cnbRecipe, buildpacks: buildpacks({ maximum_phase_memory_bytes: 8 * 1024 ** 3 }) })),
+    operations: [build("cnb", "succeeded", true, "n1", { engine: "buildpacks", service: "web", version: "0.21.29", phase_memory_bytes: 2430 * 1024 ** 2, admission_available_memory_bytes: 4430 * 1024 ** 2 })],
+  });
+  renderBuild();
+  expect(await screen.findByText("Phase memory limit 2,430 MiB (from 4,430 MiB available at admission)")).toBeInTheDocument();
+  expect(screen.queryByText(/8 GiB|4 GiB/)).not.toBeInTheDocument();
+});
+
+it.each([
+  ["a queued build before admission", "queued" as const, undefined, "Phase memory not assigned"],
+  ["older metadata without a limit", "failed" as const, undefined, "Phase memory not assigned"],
+  ["an unrecognised recorded limit", "failed" as const, "4GiB", "Phase memory limit unavailable"],
+  ["a zero recorded limit", "failed" as const, 0, "Phase memory limit unavailable"],
+])("never assumes a phase memory limit for %s", async (_case, state, limit, text) => {
+  const recipe = { engine: "buildpacks", service: "web", ...(limit === undefined ? {} : { phase_memory_bytes: limit }) } as OperationBuildRecipe;
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: cnbRecipe, buildpacks: buildpacks() })), operations: [build("cnb", state, false, "n1", recipe)] });
+  renderBuild();
+  expect(await screen.findByText(text)).toBeInTheDocument();
+  expect(screen.queryByText(/Phase memory limit \d/)).not.toBeInTheDocument();
+});
+
+it("shows no phase memory for builds by other engines", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings()), operations: [build("rp", "succeeded", true, "n1", { engine: "railpack", service: "web", version: "0.43.1" })] });
+  renderBuild();
+  expect(await screen.findByText("Railpack 0.43.1 for web")).toBeInTheDocument();
+  expect(screen.queryByText(/Phase memory/)).not.toBeInTheDocument();
 });

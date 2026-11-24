@@ -195,8 +195,9 @@ func (e *Engine) performBuild(ctx context.Context, r Request, dir string, env []
 		}
 		args = []string{"docker", "compose", "--profile", "*", "--project-name", "cove-" + r.Workload, "--file", path}
 	}
-	if len(r.FileSecrets) > 0 {
-		path, err = e.prepareFileSecrets(ctx, r, dir, args, env)
+	composeSecrets := buildpacksComposeSecrets(r)
+	if len(composeSecrets.FileSecrets) > 0 {
+		path, err = e.prepareFileSecrets(ctx, composeSecrets, dir, args, env)
 		if err != nil {
 			return err
 		}
@@ -212,8 +213,10 @@ func (e *Engine) performBuild(ctx context.Context, r Request, dir string, env []
 		return err
 	}
 	args = append(args, "--file", override)
-	if err = e.buildImages(ctx, dir, args, env, out, r.Build.NoCache); err != nil {
-		return err
+	if r.BuildRecipe == nil || r.BuildRecipe.Engine != "buildpacks" {
+		if err = e.buildImages(ctx, dir, args, env, out, r.Build.NoCache); err != nil {
+			return err
+		}
 	}
 	products := BuildResult{Images: []BuiltImage{}}
 	for _, name := range names {

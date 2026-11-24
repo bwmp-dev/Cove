@@ -305,6 +305,12 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			request.BuildRecipe = &recipe
+			if recipe.Engine == "buildpacks" {
+				if err := requireBuildpacks(r.Context(), tx, executionNode); err != nil {
+					http.Error(w, err.Error(), 409)
+					return
+				}
+			}
 		}
 		var remoteBuild bool
 		var platform string
@@ -312,7 +318,7 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "runtime platform unavailable", 409)
 			return
 		}
-		if remoteBuild {
+		if remoteBuild || recipe.Engine == "buildpacks" {
 			request.BuildPlatform = platform
 		}
 	}
@@ -423,6 +429,12 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		if _, err = tx.Exec(r.Context(), `UPDATE operations SET result=$2 WHERE id=$1`, id, metadata); err != nil {
 			http.Error(w, "build metadata could not be saved", 503)
 			return
+		}
+		if request.BuildRecipe != nil && request.BuildRecipe.Engine == "buildpacks" {
+			if err := reserveBuildpacks(r.Context(), tx, id, executionNode); err != nil {
+				http.Error(w, "Cloud Native Buildpacks reservation could not be saved", 503)
+				return
+			}
 		}
 	}
 	if in.Action == "image_check" {
@@ -734,6 +746,16 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	var cancelRequested, buildPrepared, legacyBuild bool
 	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested,build_prepared,build_legacy FROM operations WHERE id=$1", id).Scan(&cancelRequested, &buildPrepared, &legacyBuild); err != nil {
 		return err
+	}
+	if !cancelRequested && request.Action == "build" && request.BuildRecipe != nil && request.BuildRecipe.Engine == "buildpacks" {
+		admitted, admission, err := s.admitBuildpacks(ctx, id, node)
+		if err != nil || !admitted {
+			return err
+		}
+		if request.BuildpacksAdmission != nil && *request.BuildpacksAdmission != *admission {
+			return s.deferBuildResult(ctx, id)
+		}
+		request.BuildpacksAdmission = admission
 	}
 	if request.Action == "build" && !buildPrepared {
 		// An older controller may already have submitted inputs that were not saved

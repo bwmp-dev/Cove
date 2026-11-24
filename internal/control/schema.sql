@@ -417,6 +417,15 @@ CREATE TABLE IF NOT EXISTS team_quotas (
  memory_mb bigint NOT NULL DEFAULT 0 CHECK(memory_mb>=0),
  deployments integer NOT NULL DEFAULT 0 CHECK(deployments>=0)
 );
+CREATE TABLE IF NOT EXISTS buildpack_reservations (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id),
+ cpus double precision NOT NULL CHECK(cpus>0),
+ memory_mb bigint NOT NULL CHECK(memory_mb>0),
+ phase_memory_bytes bigint NOT NULL DEFAULT 0 CHECK(phase_memory_bytes>=0),
+ available_memory_bytes bigint NOT NULL DEFAULT 0 CHECK(available_memory_bytes>=0)
+);
+CREATE INDEX IF NOT EXISTS buildpack_reservation_node ON buildpack_reservations(node_id);
 CREATE OR REPLACE FUNCTION cove_enforce_team_quota() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE quota team_quotas; used_count bigint; used_cpu double precision; used_memory bigint;
 BEGIN
@@ -424,6 +433,7 @@ BEGIN
  SELECT * INTO quota FROM team_quotas WHERE team_id=NEW.team_id;
  IF NOT FOUND THEN RETURN NEW; END IF;
  SELECT count(*),COALESCE(sum(configured_cpu),0),COALESCE(sum(configured_memory_mb),0) INTO used_count,used_cpu,used_memory FROM workloads WHERE team_id=NEW.team_id AND id<>NEW.id;
+ SELECT used_cpu+COALESCE(sum(b.cpus),0),used_memory+COALESCE(sum(b.memory_mb),0) INTO used_cpu,used_memory FROM buildpack_reservations b JOIN operations o ON o.id=b.operation_id JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=NEW.team_id AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running');
  IF (quota.resources>0 AND used_count+1>quota.resources) OR (quota.cpus>0 AND used_cpu+COALESCE(NEW.configured_cpu,0)>quota.cpus+0.000001) OR (quota.memory_mb>0 AND used_memory+COALESCE(NEW.configured_memory_mb,0)>quota.memory_mb) THEN
   RAISE EXCEPTION 'team quota exceeded' USING ERRCODE='23514',CONSTRAINT='cove_team_quota';
  END IF;

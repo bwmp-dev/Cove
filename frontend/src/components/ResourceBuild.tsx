@@ -9,7 +9,7 @@ import { connectionsQuery } from "../api/connections";
 import { useQueueOperation } from "../api/mutations";
 import { nodesQuery, workloadOperationsQuery, workloadRegistryQuery } from "../api/queries";
 import type { Node, Operation, Workload } from "../api/types";
-import { engineLabel, isRecipeEngine, recordedEngine } from "../lib/build-recipes";
+import { engineLabel, recordedEngine, recordedPhaseMemory, savedRecipeBlocker } from "../lib/build-recipes";
 import { buildHistory, repositoryError, repositoryMaxLength } from "../lib/builds";
 import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, stateLabels } from "../lib/operations";
@@ -37,6 +37,11 @@ function ExecutionNode({ operation, settings, nodes }: { operation: Operation; s
   return <span className="min-w-0 break-all">Built on {name === id ? <span className="font-mono">{id}</span> : name}</span>;
 }
 
+function RecordedPhaseMemory({ operation }: { operation: Operation }) {
+  const memory = recordedPhaseMemory(operation);
+  return memory ? <span>{memory}</span> : null;
+}
+
 function LatestAttempt({ operation, hasSuccess, node }: { operation: Operation; hasSuccess: boolean; node: ReactNode }) {
   const active = isActive(operation.state);
   const error = operation.result?.error;
@@ -50,6 +55,7 @@ function LatestAttempt({ operation, hasSuccess, node }: { operation: Operation; 
         </span>
         {node}
         <span>{recordedEngine(operation)}</span>
+        <RecordedPhaseMemory operation={operation} />
         <OperationLink operation={operation}>{active ? "View build progress" : "View build"}</OperationLink>
       </p>
       {error && (
@@ -81,6 +87,7 @@ function SuccessfulBuild({ operation, node }: { operation: Operation; node: Reac
           </span>
           {node}
           <span>{recordedEngine(operation)}</span>
+          <RecordedPhaseMemory operation={operation} />
           {operation.result?.revision && (
             <span className="font-mono" title={operation.result.revision}>
               {operation.result.revision.slice(0, 7)}
@@ -131,8 +138,8 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   const supported = node?.capabilities?.build_publish === true;
   // Ordinary Compose builds are unaffected; a saved explicit recipe the server reports as unusable refuses the build.
   const savedRecipe = recipe.isError ? undefined : recipe.data;
-  const recipeEngine = savedRecipe?.recipe.engine ?? "compose";
-  const recipeBlocked = savedRecipe !== undefined && recipeEngine !== "compose" && (!isRecipeEngine(recipeEngine) || !savedRecipe.supported || savedRecipe.reason !== "");
+  const recipeBlocker = savedRecipe ? savedRecipeBlocker(savedRecipe) : undefined;
+  const recipeBlocked = recipeBlocker !== undefined;
   const unreadable = recipe.isPending || recipe.isError || settings.isPending || settings.isError || nodes.isPending || nodes.isError || operations.isPending || operations.isError || registry.isPending || registry.isError;
   const registryId = registry.data?.registry_id ?? "";
   const server = registries.data?.find((item) => item.id === registryId)?.registry?.server;
@@ -176,7 +183,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
         {canOperate && savedRecipe && recipeBlocked && (
           <Notice tone="warn" title="The build recipe cannot build">
             <span className="break-words">
-              {engineLabel(savedRecipe.recipe.engine)}: {savedRecipe.reason || (isRecipeEngine(savedRecipe.recipe.engine) ? "The build worker does not support this recipe." : "This panel does not recognise the saved engine.")} Change the build recipe above or resolve the problem to build.
+              {engineLabel(savedRecipe.recipe.engine)}: {recipeBlocker} Change the build recipe above or resolve the problem to build.
             </span>
           </Notice>
         )}

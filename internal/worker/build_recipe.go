@@ -24,11 +24,15 @@ type BuildRecipe struct {
 }
 
 type BuildRecipeInfo struct {
-	Engine        string   `json:"engine"`
-	Service       string   `json:"service,omitempty"`
-	Version       string   `json:"version,omitempty"`
-	PinnedImages  []string `json:"pinned_images,omitempty"`
-	StaticRuntime string   `json:"static_runtime,omitempty"`
+	Engine                        string   `json:"engine"`
+	Service                       string   `json:"service,omitempty"`
+	Version                       string   `json:"version,omitempty"`
+	PinnedImages                  []string `json:"pinned_images,omitempty"`
+	StaticRuntime                 string   `json:"static_runtime,omitempty"`
+	BuilderVersion                string   `json:"builder_version,omitempty"`
+	PlatformAPI                   string   `json:"platform_api,omitempty"`
+	PhaseMemoryBytes              uint64   `json:"phase_memory_bytes,omitempty"`
+	AdmissionAvailableMemoryBytes uint64   `json:"admission_available_memory_bytes,omitempty"`
 }
 
 func BuildRecipeSummary(recipe *BuildRecipe) *BuildRecipeInfo {
@@ -38,6 +42,10 @@ func BuildRecipeSummary(recipe *BuildRecipe) *BuildRecipeInfo {
 		if info.Engine == "railpack" {
 			info.Version = RailpackVersion
 			info.PinnedImages = []string{RailpackFrontendImage, RailpackBuilderImage, RailpackRuntimeImage}
+		}
+		if info.Engine == "buildpacks" {
+			info.Version, info.BuilderVersion, info.PlatformAPI = BuildpacksLifecycleVersion, BuildpacksBuilderVersion, "0.13"
+			info.PinnedImages = []string{BuildpacksLifecycleImage, BuildpacksBuilderImage, BuildpacksRunImage}
 		}
 	}
 	return info
@@ -54,8 +62,8 @@ func ValidateBuildRecipe(recipe BuildRecipe) error {
 		}
 		return nil
 	}
-	if recipe.Engine != "static" && recipe.Engine != "railpack" {
-		return errors.New("select an explicit supported build engine: compose, static or railpack")
+	if recipe.Engine != "static" && recipe.Engine != "railpack" && recipe.Engine != "buildpacks" {
+		return errors.New("select an explicit supported build engine: compose, static, railpack or buildpacks")
 	}
 	if !serviceIdentifier.MatchString(recipe.Service) || !recipeRelativePath(recipe.Directory) {
 		return errors.New("select a Compose service and a clean relative project directory")
@@ -63,6 +71,10 @@ func ValidateBuildRecipe(recipe BuildRecipe) error {
 	if recipe.Engine == "static" {
 		if !recipeRelativePath(recipe.Output) || recipe.BuildCommand != "" || recipe.StartCommand != "" {
 			return errors.New("static output requires a relative public output directory and accepts no build or start command")
+		}
+	} else if recipe.Engine == "buildpacks" {
+		if recipe.Output != "" || recipe.BuildCommand != "" || recipe.StartCommand != "" {
+			return errors.New("Cloud Native Buildpacks uses the pinned builder's detection and the source's launch configuration; clear static output and command overrides")
 		}
 	} else if recipe.Output != "" || len(recipe.BuildCommand) > 8192 || len(recipe.StartCommand) > 8192 || strings.ContainsRune(recipe.BuildCommand+recipe.StartCommand, '\x00') {
 		return errors.New("Railpack accepts optional build/start commands up to 8192 bytes and no static output directory")
@@ -94,10 +106,25 @@ func ValidateRecipeSource(recipe BuildRecipe, source *GitSource, compose, kind s
 	}
 	service := services[recipe.Service].(map[string]any)
 	build, _ := service["build"].(map[string]any)
+	if recipe.Engine == "buildpacks" {
+		if err := validateBuildpacksServices(services, recipe.Service); err != nil {
+			return err
+		}
+		return validateBuildpacksPolicy(build)
+	}
 	return validateRailpackBuildPolicy(build)
 }
 
 func ValidateRecipeSecrets(recipe BuildRecipe, secrets []FileSecret) error {
+	if recipe.Engine == "buildpacks" {
+		for _, secret := range secrets {
+			for _, service := range secret.BuildServices {
+				if service == recipe.Service && !buildpacksSecretNameAllowed(secret.Name) {
+					return errors.New("CNB build secret names cannot override lifecycle, Cove, Docker, loader or managed proxy settings")
+				}
+			}
+		}
+	}
 	if recipe.Engine != "static" {
 		return nil
 	}

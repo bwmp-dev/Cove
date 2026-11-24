@@ -19,7 +19,7 @@ import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
 import { resultSummary } from "../lib/rollouts";
 import { linkClass } from "../lib/styles";
-import { recordedEngine } from "../lib/build-recipes";
+import { recordedEngine, recordedPhaseMemory } from "../lib/build-recipes";
 import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
 import type { ManagedRegistryResult, Operation, SuspensionResult, WorkloadSummary } from "../api/types";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
@@ -88,9 +88,11 @@ function BuildNodeValue({ id, name }: { id?: string; name?: string }) {
 function BuildEngineValue({ operation }: { operation: Operation }) {
   const recipe = operation.result?.build_recipe;
   if (!recipe?.engine) return <span className="text-fg-muted">{recordedEngine(operation)}</span>;
+  const memory = recordedPhaseMemory(operation);
   return (
     <div className="space-y-1">
       <p className="break-words">{recordedEngine(operation)}</p>
+      {memory && <p className="text-xs break-words text-fg-muted">{memory}</p>}
       {recipe.static_runtime && <p className="font-mono text-xs break-all text-fg-muted">{recipe.static_runtime}</p>}
       {recipe.pinned_images && recipe.pinned_images.length > 0 && (
         <ul aria-label="Pinned build images" className="space-y-0.5">

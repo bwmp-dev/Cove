@@ -123,6 +123,28 @@ func (e *Engine) prepareRecipeBuild(ctx context.Context, r Request, dir string, 
 	if err != nil {
 		return "", err
 	}
+	if r.BuildRecipe.Engine == "buildpacks" {
+		if err := validateBuildpacksServices(services, r.BuildRecipe.Service); err != nil {
+			return "", err
+		}
+		original, _ := service["build"].(map[string]any)
+		previous := service["build"]
+		if original == nil {
+			service["build"] = map[string]any{}
+		}
+		err := validateFileSecretTargets(config, r)
+		service["build"] = previous
+		if err != nil {
+			return "", err
+		}
+		if err := e.prepareBuildpacksBuild(ctx, r, project, original, out); err != nil {
+			return "", err
+		}
+		delete(service, "build")
+		service["image"] = buildImageTag(r, r.BuildRecipe.Service)
+		path := filepath.Join(dir, r.ID+".recipe.compose.json")
+		return path, writeJSON(path, literalCompose(config))
+	}
 	build := map[string]any{"context": inputs, "dockerfile": "Dockerfile"}
 	if r.BuildRecipe.Engine == "static" {
 		public, err := recipeDirectory(project, r.BuildRecipe.Output)

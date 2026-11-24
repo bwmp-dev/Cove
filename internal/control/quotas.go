@@ -105,7 +105,7 @@ func (s *Server) teamQuota(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "usage unavailable", 503)
 			return
 		}
-		if err := s.DB.QueryRow(r.Context(), `SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND o.action IN ('deploy','rollback')`, team).Scan(&usage.Deployments); err != nil {
+		if err := s.DB.QueryRow(r.Context(), `SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND (o.action IN ('deploy','rollback','rollout_promote') OR EXISTS(SELECT 1 FROM buildpack_reservations b WHERE b.operation_id=o.id))`, team).Scan(&usage.Deployments); err != nil {
 			http.Error(w, "usage unavailable", 503)
 			return
 		}
@@ -136,6 +136,10 @@ func (s *Server) teamQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	var usage teamQuota
 	if err = tx.QueryRow(r.Context(), `SELECT count(*),COALESCE(sum(configured_cpu),0),COALESCE(sum(configured_memory_mb),0) FROM workloads WHERE team_id=$1`, team).Scan(&usage.Resources, &usage.CPUs, &usage.MemoryMB); err != nil {
+		http.Error(w, "usage unavailable", 503)
+		return
+	}
+	if err = tx.QueryRow(r.Context(), `SELECT $2::double precision+COALESCE(sum(b.cpus),0),$3::bigint+COALESCE(sum(b.memory_mb),0) FROM buildpack_reservations b JOIN operations o ON o.id=b.operation_id JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running')`, team, usage.CPUs, usage.MemoryMB).Scan(&usage.CPUs, &usage.MemoryMB); err != nil {
 		http.Error(w, "usage unavailable", 503)
 		return
 	}
@@ -186,7 +190,7 @@ func (s *Server) admitDeployment(ctx context.Context, id string) (bool, error) {
 	if reason != "" {
 		return holdDeployment(ctx, tx, id, reason)
 	}
-	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT deployments FROM team_quotas WHERE team_id=$1),0),(SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND o.action IN ('deploy','rollback','rollout_promote'))`, team).Scan(&maximum, &used); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT deployments FROM team_quotas WHERE team_id=$1),0),(SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND (o.action IN ('deploy','rollback','rollout_promote') OR EXISTS(SELECT 1 FROM buildpack_reservations b WHERE b.operation_id=o.id)))`, team).Scan(&maximum, &used); err != nil {
 		return false, err
 	}
 	if maximum > 0 && used >= maximum {

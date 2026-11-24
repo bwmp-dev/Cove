@@ -1,14 +1,17 @@
 import { isMap, isScalar, parseDocument } from "yaml";
-import type { BuildRecipe } from "../api/build-recipes";
+import type { BuildRecipe, BuildRecipeSettings } from "../api/build-recipes";
 import type { Operation } from "../api/types";
 import { byteLength } from "./workload-form";
 
-export type RecipeEngine = "compose" | "static" | "railpack";
+export type RecipeEngine = "compose" | "static" | "railpack" | "buildpacks";
+
+export const recipeEngines: readonly RecipeEngine[] = ["compose", "static", "railpack", "buildpacks"];
 
 export const engineLabels: Record<RecipeEngine, string> = {
   compose: "Existing Compose / Dockerfile",
   static: "Static output",
   railpack: "Railpack",
+  buildpacks: "Cloud Native Buildpacks",
 };
 
 export const commandMaxBytes = 8192;
@@ -18,7 +21,7 @@ export const railpackDisclosure =
   "Railpack plans and builds with default build networking and downloads metadata, language toolchains and packages from upstream services. Cove pins the Railpack frontend, builder and runtime images, but those three pins do not pin toolchains or packages, so Railpack builds are neither reproducible nor fully pinned.";
 
 export function isRecipeEngine(value: string): value is RecipeEngine {
-  return value === "compose" || value === "static" || value === "railpack";
+  return (recipeEngines as readonly string[]).includes(value);
 }
 
 export function engineLabel(engine: string) {
@@ -31,6 +34,7 @@ export const emptyRecipe: BuildRecipe = { engine: "compose", service: "", direct
 export function recipePayload(draft: BuildRecipe): BuildRecipe {
   if (draft.engine === "compose") return emptyRecipe;
   if (draft.engine === "static") return { ...emptyRecipe, engine: "static", service: draft.service, directory: draft.directory, output: draft.output };
+  if (draft.engine === "buildpacks") return { ...emptyRecipe, engine: "buildpacks", service: draft.service, directory: draft.directory };
   return { ...emptyRecipe, engine: draft.engine, service: draft.service, directory: draft.directory, build_command: draft.build_command, start_command: draft.start_command };
 }
 
@@ -80,6 +84,55 @@ export function recipeErrors(draft: BuildRecipe, isJob: boolean): RecipeErrors {
   return errors;
 }
 
+// Why the saved recipe cannot build now, or nothing when it can. Unknown Cloud Native Buildpacks eligibility counts as unavailable.
+export function savedRecipeBlocker(settings: BuildRecipeSettings) {
+  const engine = settings.recipe.engine;
+  if (engine === "compose") return undefined;
+  if (!isRecipeEngine(engine)) return "This panel does not recognise the saved engine.";
+  if (engine === "buildpacks") {
+    if (settings.reason) return settings.reason;
+    if (!settings.buildpacks) return "This server did not report Cloud Native Buildpacks eligibility, so it is treated as unavailable.";
+    if (!settings.buildpacks.supported) return settings.buildpacks.reason || "The build node cannot run Cloud Native Buildpacks builds.";
+    return undefined;
+  }
+  if (!settings.supported || settings.reason) return settings.reason || "The build worker does not support this recipe.";
+  return undefined;
+}
+
+// Decimal gigabytes, for download sizes that registries report in bytes.
+export function formatGB(bytes: number) {
+  return `${(bytes / 1e9).toFixed(2)} GB`;
+}
+
+const mib = 1024 ** 2;
+const gib = 1024 ** 3;
+
+// Exact binary memory sizes: whole GiB, else whole MiB (the unit phase limits are rounded to), else bytes.
+export function formatMemory(bytes: number) {
+  if (bytes % gib === 0) return `${(bytes / gib).toLocaleString("en-US")} GiB`;
+  if (bytes % mib === 0) return `${(bytes / mib).toLocaleString("en-US")} MiB`;
+  return `${bytes.toLocaleString("en-US")} bytes`;
+}
+
+export function formatCPU(cpus: number) {
+  return `${cpus.toLocaleString("en-US", { maximumFractionDigits: 3 })} ${cpus === 1 ? "CPU" : "CPUs"}`;
+}
+
+const recordedBytes = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+
+// The phase memory limit this Cloud Native Buildpacks build recorded at admission. Never a default: absent means not yet assigned.
+export function recordedPhaseMemory(operation: Operation) {
+  const recipe = operation.result?.build_recipe;
+  if (recipe?.engine !== "buildpacks") return undefined;
+  const limit: unknown = recipe.phase_memory_bytes;
+  if (limit === undefined) return "Phase memory not assigned";
+  if (!recordedBytes(limit)) return "Phase memory limit unavailable";
+  const available: unknown = recipe.admission_available_memory_bytes;
+  if (available === undefined) return `Phase memory limit ${formatMemory(limit)}`;
+  if (!recordedBytes(available)) return `Phase memory limit ${formatMemory(limit)} (available memory at admission unavailable)`;
+  return `Phase memory limit ${formatMemory(limit)} (from ${formatMemory(available)} available at admission)`;
+}
+
 // Service names from the saved Compose file. An unreadable file yields none and the saved choice is still shown.
 export function composeServices(compose: string) {
   const document = parseDocument(compose, { logLevel: "silent" });
@@ -95,5 +148,9 @@ export function recordedEngine(operation: Operation) {
   if (!recipe?.engine) return "Build engine not recorded";
   const version = recipe.engine === "railpack" && recipe.version ? ` ${recipe.version}` : "";
   const service = recipe.service ? ` for ${recipe.service}` : "";
+  if (recipe.engine === "buildpacks") {
+    const parts = [recipe.version && `lifecycle ${recipe.version}`, recipe.builder_version && `builder ${recipe.builder_version}`, recipe.platform_api && `platform API ${recipe.platform_api}`].filter(Boolean);
+    return `${engineLabels.buildpacks}${parts.length > 0 ? ` (${parts.join(", ")})` : ""}${service}`;
+  }
   return `${engineLabel(recipe.engine)}${version}${service}`;
 }

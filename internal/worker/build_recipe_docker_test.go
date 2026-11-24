@@ -16,7 +16,7 @@ import (
 
 func runBuildRecipeTestProcess() bool {
 	mise := filepath.Base(os.Args[0]) == "mise-"+RailpackMiseVersion
-	if !mise && (len(os.Args) < 2 || os.Args[1] != "build-recipe-plan" && os.Args[1] != "build-recipe-output" && os.Args[1] != "build-recipe-egress") {
+	if !mise && (len(os.Args) < 2 || os.Args[1] != "build-recipe-plan" && os.Args[1] != "build-recipe-output" && os.Args[1] != "build-recipe-egress" && os.Args[1] != "buildpacks-helper") {
 		return false
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -29,6 +29,8 @@ func runBuildRecipeTestProcess() bool {
 		err = RunRailpackPlanner(ctx)
 	case os.Args[1] == "build-recipe-egress":
 		err = RunBuildRecipeEgress(ctx)
+	case len(os.Args) == 3 && os.Args[1] == "buildpacks-helper":
+		err = RunBuildpacksHelper(ctx, os.Args[2], os.Stdout)
 	case len(os.Args) == 3:
 		err = ReadRailpackOutput(os.Args[2], os.Stdout)
 	default:

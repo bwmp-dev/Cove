@@ -20,7 +20,7 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) != 2 && !((len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "cloudflare-probe") && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "certificate-probe" || os.Args[1] == "build-recipe-output")) {
+	if len(os.Args) != 2 && !((len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "cloudflare-probe") && !(len(os.Args) == 3 && (os.Args[1] == "tunnel" || os.Args[1] == "healthcheck" || os.Args[1] == "certificate-probe" || os.Args[1] == "build-recipe-output" || os.Args[1] == "buildpacks-helper")) {
 		fmt.Fprintln(os.Stderr, "usage: cove-worker probe|rpc|daemon|ingress-prepare|link-gateway|idle-gateway|volume-copy|volume-free|volume-digest")
 		os.Exit(2)
 	}
@@ -28,6 +28,12 @@ func main() {
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "buildpacks-helper":
+		if len(os.Args) != 3 {
+			err = fmt.Errorf("buildpacks helper action required")
+		} else {
+			err = worker.RunBuildpacksHelper(ctx, os.Args[2], os.Stdout)
+		}
 	case "build-recipe-output":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("planner output kind required")
