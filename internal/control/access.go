@@ -286,6 +286,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		// Each preview is filtered by access to its production environment.
 		return true
 	case strings.HasPrefix(path, "/api/projects/"):
+		if r.Method == "GET" && strings.HasSuffix(path, "/preview-images") {
+			return s.requireAccess(w, r, "project", id, 1)
+		}
 		if r.Method == "GET" && strings.HasSuffix(path, "/connections") {
 			// Environment-scoped members view their environment's graph; each resource is still filtered by access.
 			if environment := r.URL.Query().Get("environment"); environment != "" {

@@ -41,6 +41,8 @@ export interface Capabilities {
   managed_registry?: boolean;
   // The worker mounts saved variables as files under /run/secrets.
   file_secrets?: boolean;
+  // The worker can deploy previews from CI-built registry images. Eligibility comes from the server.
+  preview_ci_images?: boolean;
   // The worker can verify and enforce a hard build-cache cap on a dedicated filesystem. Linux workers only.
   build_cache_limits?: boolean;
   // The worker can build with explicit static output and Railpack recipes. The build recipe read decides whether a resource can use them.

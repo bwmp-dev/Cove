@@ -975,3 +975,33 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS cove_build_execution_identity ON operations;
 CREATE TRIGGER cove_build_execution_identity BEFORE UPDATE OF execution_node_id,payload,build_prepared ON operations FOR EACH ROW EXECUTE FUNCTION cove_build_execution_identity();
+
+CREATE TABLE IF NOT EXISTS preview_ci_credentials (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id),
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ token_hash bytea NOT NULL UNIQUE,
+ bindings jsonb NOT NULL CHECK(jsonb_typeof(bindings)='object'),
+ recipe_version bigint NOT NULL,
+ expires_at timestamptz NOT NULL,
+ last_received_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS preview_ci_slots (
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ suffix text NOT NULL,
+ sequence bigint NOT NULL CHECK(sequence>0),
+ preview_id text REFERENCES environment_previews(id) ON DELETE SET NULL,
+ delivery_id text NOT NULL,
+ fingerprint text NOT NULL,
+ PRIMARY KEY(project_id,suffix)
+);
+CREATE TABLE IF NOT EXISTS preview_ci_deliveries (
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ delivery_id text NOT NULL,
+ fingerprint text NOT NULL,
+ preview_id text,
+ received_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(project_id,delivery_id)
+);
+CREATE INDEX IF NOT EXISTS preview_ci_deliveries_age ON preview_ci_deliveries(project_id,received_at);

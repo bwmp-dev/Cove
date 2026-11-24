@@ -32,6 +32,7 @@ type Probe struct {
 	JobRuns              bool                `json:"job_runs"`
 	Rollouts             bool                `json:"rollouts"`
 	EnvironmentPreviews  bool                `json:"environment_previews"`
+	PreviewCIImages      bool                `json:"preview_ci_images"`
 	GuardedHooks         bool                `json:"guarded_hooks"`
 	Previews             bool                `json:"previews"`
 	GuardedDeploy        bool                `json:"guarded_deploy"`
@@ -71,6 +72,7 @@ func Inspect(ctx context.Context) Probe {
 	p.Previews = true
 	p.ManagedRegistry = runtime.GOOS == "linux"
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
+	p.PreviewCIImages = p.EnvironmentPreviews
 	p.GuardedHooks = true
 	p.IngressExposures = runtime.GOOS == "linux"
 	p.CloudflarePublishing = runtime.GOOS == "linux"

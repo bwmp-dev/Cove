@@ -231,8 +231,36 @@ func (e *Engine) preparePromotion(ctx context.Context, r Request, dir string, ar
 		return "", err
 	}
 	if r.EnvironmentPreview != nil {
+		if r.EnvironmentPreview.ImageRegistry != "" {
+			if r.Registry == nil || r.Registry.Server != r.EnvironmentPreview.ImageRegistry {
+				return "", errors.New("CI preview images require their connected registry credentials")
+			}
+			if err := ValidatePreviewRegistryImages(r.ImagePins, r.EnvironmentPreview.ImageRegistry); err != nil {
+				return "", err
+			}
+			services, ok := config["services"].(map[string]any)
+			if !ok {
+				return "", errors.New("Compose has no services")
+			}
+			for name := range r.ImagePins {
+				if _, exists := services[name]; !exists {
+					disabled := false
+					for _, omitted := range r.EnvironmentPreview.Disabled {
+						disabled = disabled || omitted == name
+					}
+					if !disabled {
+						return "", errors.New("CI preview contains an image for an unknown service")
+					}
+				}
+			}
+		}
 		if err := applyPreviewImagePins(config, r.ImagePins); err != nil {
 			return "", err
+		}
+		if r.EnvironmentPreview.ImageRegistry != "" {
+			for _, raw := range config["services"].(map[string]any) {
+				raw.(map[string]any)["pull_policy"] = "always"
+			}
 		}
 	} else if err := applyImagePins(config, r.ImagePins); err != nil {
 		return "", err

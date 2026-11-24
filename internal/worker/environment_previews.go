@@ -20,14 +20,15 @@ import (
 // preview. Every storage mount of such a resource is rewritten to a volume the preview owns, so a
 // preview never mounts, writes or deletes the production resource's storage.
 type EnvironmentPreview struct {
-	Preview  string            `json:"preview"`
-	Source   string            `json:"source,omitempty"`
-	Volumes  []PreviewVolume   `json:"volumes,omitempty"`
-	Disabled []string          `json:"disabled,omitempty"`
-	Database *PreviewDatabase  `json:"database,omitempty"`
-	Networks []string          `json:"networks,omitempty"`
-	Images   map[string]string `json:"images,omitempty"`
-	Refresh  bool              `json:"refresh,omitempty"`
+	Preview       string            `json:"preview"`
+	Source        string            `json:"source,omitempty"`
+	Volumes       []PreviewVolume   `json:"volumes,omitempty"`
+	Disabled      []string          `json:"disabled,omitempty"`
+	Database      *PreviewDatabase  `json:"database,omitempty"`
+	Networks      []string          `json:"networks,omitempty"`
+	Images        map[string]string `json:"images,omitempty"`
+	Refresh       bool              `json:"refresh,omitempty"`
+	ImageRegistry string            `json:"image_registry,omitempty"`
 }
 
 // PreviewVolume maps one storage mount of the production release to a preview-owned volume.
@@ -95,6 +96,17 @@ func validateEnvironmentPreview(r Request) error {
 			return errors.New("environment preview ownership required")
 		}
 		return nil
+	}
+	if p.ImageRegistry != "" {
+		if r.Action != "deploy" || r.Source != nil || r.Kind == "job" || len(r.ImagePins) == 0 {
+			return errors.New("CI preview images require an image-only service deployment")
+		}
+		if err := ValidatePreviewRegistryImages(r.ImagePins, p.ImageRegistry); err != nil {
+			return err
+		}
+		if r.Registry != nil && r.Registry.Server != p.ImageRegistry {
+			return errors.New("CI preview registry credentials do not match its image scope")
+		}
 	}
 	if !identifier.MatchString(p.Preview) {
 		return errors.New("invalid environment preview")

@@ -19,25 +19,28 @@ type previewBranchView struct {
 }
 
 type previewResourceView struct {
-	BaseID           string          `json:"base_id"`
-	ResourceID       string          `json:"resource_id"`
-	Name             string          `json:"name"`
-	Kind             string          `json:"kind"`
-	Source           string          `json:"source"`
-	Revision         string          `json:"revision"`
-	BaselineRevision string          `json:"baseline_revision"`
-	BaselineRelease  string          `json:"baseline_release"`
-	BaselineAt       *time.Time      `json:"baseline_deployed_at"`
-	Deployed         bool            `json:"deployed"`
-	DataState        string          `json:"data_state"`
-	SnapshotAt       *time.Time      `json:"snapshot_at"`
-	DataReport       json.RawMessage `json:"data_report"`
-	Routes           []string        `json:"routes"`
-	Published        bool            `json:"published"`
-	Operation        string          `json:"operation"`
+	CIImages         map[string]string `json:"ci_images,omitempty"`
+	BaseID           string            `json:"base_id"`
+	ResourceID       string            `json:"resource_id"`
+	Name             string            `json:"name"`
+	Kind             string            `json:"kind"`
+	Source           string            `json:"source"`
+	Revision         string            `json:"revision"`
+	BaselineRevision string            `json:"baseline_revision"`
+	BaselineRelease  string            `json:"baseline_release"`
+	BaselineAt       *time.Time        `json:"baseline_deployed_at"`
+	Deployed         bool              `json:"deployed"`
+	DataState        string            `json:"data_state"`
+	SnapshotAt       *time.Time        `json:"snapshot_at"`
+	DataReport       json.RawMessage   `json:"data_report"`
+	Routes           []string          `json:"routes"`
+	Published        bool              `json:"published"`
+	Operation        string            `json:"operation"`
 }
 
 type previewView struct {
+	CI            bool                  `json:"ci"`
+	CIInputs      *previewCIInputView   `json:"ci_inputs,omitempty"`
 	ID            string                `json:"id"`
 	ProjectID     string                `json:"project_id"`
 	EnvironmentID string                `json:"environment_id"`
@@ -81,6 +84,15 @@ func (s *Server) previewViews(r *http.Request, project, id string) ([]previewVie
 			return nil, err
 		}
 		v.Access = snapshot.Recipe.Access
+		v.CI = snapshot.CI != nil
+		if id != "" && snapshot.CI != nil {
+			inputs := snapshot.CI
+			if validatePreviewCIImages(inputs.Images, inputs.Bindings) != nil || inputs.Identity != previewCIInputIdentity(inputs.Revision, inputs.Images) {
+				rows.Close()
+				return nil, errors.New("CI preview input metadata is unavailable")
+			}
+			v.CIInputs = &previewCIInputView{Identity: inputs.Identity, Revision: inputs.Revision, RecipeVersion: inputs.RecipeVersion, Images: inputs.Images}
+		}
 		if !v.Pinned && v.State != "deleting" {
 			expires := v.LastActivity.Add(time.Duration(snapshot.Recipe.TTLHours) * time.Hour)
 			v.ExpiresAt = &expires
@@ -231,9 +243,21 @@ func (s *Server) environmentPreview(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && action == "credentials":
 		s.previewCredentialsHandler(w, r, id)
 	case r.Method == "POST" && action == "approve":
+		var input struct {
+			CIIdentity string `json:"ci_identity"`
+		}
+		if r.ContentLength != 0 && !decode(w, r, &input) {
+			return
+		}
 		s.previewTransition(w, r, id, func(p *previewRow) (string, string, string, int) {
 			if p.State != "awaiting_approval" {
 				return "", "", "the preview is not waiting for approval", 409
+			}
+			if p.Snapshot.CI != nil && (input.CIIdentity == "" || input.CIIdentity != p.Snapshot.CI.Identity) {
+				return "", "", "CI inputs changed or were not reviewed; review the current revision and images before approving", 409
+			}
+			if p.Snapshot.CI == nil && input.CIIdentity != "" {
+				return "", "", "this preview has no CI image inputs", 400
 			}
 			return "creating", "plan", "", 0
 		}, "approved")
@@ -458,6 +482,9 @@ func (s *Server) previewDetail(w http.ResponseWriter, r *http.Request, id string
 		}
 		item := previewResourceView{BaseID: resource.BaseID, ResourceID: resource.ResourceID, Name: resource.Name, Kind: resource.Kind, BaselineRevision: resource.BaselineRevision, BaselineRelease: resource.BaselineRelease, BaselineAt: baselineAt, DataState: resource.DataState, SnapshotAt: snapshot, DataReport: report, Routes: []string{}, Deployed: resource.Kind != "job" && resource.DeployedKey == resource.desiredKey(), Operation: resource.DeployOperation}
 		item.Source, item.Revision = "baseline", resource.BaselineRevision
+		if resource.CIIdentity != "" {
+			item.Source, item.Revision, item.CIImages = "ci", resource.CIRevision, resource.CIImages
+		}
 		if resource.BranchRevision != "" {
 			item.Source, item.Revision = "branch", resource.BranchRevision
 		}

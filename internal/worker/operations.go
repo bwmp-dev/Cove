@@ -976,6 +976,9 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	}
 }
 func (e *Engine) perform(ctx context.Context, r Request) (result error) {
+	if r.EnvironmentPreview != nil && r.EnvironmentPreview.ImageRegistry != "" && (r.Registry == nil || r.Registry.Server != r.EnvironmentPreview.ImageRegistry) {
+		return errors.New("CI preview images require their connected registry credentials")
+	}
 	jobParent := ctx
 	if r.Kind == "job" && r.Action == "deploy" {
 		prepare, cancel := context.WithTimeout(ctx, 30*time.Minute)

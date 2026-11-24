@@ -137,6 +137,10 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("GET /api/projects/{id}/preview-recipe", s.admin(http.HandlerFunc(s.previewRecipeHandler)))
 	mux.Handle("PUT /api/projects/{id}/preview-recipe", s.admin(http.HandlerFunc(s.previewRecipeHandler)))
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		mux.Handle(method+" /api/projects/{id}/preview-images", s.admin(http.HandlerFunc(s.previewCISettings)))
+	}
+	mux.HandleFunc("POST /hooks/preview-images/{id}", s.previewCIReceive)
 	mux.Handle("GET /api/projects/{id}/environment-previews", s.admin(http.HandlerFunc(s.environmentPreviews)))
 	mux.Handle("POST /api/projects/{id}/environment-previews", s.admin(http.HandlerFunc(s.environmentPreviews)))
 	for _, pattern := range []string{"GET /api/environment-previews/{id}", "PUT /api/environment-previews/{id}", "DELETE /api/environment-previews/{id}", "GET /api/environment-previews/{id}/{action}", "POST /api/environment-previews/{id}/{action}"} {
