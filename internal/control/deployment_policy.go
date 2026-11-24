@@ -128,6 +128,14 @@ func deploymentGate(ctx context.Context, tx pgx.Tx, id string) (string, error) {
 	if err = rows.Err(); err != nil {
 		return "", err
 	}
+	var updateStart, updateEnd string
+	err = tx.QueryRow(ctx, `SELECT window_start,window_end FROM image_update_deployments WHERE operation_id=$1`, id).Scan(&updateStart, &updateEnd)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	if err == nil && !withinDeploymentWindow(updateStart, updateEnd, now) {
+		return "Waiting for the image update UTC maintenance window.", nil
+	}
 	return "", nil
 }
 

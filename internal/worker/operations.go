@@ -25,6 +25,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	ImageUpdates           *ImageUpdateOptions      `json:"image_updates,omitempty"`
 	Certificates           []RouteCertificate       `json:"certificates,omitempty"`
 	Scale                  *CPUScaleOptions         `json:"scale,omitempty"`
 	Idle                   *IdlePolicy              `json:"idle,omitempty"`
@@ -195,6 +196,14 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
+	if r.ImageUpdates != nil {
+		if r.Action != "image_check" || r.Kind == "job" {
+			return errors.New("image update discovery requires a service image check")
+		}
+		if err := r.ImageUpdates.Validate(); err != nil {
+			return err
+		}
+	}
 	if err := validateCertificateRequest(r); err != nil {
 		return err
 	}

@@ -378,6 +378,15 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			return errors.New("upgrade and verify the worker before building images")
 		}
 	}
+	if r.ImageUpdates != nil {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'image_updates')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before checking image updates")
+		}
+	}
 	if r.PullLatest || r.Action == "image_check" {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) AND ($2<>'job' OR COALESCE((n.capabilities->>'job_image_lifecycle')::boolean,false)) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload, r.Kind).Scan(&supported); err != nil {

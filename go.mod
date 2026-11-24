@@ -3,6 +3,7 @@ module cove
 go 1.26.11
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/jackc/pgx/v5 v5.13.0
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/crypto v0.59.0

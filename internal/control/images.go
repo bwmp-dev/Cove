@@ -91,6 +91,9 @@ ORDER BY w.next_image_check_at LIMIT GREATEST(0,4-(SELECT count(*) FROM operatio
 			}
 			request.JobService = config.JobService
 		}
+		if err := s.prepareImageUpdateCheck(ctx, tx, &request); err != nil {
+			return err
+		}
 		if err := worker.ValidateRequest(request); err != nil {
 			return err
 		}

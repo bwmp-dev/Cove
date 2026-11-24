@@ -294,6 +294,10 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		request = worker.Request{ID: id, Workload: request.Workload, Action: "image_check", Kind: config.Kind, JobService: config.JobService}
+		if err = s.prepareImageUpdateCheck(r.Context(), tx, &request); err != nil {
+			http.Error(w, "image update configuration unavailable", 409)
+			return
+		}
 	}
 	if in.PullLatest && config.Kind == "job" {
 		http.Error(w, "pull and redeploy is unavailable for jobs; run the job explicitly", 400)
@@ -567,6 +571,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.dispatchImageUpdates(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchRegistryWebhooks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -688,6 +695,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		}
 	}
 	method := "submit"
+	if request.ImageUpdates != nil {
+		method = "submit_image_updates"
+	}
 	if request.Scale != nil {
 		method = "submit_cpu_scale"
 	}

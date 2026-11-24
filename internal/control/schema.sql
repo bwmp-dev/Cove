@@ -859,3 +859,25 @@ CREATE TABLE IF NOT EXISTS registry_webhook_deliveries (
 	UNIQUE(webhook_id,source_key)
 );
 CREATE INDEX IF NOT EXISTS registry_webhook_deliveries_age ON registry_webhook_deliveries(webhook_id,received_at);
+
+CREATE TABLE IF NOT EXISTS image_update_policies (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ policy jsonb NOT NULL, generation text NOT NULL,
+ last_check_id text REFERENCES operations(id) ON DELETE SET NULL,
+ last_operation_id text REFERENCES operations(id) ON DELETE SET NULL,
+ consumed_candidate text NOT NULL DEFAULT '', last_error text NOT NULL DEFAULT '',
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS next_dispatch_at timestamptz NOT NULL DEFAULT now();
+CREATE TABLE IF NOT EXISTS image_update_deployments (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ window_start text NOT NULL, window_end text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_update_events (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ summary text NOT NULL CHECK(length(summary)<=32768)
+);
+
+ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS processed_check_id text REFERENCES operations(id) ON DELETE SET NULL;

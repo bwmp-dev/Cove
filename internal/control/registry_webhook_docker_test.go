@@ -18,7 +18,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func TestRegistryWebhookDocker(t *testing.T) {
+func TestRegistryWebhookDocker(t *testing.T)   { testRegistryUpdateDocker(t, false) }
+func TestImageUpdatePolicyDocker(t *testing.T) { testRegistryUpdateDocker(t, true) }
+func testRegistryUpdateDocker(t *testing.T, updates bool) {
 	if runtime.GOOS != "linux" || os.Getenv("COVE_TEST_REGISTRY_HOOK_DOCKER") != "1" {
 		t.Skip("requires an explicitly selected isolated Linux Docker daemon and local PostgreSQL")
 	}
@@ -41,10 +43,14 @@ func TestRegistryWebhookDocker(t *testing.T) {
 	server := fmt.Sprintf("127.0.0.1:%d", port)
 	f := newRegistryHookFixture(t, "distribution", server)
 	reference := server + "/team/app:stable"
+	if updates {
+		reference = server + "/team/app:1.0.0"
+	}
+
 	compose := "services:\n  app:\n    image: " + reference + "\n    pull_policy: always\n    command: [sh, -c, 'cat /version > /tmp/seen; sleep 300']\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n      timeout: 1s\n      retries: 10\n"
 	guarded := true
 	f.call("root", "default", "PUT", f.path, workloadInput{Name: "App", NodeID: "node", Kind: "service", Compose: compose, GuardedDeploy: &guarded}, 200)
-	input := map[string]any{"provider": "distribution", "enabled": false, "filters": []registryWebhookFilter{{Repository: "team/app", Tag: "stable"}}}
+	input := map[string]any{"provider": "distribution", "enabled": false, "filters": []registryWebhookFilter{{Repository: "team/app", Tag: "*"}}}
 	f.call("root", "default", "PUT", f.path+"/registry-webhook", input, 200)
 	engine, err := worker.NewEngine(t.TempDir())
 	if err != nil {
@@ -146,6 +152,7 @@ func TestRegistryWebhookDocker(t *testing.T) {
 		name := "cove-registry-seed-" + f.id + "-" + version
 		docker("run", "--pull", "never", "--name", name, "--label", "cove.registry-webhook-test="+f.id, "busybox:1.37", "sh", "-c", "echo "+version+" > /version")
 		seeds = append(seeds, name)
+
 		docker("commit", name, reference)
 		docker("--config", pushConfig, "push", reference)
 	}
@@ -185,13 +192,35 @@ func TestRegistryWebhookDocker(t *testing.T) {
 	input["enabled"] = true
 	f.call("root", "default", "PUT", f.path+"/registry-webhook", input, 200)
 	f.call("root", "default", "PUT", "/api/projects/project/deployment-policy", deploymentPolicy{Approval: true}, 200)
+	if updates {
+		f.sql(`UPDATE nodes SET capabilities=capabilities || '{"image_updates":true,"exact_promotion":true}'::jsonb WHERE id='node'`)
+		f.call("root", "default", "PUT", f.path+"/image-update-policy", worker.ImageUpdatePolicy{Enabled: true, Mode: "auto", Rules: []worker.ImageUpdateRule{{Service: "app", Range: "^1.0.0"}}}, 200)
+		reference = server + "/team/app:2.0.0"
+		push("forbidden-major")
+		reference = server + "/team/app:1.1.0"
+	}
 	push("second")
 	wait("native push requested redeploy", func() bool { return f.status().Pending != nil })
 	if err := f.s.dispatchRegistryWebhooks(ctx); err != nil {
 		t.Fatal(err)
 	}
-	last := f.status().LastOperation
-	if last == nil {
+	lastID := ""
+	if updates {
+		if err = scheduleImageUpdateFixture(ctx, f, settled); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.s.DB.QueryRow(ctx, `SELECT COALESCE(last_operation_id,'') FROM image_update_policies WHERE workload_id=$1`, f.id).Scan(&lastID); err != nil {
+			t.Fatal(err)
+		}
+		if lastID == "" {
+			status, statusErr := f.s.readImageUpdatePolicy(ctx, f.id)
+			encoded, _ := json.Marshal(status)
+			t.Fatalf("no policy deploy: status=%s error=%v", encoded, statusErr)
+		}
+	} else if last := f.status().LastOperation; last != nil {
+		lastID = last.ID
+	}
+	if lastID == "" {
 		t.Fatal("native notification did not create ordinary deploy")
 	}
 	if err := f.s.dispatchOperations(ctx); err != nil {
@@ -201,27 +230,39 @@ func TestRegistryWebhookDocker(t *testing.T) {
 		t.Fatal("unapproved push changed the running image")
 	}
 	var admitted bool
-	if err := f.s.DB.QueryRow(ctx, "SELECT admitted_at IS NOT NULL FROM operations WHERE id=$1", last.ID).Scan(&admitted); err != nil || admitted {
+	if err := f.s.DB.QueryRow(ctx, "SELECT admitted_at IS NOT NULL FROM operations WHERE id=$1", lastID).Scan(&admitted); err != nil || admitted {
 		t.Fatal("native push bypassed approval", err)
 	}
-	f.call("root", "default", "POST", "/api/operations/"+last.ID+"/approve", map[string]any{}, 200)
-	settled(last.ID)
+	f.call("root", "default", "POST", "/api/operations/"+lastID+"/approve", map[string]any{}, 200)
+	settled(lastID)
 	container = docker("ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+f.id)
 	if docker("exec", container, "cat", "/tmp/seen") != "second" || docker("inspect", "--format", "{{.Image}}", container) == initialImage {
 		t.Fatal("worker did not pull and deploy the changed registry image")
 	}
 	var payload []byte
-	if err := f.s.DB.QueryRow(ctx, "SELECT payload FROM operations WHERE id=$1", last.ID).Scan(&payload); err != nil {
+	if err := f.s.DB.QueryRow(ctx, "SELECT payload FROM operations WHERE id=$1", lastID).Scan(&payload); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := unseal(f.s.Key, payload)
 	var request worker.Request
-	if err != nil || json.Unmarshal(raw, &request) != nil || !request.PullLatest {
+	if err != nil || json.Unmarshal(raw, &request) != nil || request.PullLatest == updates {
 		t.Fatal("native event did not use ordinary pull-and-redeploy")
 	}
-	logs, _ := engine.Logs(last.ID)
+	logs, _ := engine.Logs(lastID)
 	if strings.Contains(logs, "generated-fixture-only") || strings.Contains(logs, f.token) {
 		t.Fatal("credentials leaked into operation logs")
 	}
 	f.call("root", "default", "DELETE", f.path+"/registry-webhook", nil, 200)
+}
+
+func scheduleImageUpdateFixture(ctx context.Context, f *registryHookFixture, settled func(string)) error {
+	if err := f.s.scheduleImageChecks(ctx); err != nil {
+		return err
+	}
+	var check string
+	if err := f.s.DB.QueryRow(ctx, `SELECT id FROM operations WHERE workload_id=$1 AND action='image_check' ORDER BY created_at DESC LIMIT 1`, f.id).Scan(&check); err != nil {
+		return err
+	}
+	settled(check)
+	return f.s.dispatchImageUpdates(ctx)
 }

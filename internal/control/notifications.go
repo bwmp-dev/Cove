@@ -137,6 +137,15 @@ func (s *Server) deliverNotification(ctx context.Context, operation, connection 
 		status = "skipped"
 	} else {
 		event := map[string]string{"delivery_id": operation + ":" + connection, "event": "operation." + state, "operation_id": operation, "resource": name, "action": action, "state": state, "url": s.PublicURL + "/operations/" + operation, "message": "Cove: " + action + " " + state + " for " + name + ". " + s.PublicURL + "/operations/" + operation}
+		var updateSummary string
+		updateErr := s.DB.QueryRow(ctx, `SELECT summary FROM image_update_events WHERE operation_id=$1`, operation).Scan(&updateSummary)
+		if updateErr != nil && !errors.Is(updateErr, pgx.ErrNoRows) {
+			return updateErr
+		}
+		if updateErr == nil {
+			event["event"] = "image.update_available"
+			event["message"] = "Cove: image updates available for " + name + ". " + updateSummary + " " + event["url"]
+		}
 		if err = s.sendNotification(ctx, n, event); err != nil {
 			message = err.Error()
 			status = "pending"

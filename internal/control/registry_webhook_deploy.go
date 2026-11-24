@@ -162,6 +162,16 @@ func (s *Server) dispatchRegistryWebhook(ctx context.Context, id string) error {
 		}
 		return tx.Commit(ctx)
 	}
+	var updatePolicy bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM image_update_policies WHERE workload_id=$1 AND policy->>'enabled'='true')`, id).Scan(&updatePolicy); err != nil {
+		return err
+	}
+	if updatePolicy {
+		if _, err = tx.Exec(ctx, `UPDATE workloads SET next_image_check_at=now() WHERE id=$1`, id); err != nil {
+			return err
+		}
+		return finish("Image update policy requested a fresh check; its mode, version rules and maintenance window control deployment.")
+	}
 	request, err := s.registryWebhookDeployment(id, configuration)
 	if err != nil {
 		_, writeErr := tx.Exec(ctx, `UPDATE registry_webhooks SET pending_at=NULL,last_error=$2 WHERE workload_id=$1`, id, err.Error())

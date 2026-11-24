@@ -33,6 +33,8 @@ export interface Capabilities {
   ingress_exposures?: boolean;
   // The worker can run a locally managed Cloudflare Tunnel connector for this node's public HTTP routes.
   cloudflare_publishing?: boolean;
+  // The worker can discover newer image tags and digests for image update policies and deploy exact pinned images.
+  image_updates?: boolean;
   protocol: number;
   os: string;
   arch: string;
