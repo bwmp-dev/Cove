@@ -24,14 +24,14 @@ func main() {
 			}
 		case "tunnel", "healthcheck", "snapshot-reap":
 			expectedArgs = 3
-		case "host-security-run":
+		case "host-security-run", "firewall-revert-attempt":
 			expectedArgs = 5
 		case "firewall-revert", "firewall-restore":
 			expectedArgs = 4
 		}
 	}
 	if len(os.Args) != expectedArgs {
-		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two; host-security-run needs root, owner and manager; certificate-probe accepts an optional file")
+		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two; host-security-run needs root, owner and manager; firewall-revert-attempt needs root, owner and attempt; certificate-probe accepts an optional file")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -44,6 +44,8 @@ func main() {
 		err = worker.RunHostFirewall(ctx, os.Stdin, os.Stdout)
 	case "firewall-revert":
 		err = worker.RunFirewallRevert(ctx, os.Args[2], os.Args[3])
+	case "firewall-revert-attempt":
+		err = worker.RunFirewallRevertAttempt(ctx, os.Args[2], os.Args[3], os.Args[4])
 	case "firewall-restore":
 		err = worker.RunFirewallRestore(ctx, os.Args[2], os.Args[3])
 	case "host-maintenance":

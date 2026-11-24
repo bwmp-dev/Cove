@@ -6,6 +6,7 @@ import (
 	"cove/internal/outbound"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -670,6 +671,16 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 		return err
 	}
 	defer unlock()
+	if _, err := os.Lstat(filepath.Join(e.Root, "host-maintenance", "firewall-arming.json")); err == nil {
+		cleanup, cancelCleanup := context.WithTimeout(ctx, time.Minute)
+		_, err := e.runFirewallHost(cleanup, FirewallControl{Action: "recover"})
+		cancelCleanup()
+		if err != nil {
+			return fmt.Errorf("firewall arming recovery: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	recovery, cancelRecovery := context.WithTimeout(ctx, time.Minute)
 	err = e.recoverBackupTransfersOnStartup(recovery)
 	if err == nil {

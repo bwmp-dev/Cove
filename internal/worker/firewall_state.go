@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 type firewallIntent struct {
 	ID              string         `json:"id"`
+	AttemptBound    bool           `json:"attempt_bound,omitempty"`
 	Previous        []FirewallRule `json:"previous"`
 	PreviousPresent bool           `json:"previous_present"`
 	Desired         []FirewallRule `json:"desired"`
@@ -175,7 +177,7 @@ func prepareFirewallReverter(scope string) (string, error) {
 	return destination, syncDirectory(scope)
 }
 
-func revertFirewall(ctx context.Context, root, owner string, run snapshotCommand) error {
+func revertFirewall(ctx context.Context, root, owner, attempt string, run snapshotCommand) error {
 	scope, err := hostPolicyScope(root, owner)
 	if err != nil {
 		return err
@@ -185,9 +187,19 @@ func revertFirewall(ctx context.Context, root, owner string, run snapshotCommand
 		return err
 	}
 	defer unlock()
-	state, err := readFirewallJournal(scope, owner)
-	if err != nil || state.Pending == nil {
+	if _, err := os.Lstat(filepath.Join(scope, "firewall-arming.json")); err == nil {
+		fmt.Fprintln(os.Stderr, "Cove firewall recovery: arming was not committed; cleanup is pending, no firewall policy was applied")
+		return nil
+	} else if !os.IsNotExist(err) {
 		return err
+	}
+	state, err := readFirewallJournal(scope, owner)
+	if err != nil {
+		return err
+	}
+	if state.Pending == nil || attempt != "" && (attempt == "legacy" && state.Pending.AttemptBound || attempt != "legacy" && attempt != state.Pending.ID) {
+		fmt.Fprintln(os.Stderr, "Cove firewall recovery: stale attempt ignored; no matching pending revision")
+		return nil
 	}
 	present, comment, digest, err := inspectFirewallTable(ctx, owner, run)
 	if err != nil {

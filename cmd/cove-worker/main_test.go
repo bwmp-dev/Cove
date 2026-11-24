@@ -27,7 +27,7 @@ func TestExecutableWorkerDispatch(t *testing.T) {
 	}
 	for command, arguments := range map[string]int{
 		"healthcheck": 1, "tunnel": 1, "snapshot-reap": 1,
-		"firewall-revert": 2, "firewall-restore": 2, "host-security-run": 3,
+		"firewall-revert": 2, "firewall-restore": 2, "host-security-run": 3, "firewall-revert-attempt": 3,
 		"probe": 0, "rpc": 0, "daemon": 0, "ingress-prepare": 0,
 		"volume-copy": 0, "volume-free": 0, "volume-digest": 0,
 		"link-gateway": 0, "idle-gateway": 0, "route-helper": 0,

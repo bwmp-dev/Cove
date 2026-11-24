@@ -117,11 +117,11 @@ func stopFirewallTimer(ctx context.Context, owner string, run snapshotCommand) e
 
 func runHostFirewall(ctx context.Context, root, owner string, control FirewallControl, run snapshotCommand) (FirewallResult, error) {
 	result := FirewallResult{Rules: []FirewallRule{}, Available: control.Available, Reserved: control.Reserved}
-	if control.Action != "inspect" && control.Action != "preview" && control.Action != "apply" && control.Action != "confirm" && control.Action != "revert" {
+	if control.Action != "recover" && control.Action != "inspect" && control.Action != "preview" && control.Action != "apply" && control.Action != "confirm" && control.Action != "revert" {
 		return result, errors.New("invalid firewall action")
 	}
 	if control.Action == "revert" {
-		if err := revertFirewall(ctx, root, owner, run); err != nil {
+		if err := revertFirewall(ctx, root, owner, "", run); err != nil {
 			return result, err
 		}
 		if err := stopFirewallTimer(ctx, owner, run); err != nil {
@@ -137,6 +137,13 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 		return result, errors.New("another host maintenance change is active")
 	}
 	defer unlock()
+	if err := cleanupFirewallArming(ctx, scope, owner, run); err != nil {
+		return result, errors.New("firewall arming cleanup is pending; inspect host recovery before changing the firewall")
+	}
+	if control.Action == "recover" {
+		result.Supported = true
+		return result, nil
+	}
 	state, err := readFirewallJournal(scope, owner)
 	if err != nil {
 		return result, err
@@ -242,20 +249,9 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 	if err != nil {
 		return result, err
 	}
-	if err = installFirewallBootPolicy(ctx, root, owner, scope, binary, run); err != nil {
+	state.Pending = &firewallIntent{ID: id, Previous: state.Rules, PreviousPresent: present, Desired: control.Rules, Reserved: control.Reserved, AttemptBound: true}
+	if err = armFirewallRecovery(ctx, root, owner, scope, binary, state, run); err != nil {
 		return result, err
-	}
-	if err = stopFirewallTimer(ctx, owner, run); err != nil {
-		return result, err
-	}
-	state.Pending = &firewallIntent{ID: id, Previous: state.Rules, PreviousPresent: present, Desired: control.Rules, Reserved: control.Reserved, Deadline: time.Now().UTC().Add(2 * time.Minute)}
-	if err = writeJSON(filepath.Join(scope, "firewall.json"), state); err != nil {
-		return result, err
-	}
-	_, err = run(ctx, "/usr/bin/systemd-run", "--unit="+firewallUnit(owner), "--on-active=120s", "--timer-property=AccuracySec=1s", "--timer-property=Description=Cove firewall recovery "+owner, "--property=Description=Cove firewall recovery "+owner, "--property=Restart=on-failure", "--property=RestartSec=5s", "--property=TimeoutStartSec=30s", "--collect", binary, "firewall-revert", root, owner)
-	if err != nil {
-		state.Pending = nil
-		return result, errors.Join(errors.New("independent recovery timer could not be confirmed; firewall was not applied"), writeJSON(filepath.Join(scope, "firewall.json"), state))
 	}
 	if _, err = run(ctx, "/usr/sbin/nft", "--file", filename); err != nil {
 		return result, errors.New("firewall apply could not be confirmed; independent recovery remains armed")

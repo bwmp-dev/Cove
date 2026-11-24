@@ -50,7 +50,17 @@ func RunFirewallRevert(ctx context.Context, root, owner string) error {
 	if err := validateHostMaintenance(HostMaintenanceRequest{Action: "inspect", Root: root, Owner: owner}); err != nil {
 		return err
 	}
-	return revertFirewall(ctx, root, owner, snapshotHostCommand)
+	return revertFirewall(ctx, root, owner, "legacy", snapshotHostCommand)
+}
+
+func RunFirewallRevertAttempt(ctx context.Context, root, owner, attempt string) error {
+	if err := validateHostMaintenance(HostMaintenanceRequest{Action: "inspect", Root: root, Owner: owner}); err != nil {
+		return err
+	}
+	if !snapshotOwnerID.MatchString(attempt) {
+		return errors.New("invalid firewall recovery attempt")
+	}
+	return revertFirewall(ctx, root, owner, attempt, snapshotHostCommand)
 }
 
 func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
@@ -172,6 +182,10 @@ func (e *Engine) ConfigureFirewall(ctx context.Context, control FirewallControl)
 		return nil, err
 	}
 	control.Available = available
+	return e.runFirewallHost(ctx, control)
+}
+
+func (e *Engine) runFirewallHost(ctx context.Context, control FirewallControl) (state *FirewallResult, result error) {
 	owner, err := e.backupHelperOwner(true)
 	if err != nil {
 		return nil, err
