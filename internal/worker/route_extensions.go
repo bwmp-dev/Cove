@@ -25,7 +25,7 @@ type RouteForwardAuth struct {
 
 func HasRouteExtensions(routes []Route) bool {
 	for _, route := range routes {
-		if p := route.Policy; p != nil && (p.CertificateID != "" || p.CertificateSource == "default" || p.Maintenance != nil || len(p.ErrorPages) > 0 || p.ForwardAuth != nil) {
+		if p := route.Policy; p != nil && (p.Timeouts != nil || p.Visibility != "" || p.Listener != "" || p.CertificateID != "" || p.CertificateSource == "default" || p.Maintenance != nil || len(p.ErrorPages) > 0 || p.ForwardAuth != nil) {
 			return true
 		}
 	}
@@ -102,6 +102,9 @@ func protectedRouteHeader(key string) bool {
 }
 
 func idleAuthEligibility(routes []Route) error {
+	if HasTransportRoutes(routes) {
+		return errors.New("idle sleep cannot observe TCP or UDP activity; remove raw routes before enabling sleep")
+	}
 	domains := map[string]bool{}
 	for _, route := range routes {
 		domains[route.Domain] = true

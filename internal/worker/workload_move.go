@@ -283,6 +283,29 @@ func validMoveVolumeName(value string) bool {
 }
 
 func (e *Engine) Move(ctx context.Context, r MoveRequest) (*MoveState, error) {
+	if r.Action != "status" {
+		unlock, err := e.lockNodeChange(true)
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
+		ctx = context.WithValue(ctx, nodeLeaseContextKey{}, e)
+		if err := e.requireInterlockedHostSchedule(); err != nil {
+			return nil, err
+		}
+		if err := e.ingressExposureReady(); err != nil {
+			return nil, err
+		}
+		if e.trafficRecoveryPending() {
+			return nil, errors.New("finish proxy traffic recovery before moving a resource")
+		}
+		e.mu.Lock()
+		busy := e.draining || e.hostChanging || e.proxyUnsettled || e.proxyRunning || e.customRunning || e.customUnsettled
+		e.mu.Unlock()
+		if busy {
+			return nil, errors.New("finish proxy or host maintenance before moving a resource")
+		}
+	}
 	if !identifier.MatchString(r.ID) || !workloadIdentifier.MatchString(r.Workload) {
 		return nil, errors.New("invalid move identity")
 	}

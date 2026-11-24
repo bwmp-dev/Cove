@@ -6,9 +6,10 @@ import { PlacementAdvice } from "./PlacementAdvice";
 import { Link } from "@tanstack/react-router";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import type { Project } from "../api/projects";
-import type { Node, WorkloadInput } from "../api/types";
+import type { Node, Route, WorkloadInput } from "../api/types";
 import { formatBytes } from "../lib/format";
-import { byteLength, composeLimit, formValues, isSSHRepository, routeRows, validateRoutes, validateWorkload, type EnvRow, type SourceKind, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { byteLength, composeLimit, formValues, isSSHRepository, routeLimits, routeRows, validateRoutes, validateWorkload, type EnvRow, type SourceKind, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { splitRoutes, transportOf, transportRows, transportSummary, transportTargets, validateTransports, type TransportRow } from "../lib/route-transports";
 import { ComposeEditor } from "./ComposeEditor";
 import { EnvironmentEditor } from "./EnvironmentEditor";
 import { RouteEditor } from "./RouteEditor";
@@ -17,6 +18,7 @@ import { Button, Field, Notice, SwitchField } from "./ui";
 import { GitProviderPicker } from "./GitProviderPicker";
 import { automaticDescription, emptySelection, reportingDescription, type ProviderRepository, type ProviderSelection, type ProviderSourceInput } from "../api/git-providers";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
+import { Trash2 } from "lucide-react";
 
 export function FormSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return (
@@ -233,6 +235,50 @@ function ProviderFields({ selection, errors, automatic, reporting, onSelection, 
   );
 }
 
+// Listeners exist only on the node and are chosen per resource, so template TCP and UDP routes are created exactly as the
+// template defines them and edited on the Domains page afterwards. The control plane checks their listeners.
+function TemplateTransports({ rows, errors, onRemove }: { rows: TransportRow[]; errors: Record<string, string>; onRemove: (id: string) => void }) {
+  const id = useId();
+  return (
+    <section aria-labelledby={`${id}-title`} className="space-y-2 border-t border-line pt-4">
+      <h3 id={`${id}-title`} className="text-[13px] font-semibold text-fg">
+        TCP and UDP routes from the template
+      </h3>
+      <p className="text-xs text-fg-muted">Created with the resource as listed. Change their listeners and visibility on the resource&apos;s Domains page once it exists. The worker on the selected node must support TCP and UDP routes.</p>
+      {errors.transports && <p role="alert" className="text-xs text-bad">{errors.transports}</p>}
+      <ul aria-label="TCP and UDP routes from the template" className="divide-y divide-line">
+        {rows.map((row, index) => {
+          const route = transportOf(row);
+          const messages = Object.entries(errors).filter(([key]) => key === row.id || key.startsWith(`${row.id}.`));
+          return (
+            <li key={row.id} className="flex items-start gap-2 py-2">
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <p className="text-[13px] text-fg">{transportSummary(route)}</p>
+                <p className="font-mono text-xs break-all text-fg-muted">{transportTargets(route)}</p>
+                {messages.map(([key, message]) => (
+                  <p key={key} className="text-xs text-bad">
+                    {message}
+                  </p>
+                ))}
+              </div>
+              <Button variant="ghost" size="sm" className="px-2" aria-label={`Remove ${route.protocol === "udp" ? "UDP" : "TCP"} route ${row.listener || index + 1}`} title="Remove route" onClick={() => onRemove(row.id)}>
+                <Trash2 aria-hidden className="size-3.5" />
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function checkTemplateTransports(rows: TransportRow[], node: Node | undefined, httpCount: number): { routes?: Route[]; errors: Record<string, string> } {
+  if (rows.length === 0) return { routes: [], errors: {} };
+  // Without a node the worker's support is unknown; the node error already blocks the request.
+  if (!node) return { errors: {} };
+  return validateTransports(rows, { routeProtocol: routeProtocolOf(node), listeners: undefined, saved: [], httpCount });
+}
+
 interface WorkloadFormProps {
   draft?: ResourceDraft;
   nodes: Node[];
@@ -253,7 +299,8 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
   const [errors, setErrors] = useState<WorkloadFormErrors>({});
   const [routeErrors, setRouteErrors] = useState<Record<string, string>>({});
   const [resourcePlacement, setResourcePlacement] = useState(initialProjectId ? `${initialProjectId}:${initialEnvironmentId}` : "");
-  const [routes, setRoutes] = useState(() => routeRows(draft?.routes));
+  const [routes, setRoutes] = useState(() => routeRows(splitRoutes(draft?.routes).http));
+  const [transports, setTransports] = useState(() => transportRows(draft?.routes ?? []));
   const [access, setAccess] = useState<"url" | "provider">("url");
   const [selection, setSelection] = useState<ProviderSelection>(emptySelection);
   const [automatic, setAutomatic] = useState(true);
@@ -281,13 +328,15 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
       result.errors.repository = "Select a connection, repository and branch.";
       delete result.input;
     }
-    const checkedRoutes = values.kind === "job" ? { routes: [], errors: {} } : validateRoutes(routes, [], [], routeProtocolOf(selectedNode));
+    const service = values.kind === "service";
+    const checkedRoutes = service ? validateRoutes(routes, [], [], routeProtocolOf(selectedNode)) : { routes: [], errors: {} };
+    const checkedTransports = service ? checkTemplateTransports(transports, selectedNode, routes.length) : { routes: [], errors: {} };
     setErrors(result.errors);
-    setRouteErrors(checkedRoutes.errors);
-    if (result.input && checkedRoutes.routes && resourcePlacement) {
+    setRouteErrors({ ...checkedRoutes.errors, ...checkedTransports.errors });
+    if (result.input && checkedRoutes.routes && checkedTransports.routes && resourcePlacement) {
       const [projectId, environmentId] = resourcePlacement.split(":");
       const provider = linked && selection.connectionId !== null && selection.repositoryId !== null ? { connection_id: selection.connectionId, repository_id: selection.repositoryId, automatic, reporting } : undefined;
-      const input: WorkloadInput = { ...result.input, routes: checkedRoutes.routes, project_id: projectId, environment_id: environmentId };
+      const input: WorkloadInput = { ...result.input, routes: [...checkedRoutes.routes, ...checkedTransports.routes], project_id: projectId, environment_id: environmentId };
       if (fileSecrets.length > 0) input.file_secrets = fileSecrets;
       onSubmit(input, provider);
     } else {
@@ -390,7 +439,7 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
         {values.kind === "service" && (
           <FormSection
             title="Routes"
-            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced. To serve a certificate you provide, upload it on the resource's Domains page after creating it."
+            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced. To serve a certificate you provide, upload it on the resource's Domains page after creating it. New TCP and UDP routes are also added there, once the resource exists."
           >
             <RouteEditor
               routes={routes}
@@ -398,8 +447,19 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
               policies={selectedNode ? Boolean(selectedNode.capabilities?.route_policies) : undefined}
               extensions={selectedNode ? (selectedNode.capabilities?.route_protocol ?? 0) >= 2 : undefined}
               routeProtocol={routeProtocolOf(selectedNode)}
+              capacity={routeLimits.routes - transports.length}
               onChange={setRoutes}
             />
+            {transports.length > 0 && (
+              <TemplateTransports
+                rows={transports}
+                errors={routeErrors}
+                onRemove={(key) => {
+                  setTransports((current) => current.filter((row) => row.id !== key));
+                  setRouteErrors((current) => Object.fromEntries(Object.entries(current).filter(([name]) => name !== "transports" && name !== key && !name.startsWith(`${key}.`))));
+                }}
+              />
+            )}
           </FormSection>
         )}
 

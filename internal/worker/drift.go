@@ -118,7 +118,43 @@ func (e *Engine) recordDriftBaseline(ctx context.Context, request Request) error
 		return err
 	}
 	if len(containers) == 0 && request.Action != "stop" {
-		return errors.New("cannot record a drift baseline without created containers")
+		// A coordinated preview can intentionally disable every background service.
+		// Verify the saved deployment as well as the request before accepting no containers.
+		emptyPreview := false
+		if request.EnvironmentPreview != nil && len(request.EnvironmentPreview.Disabled) > 0 {
+			current, exists, err := readCurrent(filepath.Join(e.Root, "workloads", request.Workload, "current.json"))
+			if err != nil {
+				return err
+			}
+			if exists {
+				data, err := os.ReadFile(current.ComposePath)
+				if err != nil {
+					return err
+				}
+				var config struct {
+					Services map[string]struct {
+						Scale *int `json:"scale"`
+					} `json:"services"`
+				}
+				if err = json.Unmarshal(data, &config); err != nil {
+					return err
+				}
+				disabled := map[string]bool{}
+				for _, name := range request.EnvironmentPreview.Disabled {
+					disabled[name] = true
+				}
+				emptyPreview = len(config.Services) > 0
+				for name, service := range config.Services {
+					if !disabled[name] || service.Scale == nil || *service.Scale != 0 {
+						emptyPreview = false
+						break
+					}
+				}
+			}
+		}
+		if !emptyPreview {
+			return errors.New("cannot record a drift baseline without created containers")
+		}
 	}
 	baseline := driftBaseline{Operation: request.ID, CapturedAt: time.Now().UTC(), Containers: containers}
 	return writeJSON(filepath.Join(e.Root, "workloads", request.Workload, "drift.json"), baseline)

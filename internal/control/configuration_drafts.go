@@ -462,7 +462,10 @@ func (s *Server) applyProjectConfiguration(w http.ResponseWriter, r *http.Reques
 		if active {
 			return fail("wait for active operations before applying a draft", 409)
 		}
-		if !s.checkRouteClaims(w, ctx, tx, id, config.Routes) {
+		if !s.checkRouteListenerSelection(w, r.WithContext(ctx), config.NodeID, config.Routes) {
+			return nil, false
+		}
+		if !s.checkRouteClaims(w, ctx, tx, id, config.NodeID, config.Routes) {
 			return nil, false
 		}
 		if exists && !reflect.DeepEqual(config.Routes, old.Configuration.Routes) {

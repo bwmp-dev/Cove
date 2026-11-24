@@ -54,6 +54,8 @@ export interface Capabilities {
   cpu_autoscale?: boolean;
   ssh_identity?: boolean;
   resource_defaults?: boolean;
+  // The worker can manage the shared proxy's public bindings, HTTP/3 and extra listeners. Only Linux workers report it.
+  ingress_exposures?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -334,13 +336,33 @@ export interface RoutePolicy {
   certificate_id?: string | null;
   upstreams?: RouteUpstream[];
   sticky?: boolean;
+  // Route protocol 5. A private route ("lan" or "tailscale") is served only on the named managed HTTPS listener of the
+  // same visibility. While both are omitted the API keeps the hostname's saved values, so switching a private hostname
+  // back to public sends "public" with a null listener.
+  visibility?: RouteVisibility;
+  listener?: string | null;
+  // Route protocol 6, HTTP routes only. Whole seconds; an omitted or zero field keeps the proxy default. Kept like the
+  // extensions above while omitted; null clears saved timeouts.
+  timeouts?: RouteTimeouts | null;
 }
+
+export interface RouteTimeouts {
+  dial_seconds?: number;
+  response_header_seconds?: number;
+  idle_connection_seconds?: number;
+}
+
+// "tcp" and "udp" routes (route protocol 6) have an empty domain and forward raw bytes from one dedicated managed
+// listener; their policy holds only listener, visibility, upstreams and, for TCP, ip_allow_list. Omitted means HTTP.
+export type RouteProtocolName = "http" | "tcp" | "udp";
+
+export type RouteVisibility = "public" | "lan" | "tailscale";
 
 // Public metadata of a certificate stored for a resource. The certificate chain and private key are never returned.
 export interface RouteCertificate {
   id: string;
   name: string;
-  // "uploaded" or "cloudflare_origin". Missing from older panels, which only stored uploads; other values may come later.
+  // "uploaded", "cloudflare_origin" or "acme_dns". Missing from older panels, which only stored uploads; other values may come later.
   source?: string;
   fingerprint: string;
   common_name?: string;
@@ -358,8 +380,10 @@ export interface CertificateZone {
   domains: string[];
 }
 
-// A managed Cloudflare Origin CA request for a resource. certificate_id is the latest issued version, which routes use
-// only once they select it (or a renewal's route update succeeds); empty strings mean none.
+// A managed certificate request for a resource: Cloudflare Origin CA or ACME DNS-01 ("acme_dns"). certificate_id is
+// the latest issued version, which routes use only once they select it (or a renewal's route update succeeds); empty
+// strings mean none. The ACME fields are set only for acme_dns: the operator's fixed directory and the exact terms
+// identity accepted, with terms_text when those terms are bounded plain text. validity_days is 0 for acme_dns.
 export interface CertificateIssuer {
   id: string;
   name: string;
@@ -373,19 +397,57 @@ export interface CertificateIssuer {
   operation_id: string;
   last_error: string;
   next_check_at: string | null;
+  directory?: string;
+  terms_url?: string;
+  terms_text?: string;
+  terms_accepted_at?: string;
   created_at: string;
 }
 
-export interface CertificateIssuerInput {
+interface CertificateIssuerRequest {
   name: string;
-  provider: "cloudflare_origin";
   zone_id: string;
   domains: string[];
-  validity_days: number;
   auto_renew: boolean;
 }
 
+// terms_url is the exact identity of the terms the editor accepted, as the authority metadata returned it.
+export type CertificateIssuerInput =
+  | (CertificateIssuerRequest & { provider: "cloudflare_origin"; validity_days: number })
+  | (CertificateIssuerRequest & { provider: "acme_dns"; validity_days: 0; accept_terms: true; terms_url: string });
+
+// The panel operator's ACME certificate authority. terms_url may be empty, an HTTPS link or a data:text/plain URI;
+// terms_text carries the decoded text of a plain-text URI and is displayed only as text.
+export interface CertificateAuthority {
+  directory: string;
+  terms_url: string;
+  terms_text: string;
+}
+
+// A DNS-01 TXT record Cove has published or still has to remove. Never includes the TXT value or ownership proof.
+// issuer_id and workload_id are null once the issuer or resource was removed.
+export interface CertificateChallenge {
+  id: string;
+  issuer_id: string | null;
+  workload_id: string | null;
+  zone_id: string;
+  hostname: string;
+  phase: string;
+  cleanup_requested: boolean;
+  last_error: string;
+  next_check_at: string | null;
+  created_at: string;
+}
+
+// The oldest unresolved challenges, at most 128; more is true when the list was cut off.
+export interface CertificateChallengeList {
+  items: CertificateChallenge[];
+  more: boolean;
+}
+
 export interface Route {
+  protocol?: RouteProtocolName;
+  // Empty for TCP and UDP routes.
   domain: string;
   service: string;
   port: number;

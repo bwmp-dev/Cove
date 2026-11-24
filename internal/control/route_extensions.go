@@ -50,6 +50,9 @@ func (r *routeInput) UnmarshalJSON(data []byte) error {
 }
 
 func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Route, ambiguous bool) error {
+	if target.Protocol == "" && old.Protocol == "http" {
+		target.Protocol = old.Protocol
+	}
 	previous := worker.RoutePolicy{}
 	if old.Policy != nil {
 		previous = *old.Policy
@@ -104,6 +107,18 @@ func retainRouteExtensions(target *worker.Route, input routeInput, old worker.Ro
 		if previous.CertificateID != "" || previous.CertificateSource == "default" {
 			policy.CertificateID, policy.CertificateSource = previous.CertificateID, previous.CertificateSource
 		}
+	}
+	if !provided("timeouts", incoming.Timeouts != nil) {
+		if ambiguous && !reflect.DeepEqual(policy.Timeouts, previous.Timeouts) {
+			return errors.New("set upstream timeouts explicitly when changing paths with different settings")
+		}
+		policy.Timeouts = previous.Timeouts
+	}
+	if !provided("visibility", incoming.Visibility != "") && !provided("listener", incoming.Listener != "") {
+		if ambiguous && (policy.Visibility != previous.Visibility || policy.Listener != previous.Listener) {
+			return errors.New("set route visibility and listener explicitly when changing paths with different privacy settings")
+		}
+		policy.Visibility, policy.Listener = previous.Visibility, previous.Listener
 	}
 	if !provided("forward_auth", incoming.ForwardAuth != nil) {
 		if ambiguous && !reflect.DeepEqual(policy.ForwardAuth, previous.ForwardAuth) {

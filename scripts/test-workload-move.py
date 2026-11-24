@@ -30,21 +30,22 @@ def main():
         try:
             run("go", "build", "-o", str(fixture / "cove-worker"), "./cmd/cove-worker",
                 env=os.environ | {"GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"})
-            for dependency in ("busybox:1.37", "restic/restic:0.19.1"):
+            for dependency in ("busybox:1.37", "restic/restic:0.19.1", "traefik:v3.7.19"):
                 if subprocess.run(["docker", "image", "inspect", dependency], capture_output=True).returncode:
                     run("docker", "pull", dependency)
-            run("docker", "image", "save", "-o", str(fixture / "seed.tar"), "busybox:1.37", "restic/restic:0.19.1")
+            run("docker", "image", "save", "-o", str(fixture / "seed.tar"), "busybox:1.37", "restic/restic:0.19.1", "traefik:v3.7.19")
+            # The DinD wrapper mounts /tmp, so the cached image archive must live outside it.
             (fixture / "Dockerfile").write_text(
                 "FROM docker:29-dind\n"
                 "RUN apk add --no-cache openssh && adduser -D -h /var/lib/cove cove && addgroup cove root && passwd -u cove "
                 "&& mkdir -p /run/sshd /run/cove /var/lib/cove/.ssh && chown -R cove:cove /run/cove /var/lib/cove && ssh-keygen -A\n"
-                "COPY cove-worker /usr/local/bin/cove-worker\nCOPY entrypoint.sh /entrypoint.sh\nCOPY seed.tar /tmp/seed.tar\n"
+                "COPY cove-worker /usr/local/bin/cove-worker\nCOPY entrypoint.sh /entrypoint.sh\nCOPY seed.tar /usr/local/share/cove-move-seed.tar\n"
                 "RUN chmod 755 /entrypoint.sh /usr/local/bin/cove-worker\n"
                 "ENV DOCKER_TLS_CERTDIR=\"\"\nENTRYPOINT [\"/entrypoint.sh\"]\n", newline="\n")
             (fixture / "entrypoint.sh").write_text(
-                "#!/bin/sh\nset -eu\nrm -f /run/docker.pid\ndockerd --storage-driver=vfs --host=unix:///var/run/docker.sock > /tmp/dockerd.log 2>&1 &\n"
+                "#!/bin/sh\nset -eu\nrm -f /run/docker.pid\ndockerd-entrypoint.sh dockerd --storage-driver=vfs --host=unix:///var/run/docker.sock > /var/log/dockerd.log 2>&1 &\n"
                 "for i in $(seq 1 90); do if docker info >/dev/null 2>&1; then break; fi; sleep 1; done\n"
-                "docker info >/dev/null\ndocker image inspect busybox:1.37 restic/restic:0.19.1 >/dev/null 2>&1 || docker load -i /tmp/seed.tar\n"
+                "docker info >/dev/null\ndocker image inspect busybox:1.37 restic/restic:0.19.1 traefik:v3.7.19 >/dev/null 2>&1 || docker load -i /usr/local/share/cove-move-seed.tar\n"
                 "chgrp root /var/run/docker.sock\nchmod 660 /var/run/docker.sock\n"
                 "su -s /bin/sh cove -c '/usr/local/bin/cove-worker daemon' &\n"
                 "exec /usr/sbin/sshd -D -e -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no\n", newline="\n")

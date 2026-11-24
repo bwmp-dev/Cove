@@ -53,3 +53,37 @@ it("shows a recipient its granted domains without owner controls", async () => {
   expect(screen.queryByRole("button", { name: "Share domains" })).not.toBeInTheDocument();
   expect(screen.queryByLabelText("API token")).not.toBeInTheDocument();
 });
+
+it("lets the zone owner follow DNS challenge cleanup, including records of deleted resources", async () => {
+  const challenges = { more: false, items: [
+    { id: "c1", issuer_id: null, workload_id: null, zone_id: zone.zone_id, hostname: "_acme-challenge.gone.example.com", phase: "cleanup", cleanup_requested: true, last_error: "", next_check_at: null, created_at: "2026-11-20T10:00:00Z" },
+    { id: "c2", issuer_id: "i1", workload_id: "b".repeat(32), zone_id: zone.zone_id, hostname: "_acme-challenge.app.example.com", phase: "present", cleanup_requested: false, last_error: "", next_check_at: null, created_at: "2026-11-21T10:00:00Z" },
+  ] };
+  vi.mocked(request).mockImplementation((_method, path) => Promise.resolve(path === "/api/cloudflare/oauth" ? { configured: false } : path === "/api/cloudflare/connections" ? [] : path === `/api/cloudflare/${zone.zone_id}/certificate-challenges` ? challenges : [zone]));
+  render(<QueryClientProvider client={new QueryClient()}><CloudflareSettings /></QueryClientProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: "DNS challenges for example.com" }));
+  expect(screen.getByText("DNS challenge records in example.com")).toBeInTheDocument();
+  expect(await screen.findByText("_acme-challenge.gone.example.com")).toBeInTheDocument();
+  expect(screen.getByText(/Resource deleted · issuer removed/)).toBeInTheDocument();
+  expect(screen.getByText(/Cleanup requested/)).toBeInTheDocument();
+  expect(screen.getByText(/Resource bbbbbbbb/)).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith("GET", `/api/cloudflare/${zone.zone_id}/certificate-challenges`, undefined, expect.anything());
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(await screen.findByRole("button", { name: "Share domains" })).toBeInTheDocument();
+});
+
+it("does not offer zone challenge records to a team that only receives a share", async () => {
+  vi.mocked(request).mockImplementation((_method, path) => Promise.resolve(path === "/api/cloudflare/oauth" ? { configured: false } : path === "/api/cloudflare/connections" ? [] : [{ ...zone, can_manage: false }]));
+  render(<QueryClientProvider client={new QueryClient()}><CloudflareSettings /></QueryClientProvider>);
+  await screen.findByText("Shared with this team: app.example.com");
+  expect(screen.queryByRole("button", { name: /DNS challenges/ })).not.toBeInTheDocument();
+  expect(vi.mocked(request).mock.calls.some(([, path]) => String(path).endsWith("/certificate-challenges"))).toBe(false);
+});
+
+it("reports a refused zone challenge read with Retry", async () => {
+  vi.mocked(request).mockImplementation((_method, path) => path === `/api/cloudflare/${zone.zone_id}/certificate-challenges` ? Promise.reject(new Error("connection owner access required")) : Promise.resolve(path === "/api/cloudflare/oauth" ? { configured: false } : path === "/api/cloudflare/connections" ? [] : [zone]));
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><CloudflareSettings /></QueryClientProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: "DNS challenges for example.com" }));
+  expect(await screen.findByText("Could not load DNS challenge records")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+});

@@ -351,6 +351,12 @@ func TestEnvironmentPreviewDockerAcceptance(t *testing.T) {
 		for _, e := range entries {
 			response, _ := s.nodeRPC(ctx, "e2e", worker.RPCRequest{Method: "logs", ID: e.id})
 			fmt.Fprintf(&logs, "--- %s %s %s\n%s\n", e.resource, e.action, e.state, response.Logs)
+			status, err := s.nodeRPC(ctx, "e2e", worker.RPCRequest{Method: "status", ID: e.id})
+			if err != nil {
+				fmt.Fprintf(&logs, "worker status unavailable: %v\n", err)
+			} else if status.Operation != nil && status.Operation.Error != "" {
+				fmt.Fprintf(&logs, "worker error: %s\n", status.Operation.Error)
+			}
 		}
 		return logs.String()
 	}

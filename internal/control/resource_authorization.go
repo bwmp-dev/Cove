@@ -71,8 +71,17 @@ func (s *Server) serveAuthorized(next http.Handler, w http.ResponseWriter, r *ht
 	if !s.authorize(w, r) {
 		return
 	}
+	guardKey := ""
+	shared := false
+	if r.Method != "GET" && strings.HasPrefix(r.URL.Path, "/api/nodes/") {
+		guardKey = "cove-node-access:" + r.PathValue("id")
+	}
 	if r.Method != "GET" && strings.HasPrefix(r.URL.Path, "/api/workloads/") {
-		release, err := s.requestGuard(r.Context(), "cove-resource-access:"+r.PathValue("id"), !strings.HasSuffix(r.URL.Path, "/move"))
+		guardKey = "cove-resource-access:" + r.PathValue("id")
+		shared = !strings.HasSuffix(r.URL.Path, "/move")
+	}
+	if guardKey != "" {
+		release, err := s.requestGuard(r.Context(), guardKey, shared)
 		if err != nil {
 			status, message := 503, "resource authorization checks unavailable"
 			if errors.Is(err, errRequestBusy) {

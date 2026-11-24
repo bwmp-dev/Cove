@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,15 +62,27 @@ func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
 	if len(ids) > 512 {
 		return nil, errors.New("firewall inspection supports at most 512 running Compose containers")
 	}
+	proxy, err := e.output(ctx, "docker", "ps", "-q", "--no-trunc", "--filter", "label=cove.managed=ingress")
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range strings.Fields(proxy) {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
 	if len(ids) == 0 {
 		return []FirewallPort{}, nil
+	}
+	if len(ids) > 513 {
+		return nil, errors.New("firewall container inventory exceeds its limit")
 	}
 	for _, id := range ids {
 		if !fileContainerID.MatchString(id) {
 			return nil, errors.New("invalid container port inventory")
 		}
 	}
-	format := `{"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}`
+	format := `{"name":{{json .Name}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}}}`
 	raw, err = e.output(ctx, append([]string{"docker", "inspect", "--format", format}, ids...)...)
 	if err != nil {
 		return nil, err
@@ -78,6 +91,7 @@ func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
 	ports := map[FirewallPort]bool{}
 	for {
 		var item struct {
+			Name   string
 			Labels map[string]string
 			Ports  map[string][]struct{ HostIP, HostPort string }
 		}
@@ -86,16 +100,19 @@ func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
 		} else if err != nil {
 			return nil, err
 		}
+		sharedProxy := item.Name == "/cove-ingress" && item.Labels["cove.managed"] == "ingress"
 		workload := strings.TrimPrefix(item.Labels["com.docker.compose.project"], "cove-")
-		if workload == item.Labels["com.docker.compose.project"] || !workloadIdentifier.MatchString(workload) {
+		if !sharedProxy && (workload == item.Labels["com.docker.compose.project"] || !workloadIdentifier.MatchString(workload)) {
 			continue
 		}
-		info, err := os.Lstat(filepath.Join(e.Root, "workloads", workload))
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil || !info.IsDir() {
-			return nil, errors.New("resource ownership inventory is unavailable")
+		if !sharedProxy {
+			info, err := os.Lstat(filepath.Join(e.Root, "workloads", workload))
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil || !info.IsDir() {
+				return nil, errors.New("resource ownership inventory is unavailable")
+			}
 		}
 		for destination, bindings := range item.Ports {
 			_, protocol, ok := strings.Cut(destination, "/")
@@ -128,6 +145,11 @@ func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
 }
 
 func (e *Engine) ConfigureFirewall(ctx context.Context, control FirewallControl) (state *FirewallResult, result error) {
+	unlock, err := e.lockNodeChange(false)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if len(control.Available) != 0 || len(control.Reserved) == 0 || len(control.Reserved) > 65535 || len(control.Revision) > 64 || len(control.Intent) > 32 {
 		return nil, errors.New("firewall requests require a bounded panel management-port inventory")
 	}
@@ -136,7 +158,7 @@ func (e *Engine) ConfigureFirewall(ctx context.Context, control FirewallControl)
 	}
 	defer e.ingressMu.Unlock()
 	e.mu.Lock()
-	if len(e.active) != 0 || e.draining || e.customRunning || e.customUnsettled || e.hostChanging {
+	if len(e.active) != 0 || e.draining || e.customRunning || e.customUnsettled || e.hostChanging || e.proxyUnsettled || e.proxyRunning {
 		e.mu.Unlock()
 		return nil, errors.New("wait for worker operations and recovery before inspecting or changing the firewall")
 	}

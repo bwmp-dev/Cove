@@ -115,3 +115,29 @@ it("checks one concrete hostname under a wildcard domain and never sends the wil
   await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/workloads/w1/uptime", expect.objectContaining({ domain: "beta.shops.example.test", path: "/" })));
   expect(vi.mocked(request).mock.calls.filter(([method]) => method === "POST").map(([, , body]) => (body as { domain: string }).domain)).toEqual(["beta.shops.example.test"]);
 });
+
+it("offers only public HTTPS domains and explains a check whose domain became private", async () => {
+  const mixed = [
+    { domain: "www.example.test", service: "web", port: 80 },
+    { domain: "intranet.example.test", service: "web", port: 80, policy: { visibility: "lan", listener: "office" } },
+    { domain: "*.lab.example.test", service: "web", port: 80, policy: { visibility: "tailscale", listener: "tailnet" } },
+    { protocol: "tcp", domain: "", service: "db", port: 5432, policy: { visibility: "public", listener: "postgres" } },
+  ];
+  renderChecks({ ...editor, routes: mixed } as unknown as Workload, [{ ...check, id: "u3", domain: "intranet.example.test" }]);
+  const row = (await screen.findByText("intranet.example.test")).closest("li") as HTMLElement;
+  expect(within(row).getByText(/served only on a LAN or Tailscale listener/)).toBeInTheDocument();
+  expect(within(row).getByRole("button", { name: "Edit check for intranet.example.test" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "New check" }));
+  fireEvent.click(screen.getByRole("combobox", { name: "Domain" }));
+  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["www.example.test"]);
+});
+
+it("asks for a public domain when the service has only private and raw routes", async () => {
+  const routesOnly = [
+    { domain: "intranet.example.test", service: "web", port: 80, policy: { visibility: "lan", listener: "office" } },
+    { protocol: "udp", domain: "", service: "dns", port: 53, policy: { visibility: "lan", listener: "dns" } },
+  ];
+  renderChecks({ ...editor, routes: routesOnly } as unknown as Workload, []);
+  expect(await screen.findByText("Add a public HTTPS domain first.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "New check" })).toBeDisabled();
+});

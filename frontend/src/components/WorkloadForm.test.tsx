@@ -1,12 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
 import type { Project } from "../api/projects";
 import type { ResourceDraft } from "../api/templates";
-import type { Node, WorkloadInput } from "../api/types";
+import type { Node, Route, WorkloadInput } from "../api/types";
 import { WorkloadForm, type ProviderLink } from "./WorkloadForm";
 
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: String }));
@@ -94,4 +94,59 @@ it("keeps template file secrets in the create request", async () => {
   await user.click(screen.getByRole("button", { name: "Create resource" }));
   await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
   expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({ name: "garage", node_id: "n1", project_id: "p1", file_secrets: draft.file_secrets, environment: draft.environment });
+});
+
+const privateRoute = { domain: "app.lan.example.com", service: "web", port: 8080, policy: { visibility: "lan", listener: "office", certificate_source: "default", timeouts: { dial_seconds: 5 } } } satisfies Route;
+const tcpRoute = { protocol: "tcp", domain: "", service: "db", port: 5432, policy: { listener: "pg", visibility: "tailscale", ip_allow_list: ["100.64.0.0/10"] } } satisfies Route;
+const udpRoute = { protocol: "udp", domain: "", service: "dns", port: 53, policy: { listener: "dns", visibility: "public", upstreams: [{ service: "dns2", port: 53 }] } } satisfies Route;
+const routedDraft: ResourceDraft = { name: "edge", compose: "services:\n  web:\n    image: nginx:1.27\n", environment: {}, routes: [udpRoute, privateRoute, tcpRoute], file_secrets: [] };
+
+function renderRouted(routeProtocol: number, onSubmit: (input: WorkloadInput) => void, draft = routedDraft) {
+  const routed: Node = { ...node, capabilities: { protocol: 1, os: "linux", arch: "amd64", docker: "", compose: "", ready: true, route_policies: true, route_protocol: routeProtocol } };
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <WorkloadForm draft={draft} nodes={[routed]} projects={[project]} initialProjectId="p1" initialEnvironmentId="" pending={false} serverError={null} submitLabel="Create resource" cancel={null} onSubmit={onSubmit} />
+    </QueryClientProvider>,
+  );
+}
+
+it("creates template TCP and UDP routes as typed and keeps private HTTP routes private", async () => {
+  const user = userEvent.setup();
+  const onSubmit = vi.fn<(input: WorkloadInput) => void>();
+  renderRouted(6, onSubmit);
+  const raw = screen.getByRole("list", { name: "TCP and UDP routes from the template" });
+  expect(within(raw).getByText(/^UDP · Public · listener dns/)).toBeInTheDocument();
+  expect(within(raw).getByText(/^TCP · Tailscale only · listener pg/)).toBeInTheDocument();
+  expect(screen.getAllByLabelText("Hostname").map((input) => (input as HTMLInputElement).value)).toEqual(["app.lan.example.com"]);
+
+  await user.click(screen.getByRole("combobox", { name: "Node" }));
+  await user.click(screen.getByRole("option", { name: "worker" }));
+  await user.click(screen.getByRole("button", { name: "Create resource" }));
+
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+  const routes = onSubmit.mock.calls[0]?.[0].routes ?? [];
+  expect(routes).toHaveLength(3);
+  expect(routes).toContainEqual(privateRoute);
+  expect(routes).toContainEqual(tcpRoute);
+  expect(routes).toContainEqual(udpRoute);
+});
+
+it("blocks template TCP and UDP routes the node cannot serve until they are removed", async () => {
+  const user = userEvent.setup();
+  const onSubmit = vi.fn<(input: WorkloadInput) => void>();
+  // Upstream timeouts need route protocol 6 as well, so this private route leaves them out.
+  const lanRoute = { domain: "app.lan.example.com", service: "web", port: 8080, policy: { visibility: "lan", listener: "office", certificate_source: "default" } } satisfies Route;
+  renderRouted(5, onSubmit, { ...routedDraft, routes: [udpRoute, lanRoute, tcpRoute] });
+  await user.click(screen.getByRole("combobox", { name: "Node" }));
+  await user.click(screen.getByRole("option", { name: "worker" }));
+  await user.click(screen.getByRole("button", { name: "Create resource" }));
+  expect(screen.getAllByText("TCP and UDP routes need a newer worker on this node. Upgrade it and verify the node again.")).toHaveLength(2);
+  expect(onSubmit).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("button", { name: "Remove UDP route dns" }));
+  await user.click(screen.getByRole("button", { name: "Remove TCP route pg" }));
+  expect(screen.queryByRole("list", { name: "TCP and UDP routes from the template" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Create resource" }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+  expect(onSubmit.mock.calls[0]?.[0].routes).toEqual([lanRoute]);
 });

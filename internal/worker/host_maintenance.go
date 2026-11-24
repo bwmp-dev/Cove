@@ -73,6 +73,19 @@ func RunHostMaintenance(ctx context.Context, input io.Reader, output io.Writer) 
 }
 
 func (e *Engine) HostMaintenance(ctx context.Context, request HostMaintenanceRequest) (status *HostPatchStatus, result error) {
+	unlock, err := e.lockNodeChange(true)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	e.mu.Lock()
+	if len(e.active) > 0 || e.proxyRunning || e.customUnsettled || e.customRunning || e.hostChanging || e.draining {
+		e.mu.Unlock()
+		return nil, errors.New("wait for worker operations and proxy recovery before host maintenance")
+	}
+	e.hostChanging = true
+	e.mu.Unlock()
+	defer func() { e.mu.Lock(); e.hostChanging = false; e.mu.Unlock() }()
 	if request.Root != "" || request.Owner != "" || request.Action != "inspect" && request.Action != "security_policy" {
 		return nil, errors.New("invalid host maintenance options")
 	}

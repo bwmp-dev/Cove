@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,6 +37,20 @@ func startMoveNode(t *testing.T, f *accountFixture, image string) sshNodeFixture
 	name := "cove-move-node-" + resourceID()
 	command("", "run", "-d", "--privileged", "--memory", "1536m", "--cpus", "1", "--name", name, "--label", "cove.test=true", "-p", "127.0.0.1::22", image)
 	t.Cleanup(func() {
+		if t.Failed() {
+			out, err := exec.Command("docker", "logs", "--tail", "20", name).CombinedOutput()
+			t.Logf("private worker startup diagnostics (%v):\n%s", err, out)
+			logPath := filepath.Join(t.TempDir(), "dockerd.log")
+			out, err = exec.Command("docker", "cp", name+":/var/log/dockerd.log", logPath).CombinedOutput()
+			if err != nil {
+				t.Logf("private Docker log capture (%v): %s", err, out)
+			} else if data, err := os.ReadFile(logPath); err != nil {
+				t.Logf("private Docker log read: %v", err)
+			} else {
+				lines := strings.Split(string(data), "\n")
+				t.Logf("private Docker daemon diagnostics:\n%s", strings.Join(lines[max(0, len(lines)-40):], "\n"))
+			}
+		}
 		out, err := exec.Command("docker", "rm", "-f", "-v", name).CombinedOutput()
 		if err != nil {
 			t.Error(err, string(out))
@@ -64,6 +79,9 @@ func startMoveNode(t *testing.T, f *accountFixture, image string) sshNodeFixture
 	var last worker.Probe
 	var lastError error
 	for attempt := 0; attempt < 90; attempt++ {
+		if command("", "inspect", "--format", "{{.State.Status}}", name) == "exited" {
+			t.Fatal("private Docker worker exited before becoming ready")
+		}
 		p, err := probeSSH(ctx, "127.0.0.1", port, host, seed)
 		last, lastError = p, err
 		if err == nil && p.Ready && p.WorkloadMoves {
@@ -74,7 +92,7 @@ func startMoveNode(t *testing.T, f *accountFixture, image string) sshNodeFixture
 		time.Sleep(time.Second)
 	}
 	t.Logf("last probe docker=%q compose=%q ready=%v moves=%v error=%v", last.Docker, last.Compose, last.Ready, last.WorkloadMoves, lastError)
-	t.Fatal("private Docker worker did not become ready", command("", "logs", name), command("", "exec", name, "cat", "/tmp/dockerd.log"))
+	t.Fatal("private Docker worker did not become ready", command("", "logs", name), command("", "exec", name, "cat", "/var/log/dockerd.log"))
 	return sshNodeFixture{}
 }
 
@@ -82,7 +100,11 @@ func moveTestOperation(t *testing.T, f *accountFixture, node string, request wor
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if _, err := f.s.nodeRPC(ctx, node, worker.RPCRequest{Method: "submit", Request: &request}); err != nil {
+	method := "submit"
+	if version := worker.RouteProtocol(request.Routes); version > 1 {
+		method = fmt.Sprintf("submit_routes_v%d", version)
+	}
+	if _, err := f.s.nodeRPC(ctx, node, worker.RPCRequest{Method: method, Request: &request}); err != nil {
 		t.Fatal(err)
 	}
 	for {
@@ -119,11 +141,36 @@ func TestWorkloadMoveTwoDockerDaemons(t *testing.T) {
 	f.sql(`UPDATE nodes SET name=CASE WHEN id=$1 THEN 'Source worker' ELSE 'Destination worker' END WHERE id IN ($1,$2)`, source.node, target.node)
 	f.sql(`INSERT INTO team_nodes(team_id,node_id) VALUES('default',$1),('default',$2)`, source.node, target.node)
 	f.sql(`INSERT INTO projects(id,name,team_id) VALUES('move-project','Move project','default')`)
-	compose := "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'exec httpd -f -p 8080 -h /data']\n    restart: always\n    ports: ['8080:8080']\n    volumes: ['data:/data']\n  idle:\n    image: busybox:1.37\n    command: [sleep, '3600']\n    restart: unless-stopped\nvolumes:\n  data: {}\n"
+	compose := "services:\n  app:\n    image: busybox:1.37\n    command: [sh, -c, 'nc -u -lk -p 9001 -e /bin/cat & exec httpd -f -p 8080 -h /data']\n    restart: always\n    ports: ['8080:8080']\n    volumes: ['data:/data']\n  idle:\n    image: busybox:1.37\n    command: [sleep, '3600']\n    restart: unless-stopped\nvolumes:\n  data: {}\n"
 	backup := &worker.BackupConfig{Repository: "local", Password: "synthetic-move-backup-password", KeepLast: 3}
 	created := f.call("root", "default", "POST", "/api/workloads", workloadInput{Name: "Move app", NodeID: source.node, Compose: compose, Kind: "service", ProjectID: "move-project", Environment: map[string]string{"PRIVATE": "synthetic-private-environment"}, Backup: backup}, 201)
 	resource := jsonString(t, created, "id")
-	deploy := worker.Request{ID: resourceID(), Workload: resource, Action: "deploy", Compose: compose, Kind: "service", Environment: map[string]string{"PRIVATE": "synthetic-private-environment"}}
+	certificate, key := certificateFixture(t, "move-private.example.test")
+	certificateID := jsonString(t, f.call("root", "default", "POST", "/api/workloads/"+resource+"/certificates", routeCertificateInput{Name: "Move certificate", CertificatePEM: certificate, PrivateKeyPEM: key}, 201), "id")
+	gateways := map[string]string{}
+	for _, node := range []sshNodeFixture{source, target} {
+		gateway := node.command("", "exec", node.container, "docker", "network", "inspect", "--format", "{{range .IPAM.Config}}{{.Gateway}}{{end}}", "bridge")
+		gateways[node.node] = gateway
+		f.call("root", "default", "POST", "/api/nodes/"+node.node+"/ingress-listeners/initialize", nil, 200)
+		settings := worker.IngressExposureSettings{Listeners: []worker.IngressListener{
+			{ID: "office", Protocol: "https", Visibility: "lan", Bindings: []worker.IngressBinding{{Address: gateway, Port: 9443}}},
+			{ID: "socket", Protocol: "tcp", Visibility: "public", Bindings: []worker.IngressBinding{{Address: "127.0.0.1", Port: 15432}}},
+			{ID: "datagrams", Protocol: "udp", Visibility: "public", Bindings: []worker.IngressBinding{{Address: "127.0.0.1", Port: 15433}}},
+		}}
+		var plan worker.IngressExposurePlan
+		if err := json.Unmarshal(f.call("root", "default", "POST", "/api/nodes/"+node.node+"/ingress-listeners/plan", settings, 200).Body.Bytes(), &plan); err != nil {
+			t.Fatal(err)
+		}
+		f.call("root", "default", "PUT", "/api/nodes/"+node.node+"/ingress-listeners", worker.IngressExposureRequest{Settings: plan.Settings, Revision: plan.Revision, Digest: plan.Digest, AcceptInterruption: true}, 200)
+		node.command("", "exec", node.container, "docker", "start", "cove-ingress")
+	}
+	routes := []worker.Route{
+		{Domain: "move-private.example.test", Service: "app", Port: 8080, Policy: &worker.RoutePolicy{Visibility: "lan", Listener: "office", CertificateSource: "uploaded", CertificateID: certificateID}},
+		{Protocol: "tcp", Service: "app", Port: 8080, Policy: &worker.RoutePolicy{Visibility: "public", Listener: "socket"}},
+		{Protocol: "udp", Service: "app", Port: 9001, Policy: &worker.RoutePolicy{Visibility: "public", Listener: "datagrams"}},
+	}
+	f.call("root", "default", "PUT", "/api/workloads/"+resource+"/routes", map[string]any{"routes": routes}, 200)
+	deploy := worker.Request{ID: resourceID(), Workload: resource, Action: "deploy", Compose: compose, Kind: "service", Environment: map[string]string{"PRIVATE": "synthetic-private-environment"}, Routes: routes, Certificates: []worker.RouteCertificate{{ID: certificateID, CertificatePEM: certificate, PrivateKeyPEM: key}}}
 	moveTestOperation(t, f, source.node, deploy)
 	deployData, _ := json.Marshal(deploy)
 	deployPayload, _ := seal(f.s.Key, deployData)
@@ -192,7 +239,7 @@ func TestWorkloadMoveTwoDockerDaemons(t *testing.T) {
 				}
 				if !ready {
 					t.Logf("last restarted probe ready=%v docker=%q compose=%q error=%v", last.Ready, last.Docker, last.Compose, lastError)
-					t.Fatal("source did not recover after its private Docker daemon restarted", source.command("", "logs", source.container), source.command("", "exec", source.container, "cat", "/tmp/dockerd.log"))
+					t.Fatal("source did not recover after its private Docker daemon restarted", source.command("", "logs", source.container), source.command("", "exec", source.container, "cat", "/var/log/dockerd.log"))
 				}
 				if got := source.command("", "exec", source.container, "docker", "inspect", "--format", "{{.State.Running}}|{{.HostConfig.RestartPolicy.Name}}", app); got != "false|no" {
 					t.Fatal("source fence did not survive Docker daemon restart", got)
@@ -288,5 +335,26 @@ func TestWorkloadMoveTwoDockerDaemons(t *testing.T) {
 	if got := source.command("", "exec", source.container, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+resource); got != "" {
 		t.Fatal("committed source containers remain")
 	}
-	t.Log(fmt.Sprintf("moved resource %s across independent Docker daemons with rollback and encrypted backup retention", resource))
+	saved := readDatabaseConfig(t, f, resource)
+	if !worker.RoutesEqual(saved.Routes, routes) {
+		t.Fatal("move lost private/raw routes or certificate reference")
+	}
+	probe, _ := json.Marshal([]map[string]any{{"hostname": "move-private.example.test", "certificate_pem": certificate, "verified_at": time.Now()}})
+	target.command(string(probe), "exec", "-i", target.container, "sh", "-ec", "cat > /tmp/moved-certificate-probe.json; /usr/local/bin/cove-worker certificate-probe /tmp/moved-certificate-probe.json; rm /tmp/moved-certificate-probe.json")
+	for _, address := range []string{"http://127.0.0.1:15432/marker", "https://" + gateways[target.node] + ":9443/marker"} {
+		body := target.command("", "exec", target.container, "docker", "run", "--rm", "--network", "host", "busybox:1.37", "wget", "-q", "-O", "-", "--no-check-certificate", "--header", "Host: move-private.example.test", address)
+		if body != "before-move" {
+			t.Fatal("moved listener did not reach retained application data")
+		}
+	}
+	udp := target.command("", "exec", target.container, "docker", "run", "--rm", "--network", "host", "busybox:1.37", "sh", "-c", `{ printf handshake; sleep 1; printf moved-datagram; } | timeout 2 nc -u -w 1 127.0.0.1 15433; status=$?; test "$status" -eq 0 -o "$status" -eq 143`)
+	if !strings.Contains(udp, "moved-datagram") {
+		t.Fatal("moved UDP listener did not return the application's datagram")
+	}
+	// The strict certificate probe above pins the moved leaf; the public listener must still deny the private host.
+	denied := target.command("", "exec", target.container, "docker", "run", "--rm", "--network", "host", "busybox:1.37", "sh", "-c", `wget --no-check-certificate -S -O /dev/null --header 'Host: move-private.example.test' https://127.0.0.1/ 2>&1 || true`)
+	if !strings.Contains(denied, "418") {
+		t.Fatal("move exposed a private hostname on public HTTPS")
+	}
+	t.Log(fmt.Sprintf("moved resource %s across independent Docker daemons with rollback, encrypted backups, private/raw listeners and verified certificate retention", resource))
 }

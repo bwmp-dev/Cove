@@ -216,6 +216,13 @@ func TestOperationsMergePublicStatusPrefixAndIsolation(t *testing.T) {
 	f, id, cookie := publicFixture(t)
 	saved := f.call(cookie, "default", "PUT", "/api/projects/variable-project/status-page", map[string]any{"enabled": true, "title": "Public availability"}, 200)
 	slug := jsonString(t, saved, "slug")
+	config := readDatabaseConfig(t, f, id)
+	config.Routes = []worker.Route{{Domain: "private-host.invalid", Service: "app", Port: 8080}}
+	sealed, err := f.s.sealJSON(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sql(`UPDATE workloads SET configuration=$2 WHERE id=$1`, id, sealed)
 	f.sql(`INSERT INTO route_checks(id,workload_id,team_id,domain,path,enabled,interval_seconds,timeout_seconds,expected_min,expected_max,public_label) VALUES('private-check',$1,'default','private-host.invalid','/private-path',true,60,2,200,299,'Public API')`, id)
 	f.sql(`UPDATE control_settings SET panel_allowlist=ARRAY['127.0.0.1/32']`)
 	f.s.PublicURL = "https://cove.example/control/cove"

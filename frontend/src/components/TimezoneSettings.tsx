@@ -104,7 +104,9 @@ export function AccountTimezone() {
   const save = useMutation({
     mutationFn: saveUserTimezone,
     gcTime: 0,
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
+      // A read already in flight would resolve with the zone from before the save and overwrite it.
+      await client.cancelQueries({ queryKey: timezonePreferenceQuery(teamId).queryKey });
       client.setQueryData(timezonePreferenceQuery(teamId).queryKey, data);
       void client.invalidateQueries({ queryKey: teamTimezoneQuery(teamId).queryKey });
     },
@@ -160,10 +162,16 @@ export function TeamTimezone({ teamId }: { teamId: string }) {
   const save = useMutation({
     mutationFn: (zone: string) => saveTeamTimezone(teamId, zone),
     gcTime: 0,
-    onSuccess: (data: TimezonePreference) => {
-      client.setQueryData(teamTimezoneQuery(teamId).queryKey, data);
+    onSuccess: async (data: TimezonePreference) => {
       // The response resolves the effective zone for the saved team, which is only the active one when it is selected.
-      if (session?.team_id === teamId) client.setQueryData(timezonePreferenceQuery(teamId).queryKey, data);
+      const active = session?.team_id === teamId;
+      // A read already in flight would resolve with the zone from before the save and overwrite it.
+      await Promise.all([
+        client.cancelQueries({ queryKey: teamTimezoneQuery(teamId).queryKey }),
+        active && client.cancelQueries({ queryKey: timezonePreferenceQuery(teamId).queryKey }),
+      ]);
+      client.setQueryData(teamTimezoneQuery(teamId).queryKey, data);
+      if (active) client.setQueryData(timezonePreferenceQuery(teamId).queryKey, data);
     },
   });
   const title = "Team time zone";

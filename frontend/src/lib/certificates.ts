@@ -115,6 +115,7 @@ export interface CertificateSourceInfo {
 export function certificateSource(source: string | undefined): CertificateSourceInfo {
   if (source === undefined || source === "uploaded") return { label: "Uploaded", trust: "Trusted by whichever clients trust the certificate authority that signed it." };
   if (source === "cloudflare_origin") return { label: "Cloudflare Origin CA", trust: "Trusted by Cloudflare's edge only. Browsers do not trust Origin CA certificates." };
+  if (source === "acme_dns") return { label: "ACME DNS-01", trust: "Trusted by clients that trust the certificate authority the panel operator configured. Browsers do not trust a private or test authority." };
   return { label: "Other source", trust: "Cove does not recognise how this version was created." };
 }
 
@@ -149,6 +150,48 @@ export function issuerRetryable(phase: string) {
   return phase === "failed" || phase === "reconciling";
 }
 
+export type IssuerProvider = "cloudflare_origin" | "acme_dns";
+
+const issuerProviders: Record<string, string> = { cloudflare_origin: "Cloudflare Origin CA", acme_dns: "ACME DNS-01" };
+
+export function issuerProviderLabel(provider: string) {
+  return issuerProviders[provider] ?? (provider ? `Unknown provider (${provider})` : "Unknown provider");
+}
+
+const challengePhases: Record<string, { tone: Tone; label: string }> = {
+  pending: { tone: "info", label: "Waiting to publish" },
+  presenting: { tone: "info", label: "Publishing" },
+  present: { tone: "info", label: "Published" },
+  blocked: { tone: "warn", label: "Refused by the DNS provider" },
+  cleanup: { tone: "info", label: "Removing" },
+};
+
+// Unknown phases from a newer panel are shown as they are, never as resolved.
+export function challengePhase(phase: string) {
+  return challengePhases[phase] ?? { tone: "neutral" as Tone, label: phase ? `Unknown state (${phase})` : "Unknown state" };
+}
+
+// Blocked records wait for an issuer Retry; every other known phase is reconciled by the panel on its own.
+export function challengeWorking(phase: string) {
+  return phase === "pending" || phase === "presenting" || phase === "present" || phase === "cleanup";
+}
+
+export type AuthorityTerms = { kind: "none" } | { kind: "text"; text: string } | { kind: "link"; href: string } | { kind: "unreadable" };
+
+// How to show an authority's terms. Plain-text terms (the panel decodes data:text/plain URIs) are shown only as text,
+// and only an HTTPS URL ever becomes a link, so a data: or script URI can never be opened from the dashboard.
+export function authorityTerms(termsUrl: string | undefined, termsText: string | undefined): AuthorityTerms {
+  if (termsText) return { kind: "text", text: termsText };
+  if (!termsUrl) return { kind: "none" };
+  try {
+    const url = new URL(termsUrl);
+    if (url.protocol === "https:" && url.hostname !== "" && url.username === "" && url.password === "") return { kind: "link", href: url.href };
+  } catch {
+    // Not an absolute URL: fall through to the unreadable state.
+  }
+  return { kind: "unreadable" };
+}
+
 export interface IssuerDraft {
   name: string;
   zoneId: string;
@@ -157,7 +200,7 @@ export interface IssuerDraft {
   autoRenew: boolean;
 }
 
-export type IssuerDraftErrors = Partial<Record<"name" | "zoneId" | "hostnames", string>>;
+export type IssuerDraftErrors = Partial<Record<"name" | "zoneId" | "hostnames" | "terms", string>>;
 
 export function hostnameList(text: string) {
   return text

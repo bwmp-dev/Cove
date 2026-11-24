@@ -112,3 +112,55 @@ func TestRuntimeDriftDockerAcceptance(t *testing.T) {
 	}
 
 }
+
+func TestRuntimeDriftEmptyPreviewRequiresEverySavedServiceDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		preview   *EnvironmentPreview
+		services  map[string]any
+		wantError bool
+	}{
+		{"disabled preview", &EnvironmentPreview{Disabled: []string{"worker"}}, map[string]any{"worker": map[string]any{"scale": 0}}, false},
+		{"ordinary resource", nil, map[string]any{"worker": map[string]any{"scale": 0}}, true},
+		{"enabled preview", &EnvironmentPreview{}, map[string]any{"worker": map[string]any{"scale": 0}}, true},
+		{"missing enabled service", &EnvironmentPreview{Disabled: []string{"worker"}}, map[string]any{"worker": map[string]any{"scale": 0}, "web": map[string]any{"scale": 1}}, true},
+		{"disabled name with running scale", &EnvironmentPreview{Disabled: []string{"worker"}}, map[string]any{"worker": map[string]any{"scale": 1}}, true},
+		{"disabled name without saved scale", &EnvironmentPreview{Disabled: []string{"worker"}}, map[string]any{"worker": map[string]any{}}, true},
+		{"empty saved services", &EnvironmentPreview{Disabled: []string{"worker"}}, map[string]any{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, err := NewEngine(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.Run = func(_ context.Context, _ string, args, _ []string, _ io.Writer) error {
+				if len(args) < 2 || args[0] != "docker" || args[1] != "ps" {
+					t.Fatalf("unexpected runtime command: %v", args)
+				}
+				return nil
+			}
+			dir := filepath.Join(engine.Root, "workloads", "app")
+			if err = os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			compose := filepath.Join(dir, "saved.compose.json")
+			if err = writeJSON(compose, map[string]any{"services": tc.services}); err != nil {
+				t.Fatal(err)
+			}
+			if err = writeJSON(filepath.Join(dir, "current.json"), deployedState{ComposePath: compose}); err != nil {
+				t.Fatal(err)
+			}
+			request := Request{ID: "preview-baseline", Workload: "app", Action: "deploy", EnvironmentPreview: tc.preview}
+			err = engine.recordDriftBaseline(context.Background(), request)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("baseline error = %v, want error %v", err, tc.wantError)
+			}
+			if !tc.wantError {
+				report, err := engine.Drift(context.Background(), "app")
+				if err != nil || !report.Baseline || len(report.Changes) != 0 {
+					t.Fatalf("disabled preview baseline: %+v, %v", report, err)
+				}
+			}
+		})
+	}
+}

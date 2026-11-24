@@ -118,6 +118,9 @@ func rolloutEligibility(r Request, config map[string]any) string {
 	if r.Rollout == nil || r.Rollout.Strategy == "disabled" {
 		return "Zero-downtime replacement is disabled; using guarded Compose replacement."
 	}
+	if HasTransportRoutes(r.Routes) {
+		return "Raw TCP and UDP routes require guarded Compose replacement; HTTP generation traffic handoff is unavailable."
+	}
 	if len(r.Routes) == 0 {
 		return "A managed HTTP route is required for an atomic traffic switch."
 	}

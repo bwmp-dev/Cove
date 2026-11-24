@@ -220,6 +220,13 @@ func (e *Engine) startMove(ctx context.Context, j *moveJournal) error {
 		return err
 	}
 	if len(j.Current.Routes) > 0 {
+		settings, err := e.loadIngressExposures()
+		if err != nil {
+			return err
+		}
+		if err := ValidateRouteListeners(j.Current.Routes, settings.Settings); err != nil {
+			return err
+		}
 		if err := e.ensureIngress(ctx, io.Discard); err != nil {
 			return err
 		}

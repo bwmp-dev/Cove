@@ -64,15 +64,19 @@ func (w *routeWorker) run(_ context.Context, _ string, args, _ []string, out io.
 		}
 		var config struct {
 			HTTP struct {
-				Routers map[string]struct{ Rule, Service string } `json:"routers"`
+				Routers map[string]struct {
+					Rule, Service            string
+					EntryPoints, Middlewares []string
+					Priority                 int
+				} `json:"routers"`
 			} `json:"http"`
 		}
 		if err = json.Unmarshal(data, &config); err != nil {
 			return err
 		}
-		routers := []map[string]string{}
+		routers := []map[string]any{}
 		for name, router := range config.HTTP.Routers {
-			routers = append(routers, map[string]string{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service})
+			routers = append(routers, map[string]any{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service, "entryPoints": router.EntryPoints, "middlewares": router.Middlewares, "priority": router.Priority})
 		}
 		return json.NewEncoder(out).Encode(routers)
 	}

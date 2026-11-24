@@ -36,7 +36,8 @@ try {
         [Environment]::SetEnvironmentVariable('GOARCH', $prior['GOARCH'], 'Process')
         $env:COVE_E2E = '1'
     }
-    go test -v ./... -timeout 10m
+    $testTimeout = if ($EndToEnd) { '30m' } else { '10m' }
+    go test -v ./... -timeout $testTimeout
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
     go vet ./...
     if ($LASTEXITCODE -ne 0) { throw 'Go vet failed.' }

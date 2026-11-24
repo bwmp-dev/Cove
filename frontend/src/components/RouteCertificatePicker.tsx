@@ -23,18 +23,25 @@ const sourceHints: Record<PolicyDraft["certificateSource"], string> = {
   "": "Requested from Let's Encrypt automatically.",
   acme: "Requested from Let's Encrypt automatically.",
   default: "Uses the certificate configured in the node's proxy settings, which may be self-signed, and stops Let's Encrypt renewing a certificate it cached for this hostname. Browsers trust it only if you provisioned one.",
-  uploaded: "A certificate version stored for this resource under Certificates: one you uploaded or one issued by Cloudflare Origin CA.",
+  uploaded: "A certificate version stored for this resource under Certificates: one you uploaded or one issued by Cloudflare Origin CA or ACME DNS-01.",
 };
+
+// The proxy serves every certificate from one TLS store, so public HTTPS presents a private route's certificate to a
+// client that sends its exact hostname, even though the request itself is denied.
+const privateCertificateExposure =
+  "A guessed private hostname can reveal certificate names on public HTTPS; HTTP access remains denied. Use wildcard or non-identifying certificate names for sensitive hosts, and a private CA to avoid public certificate logs.";
 
 // choices is undefined where the resource has no certificate storage yet, such as the create form. A saved stored or
 // proxy default selection is still shown so it is never dropped silently. protocol4: the worker supports the proxy
 // default choice (route protocol 4); undefined while unknown, which offers it only when already selected.
-export function CertificateSourceField({ id, policy, choices, protocol4, onChange }: { id: string; policy: PolicyDraft; choices?: CertificateChoices; protocol4?: boolean; onChange: Change }) {
+// error: a certificate problem that is not about the stored version, such as Let's Encrypt on a private route.
+export function CertificateSourceField({ id, policy, choices, protocol4, error, onChange }: { id: string; policy: PolicyDraft; choices?: CertificateChoices; protocol4?: boolean; error?: string; onChange: Change }) {
   const uploaded = policy.certificateSource === "uploaded";
   const proxyDefault = policy.certificateSource === "default";
-  const hint = `${sourceHints[policy.certificateSource]}${!proxyDefault && protocol4 === false ? " The proxy default certificate needs a newer worker on this node." : ""}`;
+  const privateRoute = policy.visibility === "lan" || policy.visibility === "tailscale";
+  const hint = `${sourceHints[policy.certificateSource]}${!proxyDefault && protocol4 === false ? " The proxy default certificate needs a newer worker on this node." : ""}${privateRoute ? ` Private routes need the proxy default or a stored certificate; Let's Encrypt cannot reach them. ${privateCertificateExposure}` : ""}`;
   return (
-    <Field id={id} label="Certificate" hint={hint}>
+    <Field id={id} label="Certificate" hint={hint} error={error}>
       <Select
         id={id}
         value={policy.certificateSource || "acme"}
@@ -44,7 +51,8 @@ export function CertificateSourceField({ id, policy, choices, protocol4, onChang
           // Switching away from a saved uploaded certificate must name the new source: an omitted one keeps the saved selection.
           else onChange({ certificateSource: value === "default" ? "default" : policy.certificateSource === "" ? "" : "acme", certificateId: "" });
         }}
-        aria-describedby={`${id}-hint`}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${id}-error` : `${id}-hint`}
       >
         <option value="acme">Let's Encrypt</option>
         <option value="default" disabled={!proxyDefault && protocol4 !== true}>

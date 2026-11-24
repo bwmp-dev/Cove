@@ -66,6 +66,29 @@ func TestObjectBucketRetainsScopedCredentialsForRetryAndBindsOnlyAfterConfirmati
 		t.Fatal("failed Garage preflight retained a locking bucket request", count, err)
 	}
 	failCheck = false
+	original := readDatabaseConfig(t, f, storage)
+	for _, route := range []worker.Route{
+		{Domain: "objects.example.com", Service: "garage", Port: 3900, Policy: &worker.RoutePolicy{Visibility: "lan", Listener: "office"}},
+		{Domain: "*.example.com", Service: "garage", Port: 3900},
+		{Protocol: "tcp", Service: "garage", Port: 3900, Policy: &worker.RoutePolicy{Visibility: "public", Listener: "socket"}},
+	} {
+		changed := original
+		changed.Routes = []worker.Route{route}
+		encrypted, err := f.s.sealJSON(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.sql(`UPDATE workloads SET configuration=$2 WHERE id=$1`, storage, encrypted)
+		f.call("root", "default", "POST", path, body, 409)
+		if captured.AccessKey != "" {
+			t.Fatal("private, wildcard or raw Garage route provisioned a bucket")
+		}
+	}
+	encrypted, err := f.s.sealJSON(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sql(`UPDATE workloads SET configuration=$2 WHERE id=$1`, storage, encrypted)
 	f.call("root", "default", "POST", path, body, 502)
 	if len(captured.SecretKey) != 64 || !strings.HasPrefix(captured.AccessKey, "GK") || captured.AccessKey == "GKcove00000000000000000000" {
 		t.Fatal("scoped credentials not generated")

@@ -34,16 +34,11 @@ func ownedHostPolicyFile(filename, marker string) error {
 	return nil
 }
 
-func hostPolicyFiles(manager, owner string) (string, string, error) {
-	command := ""
-	switch manager {
-	case "apt":
-		command = "/usr/bin/unattended-upgrade"
-	case "dnf":
-		command = "/usr/bin/dnf --assumeyes --security upgrade"
-	default:
+func hostPolicyFiles(manager, owner, root string) (string, string, error) {
+	if manager != "apt" && manager != "dnf" {
 		return "", "", errors.New("unsupported host package manager")
 	}
+	command := snapshotHostBinary(root) + " host-security-run " + root + " " + owner + " " + manager
 	marker := hostPolicyMarker(owner)
 	service := marker + "[Unit]\nDescription=Cove scheduled host security updates\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=oneshot\nExecStart=" + command + "\nNice=10\nIOSchedulingClass=best-effort\nIOSchedulingPriority=7\nCPUQuota=50%\nStandardOutput=null\nStandardError=journal\nSyslogIdentifier=" + hostPolicyUnit(owner) + "\nLogRateLimitIntervalSec=30s\nLogRateLimitBurst=20\n"
 	timer := marker + "[Unit]\nDescription=Cove daily host security update schedule\n\n[Timer]\nOnCalendar=*-*-* 04:00:00 UTC\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
@@ -202,7 +197,7 @@ func configureHostPatchPolicy(ctx context.Context, hostRoot, workerRoot, owner s
 		if !status.PolicySupported {
 			return errors.New("install the supported native update tool and run systemd before enabling this schedule")
 		}
-		service, timer, err := hostPolicyFiles(status.Manager, owner)
+		service, timer, err := hostPolicyFiles(status.Manager, owner, workerRoot)
 		if err != nil {
 			return err
 		}
@@ -222,7 +217,7 @@ func configureHostPatchPolicy(ctx context.Context, hostRoot, workerRoot, owner s
 		if _, err = run(ctx, "/usr/bin/systemctl", "enable", "--now", unit+".timer"); err != nil {
 			return errors.New("host schedule activation could not be confirmed; refresh its status before retrying")
 		}
-		return nil
+		return markInterlockedHostSchedule(ctx, workerRoot, owner, run)
 	}
 	for _, suffix := range []string{".service", ".timer"} {
 		filename := filepath.Join(unitDirectory, unit+suffix)
@@ -236,5 +231,5 @@ func configureHostPatchPolicy(ctx context.Context, hostRoot, workerRoot, owner s
 	if _, err = run(ctx, "/usr/bin/systemctl", "disable", "--now", unit+".timer"); err != nil {
 		return fmt.Errorf("host schedule disable could not be confirmed: %w", err)
 	}
-	return nil
+	return markInterlockedHostSchedule(ctx, workerRoot, owner, run)
 }

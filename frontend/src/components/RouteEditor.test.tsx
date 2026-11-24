@@ -139,4 +139,13 @@ describe("RouteEditor", () => {
     expect(screen.getByLabelText(/Path prefix/)).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Forward-auth" })).not.toBeInTheDocument();
   });
+  it("offers only Public before a resource exists and explains where private routing is set", async () => {
+    render(<Harness policies extensions initial={plain()} />);
+    await userEvent.click(screen.getByRole("button", { name: /Advanced routing/ }));
+    expect(screen.getByRole("combobox", { name: "Visibility" })).toHaveTextContent("Public");
+    expect(screen.getByText(/create the resource first, then set its visibility on the Domains page/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("combobox", { name: "Visibility" }));
+    expect(screen.getByRole("option", { name: "LAN only" })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByRole("combobox", { name: "Listener" })).not.toBeInTheDocument();
+  });
 });

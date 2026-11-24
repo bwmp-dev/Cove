@@ -242,7 +242,7 @@ func TestDeploysMergeStoredHistoryDraftAndExportProtectRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.sql(`INSERT INTO cloudflare_zones(zone_id,domain,configuration) VALUES($1,'example.test',$2)`, zone, secret)
+	f.sql(`INSERT INTO cloudflare_zones(zone_id,domain,owner_id,configuration) VALUES($1,'example.test','bootstrap',$2)`, zone, secret)
 	f.sql(`INSERT INTO route_certificate_issuers(id,workload_id,zone_id,name,provider,domains,validity_days,auto_renew,state) VALUES('export-issuer',$1,$2,'Export issuer','cloudflare_origin',ARRAY['app.example.test'],7,false,$3)`, id, zone, secret)
 	protected, err := f.s.sealJSON(config)
 	if err != nil {

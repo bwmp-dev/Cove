@@ -96,7 +96,7 @@ func TestWildcardRouteConfirmationRejectsStalePriority(t *testing.T) {
 	config := newIngressConfig()
 	config.addRoute("app", route)
 	for name, router := range config.HTTP.Routers {
-		live := []map[string]any{{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service, "priority": router.Priority}}
+		live := []map[string]any{{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service, "priority": router.Priority, "entryPoints": router.EntryPoints}}
 		raw, _ := json.Marshal(live)
 		if !ingressAccepted(string(raw), config) {
 			t.Fatal("current wildcard priority was not accepted")

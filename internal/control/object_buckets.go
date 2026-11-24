@@ -136,12 +136,12 @@ func (s *Server) objectBuckets(w http.ResponseWriter, r *http.Request) {
 	domain := strings.ToLower(strings.TrimSpace(in.Domain))
 	found := false
 	for _, route := range storage.Routes {
-		if route.Domain == domain && route.Service == "garage" && route.Port == 3900 {
+		if route.IsPublicHTTPRoute() && !strings.Contains(domain, "*") && route.Domain == domain && route.Service == "garage" && route.Port == 3900 {
 			found = true
 		}
 	}
 	if !found {
-		http.Error(w, "add and deploy an HTTPS route for the Garage service on port 3900, then select that hostname", 409)
+		http.Error(w, "add and deploy a public exact HTTPS route for the Garage service on port 3900, then select that hostname", 409)
 		return
 	}
 	var capable, preview bool

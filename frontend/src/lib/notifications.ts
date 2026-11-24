@@ -117,6 +117,7 @@ const outcomeGroups = {
   rollouts: { title: "Rollouts and CPU scaling", description: "Staged rollouts waiting for promotion and their outcome, and replica changes queued by CPU autoscaling." },
   sleep: { title: "Idle sleep", description: "Request-driven services stopped after being idle and woken by the next request." },
   directory: { title: "Directory provisioning", description: "Accounts and team access changed by SCIM, LDAP or GitHub team sync, and directory syncs that did not finish." },
+  certificates: { title: "Certificates", description: "Certificate requests and renewals by a resource's issuers that did not finish. Messages name the event only, without hostnames or keys. Open the resource's Domains page for details." },
 } satisfies Record<string, { title: string; description: string }>;
 
 const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: string }> = {
@@ -147,6 +148,7 @@ const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: 
   "identity.deprovisioned": { group: "directory", label: "Account deprovisioned" },
   "identity.membership_changed": { group: "directory", label: "Team access changed by a directory" },
   "identity.sync_failed": { group: "directory", label: "Directory sync failed" },
+  "certificate.failed": { group: "certificates", label: "Certificate issuance or renewal failed" },
 };
 
 export interface EventGroup {

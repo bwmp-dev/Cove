@@ -185,6 +185,9 @@ func cloneTrafficProxy(inspect map[string]any, settings TrafficSettings, nonce s
 		return nil, err
 	}
 	config["Cmd"] = command
+	if source, _ := config["Image"].(string); strings.HasPrefix(source, "traefik:") {
+		labels["cove.ingress-source-image"] = source
+	}
 	config["Image"] = image
 	labels["cove.traffic-change"] = nonce
 	config["Labels"] = labels
@@ -403,6 +406,25 @@ func (e *Engine) recoverProxyTraffic(ctx context.Context, client *http.Client) e
 func (e *Engine) ConfigureTraffic(ctx context.Context, in ProxyTrafficControl) (*ProxyTrafficState, *ProxyTrafficPlan, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
+	}
+	if in.Action != "get" {
+		e.mu.Lock()
+		draining := e.draining || e.hostChanging || e.proxyUnsettled || e.proxyRunning
+		e.mu.Unlock()
+		if draining && in.Action != "recover" {
+			return nil, nil, errors.New("wait for worker maintenance and proxy recovery before traffic changes")
+		}
+		unlock, err := e.lockNodeChange(false)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer unlock()
+		if err := e.requireInterlockedHostSchedule(); err != nil {
+			return nil, nil, err
+		}
+		if err := e.ingressExposureReady(); err != nil {
+			return nil, nil, err
+		}
 	}
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()

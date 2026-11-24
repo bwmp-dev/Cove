@@ -1582,10 +1582,16 @@ CREATE TABLE IF NOT EXISTS scheduled_job_runs (
  creator_id text NOT NULL REFERENCES users(id), dispatch_started boolean NOT NULL DEFAULT false
 );
 ALTER TABLE scheduled_job_runs ADD COLUMN IF NOT EXISTS dispatch_started boolean NOT NULL DEFAULT false;
-CREATE OR REPLACE FUNCTION cove_automation_allowed(owner_id text,team text,project text,environment text,permission text)
+CREATE OR REPLACE FUNCTION cove_account_active(owner_id text)
 RETURNS boolean LANGUAGE sql STABLE AS $$
  SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=owner_id AND u.email_verified AND NOT u.disabled
  AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now())
+ AND (NOT (SELECT require_second_factor FROM control_settings WHERE id=1)
+ OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))
+$$;
+CREATE OR REPLACE FUNCTION cove_automation_allowed(owner_id text,team text,project text,environment text,permission text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=owner_id AND cove_account_active(u.id)
  AND (u.is_admin OR cove_permission(u.id,team,project,environment,permission))
  AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR COALESCE((SELECT require_second_factor FROM teams WHERE id=team),false))
  OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))
@@ -1664,3 +1670,60 @@ CREATE TABLE IF NOT EXISTS workload_moves (
  last_error text NOT NULL DEFAULT '' CHECK(length(last_error)<=1024),
  updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- DNS-01 request identity and cleanup ownership survive issuer/resource removal.
+ALTER TABLE route_certificate_issuers DROP CONSTRAINT IF EXISTS route_certificate_issuers_provider_check;
+ALTER TABLE route_certificate_issuers ADD CONSTRAINT route_certificate_issuers_provider_check CHECK (provider IN ('cloudflare_origin','acme_dns'));
+ALTER TABLE route_certificate_issuers ADD COLUMN IF NOT EXISTS acme_state bytea;
+CREATE TABLE IF NOT EXISTS route_certificate_acme_accounts (
+ directory text PRIMARY KEY,
+ private_key bytea NOT NULL,
+ account_uri text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS route_certificate_dns_intents (
+ id text PRIMARY KEY,
+ issuer_id text REFERENCES route_certificate_issuers(id) ON DELETE SET NULL,
+ workload_id text REFERENCES workloads(id) ON DELETE SET NULL,
+ zone_id text NOT NULL REFERENCES cloudflare_zones(zone_id),
+ cycle_id text NOT NULL,
+ state bytea NOT NULL,
+ cleanup_requested boolean NOT NULL DEFAULT false,
+ phase text NOT NULL DEFAULT 'pending',
+ last_error text NOT NULL DEFAULT '',
+ next_check_at timestamptz DEFAULT now(),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS route_certificate_dns_intents_due ON route_certificate_dns_intents(next_check_at) WHERE phase<>'cleaned';
+CREATE INDEX IF NOT EXISTS route_certificate_dns_intents_zone ON route_certificate_dns_intents(zone_id);
+CREATE INDEX IF NOT EXISTS route_certificate_dns_intents_issuer ON route_certificate_dns_intents(issuer_id);
+
+CREATE OR REPLACE FUNCTION cove_queue_certificate_dns_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF (OLD.issuer_id IS NOT NULL AND NEW.issuer_id IS NULL) OR (OLD.workload_id IS NOT NULL AND NEW.workload_id IS NULL) THEN
+  NEW.cleanup_requested := true;
+  NEW.updated_at := now();
+  IF NEW.phase <> 'cleaned' THEN
+   NEW.phase := 'cleanup';
+   NEW.next_check_at := now();
+  END IF;
+ END IF;
+ RETURN NEW;
+END
+$$;
+DROP TRIGGER IF EXISTS cove_certificate_dns_orphan ON route_certificate_dns_intents;
+CREATE TRIGGER cove_certificate_dns_orphan BEFORE UPDATE OF issuer_id,workload_id ON route_certificate_dns_intents FOR EACH ROW EXECUTE FUNCTION cove_queue_certificate_dns_cleanup();
+
+CREATE OR REPLACE FUNCTION cove_notify_certificate_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE owner_team text;
+BEGIN
+ IF NEW.phase='failed' AND OLD.phase IS DISTINCT FROM NEW.phase THEN
+  SELECT team_id INTO owner_team FROM workloads WHERE id=NEW.workload_id;
+  PERFORM cove_queue_channel_event('certificate.failed','Managed certificate issuance or renewal did not finish. Review certificate issuer status.',owner_team,NEW.workload_id,'certificate:'||NEW.id||':'||NEW.updated_at::text,'');
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_certificate_notifications ON route_certificate_issuers;
+CREATE TRIGGER cove_certificate_notifications AFTER UPDATE OF phase ON route_certificate_issuers FOR EACH ROW EXECUTE FUNCTION cove_notify_certificate_outcome();

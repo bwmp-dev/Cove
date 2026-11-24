@@ -258,7 +258,10 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "use the routes endpoint to change routes on a deployed resource", 409)
 				return
 			}
-			if !s.checkRouteClaims(w, r.Context(), tx, r.PathValue("id"), in.Routes) {
+			if !s.checkRouteClaims(w, r.Context(), tx, r.PathValue("id"), node, in.Routes) {
+				return
+			}
+			if !s.checkRouteListenerSelection(w, r, node, in.Routes) {
 				return
 			}
 		}

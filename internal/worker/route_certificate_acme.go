@@ -19,6 +19,8 @@ import (
 
 type acmeCertificateArchive map[string][]json.RawMessage
 
+const maxACMEStorageBytes = 64 * 1024 * 1024
+
 type acmeProjection struct {
 	Document map[string]json.RawMessage
 	Archive  []json.RawMessage
@@ -173,7 +175,7 @@ func (e *Engine) readACMEFile(ctx context.Context, name string) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() > 64*1024*1024 {
+	if info.Size() > maxACMEStorageBytes {
 		return nil, errors.New("managed ACME storage exceeds the 64 MiB projection limit")
 	}
 	return os.ReadFile(path)
@@ -194,7 +196,7 @@ func (e *Engine) projectRouteCertificateACME(ctx context.Context, routes map[str
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err == nil && (len(raw) > 64*1024*1024 || json.Unmarshal(raw, &archive) != nil) {
+	if err == nil && (len(raw) > maxACMEStorageBytes || json.Unmarshal(raw, &archive) != nil) {
 		return errors.New("managed ACME certificate archive is unreadable")
 	}
 	marker := filepath.Join(e.Root, "certificate-acme-reload.json")
@@ -232,6 +234,16 @@ func (e *Engine) projectRouteCertificateACME(ctx context.Context, routes map[str
 	if !changed {
 		return nil
 	}
+	if ctx.Value(nodeLeaseContextKey{}) != e {
+		unlock, err := e.lockNodeChange(false)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
+	if err := e.requireInterlockedHostSchedule(); err != nil {
+		return err
+	}
 	// The intent survives a worker exit while the proxy is stopped; startup synchronizes it again.
 	if err := writeJSON(marker, map[string]int{"version": 1}); err != nil {
 		return err
@@ -262,7 +274,7 @@ func (e *Engine) projectRouteCertificateACME(ctx context.Context, routes map[str
 	if err != nil {
 		return err
 	}
-	if len(encoded) > 64*1024*1024 {
+	if len(encoded) > maxACMEStorageBytes {
 		return errors.New("managed ACME certificate archive exceeds its 64 MiB limit")
 	}
 	if err := writeJSON(archivePath, archive); err != nil {

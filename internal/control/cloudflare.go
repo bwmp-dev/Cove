@@ -49,6 +49,12 @@ func validateCloudflare(c cloudflareZone) error {
 	return nil
 }
 
+type cloudflareStatusError int
+
+func (e cloudflareStatusError) Error() string {
+	return fmt.Sprintf("Cloudflare request failed (HTTP %d)", int(e))
+}
+
 func (s *Server) cloudflareRequest(ctx context.Context, c cloudflareZone, method, path string, body any, result any) error {
 	if c.ConnectionID != "" {
 		token, err := s.cloudflareConnectionToken(ctx, c.ConnectionID)
@@ -78,7 +84,7 @@ func (s *Server) cloudflareRequest(ctx context.Context, c cloudflareZone, method
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("Cloudflare request failed (HTTP %d)", response.StatusCode)
+		return cloudflareStatusError(response.StatusCode)
 	}
 	var envelope struct {
 		Success bool            `json:"success"`
@@ -284,7 +290,7 @@ func (s *Server) reconcileResourceDNS(ctx context.Context, zone, team string, ex
 		return nil
 	}
 	var zoneRaw []byte
-	err = tx.QueryRow(ctx, "SELECT configuration FROM cloudflare_zones WHERE zone_id=$1 FOR SHARE", zone).Scan(&zoneRaw)
+	err = tx.QueryRow(ctx, "SELECT configuration FROM cloudflare_zones WHERE zone_id=$1 AND cove_account_active(owner_id) FOR SHARE", zone).Scan(&zoneRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -316,7 +322,7 @@ func (s *Server) reconcileResourceDNS(ctx context.Context, zone, team string, ex
 		return errors.New("resource configuration unavailable")
 	}
 	for _, route := range config.Routes {
-		if cloudflareDomainAllowed(domains, route.Domain) {
+		if route.IsPublicHTTPRoute() && cloudflareDomainAllowed(domains, route.Domain) {
 			if err = s.reconcileDNSRecord(ctx, c, route.Domain, c.Nodes[node]); err != nil {
 				return err
 			}

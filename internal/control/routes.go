@@ -39,7 +39,7 @@ func retainedRouteAuth(input []routeInput, previous []worker.Route) ([]worker.Ro
 		}
 		var matches []worker.Route
 		for _, old := range previous {
-			if old.Domain != next.Domain {
+			if old.Domain != next.Domain || old.IsTransportRoute() != next.IsTransportRoute() || next.IsTransportRoute() && (old.Protocol != next.Protocol || old.Policy == nil || next.Policy == nil || old.Policy.Listener != next.Policy.Listener) {
 				continue
 			}
 			oldPrefix := ""
@@ -86,7 +86,9 @@ func (s *Server) routeConflict(ctx context.Context, tx pgx.Tx, workload string, 
 	}
 	wanted := map[string]bool{}
 	for _, route := range routes {
-		wanted[route.Domain] = true
+		if !route.IsTransportRoute() {
+			wanted[route.Domain] = true
+		}
 	}
 	if panel, err := url.Parse(s.PublicURL); err == nil {
 		for domain := range wanted {
@@ -97,6 +99,9 @@ func (s *Server) routeConflict(ctx context.Context, tx pgx.Tx, workload string, 
 	}
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", routeClaimLock); err != nil {
 		return "", err
+	}
+	if len(wanted) == 0 {
+		return "", nil
 	}
 	claimed := func(list []worker.Route) string {
 		for _, route := range list {
@@ -182,7 +187,7 @@ func (s *Server) routeConflict(ctx context.Context, tx pgx.Tx, workload string, 
 }
 
 // checkRouteClaims writes the HTTP error for an unavailable hostname and reports whether the routes may be saved.
-func (s *Server) checkRouteClaims(w http.ResponseWriter, ctx context.Context, tx pgx.Tx, workload string, routes []worker.Route) bool {
+func (s *Server) checkRouteClaims(w http.ResponseWriter, ctx context.Context, tx pgx.Tx, workload, node string, routes []worker.Route) bool {
 	if _, err := retainedRouteAuth(portableRouteInput(routes, nil), nil); err != nil {
 		http.Error(w, err.Error(), 400)
 		return false
@@ -202,6 +207,14 @@ func (s *Server) checkRouteClaims(w http.ResponseWriter, ctx context.Context, tx
 	}
 	if domain != "" {
 		http.Error(w, fmt.Sprintf("%s is already used by the dashboard or another resource", domain), 409)
+		return false
+	}
+	if err := s.transportListenerClaims(ctx, tx, workload, node, routes); err != nil {
+		if errors.Is(err, errTransportListenerClaim) {
+			http.Error(w, "a selected transport listener already belongs to another resource or pending operation", 409)
+		} else {
+			http.Error(w, "transport reservations unavailable", 503)
+		}
 		return false
 	}
 	return true
@@ -320,7 +333,16 @@ func (s *Server) updateRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "wait for the active operation before changing routes", 409)
 		return
 	}
-	if !s.checkRouteClaims(w, r.Context(), tx, id, routes) {
+	var routeNode string
+	if err := tx.QueryRow(r.Context(), "SELECT node_id FROM workloads WHERE id=$1", id).Scan(&routeNode); err != nil {
+		http.Error(w, "worker unavailable", 503)
+		return
+	}
+	if !s.checkRouteClaims(w, r.Context(), tx, id, routeNode, routes) {
+		return
+	}
+
+	if !s.checkRouteListenerSelection(w, r, routeNode, routes) {
 		return
 	}
 	attempted, err := deployAttempted(r.Context(), tx, id)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -26,10 +27,10 @@ func TestExecutableWorkerDispatch(t *testing.T) {
 	}
 	for command, arguments := range map[string]int{
 		"healthcheck": 1, "tunnel": 1, "snapshot-reap": 1,
-		"firewall-revert": 2, "firewall-restore": 2,
+		"firewall-revert": 2, "firewall-restore": 2, "host-security-run": 3,
 		"probe": 0, "rpc": 0, "daemon": 0, "ingress-prepare": 0,
 		"volume-copy": 0, "volume-free": 0, "volume-digest": 0,
-		"link-gateway": 0, "idle-gateway": 0, "certificate-probe": 0, "route-helper": 0,
+		"link-gateway": 0, "idle-gateway": 0, "route-helper": 0,
 		"snapshot-host": 0, "host-gpus": 0, "host-firewall": 0, "host-maintenance": 0,
 		"pitr-fetch": 0, "pitr-forget": 0, "pitr-base": 0, "pitr-runner": 0,
 	} {
@@ -47,6 +48,27 @@ func TestExecutableWorkerDispatch(t *testing.T) {
 			}
 		})
 	}
+	t.Run("certificate probe optional file", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "probes.json")
+		if err := os.WriteFile(file, []byte("[]"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := exec.CommandContext(ctx, binary, "certificate-probe", file).CombinedOutput(); err != nil {
+			t.Fatalf("probe file dispatch: %v %s", err, output)
+		}
+		output, err := exec.CommandContext(ctx, binary, "certificate-probe", file, "extra").CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 2 || !strings.Contains(string(output), "usage:") {
+			t.Fatalf("probe arity: %v %s", err, output)
+		}
+	})
+	t.Run("scheduled host helper dispatch", func(t *testing.T) {
+		output, err := exec.CommandContext(ctx, binary, "host-security-run", "relative-root", strings.Repeat("a", 32), "apt").CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 || strings.Contains(string(output), "usage:") || strings.Contains(string(output), "panic:") || len(output) == 0 {
+			t.Fatalf("native host helper was not reached: %v %s", err, output)
+		}
+	})
 	t.Run("missing command", func(t *testing.T) {
 		output, err := exec.CommandContext(ctx, binary).CombinedOutput()
 		var exit *exec.ExitError

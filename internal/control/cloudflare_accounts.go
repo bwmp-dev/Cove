@@ -378,7 +378,7 @@ func (s *Server) cloudflareConnectionToken(ctx context.Context, id string) (stri
 	defer tx.Rollback(ctx)
 	var raw []byte
 	// Refresh tokens rotate. Lock across exchange and persistence so concurrent zones reuse the result.
-	err = tx.QueryRow(ctx, "SELECT credentials FROM cloudflare_accounts WHERE id=$1 FOR UPDATE", id).Scan(&raw)
+	err = tx.QueryRow(ctx, "SELECT credentials FROM cloudflare_accounts WHERE id=$1 AND cove_account_active(owner_id) FOR UPDATE", id).Scan(&raw)
 	if err == nil {
 		raw, err = unseal(s.Key, raw)
 	}

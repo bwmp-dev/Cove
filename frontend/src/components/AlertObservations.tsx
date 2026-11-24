@@ -5,6 +5,7 @@ import type { Node, Workload, WorkloadObservations } from "../api/types";
 import { formatAbsolute } from "../lib/format";
 import { useOnline } from "../lib/hooks";
 import { formatDays } from "../lib/threshold-rules";
+import { isTransportRoute } from "../lib/route-transports";
 import { RelativeTime } from "./RelativeTime";
 import { Button, DefinitionList, LoadingRows, MetaList, Notice, QueryError, Section, Subsection } from "./ui";
 
@@ -12,7 +13,7 @@ const description = "Raw values the worker reports for certificate and container
 
 function certificateRows(observations: WorkloadObservations, workload: Workload) {
   const expiries = new Map(observations.certificates.map((certificate) => [certificate.domain, certificate.expires_at]));
-  const domains = new Set([...(workload.routes ?? []).map((route) => route.domain), ...expiries.keys()]);
+  const domains = new Set([...(workload.routes ?? []).filter((route) => !isTransportRoute(route)).map((route) => route.domain), ...expiries.keys()]);
   return [...domains].sort().map((domain) => ({ domain, expiresAt: expiries.get(domain) ?? null }));
 }
 

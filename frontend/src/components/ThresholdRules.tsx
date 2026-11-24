@@ -14,6 +14,7 @@ import { providerLabel } from "../lib/notifications";
 import { choiceClass, describedBy, inputClass } from "../lib/styles";
 import { confirmationChoices, defaultThresholdMetric, formatDuration, isThresholdError, maxRuleChannels, metricScope, mountScopes, repeatChoices, thresholdCondition, thresholdDeliveryProblem, thresholdMetric, thresholdMetrics, thresholdRuleFromForm, thresholdUnits, type MountScope, type ThresholdFieldName, type ThresholdFormError, type ThresholdScope } from "../lib/threshold-rules";
 import { formatAbsolute } from "../lib/format";
+import { isTransportRoute } from "../lib/route-transports";
 import { Checkbox } from "./Checkbox";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Select } from "./Select";
@@ -34,7 +35,7 @@ function groupByPlacement(workloads: WorkloadSummary[]) {
 
 function DomainField({ workloadID, value, onChange, error, fieldID }: { workloadID: string; value: string; onChange: (value: string) => void; error?: string; fieldID: string }) {
   const workload = useQuery({ ...workloadQuery(workloadID), enabled: workloadID !== "" });
-  const domains = [...new Set((workload.data?.routes ?? []).map((route) => route.domain))].sort();
+  const domains = [...new Set((workload.data?.routes ?? []).filter((route) => !isTransportRoute(route)).map((route) => route.domain))].sort();
   let hint = "Domains configured on the service's routes.";
   if (workloadID === "") hint = "Select a service first.";
   else if (workload.isPending) hint = "Loading the service's domains…";

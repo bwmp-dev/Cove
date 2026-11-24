@@ -66,7 +66,6 @@ import { PendingRolloutMessage, StagedRollout, usePendingRollout } from "../comp
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
 import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
-import { isWildcardHostname } from "../lib/certificates";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { backupRights, can, currentTeam, managesTeam, pitrRights } from "../lib/permissions";
@@ -78,6 +77,7 @@ import { idleBlocks, idleReason, type IdleHold } from "../lib/idle";
 import { resultSummary } from "../lib/rollouts";
 import { ResourceIcon } from "../components/ResourceIcon";
 import { engineName } from "../lib/databases";
+import { isLinkableRoute, isTransportRoute, transportSummary } from "../lib/route-transports";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -307,14 +307,28 @@ function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: s
   };
 }
 
-// Links the first exact hostname; a resource with only wildcard routes shows the pattern as text.
-function HeaderDomain({ routes }: { routes: Route[] }) {
-  const exact = routes.find((route) => !isWildcardHostname(route.domain));
-  if (!exact) return <span className="font-mono text-xs break-all">{routes[0]?.domain}</span>;
+// Links the first public exact hostname. Wildcard patterns and private (LAN or Tailscale) hostnames show as text, and
+// a resource with only TCP and UDP routes names its first listener instead, because raw routes have no URL.
+function HeaderRoute({ routes }: { routes: Route[] }) {
+  const http = routes.filter((route) => !isTransportRoute(route));
+  const first = http.find(isLinkableRoute) ?? http[0] ?? routes[0];
+  if (!first) return null;
+  const more = routes.length > 1 && <span className="text-fg-subtle"> +{routes.length - 1}</span>;
+  let label;
+  if (isTransportRoute(first)) label = <span className="break-words">{transportSummary(first)}</span>;
+  else if (!isLinkableRoute(first)) label = <span className="font-mono text-xs break-all">{first.domain}</span>;
+  else {
+    label = (
+      <a href={`https://${first.domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
+        {first.domain}
+      </a>
+    );
+  }
   return (
-    <a href={`https://${exact.domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
-      {exact.domain}
-    </a>
+    <span>
+      {label}
+      {more}
+    </span>
   );
 }
 
@@ -385,12 +399,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
                 <RelativeTime value={latest.created_at} className="text-fg-subtle" />
               </span>
             )}
-            {workload.routes?.[0] && (
-              <span key="domain">
-                <HeaderDomain routes={workload.routes} />
-                {workload.routes.length > 1 && <span className="text-fg-subtle"> +{workload.routes.length - 1}</span>}
-              </span>
-            )}
+            {workload.routes?.length ? <HeaderRoute key="domain" routes={workload.routes} /> : null}
             {workload.manually_stopped && (
               <span key="stopped" className="text-warn">
                 Manually stopped, automatic deployments paused
@@ -771,12 +780,16 @@ export function ResourceOverview() {
                     value: workload.routes?.length ? (
                       <div className="space-y-1">
                         {workload.routes.map((item) =>
-                          isWildcardHostname(item.domain) ? (
-                            <span key={item.domain} className="block font-mono text-xs break-all">
+                          isTransportRoute(item) ? (
+                            <span key={`${item.protocol}-${item.policy?.listener ?? ""}`} className="block break-words">
+                              {transportSummary(item)}
+                            </span>
+                          ) : !isLinkableRoute(item) ? (
+                            <span key={`${item.domain}${item.policy?.path_prefix ?? ""}`} className="block font-mono text-xs break-all">
                               {item.domain}
                             </span>
                           ) : (
-                            <a key={item.domain} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
+                            <a key={`${item.domain}${item.policy?.path_prefix ?? ""}`} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
                               {item.domain}
                             </a>
                           ),

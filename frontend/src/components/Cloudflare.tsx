@@ -13,6 +13,8 @@ import { countLabel } from "../lib/hierarchy";
 import { StatusLabel } from "./status";
 import { Button, Field, LoadingRows, Notice, QueryError, Subsection, SwitchField } from "./ui";
 import { CloudflareConnect } from "./CloudflareConnect";
+import { zoneCertificateChallengesQuery } from "../api/certificates";
+import { ChallengeList } from "./CertificateChallenges";
 
 interface Share { team_id: string; domains: string[] }
 interface Zone {
@@ -70,6 +72,8 @@ export function CloudflareSettings() {
   const session = useSession();
   const [sharing, setSharing] = useState<Zone | null>(null);
   const [editing, setEditing] = useState<Zone | "new" | null>(null);
+  const [challenges, setChallenges] = useState<Zone | null>(null);
+  if (challenges) return <ZoneChallenges zone={challenges} onDone={() => setChallenges(null)} />;
   if (sharing) return <DomainSharing zone={sharing} onDone={() => setSharing(null)} />;
   if (editing) return <ZoneForm initial={editing === "new" ? undefined : editing} onDone={() => setEditing(null)} />;
   return <div className="divide-y divide-line">
@@ -91,7 +95,7 @@ export function CloudflareSettings() {
               {zone.error && <p role="alert" className="mt-1 text-xs break-words text-bad">{zone.error}</p>}
               {!zone.can_manage && <p className="mt-1 text-xs break-words text-fg-muted">Shared with this team: {sharedHere.join(", ")}</p>}
             </div>
-            {zone.can_manage && <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => setEditing(zone)}>Edit</Button><Button size="sm" onClick={() => setSharing(zone)}>Share domains</Button></div>}
+            {zone.can_manage && <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => setEditing(zone)}>Edit</Button><Button size="sm" onClick={() => setSharing(zone)}>Share domains</Button><Button size="sm" variant="ghost" onClick={() => setChallenges(zone)} aria-label={`DNS challenges for ${zone.domain}`}>DNS challenges</Button></div>}
           </li>;
         })}
       </ul>}
@@ -101,6 +105,18 @@ export function CloudflareSettings() {
       <div className="mt-3 space-y-2 pl-5.5"><p className="text-xs text-fg-muted">Use a zone ID and a token scoped to that zone instead of a saved connection.</p><Button onClick={() => setEditing("new")}>Connect Cloudflare zone</Button></div>
     </details>
   </div>;
+}
+
+// Owner and administrator view of every unresolved DNS-01 record in the zone, including cleanup for deleted resources.
+function ZoneChallenges({ zone, onDone }: { zone: Zone; onDone: () => void }) {
+  const challenges = useQuery(zoneCertificateChallengesQuery(zone.zone_id));
+  return <Subsection
+    title={`DNS challenge records in ${zone.domain}`}
+    description="Temporary _acme-challenge TXT records Cove published for ACME DNS-01 certificates, and records it still has to remove, including those of removed issuers and deleted resources. Cove reconciles them automatically while the panel is online, also after a team's share is revoked. Records Cove does not own are never listed or removed."
+    actions={<Button variant="ghost" onClick={onDone}>Close</Button>}
+  >
+    <div className="overflow-hidden rounded-md border border-line"><ChallengeList challenges={challenges} scope={{ kind: "zone" }} /></div>
+  </Subsection>;
 }
 
 function DomainSharing({ zone, onDone }: { zone: Zone; onDone: () => void }) {

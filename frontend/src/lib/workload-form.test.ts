@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Listener } from "../api/ingress-listeners";
 import type { Route } from "../api/types";
 import { certificateSwitches, emptyForwardAuth, routesNeedProtocol4, emptyPolicy, extensionSummary, isCIDR, parseDotenv, refreshCertificateErrors, routeRows, sameRoutes, validateComposePath, validateHostKey, validateRepository, validateRoutes, validateWorkload, withoutRouteSecrets, redactedHeader, type HeaderRow, type PolicyDraft, type RouteRow, type WorkloadFormValues } from "./workload-form";
 
@@ -559,5 +560,154 @@ describe("exact hostnames below a wildcard route", () => {
     expect(validateRoutes(routeRows([wildcard, exact({ certificate_source: "uploaded", certificate_id: wildcardId })]), [], [], 4).errors).toEqual({});
     expect(validateRoutes(routeRows([wildcard, exact({ certificate_source: "uploaded", certificate_id: exactId })]), [], [], 4).errors).toEqual({});
     expect(validateRoutes(routeRows([wildcard, exact(undefined, "example.com"), exact({ certificate_source: "acme" }, "a.b.example.com")]), [], [], 4).errors).toEqual({});
+  });
+});
+
+describe("private route visibility", () => {
+  // Fixture listeners shaped like GET /api/workloads/{id}/route-listeners; not real node configuration.
+  const listeners: Listener[] = [
+    { id: "office", protocol: "https", visibility: "lan", bindings: [{ address: "192.168.10.2", port: 8443 }] },
+    { id: "tailnet", protocol: "https", visibility: "tailscale", bindings: [{ address: "100.100.1.2", port: 8443 }] },
+    { id: "raw", protocol: "tcp", visibility: "lan", bindings: [{ address: "192.168.10.2", port: 5432 }] },
+  ];
+  const privateRoute = (policy: Route["policy"] = {}, domain = "app.example.com"): Route => ({ domain, service: "web", port: 8080, policy: { visibility: "lan", listener: "office", certificate_source: "default", ...policy } });
+  const publicRoute: Route = { domain: "app.example.com", service: "web", port: 8080 };
+
+  it("keeps legacy public routes in their old shape", () => {
+    expect(validateRoutes(routeRows([publicRoute]), [publicRoute], [], 4, listeners)).toEqual({ routes: [publicRoute], errors: {} });
+  });
+
+  it("round-trips a saved private route unchanged and keeps it clean", () => {
+    const saved = privateRoute();
+    expect(sameRoutes(routeRows([saved]), [saved])).toBe(true);
+    expect(validateRoutes(routeRows([saved]), [saved], [], 5, listeners)).toEqual({ routes: [saved], errors: {} });
+  });
+
+  it("serializes a new private route with its listener and certificate", () => {
+    const rows = routeRows([publicRoute]);
+    const row = rows[0] as RouteRow;
+    row.policy = { ...emptyPolicy(), visibility: "tailscale", listener: "tailnet", certificateSource: "default" };
+    expect(validateRoutes(rows, [publicRoute], [], 5, listeners).routes).toEqual([{ ...publicRoute, policy: { visibility: "tailscale", listener: "tailnet", certificate_source: "default" } }]);
+  });
+
+  it("switches a saved private hostname to public with an explicit public visibility and null listener", () => {
+    const saved = privateRoute();
+    const rows = routeRows([saved]);
+    const row = rows[0] as RouteRow;
+    row.policy = { ...(row.policy as PolicyDraft), visibility: "", listener: "" };
+    expect(validateRoutes(rows, [saved], [], 5, listeners).routes).toEqual([{ ...publicRoute, policy: { certificate_source: "default", visibility: "public", listener: null } }]);
+    const fresh: RouteRow = { id: "new", domain: "app.example.com", service: "web", port: 8080 };
+    expect(validateRoutes([fresh], [saved], [], 5, listeners).routes).toEqual([{ ...publicRoute, policy: { certificate_id: null, visibility: "public", listener: null } }]);
+  });
+
+  it("keeps an explicitly saved public visibility", () => {
+    const saved: Route = { ...publicRoute, policy: { visibility: "public" } };
+    expect(sameRoutes(routeRows([saved]), [saved])).toBe(true);
+    expect(validateRoutes(routeRows([saved]), [saved], [], 5, listeners).routes).toEqual([saved]);
+  });
+
+  it("requires a listener of the same visibility and HTTPS protocol", () => {
+    const missing = routeRows([privateRoute({ listener: "" })]);
+    expect(validateRoutes(missing, [], [], 5, listeners).errors[`${missing[0]?.id}.listener`]).toBe("Choose the listener that serves this hostname.");
+    const wrong = routeRows([privateRoute({ listener: "tailnet" })]);
+    expect(validateRoutes(wrong, [], [], 5, listeners).errors[`${wrong[0]?.id}.listener`]).toMatch(/not a LAN HTTPS listener/);
+    const tcp = routeRows([privateRoute({ listener: "raw" })]);
+    expect(validateRoutes(tcp, [], [], 5, listeners).errors[`${tcp[0]?.id}.listener`]).toMatch(/not a LAN HTTPS listener/);
+  });
+
+  it("keeps a stored listener that is no longer listed, and leaves it to the API while the list is unknown", () => {
+    const saved = privateRoute({ listener: "removed" });
+    const rows = routeRows([saved]);
+    expect(validateRoutes(rows, [saved], [], 5, listeners).errors[`${rows[0]?.id}.listener`]).toMatch(/Listener removed is not configured/);
+    expect(validateRoutes(rows, [saved], [], 5, undefined)).toEqual({ routes: [saved], errors: {} });
+    expect(rows[0]?.policy?.listener).toBe("removed");
+  });
+
+  it("rejects Let's Encrypt on a private route", () => {
+    for (const policy of [{ certificate_source: "acme" as const }, { certificate_source: undefined }]) {
+      const rows = routeRows([privateRoute(policy)]);
+      expect(validateRoutes(rows, [], [], 5, listeners).errors[`${rows[0]?.id}.certificate`]).toMatch(/Private routes cannot use Let's Encrypt/);
+    }
+  });
+
+  it("requires the same visibility on every path and overlapping wildcard", () => {
+    const paths = routeRows([privateRoute(), { ...publicRoute, policy: { path_prefix: "/api", certificate_source: "default" } }]);
+    expect(validateRoutes(paths, [], [], 5, listeners).errors[`${paths[1]?.id}.visibility`]).toBe("Every path on app.example.com must use the same visibility and listener.");
+    const wildcard = routeRows([privateRoute({ certificate_source: "uploaded", certificate_id: "a".repeat(32) }, "*.example.com"), { ...publicRoute, policy: { certificate_source: "uploaded", certificate_id: "a".repeat(32) } }]);
+    expect(validateRoutes(wildcard, [], [], 5, listeners).errors[`${wildcard[1]?.id}.visibility`]).toMatch(/app\.example\.com overlaps \*\.example\.com/);
+  });
+
+  it("rejects new privacy on an older worker but keeps saved privacy for the control plane", () => {
+    const rows = routeRows([publicRoute]);
+    const row = rows[0] as RouteRow;
+    row.policy = { ...emptyPolicy(), visibility: "lan", listener: "office", certificateSource: "default" };
+    expect(validateRoutes(rows, [publicRoute], [], 4).errors[`${row.id}.visibility`]).toMatch(/needs a newer worker/);
+    const saved = privateRoute();
+    expect(validateRoutes(routeRows([saved]), [saved], [], 4)).toEqual({ routes: [saved], errors: {} });
+  });
+
+  it("clears a shown listener error once another listener is chosen", () => {
+    const rows = routeRows([privateRoute({ listener: "" })]);
+    const shown = validateRoutes(rows, [], [], 5, listeners).errors;
+    (rows[0]?.policy as PolicyDraft).listener = "office";
+    expect(refreshCertificateErrors(shown, rows, [], [], 5, listeners)).toEqual({});
+  });
+});
+
+describe("HTTP upstream timeouts", () => {
+  const timed: Route = { domain: "app.example.com", service: "web", port: 80, policy: { timeouts: { dial_seconds: 5, idle_connection_seconds: 120 } } };
+  const plainRoute: Route = { domain: "app.example.com", service: "web", port: 80 };
+  const policyOf = (rows: RouteRow[]) => rows[0]?.policy as PolicyDraft;
+
+  it("keeps legacy routes without timeouts in their legacy shape", () => {
+    const rows = routeRows([plainRoute]);
+    expect(sameRoutes(rows, [plainRoute])).toBe(true);
+    expect(validateRoutes(rows, [plainRoute], [], 6).routes).toEqual([plainRoute]);
+  });
+
+  it("keeps an explicit http protocol unchanged and saves it back", () => {
+    const explicit: Route = { ...plainRoute, protocol: "http" };
+    const rows = routeRows([explicit]);
+    expect(sameRoutes(rows, [explicit])).toBe(true);
+    expect(validateRoutes(rows, [explicit], [], 6).routes).toEqual([explicit]);
+    expect(routeRows([plainRoute])[0]).not.toHaveProperty("protocol");
+  });
+
+  it("round-trips saved timeouts and sends only positive overrides", () => {
+    const rows = routeRows([timed]);
+    expect(sameRoutes(rows, [timed])).toBe(true);
+    expect(validateRoutes(rows, [timed], [], 6).routes).toEqual([timed]);
+    policyOf(rows).timeouts = { dial: "0", header: "30", idle: "" };
+    expect(validateRoutes(rows, [timed], [], 6).routes).toEqual([{ ...plainRoute, policy: { timeouts: { response_header_seconds: 30 } } }]);
+  });
+
+  it("clears saved timeouts with an explicit null, also on a route removed and added again", () => {
+    const rows = routeRows([timed]);
+    policyOf(rows).timeouts = { dial: "", header: "", idle: "0" };
+    expect(validateRoutes(rows, [timed], [], 6).routes).toEqual([{ ...plainRoute, policy: { timeouts: null } }]);
+    const readded: RouteRow[] = [{ id: "r2", domain: "app.example.com", service: "web", port: 80 }];
+    expect(validateRoutes(readded, [timed], [], 6).routes).toEqual([{ ...plainRoute, policy: { timeouts: null } }]);
+  });
+
+  it("validates whole seconds within the worker's limits", () => {
+    const rows = routeRows([plainRoute]);
+    const id = rows[0]?.id ?? "";
+    rows[0] = { ...rows[0]!, policy: { ...emptyPolicy(), timeouts: { dial: "601", header: "1.5", idle: "3601" } } };
+    expect(validateRoutes(rows, [], [], 6).errors).toEqual({ [`${id}.timeouts.dial`]: "Enter whole seconds from 0 to 600.", [`${id}.timeouts.header`]: "Enter whole seconds from 0 to 600.", [`${id}.timeouts.idle`]: "Enter whole seconds from 0 to 3600." });
+    rows[0] = { ...rows[0], policy: { ...emptyPolicy(), timeouts: { dial: "600", header: "600", idle: "3600" } } };
+    expect(validateRoutes(rows, [], [], 6).errors).toEqual({});
+  });
+
+  it.each([
+    [5, /need a newer worker/],
+    [undefined, /once the worker capabilities of the node are known/],
+  ])("rejects new timeouts on route protocol %s but keeps saved ones and allows clearing them", (protocol, message) => {
+    const added = routeRows([plainRoute]);
+    added[0] = { ...added[0]!, policy: { ...emptyPolicy(), timeouts: { dial: "5", header: "", idle: "" } } };
+    expect(validateRoutes(added, [plainRoute], [], protocol).errors[`${added[0].id}.timeouts`]).toMatch(message);
+    expect(validateRoutes(routeRows([timed]), [timed], [], protocol).errors).toEqual({});
+    const cleared = routeRows([timed]);
+    policyOf(cleared).timeouts = { dial: "", header: "", idle: "" };
+    expect(validateRoutes(cleared, [timed], [], protocol).routes).toEqual([{ ...plainRoute, policy: { timeouts: null } }]);
   });
 });

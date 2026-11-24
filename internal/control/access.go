@@ -369,7 +369,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return true
 	case strings.HasPrefix(path, "/api/nodes"):
-		if p.Admin && (r.Pattern == "PUT /api/nodes/{id}" || r.Pattern == "DELETE /api/nodes/{id}" || r.Method != "GET" && (strings.HasSuffix(path, "/identity") || strings.HasSuffix(path, "/bastion") || strings.HasSuffix(path, "/enrollment"))) {
+		if p.Admin && (r.Pattern == "PUT /api/nodes/{id}" || r.Pattern == "DELETE /api/nodes/{id}" || r.Method != "GET" && (strings.HasSuffix(path, "/identity") || strings.HasSuffix(path, "/bastion") || strings.HasSuffix(path, "/enrollment") || strings.Contains(path, "/ingress-listeners") || strings.HasSuffix(path, "/host-maintenance"))) {
 			var moving bool
 			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM workload_moves m JOIN operations o ON o.id=m.operation_id WHERE (m.source_node=$1 OR m.target_node=$1) AND o.state IN ('queued','running'))`, id).Scan(&moving); err != nil {
 				http.Error(w, "move state unavailable", 503)

@@ -61,6 +61,12 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/nodes/{id}/ingress-listeners", "nodes:manage", "Inspect shared node listener metadata; instance administrators only", nil, worker.IngressExposureStatus{}, 200, s.ingressExposures},
+		{"POST", "/nodes/{id}/ingress-listeners/initialize", "nodes:manage", "Initialize or recover the shared node proxy; instance administrators only", nil, worker.IngressExposureStatus{}, 200, s.initializeIngressExposures},
+		{"POST", "/nodes/{id}/ingress-listeners/plan", "nodes:manage", "Review shared listener changes without applying them", worker.IngressExposureSettings{}, worker.IngressExposurePlan{}, 200, s.planIngressExposures},
+		{"PUT", "/nodes/{id}/ingress-listeners", "nodes:manage", "Apply a reviewed listener plan with explicit interruption acknowledgement", worker.IngressExposureRequest{}, worker.IngressExposureStatus{}, 200, s.changeIngressExposures},
+		{"GET", "/workloads/{id}/route-listeners", "workloads:read", "Read managed route listener metadata", nil, map[string]any{}, 200, s.routeListeners},
+		{"GET", "/workloads/{id}/certificate-authority", "workloads:read", "Read configured authority metadata and current terms", nil, map[string]string{}, 200, s.certificateAuthority},
 		{"GET", "/workloads/{id}/pitr", "workloads:read", "Read PITR configuration metadata and verified recovery windows without keys", nil, map[string]any{}, 200, s.getPITR},
 		{"PUT", "/workloads/{id}/pitr", "pitr:configure", "Configure PostgreSQL capture after explicit restart confirmation", pitrSettingsInput{}, apiID{}, 202, s.changePITR},
 		{"DELETE", "/workloads/{id}/pitr", "pitr:forget", "Delete disabled PITR history after confirmation", pitrSettingsInput{}, apiID{}, 202, s.changePITR},

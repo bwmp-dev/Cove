@@ -11,7 +11,7 @@ import { RelativeTime } from "../components/RelativeTime";
 import { Select } from "../components/Select";
 import { StatusLabel } from "../components/status";
 import { Button, DefinitionList, EmptyState, Field, Notice, QueryError, Section } from "../components/ui";
-import { isWildcardHostname } from "../lib/certificates";
+import { isLinkableRoute } from "../lib/route-transports";
 import { useOnline } from "../lib/hooks";
 import { can, currentTeam, managesTeam } from "../lib/permissions";
 import { useSession } from "../lib/session";
@@ -169,8 +169,9 @@ function ProvisionForm({ workload }: { workload: Workload }) {
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: bucketsKey(workload.id) }), client.invalidateQueries({ queryKey: keys.workload(workload.id) }), client.invalidateQueries({ queryKey: ["connections", "storage-locations"] })]),
   });
   const candidates = (resources.data ?? []).filter((item) => item.id !== workload.id && item.kind !== "database" && can(item.permissions, "edit") && can(item.permissions, "read_secrets"));
-  // A wildcard hostname is not an address clients can connect to, so it is never offered as the S3 endpoint.
-  const routes = (detail.data?.routes ?? []).filter((route) => route.service === garageService && route.port === garagePort && !isWildcardHostname(route.domain));
+  // Clients reach the S3 endpoint at its public exact HTTPS hostname. A wildcard is not an address, a LAN or Tailscale
+  // hostname is not served publicly, and a raw TCP or UDP route has no hostname, so none of them is offered.
+  const routes = (detail.data?.routes ?? []).filter((route) => route.service === garageService && route.port === garagePort && isLinkableRoute(route));
   const garage = detail.data ? /dxflrs\/garage:/.test(detail.data.compose) : false;
   const selectedDomain = routes.some((route) => route.domain === domain) ? domain : (routes[0]?.domain ?? "");
 
@@ -264,7 +265,7 @@ function GarageEndpoint({ detail, routes, garage, selected, onSelect }: { detail
             </Link>
           }
         >
-          {detail.data.name} has no exact HTTPS domain for service garage on port 3900. A wildcard domain cannot be the S3 endpoint. Add an exact domain, deploy, then return here.
+          {detail.data.name} has no public exact HTTPS domain for service garage on port 3900. A wildcard domain or a LAN or Tailscale only domain cannot be the S3 endpoint. Add a public exact domain, deploy, then return here.
         </Notice>
       )}
       {routes.length > 0 && (

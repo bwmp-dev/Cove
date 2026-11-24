@@ -151,7 +151,7 @@ func (s *Server) observedPosture(ctx context.Context, add func(string, bool, str
 
 	add("panel_backup", backup, "Encrypted panel backup repository was verified by the host backup script within 48 hours.", "Run and schedule scripts/backup-panel.py; retain off-host copies and restore-test them. The receipt proves a successful repository check, not off-host durability.")
 	add("updates", updates, "The host updater verified the selected channel within two hours and its version matches this panel.", "Run the host updater with --latest and check its timer. A missing or stale successful registry check needs attention.")
-	add("port_exposure", ports, "Every workload was inspected within 15 minutes and no all-interface Docker port publication was found.", "Review workload runtime/preflight and bind exposed ports to a deliberate address. Resolve unreachable workers so the bounded fleet scanner can inspect them.")
+	add("port_exposure", ports, "Every workload was inspected within 15 minutes and no all-interface Docker port publication was found.", "Review workload runtime/preflight and bind exposed ports to a deliberate address. Inspect shared ingress HTTP, HTTP/3, TCP and UDP listeners separately on each node and review Host firewall; listener changes never open firewall rules. Resolve unreachable workers so the bounded fleet scanner can inspect them.")
 	rows, err := s.DB.Query(ctx, "SELECT capabilities,last_checked_at>now()-interval '15 minutes' FROM nodes WHERE state<>'pending'")
 	if err != nil {
 		return err

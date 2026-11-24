@@ -8,6 +8,7 @@ import (
 )
 
 var channelOutcomeEvents = []string{
+	"certificate.failed",
 	"identity.provisioned", "identity.deprovisioned", "identity.membership_changed", "identity.sync_failed",
 	"security.lockout", "security.new_device", "security.second_factor_reset", "audit_export.failed", "deployment.freeze_override",
 	"deploy_hook.accepted", "deploy_hook.failed", "gitops.applied", "gitops.drift", "configuration.applied", "import.reviewed", "import.failed", "adoption.succeeded", "adoption.failed",

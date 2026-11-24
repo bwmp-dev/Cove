@@ -21,6 +21,9 @@ type RouteUpstream struct {
 }
 
 type RoutePolicy struct {
+	Timeouts          *RouteTimeouts    `json:"timeouts,omitempty"`
+	Visibility        string            `json:"visibility,omitempty"`
+	Listener          string            `json:"listener,omitempty"`
 	Maintenance       *RouteMaintenance `json:"maintenance,omitempty"`
 	ErrorPages        map[string]string `json:"error_pages,omitempty"`
 	ForwardAuth       *RouteForwardAuth `json:"forward_auth,omitempty"`
@@ -56,12 +59,21 @@ var routePath = regexp.MustCompile(`^/[a-zA-Z0-9/_.~%+@:-]*$`)
 var headerName = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 func (r Route) validatePolicy() error {
+	if r.IsTransportRoute() {
+		return validateTransportRoute(r)
+	}
 	if err := validateRouteExtensions(r.Policy); err != nil {
+		return err
+	}
+	if err := validatePrivateRoute(r); err != nil {
 		return err
 	}
 	p := r.Policy
 	if p == nil {
 		return nil
+	}
+	if err := validateRouteTimeouts(p.Timeouts); err != nil {
+		return err
 	}
 	if len(p.PathPrefix) > 1024 || (p.PathPrefix != "" && !routePath.MatchString(p.PathPrefix)) {
 		return errors.New("route path prefix must be an absolute URL path without query or rule syntax")
@@ -99,25 +111,10 @@ func (r Route) validatePolicy() error {
 			names[key] = true
 		}
 	}
-	if len(p.IPAllowList) > 64 {
-		return errors.New("at most 64 source CIDRs are allowed")
+	if err := validateRouteAllowList(p.IPAllowList); err != nil {
+		return err
 	}
-	for _, cidr := range p.IPAllowList {
-		if _, err := netip.ParsePrefix(cidr); err != nil {
-			return errors.New("IP allowlist entries must be IPv4 or IPv6 CIDRs")
-		}
-	}
-	if len(p.Upstreams) > 15 {
-		return errors.New("at most 16 route upstreams are allowed including the primary service")
-	}
-	seen := map[RouteUpstream]bool{{Service: r.Service, Port: r.Port}: true}
-	for _, target := range p.Upstreams {
-		if !serviceIdentifier.MatchString(target.Service) || target.Port < 1 || target.Port > 65535 || seen[target] {
-			return errors.New("invalid or duplicate route upstream")
-		}
-		seen[target] = true
-	}
-	return nil
+	return validateRouteUpstreams(r)
 }
 
 func routeTargets(routes []Route) []Route {
@@ -137,6 +134,10 @@ func routeTargets(routes []Route) []Route {
 }
 
 func (c *dynamicIngress) addRoute(workload string, r Route) {
+	if r.IsTransportRoute() {
+		c.addTransportRoute(workload, r)
+		return
+	}
 	upstream := fmt.Sprintf("http://%s:%d", routeAlias(workload, r.Service), r.Port)
 	if r.Policy == nil {
 		c.add(r.Domain, upstream, r.Auth)
@@ -163,6 +164,10 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 		key := next + suffix
 		c.HTTP.Middlewares[key] = middleware
 		router.Middlewares = append(router.Middlewares, key)
+	}
+	if r.privateRoute() {
+		add("-visibility", ingressMiddleware{IPAllowList: map[string]any{"sourceRange": privateRouteRanges(p.Visibility)}})
+		router.EntryPoints = []string{ingressListenerName(p.Listener)}
 	}
 	if len(p.IPAllowList) > 0 {
 		add("-allow", ingressMiddleware{IPAllowList: map[string]any{"sourceRange": p.IPAllowList}})
@@ -211,5 +216,36 @@ func (c *dynamicIngress) addRoute(workload string, r Route) {
 		slices.Sort(statuses)
 		add("-errors", ingressMiddleware{Errors: map[string]any{"status": statuses, "service": pages, "query": "/routes/" + routeAuxKey(r) + "/error/{status}", "errorRequestHeaders": []string{"Accept"}}})
 	}
+	c.addRouteTimeouts(next, p.Timeouts, &service)
 	c.HTTP.Routers[next], c.HTTP.Services[next] = router, service
+}
+
+func validateRouteAllowList(ranges []string) error {
+	if len(ranges) > 64 {
+		return errors.New("at most 64 source CIDRs are allowed")
+	}
+	for _, cidr := range ranges {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			return errors.New("IP allowlist entries must be IPv4 or IPv6 CIDRs")
+		}
+	}
+
+	return nil
+}
+func validateRouteUpstreams(r Route) error {
+	p := r.Policy
+	if p == nil {
+		return nil
+	}
+	if len(p.Upstreams) > 15 {
+		return errors.New("at most 16 route upstreams are allowed including the primary service")
+	}
+	seen := map[RouteUpstream]bool{{Service: r.Service, Port: r.Port}: true}
+	for _, target := range p.Upstreams {
+		if !serviceIdentifier.MatchString(target.Service) || target.Port < 1 || target.Port > 65535 || seen[target] {
+			return errors.New("invalid or duplicate route upstream")
+		}
+		seen[target] = true
+	}
+	return nil
 }

@@ -15,11 +15,12 @@ import (
 )
 
 type workloadMovePreview struct {
-	SourceID string           `json:"source_node_id"`
-	TargetID string           `json:"destination_node_id"`
-	Source   *worker.MovePlan `json:"source"`
-	Target   *worker.MovePlan `json:"target"`
-	Revision string           `json:"revision"`
+	SourceID         string           `json:"source_node_id"`
+	TargetID         string           `json:"destination_node_id"`
+	Source           *worker.MovePlan `json:"source"`
+	Target           *worker.MovePlan `json:"target"`
+	Revision         string           `json:"revision"`
+	ListenerRevision string           `json:"listener_revision,omitempty"`
 }
 
 type workloadMoveIntent struct {
@@ -57,6 +58,15 @@ func (s *Server) planWorkloadMove(ctx context.Context, workload, target string) 
 	}
 	if !allowed || preview.SourceID == target {
 		return preview, nil, errors.New("choose a different assigned ready node with move support, and settle source operations or previews first")
+	}
+	var config workloadInput
+	plain, err := unseal(s.Key, configuration)
+	if err != nil || json.Unmarshal(plain, &config) != nil {
+		return preview, nil, errors.New("move configuration is unavailable")
+	}
+	preview.ListenerRevision, err = s.moveRouteDestination(ctx, s.DB, target, config.Routes)
+	if err != nil {
+		return preview, nil, err
 	}
 	id := resourceID()
 	source, err := s.moveRPC(ctx, preview.SourceID, id, workload, "plan")
@@ -137,6 +147,25 @@ func (s *Server) workloadMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "move queue unavailable", 503)
 		return
 	}
+	if _, err = tx.Exec(r.Context(), "SELECT pg_advisory_xact_lock($1)", routeClaimLock); err != nil {
+		http.Error(w, "route reservations unavailable", 503)
+		return
+	}
+	var config workloadInput
+	plain, err := unseal(s.Key, configuration)
+	if err != nil || json.Unmarshal(plain, &config) != nil {
+		http.Error(w, "move configuration unavailable", 503)
+		return
+	}
+	listenerRevision, err := s.moveRouteDestination(r.Context(), tx, preview.TargetID, config.Routes)
+	if err != nil || listenerRevision != preview.ListenerRevision {
+		http.Error(w, "destination route listeners changed; review a fresh move plan", 409)
+		return
+	}
+	if err = s.transportListenerClaims(r.Context(), tx, id, preview.TargetID, config.Routes); err != nil {
+		http.Error(w, "destination transport listener is reserved by another resource or move", 409)
+		return
+	}
 	var count int
 	if err = tx.QueryRow(r.Context(), `SELECT count(*) FROM workload_moves m JOIN operations o ON o.id=m.operation_id WHERE o.state IN ('queued','running')`).Scan(&count); err != nil {
 		http.Error(w, "move queue unavailable", 503)
@@ -175,4 +204,39 @@ func (s *Server) workloadMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, 202, map[string]string{"id": operation})
+}
+
+func (s *Server) moveRouteDestination(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, node string, routes []worker.Route) (string, error) {
+	managed := false
+	for _, route := range routes {
+		if route.IsTransportRoute() || route.Policy != nil && (route.Policy.Visibility == "lan" || route.Policy.Visibility == "tailscale") {
+			managed = true
+		}
+	}
+	if !managed {
+		return "", nil
+	}
+	var protocol int
+	if err := db.QueryRow(ctx, "SELECT COALESCE((capabilities->>'route_protocol')::integer,0) FROM nodes WHERE id=$1", node).Scan(&protocol); err != nil || protocol < worker.RouteProtocol(routes) {
+		return "", errors.New("upgrade and verify the destination worker before moving listener routes")
+	}
+	proxy, err := s.outboundConfig(ctx)
+	if err != nil {
+		return "", err
+	}
+	response, err := s.nodeRPCUsing(ctx, db, node, worker.RPCRequest{Method: "ingress_exposures"}, proxy)
+	if err != nil || response.Exposures == nil {
+		return "", errors.New("destination route listeners are unavailable; verify the node before moving")
+	}
+	if err := worker.ValidateRouteListeners(routes, response.Exposures.Settings); err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(response.Exposures.Settings)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
 }

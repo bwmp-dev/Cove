@@ -13,14 +13,20 @@ func main() {
 	expectedArgs := 2
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "certificate-probe":
+			if len(os.Args) == 3 {
+				expectedArgs = 3
+			}
 		case "tunnel", "healthcheck", "snapshot-reap":
 			expectedArgs = 3
+		case "host-security-run":
+			expectedArgs = 5
 		case "firewall-revert", "firewall-restore":
 			expectedArgs = 4
 		}
 	}
 	if len(os.Args) != expectedArgs {
-		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two")
+		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two; host-security-run needs root, owner and manager; certificate-probe accepts an optional file")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -66,9 +72,15 @@ func main() {
 		reload := make(chan os.Signal, 1)
 		signal.Notify(reload, syscall.SIGHUP)
 		err = worker.RunLinkGateway(ctx, reload)
+	case "host-security-run":
+		err = worker.RunScheduledHostSecurity(ctx, os.Args[2], os.Args[3], os.Args[4])
 	case "certificate-probe":
 		var file *os.File
-		file, err = os.Open("/config/probes.json")
+		path := "/config/probes.json"
+		if len(os.Args) == 3 {
+			path = os.Args[2]
+		}
+		file, err = os.Open(path)
 		if err == nil {
 			defer file.Close()
 			err = worker.RunRouteCertificateProbe(ctx, file)

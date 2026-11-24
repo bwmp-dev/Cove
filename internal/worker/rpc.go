@@ -18,6 +18,7 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
+	Exposures       *IngressExposureRequest    `json:"exposures,omitempty"`
 	Database        *DatabaseInspectionRequest `json:"database_inspection,omitempty"`
 	Bucket          *ObjectBucket              `json:"object_bucket,omitempty"`
 	Diff            *ReleaseComparisonRequest  `json:"release_comparison,omitempty"`
@@ -47,53 +48,55 @@ type RPCRequest struct {
 	Identity        *IdentityRequest           `json:"identity,omitempty"`
 }
 type RPCResponse struct {
-	Database        *DatabaseInspection   `json:"database_inspection,omitempty"`
-	Comparison      *ReleaseComparison    `json:"release_comparison,omitempty"`
-	Adopted         *AdoptionRequest      `json:"adopted,omitempty"`
-	ComposeProjects []ComposeProject      `json:"compose_projects,omitempty"`
-	Adoption        *AdoptionPlan         `json:"adoption,omitempty"`
-	ImportedCompose *ImportedCompose      `json:"imported_compose,omitempty"`
-	Drift           *DriftReport          `json:"drift,omitempty"`
-	SourceFiles     *SourceFiles          `json:"source_files,omitempty"`
-	Exec            *ExecResult           `json:"exec,omitempty"`
-	Links           *LinkStatus           `json:"links,omitempty"`
-	Ingress         *IngressConfigState   `json:"ingress,omitempty"`
-	IngressFile     *IngressConfigFile    `json:"ingress_file,omitempty"`
-	IngressResult   *IngressConfigResult  `json:"ingress_result,omitempty"`
-	RestoreCopy     *RestoreCopy          `json:"restore_copy,omitempty"`
-	Images          map[string]string     `json:"images,omitempty"`
-	Inventory       *PreviewInventory     `json:"inventory,omitempty"`
-	Cleanup         *CleanupPreview       `json:"cleanup,omitempty"`
-	Preflight       *PreflightReport      `json:"preflight,omitempty"`
-	Terminal        *TerminalResponse     `json:"terminal,omitempty"`
-	Releases        []Release             `json:"releases,omitempty"`
-	Backups         []BackupRecord        `json:"backups,omitempty"`
-	Maintenance     *Maintenance          `json:"maintenance,omitempty"`
-	Probe           *Probe                `json:"probe,omitempty"`
-	Operation       *Operation            `json:"operation,omitempty"`
-	Logs            string                `json:"logs,omitempty"`
-	Error           string                `json:"error,omitempty"`
-	Containers      []Container           `json:"containers,omitempty"`
-	Snapshot        *SnapshotPreview      `json:"snapshot,omitempty"`
-	TrafficState    *ProxyTrafficState    `json:"traffic_state,omitempty"`
-	TrafficPlan     *ProxyTrafficPlan     `json:"traffic_plan,omitempty"`
-	Traffic         *TrafficReport        `json:"traffic,omitempty"`
-	CleanupState    *CleanupState         `json:"cleanup_state,omitempty"`
-	CleanupPlan     *CleanupPlan          `json:"cleanup_plan,omitempty"`
-	JournalPrune    *JournalPruneResult   `json:"journal_prune,omitempty"`
-	Observations    *WorkloadObservations `json:"observations,omitempty"`
-	Files           *FileResponse         `json:"files,omitempty"`
-	Telemetry       *Telemetry            `json:"telemetry,omitempty"`
-	CPUScale        *CPUScaleObservation  `json:"cpu_scale,omitempty"`
-	Idle            *IdleStatus           `json:"idle,omitempty"`
-	Rollout         *RolloutStatus        `json:"rollout,omitempty"`
-	Suspension      *SuspensionStatus     `json:"suspension,omitempty"`
-	Move            *MoveState            `json:"move,omitempty"`
-	GPUs            *GPUInventory         `json:"gpus,omitempty"`
-	Firewall        *FirewallResult       `json:"firewall,omitempty"`
-	HostPatches     *HostPatchStatus      `json:"host_patches,omitempty"`
-	Identity        *IdentityState        `json:"identity,omitempty"`
-	PITR            *PITRStatus           `json:"pitr,omitempty"`
+	Exposures       *IngressExposureStatus `json:"exposures,omitempty"`
+	ExposurePlan    *IngressExposurePlan   `json:"exposure_plan,omitempty"`
+	Database        *DatabaseInspection    `json:"database_inspection,omitempty"`
+	Comparison      *ReleaseComparison     `json:"release_comparison,omitempty"`
+	Adopted         *AdoptionRequest       `json:"adopted,omitempty"`
+	ComposeProjects []ComposeProject       `json:"compose_projects,omitempty"`
+	Adoption        *AdoptionPlan          `json:"adoption,omitempty"`
+	ImportedCompose *ImportedCompose       `json:"imported_compose,omitempty"`
+	Drift           *DriftReport           `json:"drift,omitempty"`
+	SourceFiles     *SourceFiles           `json:"source_files,omitempty"`
+	Exec            *ExecResult            `json:"exec,omitempty"`
+	Links           *LinkStatus            `json:"links,omitempty"`
+	Ingress         *IngressConfigState    `json:"ingress,omitempty"`
+	IngressFile     *IngressConfigFile     `json:"ingress_file,omitempty"`
+	IngressResult   *IngressConfigResult   `json:"ingress_result,omitempty"`
+	RestoreCopy     *RestoreCopy           `json:"restore_copy,omitempty"`
+	Images          map[string]string      `json:"images,omitempty"`
+	Inventory       *PreviewInventory      `json:"inventory,omitempty"`
+	Cleanup         *CleanupPreview        `json:"cleanup,omitempty"`
+	Preflight       *PreflightReport       `json:"preflight,omitempty"`
+	Terminal        *TerminalResponse      `json:"terminal,omitempty"`
+	Releases        []Release              `json:"releases,omitempty"`
+	Backups         []BackupRecord         `json:"backups,omitempty"`
+	Maintenance     *Maintenance           `json:"maintenance,omitempty"`
+	Probe           *Probe                 `json:"probe,omitempty"`
+	Operation       *Operation             `json:"operation,omitempty"`
+	Logs            string                 `json:"logs,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+	Containers      []Container            `json:"containers,omitempty"`
+	Snapshot        *SnapshotPreview       `json:"snapshot,omitempty"`
+	TrafficState    *ProxyTrafficState     `json:"traffic_state,omitempty"`
+	TrafficPlan     *ProxyTrafficPlan      `json:"traffic_plan,omitempty"`
+	Traffic         *TrafficReport         `json:"traffic,omitempty"`
+	CleanupState    *CleanupState          `json:"cleanup_state,omitempty"`
+	CleanupPlan     *CleanupPlan           `json:"cleanup_plan,omitempty"`
+	JournalPrune    *JournalPruneResult    `json:"journal_prune,omitempty"`
+	Observations    *WorkloadObservations  `json:"observations,omitempty"`
+	Files           *FileResponse          `json:"files,omitempty"`
+	Telemetry       *Telemetry             `json:"telemetry,omitempty"`
+	CPUScale        *CPUScaleObservation   `json:"cpu_scale,omitempty"`
+	Idle            *IdleStatus            `json:"idle,omitempty"`
+	Rollout         *RolloutStatus         `json:"rollout,omitempty"`
+	Suspension      *SuspensionStatus      `json:"suspension,omitempty"`
+	Move            *MoveState             `json:"move,omitempty"`
+	GPUs            *GPUInventory          `json:"gpus,omitempty"`
+	Firewall        *FirewallResult        `json:"firewall,omitempty"`
+	HostPatches     *HostPatchStatus       `json:"host_patches,omitempty"`
+	Identity        *IdentityState         `json:"identity,omitempty"`
+	PITR            *PITRStatus            `json:"pitr,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
@@ -372,6 +375,36 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: err.Error()}
 		}
 		return RPCResponse{Telemetry: result}
+	case "ingress_exposures", "ingress_exposures_initialize":
+		var status IngressExposureStatus
+		var err error
+		if r.Method == "ingress_exposures_initialize" {
+			status, err = e.InitializeIngressExposures(ctx)
+		} else {
+			status, err = e.IngressExposures(ctx)
+		}
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Exposures: &status}
+	case "ingress_exposures_plan":
+		if r.Exposures == nil {
+			return RPCResponse{Error: "listener settings required"}
+		}
+		plan, err := e.PlanIngressExposures(ctx, r.Exposures.Settings)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{ExposurePlan: &plan}
+	case "ingress_exposures_apply":
+		if r.Exposures == nil {
+			return RPCResponse{Error: "reviewed listener plan required"}
+		}
+		status, err := e.ChangeIngressExposures(ctx, *r.Exposures)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{Exposures: &status}
 	case "cpu_scale_sample":
 		sample, err := e.CPUScaleSample(ctx, r.ID)
 		if err != nil {
@@ -557,7 +590,7 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4":
+	case "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
 		}
@@ -573,6 +606,12 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 		if RouteProtocol(r.Request.Routes) >= 4 {
 			expected = "submit_routes_v4"
+		}
+		if RouteProtocol(r.Request.Routes) >= 5 {
+			expected = "submit_routes_v5"
+		}
+		if RouteProtocol(r.Request.Routes) >= 6 {
+			expected = "submit_routes_v6"
 		}
 		if r.Method != expected {
 			return RPCResponse{Error: "request requires its dedicated submission method"}
@@ -696,11 +735,11 @@ func RPCTimeout(method string) time.Duration {
 		return 90 * time.Second
 	case "stream", "move":
 		return 30 * time.Minute
-	case "ingress_config_change":
+	case "ingress_config_change", "ingress_exposures_apply":
 		return 5 * time.Minute
 	case "links_apply", "traffic_control":
 		return 4 * time.Minute
-	case "compose_plan", "compose_adopt", "source_files", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
+	case "ingress_exposures_initialize", "ingress_exposures_plan", "compose_plan", "compose_adopt", "source_files", "storage_test", "preflight", "export_release", "ingress_config", "ingress_config_file", "environment_preview_inventory":
 		return 3 * time.Minute
 	}
 	return 30 * time.Second

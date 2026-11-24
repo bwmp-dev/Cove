@@ -29,7 +29,22 @@ func (e *Engine) Maintenance(drain bool) (Maintenance, error) {
 		}
 	}
 	e.draining = drain
-	return Maintenance{Draining: drain, Active: len(e.active) + e.recoveringWorkloadCount(), Queued: len(e.pending)}, nil
+	active := len(e.active) + e.recoveringWorkloadCount()
+	if e.proxyRunning || e.proxyUnsettled || e.customRunning || e.customUnsettled || e.hostChanging {
+		active++
+	}
+	if err := e.pendingNodeMoves(); err != nil {
+		active++
+	}
+	if _, err := os.Lstat(filepath.Join(e.Root, "node-changes")); !os.IsNotExist(err) {
+		unlock, err := nodeChangeLease(e.Root, false)
+		if err != nil {
+			active++
+		} else {
+			unlock()
+		}
+	}
+	return Maintenance{Draining: drain, Active: active, Queued: len(e.pending)}, nil
 }
 
 func (e *Engine) recoveringWorkloadCount() int {

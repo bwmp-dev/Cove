@@ -3,9 +3,10 @@ import { Plus } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 import { errorMessage, request } from "../api/client";
 import { uptimeChecksQuery, type UptimeCheck, type UptimeCheckInput } from "../api/outputs";
-import type { Workload } from "../api/types";
+import type { Route, Workload } from "../api/types";
 import { useNow, useOnline } from "../lib/hooks";
 import { wildcardCovers } from "../lib/certificates";
+import { isPublicHTTPRoute, isTransportRoute } from "../lib/route-transports";
 import { formatInterval, formatMs, uptimeCheckFromForm, uptimeDefaults, uptimeState, type UptimeField } from "../lib/outputs";
 import { can } from "../lib/permissions";
 import { describedBy, inputClass } from "../lib/styles";
@@ -123,7 +124,7 @@ function UptimeForm({ workloadId, domains, initial, close }: { workloadId: strin
   );
 }
 
-function CheckRow({ check, routed, editable, busy, onEdit, onDelete }: { check: UptimeCheck; routed: boolean; editable: boolean; busy: boolean; onEdit: () => void; onDelete: () => void }) {
+function CheckRow({ check, unrouted, editable, busy, onEdit, onDelete }: { check: UptimeCheck; unrouted?: string; editable: boolean; busy: boolean; onEdit: () => void; onDelete: () => void }) {
   const now = useNow(15_000);
   const state = uptimeState(check, now);
   const detail = [
@@ -143,7 +144,7 @@ function CheckRow({ check, routed, editable, busy, onEdit, onDelete }: { check: 
           {check.public_label ? ` · Public as “${check.public_label}”` : " · Private"}
         </p>
         {check.enabled && check.error && <p className="text-xs break-words text-bad">{check.error}</p>}
-        {!routed && <p className="text-xs text-warn">This domain is no longer configured on the service. Delete the check, or add the domain again.</p>}
+        {unrouted && <p className="text-xs text-warn">{unrouted}</p>}
       </div>
       <div className="flex flex-col items-start gap-0.5 sm:items-end sm:text-right">
         <StatusLabel tone={state.tone} label={state.label} />
@@ -154,7 +155,7 @@ function CheckRow({ check, routed, editable, busy, onEdit, onDelete }: { check: 
       </div>
       {editable && (
         <div className="-ml-2 flex gap-1 sm:ml-0">
-          <Button size="sm" variant="ghost" onClick={onEdit} disabled={busy || !routed} aria-label={`Edit check for ${check.domain}`}>Edit</Button>
+          <Button size="sm" variant="ghost" onClick={onEdit} disabled={busy || unrouted !== undefined} aria-label={`Edit check for ${check.domain}`}>Edit</Button>
           <Button size="sm" variant="ghost" onClick={onDelete} disabled={busy} aria-label={`Delete check for ${check.domain}`}>Delete</Button>
         </div>
       )}
@@ -162,14 +163,25 @@ function CheckRow({ check, routed, editable, busy, onEdit, onDelete }: { check: 
   );
 }
 
-function CheckList({ checks, routed, editable, busy, onEdit, onDelete }: { checks: UptimeCheck[]; routed: Set<string>; editable: boolean; busy: boolean; onEdit: (check: UptimeCheck) => void; onDelete: (check: UptimeCheck) => void }) {
+// Private hostnames are served only on a LAN or Tailscale listener, so uptime checks never cover them.
+function privateRouteHosts(routes: Route[] | null | undefined) {
+  return (routes ?? []).filter((route) => !isTransportRoute(route) && !isPublicHTTPRoute(route)).map((route) => route.domain);
+}
+
+function unroutedReason(domain: string, routed: Set<string>, privateHosts: string[]) {
+  if (routed.has(domain)) return undefined;
+  if (privateHosts.some((host) => host === domain || wildcardCovers(host, domain))) return "This domain is now served only on a LAN or Tailscale listener, and uptime checks cover public HTTPS domains only. Delete the check, or make the route public again.";
+  return "This domain is no longer configured on the service. Delete the check, or add the domain again.";
+}
+
+function CheckList({ checks, routed, privateHosts, editable, busy, onEdit, onDelete }: { checks: UptimeCheck[]; routed: Set<string>; privateHosts: string[]; editable: boolean; busy: boolean; onEdit: (check: UptimeCheck) => void; onDelete: (check: UptimeCheck) => void }) {
   if (checks.length === 0) {
-    return <p className="px-4 py-4 text-[13px] text-fg-muted">{routed.size === 0 ? "Add a domain above before creating an uptime check." : "No uptime checks. Nothing is probed until you create one."}</p>;
+    return <p className="px-4 py-4 text-[13px] text-fg-muted">{routed.size === 0 ? "Add a public HTTPS domain above before creating an uptime check." : "No uptime checks. Nothing is probed until you create one."}</p>;
   }
   return (
     <ul aria-label="Uptime checks" className="divide-y divide-line">
       {checks.map((check) => (
-        <CheckRow key={check.id} check={check} routed={routed.has(check.domain)} editable={editable} busy={busy} onEdit={() => onEdit(check)} onDelete={() => onDelete(check)} />
+        <CheckRow key={check.id} check={check} unrouted={unroutedReason(check.domain, routed, privateHosts)} editable={editable} busy={busy} onEdit={() => onEdit(check)} onDelete={() => onDelete(check)} />
       ))}
     </ul>
   );
@@ -188,7 +200,7 @@ function NewCheckAction({ blocker, disabled, onClick }: { blocker?: string; disa
 }
 
 function newCheckBlocker(configured: string[], available: string[]) {
-  if (configured.length === 0) return "Add a domain first.";
+  if (configured.length === 0) return "Add a public HTTPS domain first.";
   if (available.length === 0) return "Every domain already has a check.";
   return undefined;
 }
@@ -209,7 +221,8 @@ export function UptimeChecks({ workload }: { workload: Workload }) {
     },
   });
 
-  const configured = [...new Set((workload.routes ?? []).map((route) => route.domain))].sort();
+  const configured = [...new Set((workload.routes ?? []).filter(isPublicHTTPRoute).map((route) => route.domain))].sort();
+  const privateHosts = privateRouteHosts(workload.routes);
   const checked = new Set((checks.data ?? []).map((check) => check.domain));
   // A wildcard domain stays available: each check under it names its own hostname.
   const available = configured.filter((domain) => domain.startsWith("*.") || !checked.has(domain));
@@ -232,6 +245,7 @@ export function UptimeChecks({ workload }: { workload: Workload }) {
         <CheckList
           checks={checks.data}
           routed={routed}
+          privateHosts={privateHosts}
           editable={editable}
           busy={!online || deletion.isPending}
           onEdit={setEditing}

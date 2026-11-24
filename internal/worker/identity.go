@@ -43,6 +43,11 @@ func (e *Engine) ChangeIdentity(request IdentityRequest) (*IdentityState, error)
 	if runtime.GOOS != "linux" || !snapshotOwnerID.MatchString(request.ID) || request.Action != "stage" && request.Action != "commit" && request.Action != "abort" {
 		return nil, errors.New("invalid SSH identity change")
 	}
+	unlock, err := e.lockNodeChange(false)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	old, err := identityPublicKey(request.Old)
 	if err != nil {
 		return nil, err

@@ -627,6 +627,12 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 				block("route_redirect", "A route redirects to a fixed hostname that may reach production.", "Exclude this resource or remove its hostname redirect before publishing preview domains.", "")
 			}
 		}
+		if route.IsTransportRoute() || route.Policy != nil && (route.Policy.Visibility == "lan" || route.Policy.Visibility == "tailscale") {
+			if recipe.DomainTemplate != "" {
+				block("route_listener", "Dedicated or private route listeners cannot be copied to preview hostnames.", "Exclude this resource or disable published preview domains; previews never reuse production listeners.", "")
+			}
+			continue
+		}
 		if recipe.DomainTemplate != "" {
 			name := resourceSlug(src.Name)
 			if i > 0 {

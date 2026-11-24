@@ -3,4 +3,5 @@ RUN apk add --no-cache openssh && adduser -D -h /var/lib/cove cove && addgroup c
 COPY bin/cove-worker-linux-amd64 /usr/local/bin/cove-worker
 COPY test/worker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod 755 /entrypoint.sh /usr/local/bin/cove-worker
+ENV COVE_ACME_DIRECTORY=https://127.0.0.1:9/directory
 ENTRYPOINT ["/entrypoint.sh"]

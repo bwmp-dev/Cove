@@ -186,6 +186,8 @@ def cleanup_worker_resources(fixture, state, root_owned, kinds=("container", "ne
 
 
 def main():
+    certificate_dns = "--certificate-dns" in sys.argv[1:]
+    browser_args = [value for value in sys.argv[1:] if value != "--certificate-dns"]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image = name + "-panel:development"
     worker_image = name + "-worker:development"
@@ -201,6 +203,8 @@ def main():
     fixture_workloads = []
     baseline = {kind: set(output_lines("docker", *listing)) for kind, listing in (
         ("container", ["ps", "-aq", "--no-trunc"]), ("network", ["network", "ls", "-q", "--no-trunc"]), ("volume", ["volume", "ls", "-q"]))}
+    certificate_config = None
+    extra_images = []
     env = os.environ.copy()
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
@@ -213,7 +217,7 @@ def main():
         run(openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
             "-config", str(fixture / "openssl.cnf"), "-keyout", str(fixture / "key.pem"),
             "-out", str(fixture / "cert.pem"), "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            "-addext", "subjectAltName=DNS:localhost,DNS:pebble,DNS:api.cloudflare.com" if certificate_dns else "subjectAltName=DNS:localhost", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         (fixture / "routes.yaml").write_text(json.dumps({
             "http":{"routers":{"panel":{"rule":"Host(`localhost`)","entryPoints":["websecure"],"service":"panel","tls":{}}},
                     "services":{"panel":{"loadBalancer":{"servers":[{"url":"http://panel:8080"}]}}}},
@@ -250,6 +254,10 @@ def main():
                 time.sleep(1)
             else:
                 raise RuntimeError("Disposable database did not start")
+            if certificate_dns:
+                from certificate_fixture import start_certificate_fixture
+                extra_images.append(name + "-certificate-provider:test")
+                certificate_config = start_certificate_fixture(run, name, fixture, containers)
             with socket.socket() as listener:
                 listener.bind(("127.0.0.1", 0))
                 port = listener.getsockname()[1]
@@ -263,6 +271,11 @@ def main():
                 identity_spec.loader.exec_module(identity)
                 identity_options = identity.start(name, fixture, env, containers, identity_images, openssl)
             options = [item for key in ("DATABASE_URL", "COVE_PUBLIC_URL", "COVE_ADMIN_PASSWORD", "COVE_ADMIN_TOKEN", "COVE_ENCRYPTION_KEY") for item in ("-e", key)]
+            if certificate_config:
+                env.update(COVE_ACME_DIRECTORY="https://pebble:14000/dir", COVE_ACME_ROOT="/fixture-trust.pem", SSL_CERT_FILE="/fixture-trust.pem")
+                options += ["--dns", certificate_config["dns"], "--mount", f"type=bind,source={fixture / 'cert.pem'},target=/fixture-trust.pem,readonly"]
+                options += ["-e", "HTTP_PROXY=", "-e", "HTTPS_PROXY=", "-e", "ALL_PROXY=", "-e", "NO_PROXY=*"]
+                options += [item for key in ("COVE_ACME_DIRECTORY", "COVE_ACME_ROOT", "SSL_CERT_FILE") for item in ("-e", key)]
             run("docker", "run", "-d", "--name", name + "-panel", "--network", name,
                 "--network-alias", "panel", *options, *identity_options, panel_image, env=env, stdout=subprocess.DEVNULL)
             containers.append(name + "-panel")
@@ -295,7 +308,11 @@ def main():
                 raise RuntimeError("Packaged panel lacks this merge's scoped certificate contract")
             if "directory:manage" not in [item["name"] for item in api("GET", "/api/access-tokens/scopes")]:
                 raise RuntimeError("Packaged panel lacks this merge's directory scope and ownership contract")
+            if "nodes:manage" not in [item["name"] for item in api("GET", "/api/access-tokens/scopes")]:
+                raise RuntimeError("Packaged panel lacks this merge's instance-admin listener contract")
             events = api("GET", "/api/notifications/events")
+            if "certificate.failed" not in events:
+                raise RuntimeError("Packaged panel lacks this merge's certificate outcome contract")
             if not isinstance(search.get("items"), list) or search.get("limit") != 40 or timezone.get("schedule_timezone") != "UTC" or "read_secrets" not in roles.get("permission_catalogue", []):
                 raise RuntimeError("Packaged panel does not expose the merged integration/trust contract")
             if "security.lockout" not in events or "adoption.succeeded" not in events:
@@ -364,13 +381,16 @@ def main():
             ssh_port=run("docker", "port", worker, "22/tcp",capture_output=True,text=True).stdout.strip().rsplit(":",1)[1]
             env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
             env.update(COVE_BROWSER_DATABASE=name+"-db", COVE_BROWSER_WORKER=worker, COVE_BROWSER_CLIENT=str(client_binary), COVE_BROWSER_SSH_PORT=ssh_port, COVE_BROWSER_URL=origin, COVE_BROWSER_PASSWORD=env["COVE_ADMIN_PASSWORD"])
+            if certificate_config:
+                env.update(COVE_BROWSER_CERTIFICATE_PROVIDER=certificate_config["provider"], COVE_BROWSER_CERTIFICATE_TOKEN=certificate_config["token"],
+                           COVE_BROWSER_CERTIFICATE_ROOT=str(fixture / "cert.pem"), COVE_BROWSER_CERTIFICATE_ISSUANCE_ROOT=certificate_config["management"] + "/roots/0")
             if sys.argv[1:] in (["--managed-data"], ["--identity"]):
                 env["COVE_BROWSER_CA"] = str(fixture / "cert.pem")
                 env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
                 script = "test-identity.py" if identity is not None else "test-managed-data.py"
                 subprocess.run([sys.executable, str(ROOT / "scripts" / script)], cwd=ROOT, env=env, check=True)
             else:
-                subprocess.run([shutil.which("pnpm"), "test:e2e", *sys.argv[1:]], cwd=ROOT / "frontend", env=env, check=True)
+                subprocess.run([shutil.which("pnpm"), "test:e2e", *browser_args], cwd=ROOT / "frontend", env=env, check=True)
         finally:
             state = {"owner": None, "backup_owner": None, "workloads": set(), "operations": set(), "shared_networks": set(), "links": False}
             root_proved = False
@@ -384,7 +404,7 @@ def main():
                     state = worker_fixture_state(worker_image, name)
                     state["previous"] = baseline
                     root_proved = True
-                if name+"-db" in containers:
+                if root_proved and name+"-db" in containers:
                     for key, query in (
                         ("operations", "SELECT id FROM operations"),
                         ("workloads", "SELECT id FROM workloads UNION SELECT subject FROM audit_events WHERE action='DELETE /api/workloads/{id}' AND status=200"),
@@ -429,7 +449,7 @@ def main():
                     result = subprocess.run(["docker", "network", "rm", name], capture_output=True, text=True)
                     if result.returncode and inspect_cleanup_resource("network", name) is not None:
                         cleanup_errors.append("could not remove fixture network " + name)
-                for image in (*identity_images, worker_image, panel_image):
+                for image in (*identity_images, worker_image, panel_image, *extra_images):
                     subprocess.run(["docker", "image", "rm", image], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if cleanup_errors:
                     raise RuntimeError("; ".join(cleanup_errors))

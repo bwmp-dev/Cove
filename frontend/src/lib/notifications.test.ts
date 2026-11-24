@@ -52,6 +52,14 @@ it("labels directory provisioning events and never offers them to incident provi
   expect(incidentConditions([...outcomes, "node_unreachable.alert", "node_unreachable.recovered"])).toEqual([{ value: "node_unreachable", label: "Node unreachable" }]);
 });
 
+it("labels certificate failures as an outcome event, never a health condition", () => {
+  const groups = groupNotificationEvents(["certificate.failed", "node_unreachable.alert", "node_unreachable.recovered"]);
+  expect(groups.map((group) => group.title)).toEqual(["Certificates", "Health alerts"]);
+  expect(groups[0]?.events).toEqual([{ value: "certificate.failed", label: "Certificate issuance or renewal failed" }]);
+  expect(groups[0]?.health).toBe(false);
+  expect(incidentConditions(["certificate.failed"])).toEqual([]);
+});
+
 it("sends exact events without the legacy switches", () => {
   expect(notificationFromForm(form([["provider", "slack"], ["url", " https://hooks.example.com/x "], ["enabled", "on"], ["routing", "events"], ["success", "on"], ["events", "backup.failed"], ["events", "drill.failed"]]))).toEqual({
     provider: "slack", url: "https://hooks.example.com/x", enabled: true, success: false, failure: false, health: false, events: ["backup.failed", "drill.failed"],

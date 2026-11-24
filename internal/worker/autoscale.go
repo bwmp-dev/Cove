@@ -22,7 +22,7 @@ func validateCPUScale(r Request) error {
 	if r.Scale == nil {
 		return nil
 	}
-	if r.Action != "deploy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || !identifier.MatchString(r.Scale.Generation) || r.PullLatest || r.Build != nil || r.Rollout == nil || r.Rollout.Strategy != "rolling" {
+	if r.Action != "deploy" || HasTransportRoutes(r.Routes) || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || !identifier.MatchString(r.Scale.Generation) || r.PullLatest || r.Build != nil || r.Rollout == nil || r.Rollout.Strategy != "rolling" {
 		return errors.New("CPU scaling requires an immutable rolling service release")
 	}
 	if len(r.Scale.Replicas) == 0 || len(r.Scale.Before) > 32 || len(r.Scale.CPUPercent) > 32 {

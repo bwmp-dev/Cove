@@ -165,6 +165,16 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 			return "", err
 		}
 		for _, route := range routes[workload] {
+			if route.IsTransportRoute() {
+				if idle != nil {
+					return "", errors.New("raw traffic cannot use an idle wake gateway")
+				}
+				paused := suspension != nil && suspension.Phase != "awake"
+				if err := e.addTransportTraffic(ctx, workload, route, traffic, paused, &config, out); err != nil {
+					return "", err
+				}
+				continue
+			}
 			before := map[string]bool{}
 			for name := range config.HTTP.Routers {
 				before[name] = true
@@ -240,7 +250,7 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 					data, _ := json.Marshal(servers)
 					sum := sha256.Sum256(append(data, []byte(generation.Service+strconv.Itoa(generation.Weight))...))
 					key := name + "-" + hex.EncodeToString(sum[:8])
-					config.HTTP.Services[key] = ingressService{LoadBalancer: &ingressLoadBalancer{Servers: servers, Sticky: base.LoadBalancer.Sticky}}
+					config.HTTP.Services[key] = ingressService{LoadBalancer: &ingressLoadBalancer{Servers: servers, Sticky: base.LoadBalancer.Sticky, ServersTransport: base.LoadBalancer.ServersTransport}}
 					groups = append(groups, ingressWeightedService{Name: key, Weight: generation.Weight})
 				}
 			}
@@ -258,13 +268,14 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 			config.HTTP.Routers[next] = router
 		}
 	}
+	config.addPrivateDenials(routes)
 	if err := e.applyRouteCertificates(ctx, routes, &config, out); err != nil {
 		return "", err
 	}
 	if err := e.applyRouteAuxiliary(ctx, routes, &config, out); err != nil {
 		return "", err
 	}
-	if len(config.HTTP.Routers) == 0 {
+	if config.empty() {
 		return "{}", nil
 	}
 	data, err := json.Marshal(config)
@@ -273,8 +284,15 @@ func (e *Engine) ingressTraffic(ctx context.Context, routes map[string][]Route, 
 
 func (e *Engine) refreshTrafficIngress(ctx context.Context, workload string, out io.Writer) error {
 	traffic, err := e.loadTraffic(workload)
-	if err != nil || len(traffic) == 0 {
+	if err != nil {
 		return err
+	}
+	if len(traffic) == 0 {
+		routes, err := e.loadIngress()
+		if err != nil || !HasTransportRoutes(routes[workload]) {
+			return err
+		}
+		return e.applyIngress(ctx, workload, routes[workload], out)
 	}
 	state, released, err := readCurrent(filepath.Join(e.Root, "workloads", workload, "current.json"))
 	if err != nil {

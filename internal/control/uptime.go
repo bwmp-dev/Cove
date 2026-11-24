@@ -115,14 +115,9 @@ func (s *Server) uptimeChecks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resource configuration unavailable", 503)
 		return
 	}
-	found := false
-	for _, route := range config.Routes {
-		if !strings.Contains(c.Domain, "*") && worker.RouteDomainsOverlap(route.Domain, c.Domain) {
-			found = true
-		}
-	}
+	found := worker.PublicHTTPRouteDomain(config.Routes, c.Domain)
 	if kind != "service" || !found {
-		http.Error(w, "select a configured service route", 400)
+		http.Error(w, "select a configured public HTTP service route", 400)
 		return
 	}
 	var total, teamCount int
@@ -282,14 +277,9 @@ func (s *Server) collectUptime(ctx context.Context) error {
 				failures <- errors.New("uptime resource configuration unavailable")
 				return
 			}
-			configured := false
-			for _, route := range config.Routes {
-				if !strings.Contains(j.check.Domain, "*") && worker.RouteDomainsOverlap(route.Domain, j.check.Domain) {
-					configured = true
-				}
-			}
+			configured := worker.PublicHTTPRouteDomain(config.Routes, j.check.Domain)
 			if !configured {
-				_, err = s.DB.Exec(ctx, `UPDATE route_checks SET enabled=false,last_up=NULL,last_error='Route removed; recreate or edit this check before enabling it.' WHERE id=$1 AND version=$2`, j.check.ID, j.check.version)
+				_, err = s.DB.Exec(ctx, `UPDATE route_checks SET enabled=false,last_up=NULL,last_error='Public route removed or made private; recreate or edit this check before enabling it.' WHERE id=$1 AND version=$2`, j.check.ID, j.check.version)
 				if err != nil {
 					failures <- err
 				}
@@ -449,7 +439,7 @@ func (s *Server) publicStatusPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "status unavailable", 503)
 		return
 	}
-	rows, err := s.DB.Query(r.Context(), `SELECT c.public_label,CASE WHEN c.checked_at IS NULL OR c.checked_at<now()-make_interval(secs=>c.interval_seconds*2+c.timeout_seconds) THEN NULL ELSE c.last_up END,c.checked_at,c.latency_ms,(SELECT count(*) FROM route_check_results r WHERE r.check_id=c.id AND r.checked_at>now()-interval '24 hours'),(SELECT avg(CASE WHEN r.up THEN 1.0 ELSE 0.0 END)::double precision FROM route_check_results r WHERE r.check_id=c.id AND r.checked_at>now()-interval '24 hours') FROM route_checks c JOIN workloads w ON w.id=c.workload_id WHERE w.project_id=$1 AND c.enabled AND c.public_label<>'' ORDER BY c.public_label`, project)
+	rows, err := s.DB.Query(r.Context(), `SELECT c.public_label,CASE WHEN c.checked_at IS NULL OR c.checked_at<now()-make_interval(secs=>c.interval_seconds*2+c.timeout_seconds) THEN NULL ELSE c.last_up END,c.checked_at,c.latency_ms,(SELECT count(*) FROM route_check_results r WHERE r.check_id=c.id AND r.checked_at>now()-interval '24 hours'),(SELECT avg(CASE WHEN r.up THEN 1.0 ELSE 0.0 END)::double precision FROM route_check_results r WHERE r.check_id=c.id AND r.checked_at>now()-interval '24 hours'),w.configuration,c.domain FROM route_checks c JOIN workloads w ON w.id=c.workload_id WHERE w.project_id=$1 AND c.enabled AND c.public_label<>'' ORDER BY c.public_label`, project)
 	if err != nil {
 		http.Error(w, "status unavailable", 503)
 		return
@@ -466,9 +456,20 @@ func (s *Server) publicStatusPage(w http.ResponseWriter, r *http.Request) {
 	out := []item{}
 	for rows.Next() {
 		var i item
-		if rows.Scan(&i.Label, &i.Up, &i.CheckedAt, &i.LatencyMS, &i.Samples, &i.UpRatio) != nil {
+		var encrypted []byte
+		var domain string
+		if rows.Scan(&i.Label, &i.Up, &i.CheckedAt, &i.LatencyMS, &i.Samples, &i.UpRatio, &encrypted, &domain) != nil {
 			http.Error(w, "status unavailable", 503)
 			return
+		}
+		raw, err := unseal(s.Key, encrypted)
+		var config workloadInput
+		if err != nil || json.Unmarshal(raw, &config) != nil {
+			http.Error(w, "status unavailable", 503)
+			return
+		}
+		if !worker.PublicHTTPRouteDomain(config.Routes, domain) {
+			continue
 		}
 		out = append(out, i)
 	}

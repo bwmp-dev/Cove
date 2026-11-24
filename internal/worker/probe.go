@@ -47,6 +47,7 @@ type Probe struct {
 	BackblazeB2         bool         `json:"backblaze_b2"`
 	BackupRetention     bool         `json:"backup_retention"`
 	Telemetry           bool         `json:"telemetry"`
+	IngressExposures    bool         `json:"ingress_exposures"`
 	RouteProtocol       int          `json:"route_protocol"`
 	CPUAutoscale        bool         `json:"cpu_autoscale"`
 	IdleSleep           bool         `json:"idle_sleep"`
@@ -125,9 +126,10 @@ func Inspect(ctx context.Context) Probe {
 	p.MountMetrics = runtime.GOOS == "linux"
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
+	p.IngressExposures = runtime.GOOS == "linux"
 	p.RoutePolicies = true
 	if runtime.GOOS == "linux" {
-		p.RouteProtocol = 4
+		p.RouteProtocol = 6
 	}
 	p.Rollouts = true
 	p.CPUAutoscale = true

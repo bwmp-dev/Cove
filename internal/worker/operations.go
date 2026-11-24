@@ -181,6 +181,9 @@ type Engine struct {
 	customUnsettled bool
 	customRunning   bool
 	customRetry     time.Time
+	proxyUnsettled  bool
+	proxyRunning    bool
+	proxyRetry      time.Time
 }
 
 func RunCommand(ctx context.Context, dir string, args, environment []string, out io.Writer) error {
@@ -568,6 +571,9 @@ func (e *Engine) Recover() error {
 	} else if unsettledCustom(state.Change) {
 		e.customUnsettled = true
 	}
+	if state, err := e.loadIngressExposures(); err != nil || state.Change != nil && state.Change.FinishedAt == nil {
+		e.proxyUnsettled = true
+	}
 	entries, err := os.ReadDir(filepath.Join(e.Root, "operations"))
 	if err != nil {
 		return err
@@ -682,21 +688,28 @@ func (e *Engine) Serve(ctx context.Context) error {
 	if err := e.recoverStorage(ctx); err != nil {
 		return err
 	}
+	e.runProxyRecovery(ctx)
 	closeWake, err := e.startIdleWake(ctx)
 	if err != nil {
 		return err
 	}
 	defer closeWake()
-	if err := e.recoverIngressDecisions(); err != nil {
-		return err
+	if e.ingressExposureReady() == nil {
+		if err := e.recoverIngressDecisions(); err != nil {
+			return err
+		}
 	}
 	pendingCertificates, err := e.certificateReloadPending()
 	if err != nil {
 		return err
 	}
+	pendingRouteTransition, err := e.loadIngressTransition()
+	if err != nil {
+		return err
+	}
 	if routes, err := e.loadIngress(); err != nil {
 		return err
-	} else if (len(routes) > 0 || pendingCertificates) && !e.trafficRecoveryPending() {
+	} else if (len(routes) > 0 || pendingCertificates || pendingRouteTransition != nil) && !e.trafficRecoveryPending() {
 		if err = e.syncIngress(ctx, routes, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "Ingress recovery failed; worker remains available for repairs:", err)
 		}
@@ -726,6 +739,14 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := time.Now()
+	if e.proxyUnsettled {
+		if !e.proxyRunning && !now.Before(e.proxyRetry) {
+			e.proxyRunning = true
+			jobs.Go(func() { e.runProxyRecovery(ctx) })
+		}
+		return nil
+	}
+
 	for id, recovery := range e.recovering {
 		if recovery.running || now.Before(recovery.next) {
 			continue

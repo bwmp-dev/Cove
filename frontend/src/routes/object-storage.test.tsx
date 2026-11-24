@@ -55,7 +55,30 @@ it("asks for an exact domain when the Garage resource only has a wildcard S3 rou
   serve(garage([{ domain: "*.s3.example.com", service: "garage", port: 3900 }]));
   await chooseGarage();
   expect(await screen.findByText("Add the S3 route first")).toBeInTheDocument();
-  expect(screen.getByText(/A wildcard domain cannot be the S3 endpoint/)).toBeInTheDocument();
+  expect(screen.getByText(/A wildcard domain or a LAN or Tailscale only domain cannot be the S3 endpoint/)).toBeInTheDocument();
   expect(screen.queryByRole("combobox", { name: "S3 endpoint" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Provision bucket" })).toBeDisabled();
+});
+
+it("never offers a private or raw route as the S3 endpoint", async () => {
+  serve(garage([
+    { domain: "s3.lan.example.com", service: "garage", port: 3900, policy: { visibility: "lan", listener: "office", certificate_source: "default" } },
+    { domain: "s3.ts.example.com", service: "garage", port: 3900, policy: { visibility: "tailscale", listener: "tail", certificate_source: "default" } },
+    { protocol: "tcp", domain: "", service: "garage", port: 3900, policy: { visibility: "public", listener: "s3raw" } },
+    { domain: "s3.example.com", service: "garage", port: 3900, policy: { visibility: "public" } },
+  ]));
+  await chooseGarage();
+  const endpoint = await screen.findByRole("combobox", { name: "S3 endpoint" });
+  fireEvent.click(endpoint);
+  const options = within(screen.getByRole("listbox")).getAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual(["https://s3.example.com"]);
+});
+
+it("refuses a Garage resource whose S3 route is private", async () => {
+  serve(garage([{ domain: "s3.lan.example.com", service: "garage", port: 3900, policy: { visibility: "lan", listener: "office", certificate_source: "default" } }]));
+  await chooseGarage();
+  expect(await screen.findByText("Add the S3 route first")).toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "S3 endpoint" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Provision bucket" })).toBeDisabled();
+  expect(request).not.toHaveBeenCalledWith("POST", expect.anything(), expect.anything());
 });

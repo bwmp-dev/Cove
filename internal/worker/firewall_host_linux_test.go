@@ -67,16 +67,16 @@ func TestHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T) {
 				t.Error(err)
 			}
 		}
-		if createdNamespace {
-			if _, err := snapshotHostCommand(cleanup, "/usr/sbin/ip", "netns", "delete", namespace); err != nil {
-				t.Error(err)
-			}
-		}
 		if createdLink {
 			if _, err := snapshotHostCommand(cleanup, "/usr/sbin/ip", "link", "show", hostLink); err == nil {
 				if _, err := snapshotHostCommand(cleanup, "/usr/sbin/ip", "link", "delete", hostLink); err != nil {
 					t.Error(err)
 				}
+			}
+		}
+		if createdNamespace {
+			if _, err := snapshotHostCommand(cleanup, "/usr/sbin/ip", "netns", "delete", namespace); err != nil {
+				t.Error(err)
 			}
 		}
 	})
