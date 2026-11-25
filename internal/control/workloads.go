@@ -349,6 +349,19 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		request = worker.Request{ID: id, Workload: request.Workload, Action: "build", Build: in.Build, Compose: config.Compose, ComposeBundle: config.ComposeBundle, Source: config.Source, Environment: config.Environment, FileSecrets: config.FileSecrets, Kind: config.Kind, JobService: config.JobService}
+		recipe, recipeErr := s.readBuildRecipe(r.Context(), tx, request.Workload)
+		if recipeErr != nil {
+			http.Error(w, "build recipe unavailable", 503)
+			return
+		}
+		if recipe.Engine != "compose" {
+			var supported bool
+			if err = tx.QueryRow(r.Context(), `SELECT COALESCE((capabilities->>'build_recipes')::boolean,false) FROM nodes WHERE id=$1`, executionNode).Scan(&supported); err != nil || !supported {
+				http.Error(w, "upgrade and verify the effective build worker before using build recipes", 409)
+				return
+			}
+			request.BuildRecipe = &recipe
+		}
 		var remoteBuild bool
 		var platform string
 		if err = tx.QueryRow(r.Context(), `SELECT w.node_id<>$2,COALESCE(n.capabilities->>'os','')||'/'||COALESCE(n.capabilities->>'arch','') FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1`, request.Workload, executionNode).Scan(&remoteBuild, &platform); err != nil {
@@ -464,6 +477,17 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 	if err = saveOperationReason(r.Context(), tx, id, in.Reason, actor(r).ID); err != nil {
 		http.Error(w, "could not record deployment reason", 503)
 		return
+	}
+	if in.Action == "build" {
+		metadata, problem := json.Marshal(map[string]any{"build_recipe": worker.BuildRecipeSummary(request.BuildRecipe)})
+		if problem != nil {
+			http.Error(w, "build metadata unavailable", 500)
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `UPDATE operations SET result=$2 WHERE id=$1`, id, metadata); err != nil {
+			http.Error(w, "build metadata could not be saved", 503)
+			return
+		}
 	}
 	if in.Action == "image_check" {
 		if _, err = tx.Exec(r.Context(), `UPDATE workloads SET next_image_check_at=now()+interval '1 hour' WHERE id=$1`, request.Workload); err != nil {
@@ -929,6 +953,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if request.BuildPlatform != "" {
 		method = "submit_build_v2"
 	}
+	if request.BuildRecipe != nil {
+		method = "submit_build_recipe"
+	}
 	if request.ImageUpdates != nil {
 		method = "submit_image_updates"
 	}
@@ -1097,7 +1124,7 @@ func (s *Server) failOperation(ctx context.Context, id, message string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, "UPDATE operations SET state='failed',result=$1,updated_at=now() WHERE id=$2", result, id)
+	_, err = s.DB.Exec(ctx, `UPDATE operations SET state='failed',result=CASE WHEN action='build' AND result ? 'build_recipe' THEN $1::jsonb||jsonb_build_object('build_recipe',result->'build_recipe') ELSE $1::jsonb END,updated_at=now() WHERE id=$2`, result, id)
 	return err
 }
 

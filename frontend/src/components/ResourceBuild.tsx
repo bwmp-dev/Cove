@@ -3,11 +3,13 @@ import { Link } from "@tanstack/react-router";
 import { Hammer } from "lucide-react";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { buildNodeQuery, choiceName, type BuildNodeSettings } from "../api/build-nodes";
+import { buildRecipeQuery, type BuildRecipeSettings } from "../api/build-recipes";
 import { errorMessage, isStatus } from "../api/client";
 import { connectionsQuery } from "../api/connections";
 import { useQueueOperation } from "../api/mutations";
 import { nodesQuery, workloadOperationsQuery, workloadRegistryQuery } from "../api/queries";
 import type { Node, Operation, Workload } from "../api/types";
+import { engineLabel, isRecipeEngine, recordedEngine } from "../lib/build-recipes";
 import { buildHistory, repositoryError, repositoryMaxLength } from "../lib/builds";
 import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, reasonError, stateLabels, workerResult } from "../lib/operations";
@@ -56,21 +58,42 @@ function buildNodeStatus(settings: BuildNodeSettings | undefined, nodes: Node[] 
   };
 }
 
-type BuildReads = Record<"settings" | "nodes" | "registry" | "operations", UseQueryResult<unknown>>;
+// Ordinary Compose builds are unaffected; a saved explicit recipe the server reports as unusable refuses the build.
+function refusedRecipe(recipe: UseQueryResult<BuildRecipeSettings>) {
+  const settings = recipe.isError ? undefined : recipe.data;
+  if (!settings || settings.recipe.engine === "compose") return undefined;
+  return !isRecipeEngine(settings.recipe.engine) || !settings.supported || settings.reason !== "" ? settings : undefined;
+}
 
-function BuildReadError({ settings, nodes, registry, operations }: BuildReads) {
+function RecipeRefusedNotice({ settings }: { settings: BuildRecipeSettings }) {
+  const engine = settings.recipe.engine;
+  const fallback = isRecipeEngine(engine) ? "The build worker does not support this recipe." : "This panel does not recognise the saved engine.";
   return (
-    <QueryError
-      what={settings.isError ? "the build node" : nodes.isError ? "node status" : registry.isError ? "registry" : "the latest builds"}
-      error={settings.error ?? nodes.error ?? registry.error ?? operations.error}
-      onRetry={() => {
-        void settings.refetch();
-        void nodes.refetch();
-        void registry.refetch();
-        void operations.refetch();
-      }}
-      retrying={settings.isFetching || nodes.isFetching || registry.isFetching || operations.isFetching}
-    />
+    <Notice tone="warn" title="The build recipe cannot build">
+      <span className="break-words">
+        {engineLabel(engine)}: {settings.reason || fallback} Change the build recipe above or resolve the problem to build.
+      </span>
+    </Notice>
+  );
+}
+
+type BuildReads = Record<"settings" | "recipe" | "nodes" | "registry" | "operations", UseQueryResult<unknown>>;
+
+// A failed first read of operations is shown in place of the history instead, so only a failed refresh appears here.
+function BuildReadError({ settings, recipe, nodes, registry, operations }: BuildReads) {
+  const reads = [settings, recipe, nodes, registry, operations];
+  if (!settings.isError && !recipe.isError && !nodes.isError && !registry.isError && !(operations.isError && operations.data)) return null;
+  return (
+    <div className="border-b border-line p-4 sm:px-6">
+      <QueryError
+        what={settings.isError ? "the build node" : recipe.isError ? "the build recipe" : nodes.isError ? "node status" : registry.isError ? "registry" : "the latest builds"}
+        error={settings.error ?? recipe.error ?? nodes.error ?? registry.error ?? operations.error}
+        onRetry={() => {
+          for (const read of reads) void read.refetch();
+        }}
+        retrying={reads.some((read) => read.isFetching)}
+      />
+    </div>
   );
 }
 
@@ -86,6 +109,7 @@ function LatestAttempt({ operation, hasSuccess, node }: { operation: Operation; 
           Started <RelativeTime value={operation.created_at} />
         </span>
         {node}
+        <span>{recordedEngine(operation)}</span>
         <OperationLink operation={operation}>{active ? "View build progress" : "View build"}</OperationLink>
       </p>
       {error && (
@@ -117,6 +141,7 @@ function SuccessfulBuild({ operation, node }: { operation: Operation; node: Reac
             Published <RelativeTime value={finished} />
           </span>
           {node}
+          <span>{recordedEngine(operation)}</span>
           {result?.revision && (
             <span className="font-mono" title={result.revision}>
               {result.revision.slice(0, 7)}
@@ -148,6 +173,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   const registry = useQuery(workloadRegistryQuery(workload.id));
   const registries = useQuery(connectionsQuery("registries"));
   const settings = useQuery(buildNodeQuery(workload.id));
+  const recipe = useQuery(buildRecipeQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
   const statusId = useId();
@@ -160,13 +186,14 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   const canBuild = can(workload.permissions, "edit_configuration") && can(workload.permissions, "read_secrets");
   // Eligibility comes from the authoritative build node read. Pending or failed reads block building instead of trusting cached data.
   const { effectiveId, choice, nodeName, eligible, unavailable, upgradeNode, reasonShown, notReady } = buildNodeStatus(settings.data, nodes.data);
-  const unreadable = [settings, nodes, operations, registry].some((query) => query.isPending || query.isError);
+  const refused = refusedRecipe(recipe);
+  const unreadable = [recipe, settings, nodes, operations, registry].some((query) => query.isPending || query.isError);
   const registryId = registry.data?.registry_id ?? "";
   const server = registries.data?.find((item) => item.id === registryId)?.registry?.server;
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const history = operations.data ? buildHistory(operations.data, workload.id) : undefined;
   const latestAttempt = history?.attempt && history.attempt !== history.success ? history.attempt : undefined;
-  const blocked = !online || unreadable || !eligible || !registryId || Boolean(active) || queue.isPending;
+  const blocked = !online || unreadable || Boolean(refused) || !eligible || !registryId || Boolean(active) || queue.isPending;
   const executionNode = (operation: Operation) => <ExecutionNode operation={operation} settings={settings.data} nodes={nodes.data} />;
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -181,7 +208,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   return (
     <Section
       title="Build and publish"
-      description="Builds every Compose service that has a build section on the build node and pushes the images to this resource's registry. Nothing is deployed, started or routed."
+      description="Builds every Compose service that has a build section, or the service chosen in the build recipe, on the build node and pushes the images to this resource's registry. Nothing is deployed, started or routed."
       flush
     >
       <div id={statusId} className="space-y-3 border-b border-line px-4 py-3 empty:hidden sm:px-6">
@@ -200,6 +227,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
             .
           </Notice>
         )}
+        {canBuild && refused && <RecipeRefusedNotice settings={refused} />}
         {canBuild && registry.data && !registryId && (
           <Notice tone="warn" title="No registry selected">
             Select and save registry credentials above to publish images. Team registries are added on the{" "}
@@ -243,11 +271,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
           </Notice>
         )}
       </div>
-      {(settings.isError || nodes.isError || registry.isError || (operations.isError && operations.data)) && (
-        <div className="border-b border-line p-4 sm:px-6">
-          <BuildReadError settings={settings} nodes={nodes} registry={registry} operations={operations} />
-        </div>
-      )}
+      <BuildReadError settings={settings} recipe={recipe} nodes={nodes} registry={registry} operations={operations} />
       {canBuild && (
         <div className="border-b border-line">
           <form onSubmit={submit} noValidate className="max-w-3xl space-y-3 px-4 py-4 sm:px-6">

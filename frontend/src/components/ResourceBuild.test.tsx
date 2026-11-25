@@ -4,7 +4,8 @@ import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
 import type { BuildNodeSettings } from "../api/build-nodes";
-import type { Node, Operation, Workload } from "../api/types";
+import type { BuildRecipeSettings } from "../api/build-recipes";
+import type { Node, Operation, OperationBuildRecipe, Workload } from "../api/types";
 import { ResourceBuild } from "./ResourceBuild";
 
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: ReactNode }) => <a href="/">{children}</a> }));
@@ -19,7 +20,7 @@ function node(buildPublish: boolean | undefined, id = "n1", name = "worker-1"): 
 
 const reference = "ghcr.io/team/app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-function build(id: string, state: Operation["state"], images = false, executionNode?: string): Operation {
+function build(id: string, state: Operation["state"], images = false, executionNode?: string, recipe?: OperationBuildRecipe): Operation {
   const created_at = "2026-11-22T10:00:00Z";
   return {
     id,
@@ -36,6 +37,7 @@ function build(id: string, state: Operation["state"], images = false, executionN
       created_at,
       ...(images ? { build: { images: [{ service: "web", image_id: "sha256:1", reference }] } } : {}),
       ...(state === "failed" ? { error: "push denied" } : {}),
+      ...(recipe ? { build_recipe: recipe } : {}),
     },
   };
 }
@@ -46,16 +48,35 @@ function settings(overrides: Partial<BuildNodeSettings> = {}): BuildNodeSettings
   return { node_id: "", runtime_node_id: "n1", effective_node_id: "n1", nodes: [runtimeChoice], ...overrides };
 }
 
+function recipeSettings(overrides: Partial<BuildRecipeSettings> = {}): BuildRecipeSettings {
+  return {
+    recipe: { engine: "compose", service: "", directory: "", output: "", build_command: "", start_command: "" },
+    can_edit: false,
+    source_ready: true,
+    supported: true,
+    reason: "",
+    build_node_id: "n1",
+    active_operation_id: "",
+    build_command_set: false,
+    start_command_set: false,
+    railpack_version: "0.43.1",
+    pinned_images: [],
+    ...overrides,
+  };
+}
+
 interface Serve {
+  recipe?: () => Promise<unknown>;
   nodes?: Node[];
   registryId?: string;
   operations?: Operation[] | (() => Promise<unknown>);
   buildNode?: () => Promise<unknown>;
 }
 
-function serve({ nodes = [node(true)], registryId = "r1", operations = [], buildNode = () => Promise.resolve(settings()) }: Serve = {}) {
+function serve({ nodes = [node(true)], registryId = "r1", operations = [], buildNode = () => Promise.resolve(settings()), recipe = () => Promise.resolve(recipeSettings()) }: Serve = {}) {
   vi.mocked(request).mockImplementation((method: string, path: string) => {
     if (method === "POST") return Promise.resolve({ id: "op9", state: "queued" });
+    if (path === "/api/workloads/w1/build-recipe") return recipe();
     if (path === "/api/workloads/w1/build-node") return buildNode();
     if (path === "/api/nodes") return Promise.resolve(nodes);
     if (path === "/api/registries") return Promise.resolve([{ id: "r1", name: "GHCR", registry: { server: "ghcr.io", username: "bot" } }]);
@@ -225,4 +246,48 @@ it("shows the node ID when the execution node is not listed", async () => {
   serve({ operations: [build("ok", "succeeded", true, "gone")] });
   renderBuild();
   expect(await screen.findByText("gone")).toBeInTheDocument();
+});
+
+it("keeps ordinary Compose builds available when explicit recipes are unavailable", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings({ source_ready: false, supported: false, reason: "select a Git source using the saved Compose configuration before choosing a recipe" })) });
+  renderBuild();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Build and publish" })).toBeEnabled());
+  expect(screen.queryByText("The build recipe cannot build")).not.toBeInTheDocument();
+});
+
+it("refuses to build a saved explicit recipe the server reports as unusable", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: { engine: "static", service: "web", directory: "site", output: "dist", build_command: "", start_command: "" }, reason: "the selected static service is absent from saved Compose" })) });
+  renderBuild();
+  expect(await screen.findByText("The build recipe cannot build")).toBeInTheDocument();
+  expect(screen.getByText(/absent from saved Compose/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
+});
+
+it("refuses to build a saved recipe on a worker without recipe support", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: { engine: "railpack", service: "web", directory: ".", output: "", build_command: "", start_command: "" }, supported: false })) });
+  renderBuild();
+  expect(await screen.findByText("The build recipe cannot build")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
+});
+
+it("refuses to build an engine this panel does not recognise", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: { engine: "nixpacks", service: "web", directory: ".", output: "", build_command: "", start_command: "" } })) });
+  renderBuild();
+  expect(await screen.findByText(/Unknown engine \(nixpacks\)/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
+});
+
+it("blocks building when the build recipe cannot be read", async () => {
+  serve({ recipe: () => Promise.reject(new Error("down")) });
+  renderBuild();
+  expect(await screen.findByText("Could not load the build recipe")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
+});
+
+it("shows the engine each build recorded and never assumes Compose for older builds", async () => {
+  serve({ operations: [build("bad", "failed", false, "n1", { engine: "railpack", service: "web", version: "0.43.1" }), build("ok", "succeeded", true, "n1")] });
+  renderBuild();
+  expect(await screen.findByText("Railpack 0.43.1 for web")).toBeInTheDocument();
+  expect(screen.getByText("Build engine not recorded")).toBeInTheDocument();
+  expect(screen.queryByText(/Existing Compose/)).not.toBeInTheDocument();
 });

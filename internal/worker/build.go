@@ -23,6 +23,7 @@ type BuildOptions struct {
 }
 
 const protectedBuildPlatform = "cove-build-platform-v1"
+const protectedBuildRecipe = "cove-build-recipe-v1"
 
 func (b *BuildOptions) UnmarshalJSON(data []byte) error {
 	var wire struct {
@@ -40,7 +41,7 @@ func (b *BuildOptions) UnmarshalJSON(data []byte) error {
 	}
 	var marker string
 	noCache := false
-	if json.Unmarshal(wire.NoCache, &marker) == nil && marker == protectedBuildPlatform {
+	if json.Unmarshal(wire.NoCache, &marker) == nil && (marker == protectedBuildPlatform || marker == protectedBuildRecipe) {
 		if wire.StoredNoCache == nil {
 			return errors.New("invalid protected build options")
 		}
@@ -69,7 +70,9 @@ func protectPersistedBuild(document any) bool {
 		return false
 	}
 	platform, _ := request["build_platform"].(string)
-	if platform == "" {
+	recipe, _ := request["build_recipe"].(map[string]any)
+	hasRecipe := recipe != nil && recipe["engine"] != "compose"
+	if platform == "" && !hasRecipe {
 		return false
 	}
 	build, ok := request["build"].(map[string]any)
@@ -79,6 +82,9 @@ func protectPersistedBuild(document any) bool {
 	noCache, _ := build["no_cache"].(bool)
 	// A bool-shaped field makes older journal readers refuse the unknown platform instead of executing without it.
 	build["no_cache"] = protectedBuildPlatform
+	if hasRecipe {
+		build["no_cache"] = protectedBuildRecipe
+	}
 	build["cove_no_cache"] = noCache
 	return true
 }
@@ -194,7 +200,7 @@ func (e *Engine) performBuild(ctx context.Context, r Request, dir string, env []
 	}
 	names := []string{}
 	for name, service := range config.Services {
-		if len(service.Build) > 0 && string(service.Build) != "null" {
+		if len(service.Build) > 0 && string(service.Build) != "null" || r.BuildRecipe != nil && r.BuildRecipe.Service == name {
 			if !serviceIdentifier.MatchString(name) {
 				return errors.New("invalid build service")
 			}
@@ -213,6 +219,13 @@ func (e *Engine) performBuild(ctx context.Context, r Request, dir string, env []
 	}
 	if err = writeJSON(filepath.Join(dir, "pending-build.json"), pendingBuild{Operation: r.ID, Owner: owner, Services: names}); err != nil {
 		return err
+	}
+	if r.BuildRecipe != nil && r.BuildRecipe.Engine != "compose" {
+		path, err = e.prepareRecipeBuild(ctx, r, dir, resolved.data.Bytes(), env, out)
+		if err != nil {
+			return err
+		}
+		args = []string{"docker", "compose", "--profile", "*", "--project-name", "cove-" + r.Workload, "--file", path}
 	}
 	if len(r.FileSecrets) > 0 {
 		path, err = e.prepareFileSecrets(ctx, r, dir, args, env)
@@ -358,7 +371,18 @@ func (e *Engine) cleanupBuildInputs(r Request) error {
 	}
 	dir := filepath.Join(e.Root, "workloads", r.Workload)
 	var failures []error
-	for _, suffix := range []string{".build.yaml", ".build-tags.compose.json", ".secrets.compose.json"} {
+	if r.BuildRecipe != nil && r.BuildRecipe.Engine != "compose" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		err := e.cleanupRecipeResources(ctx, r)
+		cancel()
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(e.recipeInputs(r)); err != nil {
+			return err
+		}
+	}
+	for _, suffix := range []string{".build.yaml", ".build-tags.compose.json", ".secrets.compose.json", ".recipe.compose.json"} {
 		if err := os.Remove(filepath.Join(dir, r.ID+suffix)); err != nil && !os.IsNotExist(err) {
 			failures = append(failures, err)
 		}

@@ -1872,6 +1872,12 @@ CREATE TABLE IF NOT EXISTS workload_build_nodes (
  workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
  node_id text NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT
 );
+
+CREATE TABLE IF NOT EXISTS workload_build_recipes (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ configuration bytea NOT NULL,
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
 ALTER TABLE operations ADD COLUMN IF NOT EXISTS execution_node_id text REFERENCES nodes(id) ON DELETE RESTRICT;
 ALTER TABLE operations ADD COLUMN IF NOT EXISTS build_prepared boolean NOT NULL DEFAULT false;
 DO $$ BEGIN

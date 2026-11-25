@@ -6,10 +6,20 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 )
 
 func main() {
+	if filepath.Base(os.Args[0]) == "mise-"+worker.RailpackMiseVersion {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := worker.RunRailpackMise(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	expectedArgs := 2
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -22,7 +32,7 @@ func main() {
 			if len(os.Args) == 3 {
 				expectedArgs = 3
 			}
-		case "tunnel", "healthcheck", "snapshot-reap":
+		case "tunnel", "healthcheck", "snapshot-reap", "build-recipe-output":
 			expectedArgs = 3
 		case "host-security-run", "firewall-revert-attempt":
 			expectedArgs = 5
@@ -31,7 +41,7 @@ func main() {
 		}
 	}
 	if len(os.Args) != expectedArgs {
-		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two; host-security-run needs root, owner and manager; firewall-revert-attempt needs root, owner and attempt; certificate-probe accepts an optional file")
+		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two; host-security-run needs root, owner and manager; firewall-revert-attempt needs root, owner and attempt; build-recipe-output needs one argument; certificate-probe accepts an optional file")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -62,6 +72,18 @@ func main() {
 		err = worker.RunFilesystemSnapshotReaper(ctx, os.Args[2], false)
 	case "snapshot-host":
 		err = worker.RunFilesystemSnapshotHost(ctx, os.Stdin, os.Stdout)
+	case "build-recipe-output":
+		if len(os.Args) != 3 {
+			err = fmt.Errorf("planner output kind required")
+		} else {
+			err = worker.ReadRailpackOutput(os.Args[2], os.Stdout)
+		}
+	case "build-recipe-plan":
+		err = worker.RunRailpackPlanner(ctx)
+	case "build-recipe-egress":
+		err = worker.RunBuildRecipeEgress(ctx)
+	case "static-site":
+		err = worker.ServeStaticSite(ctx)
 	case "build-cache-filesystem":
 		err = worker.BuildCacheFilesystem(os.Stdout)
 	case "registry-storage":

@@ -22,6 +22,7 @@ import { can } from "../lib/permissions";
 import { findPlacement } from "../lib/hierarchy";
 import { resultSummary } from "../lib/rollouts";
 import { buttonClass, inputClass, linkClass } from "../lib/styles";
+import { recordedEngine } from "../lib/build-recipes";
 import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
 import type { ManagedRegistryResult, SuspensionResult, WorkerOperation, WorkloadSummary } from "../api/types";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
@@ -127,7 +128,31 @@ const nodeTerm = (operation: Operation) => (operation.action === "build" ? "Runt
 
 function buildNodeRows(operation: Operation, nodes: Node[] | undefined) {
   if (operation.action !== "build") return [];
-  return [{ term: "Build node", value: <BuildNodeValue id={operation.execution_node_id} name={nodes?.find((node) => node.id === operation.execution_node_id)?.name} /> }];
+  return [
+    { term: "Build node", value: <BuildNodeValue id={operation.execution_node_id} name={nodes?.find((node) => node.id === operation.execution_node_id)?.name} /> },
+    { term: "Build engine", value: <BuildEngineValue operation={operation} /> },
+  ];
+}
+
+// The engine recorded by this build, never the current setting. Command text is not part of the record.
+function BuildEngineValue({ operation }: { operation: Operation }) {
+  const recipe = workerResult(operation)?.build_recipe;
+  if (!recipe?.engine) return <span className="text-fg-muted">{recordedEngine(operation)}</span>;
+  return (
+    <div className="space-y-1">
+      <p className="break-words">{recordedEngine(operation)}</p>
+      {recipe.static_runtime && <p className="font-mono text-xs break-all text-fg-muted">{recipe.static_runtime}</p>}
+      {recipe.pinned_images && recipe.pinned_images.length > 0 && (
+        <ul aria-label="Pinned build images" className="space-y-0.5">
+          {recipe.pinned_images.map((image) => (
+            <li key={image} className="font-mono text-xs break-all text-fg-muted">
+              {image}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 const suspensionTerms: Record<SuspensionResult["reason"], string> = { idle: "Idle sleep", environment: "Environment pause", manual_stop: "Manual stop" };
