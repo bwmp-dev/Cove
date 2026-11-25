@@ -1867,3 +1867,29 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS cove_managed_registry_binding ON workload_connections;
 CREATE TRIGGER cove_managed_registry_binding BEFORE INSERT OR UPDATE OF connection_id ON workload_connections FOR EACH ROW EXECUTE FUNCTION cove_managed_registry_binding();
+
+CREATE TABLE IF NOT EXISTS workload_build_nodes (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT
+);
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS execution_node_id text REFERENCES nodes(id) ON DELETE RESTRICT;
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS build_prepared boolean NOT NULL DEFAULT false;
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='operations' AND column_name='build_legacy') THEN
+  ALTER TABLE operations ADD COLUMN build_legacy boolean NOT NULL DEFAULT false;
+  UPDATE operations SET build_legacy=true WHERE action='build' AND state IN ('queued','running');
+ END IF;
+END $$;
+UPDATE operations o SET execution_node_id=w.node_id FROM workloads w WHERE o.workload_id=w.id AND o.action='build' AND o.state IN ('queued','running') AND o.execution_node_id IS NULL;
+CREATE OR REPLACE FUNCTION cove_build_execution_identity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF OLD.execution_node_id IS NOT NULL AND NEW.execution_node_id IS DISTINCT FROM OLD.execution_node_id THEN
+  RAISE EXCEPTION 'build execution node is immutable' USING ERRCODE='23514';
+ END IF;
+ IF OLD.action='build' AND OLD.build_prepared AND (NOT NEW.build_prepared OR NEW.payload IS DISTINCT FROM OLD.payload) THEN
+  RAISE EXCEPTION 'prepared build inputs are immutable' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_build_execution_identity ON operations;
+CREATE TRIGGER cove_build_execution_identity BEFORE UPDATE OF execution_node_id,payload,build_prepared ON operations FOR EACH ROW EXECUTE FUNCTION cove_build_execution_identity();

@@ -26,6 +26,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	BuildPlatform          string                    `json:"build_platform,omitempty"`
 	ManagedRegistry        *ManagedRegistryOperation `json:"managed_registry,omitempty"`
 	DatabaseMetadata       json.RawMessage           `json:"database_metadata,omitempty"`
 	ManagedDatabase        bool                      `json:"managed_database,omitempty"`
@@ -300,6 +301,9 @@ func ValidateRequest(r Request) error {
 	}
 	if r.Build != nil && r.Action != "build" {
 		return errors.New("build options require a build operation")
+	}
+	if r.BuildPlatform != "" && (r.Action != "build" || !buildPlatformPattern.MatchString(r.BuildPlatform)) {
+		return errors.New("build platform must name the runtime Linux architecture")
 	}
 	if r.PullLatest && (r.Action != "deploy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || len(r.ImagePins) > 0) {
 		return errors.New("pull latest requires an unpinned service deployment")

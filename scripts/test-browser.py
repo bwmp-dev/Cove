@@ -193,9 +193,12 @@ def main():
     registry_hooks = "--registry-webhooks" in sys.argv[1:]
     image_scans = "--image-scans" in sys.argv[1:]
     managed_registry = "--managed-registry" in sys.argv[1:]
+    build_nodes = "--build-nodes" in sys.argv[1:]
+    if build_nodes and not managed_registry:
+        raise ValueError("Build-node acceptance requires the managed-registry TLS fixture")
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image = name + "-panel:development"
     worker_image = name + "-worker:development"
@@ -213,6 +216,7 @@ def main():
         ("container", ["ps", "-aq", "--no-trunc"]), ("network", ["network", "ls", "-q", "--no-trunc"]), ("volume", ["volume", "ls", "-q"]))}
     certificate_config = None
     managed_registry_config = None
+    build_nodes_config = None
     extra_images = []
     tunnel_bridges = []
     env = os.environ.copy()
@@ -437,6 +441,10 @@ def main():
                 methods = api("GET", "/auth/sign-in-methods")
                 if "ldap_providers" not in methods or not api("GET", "/api/settings/directory/teams").get("teams"):
                     raise RuntimeError("Directory acceptance requires this branch's identity APIs")
+            if build_nodes:
+                from build_nodes_fixture import BuildNodesFixture
+                build_nodes_config = BuildNodesFixture(run, name, fixture, env, containers)
+                build_nodes_config.start(worker_image, api, managed_registry_config.hostname)
             client_binary=fixture / ("cove.exe" if os.name == "nt" else "cove")
             run("go", "build", "-o", str(client_binary), "./cmd/cove")
             env["COVE_BROWSER_LOCK_OWNER"] = str(os.getpid())
@@ -498,6 +506,11 @@ def main():
                 except Exception as error:
                     cleanup_errors.append(str(error))
             finally:
+                if build_nodes_config:
+                    try:
+                        build_nodes_config.cleanup()
+                    except Exception as error:
+                        cleanup_errors.append("build worker fixture cleanup failed: " + str(error))
                 if managed_registry_config:
                     try:
                         managed_registry_config.cleanup(worker_image)

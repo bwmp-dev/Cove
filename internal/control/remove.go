@@ -92,6 +92,10 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if err = s.retireRemoteBuilds(r.Context(), tx, r.PathValue("id"), node); err != nil {
+		http.Error(w, "runtime cleanup finished; build worker cleanup is pending or unavailable, so the resource record is kept. Retry deletion when the build worker is available", 409)
+		return
+	}
 	if err = deleteWorkloadRecords(r.Context(), tx, r.PathValue("id")); err != nil {
 		http.Error(w, "could not delete workload", 500)
 		return
@@ -139,12 +143,12 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var used bool
-	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workloads WHERE node_id=$1) OR EXISTS(SELECT 1 FROM workload_moves m JOIN operations o ON o.id=m.operation_id WHERE (m.source_node=$1 OR m.target_node=$1) AND o.state IN ('queued','running'))", id).Scan(&used); err != nil {
+	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workloads WHERE node_id=$1) OR EXISTS(SELECT 1 FROM workload_build_nodes WHERE node_id=$1) OR EXISTS(SELECT 1 FROM operations WHERE execution_node_id=$1) OR EXISTS(SELECT 1 FROM workload_moves m JOIN operations o ON o.id=m.operation_id WHERE (m.source_node=$1 OR m.target_node=$1) AND o.state IN ('queued','running'))", id).Scan(&used); err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	if used {
-		http.Error(w, "finish node moves and move or delete this node's workloads first", 409)
+		http.Error(w, "finish node moves, move or delete workloads, and clear build assignments or retained build history first", 409)
 		return
 	}
 	if _, err = tx.Exec(r.Context(), "DELETE FROM enrollments WHERE node_id=$1", id); err == nil {

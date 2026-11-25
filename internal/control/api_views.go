@@ -34,6 +34,7 @@ type workloadView struct {
 	EnvironmentPreviewID string                          `json:"environment_preview_id"`
 }
 type operationView struct {
+	ExecutionNode           string          `json:"execution_node_id"`
 	CanCancel               *bool           `json:"can_cancel,omitempty"`
 	Reason                  string          `json:"reason"`
 	EmergencyOverrideBy     *string         `json:"emergency_override_by"`

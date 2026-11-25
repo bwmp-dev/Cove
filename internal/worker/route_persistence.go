@@ -60,7 +60,11 @@ func marshalWorkerState(value any) ([]byte, error) {
 	if err := decoder.Decode(&document); err != nil {
 		return nil, err
 	}
-	if !protectPersistedRoutes(document) {
+	changed := protectPersistedRoutes(document)
+	if protectPersistedBuild(document) {
+		changed = true
+	}
+	if !changed {
 		return data, nil
 	}
 	return json.Marshal(document)

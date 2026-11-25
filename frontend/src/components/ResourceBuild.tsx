@@ -1,12 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Hammer } from "lucide-react";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent, type ReactNode } from "react";
+import { buildNodeQuery, choiceName, type BuildNodeSettings } from "../api/build-nodes";
 import { errorMessage, isStatus } from "../api/client";
 import { connectionsQuery } from "../api/connections";
 import { useQueueOperation } from "../api/mutations";
 import { nodesQuery, workloadOperationsQuery, workloadRegistryQuery } from "../api/queries";
-import type { Operation, Workload } from "../api/types";
+import type { Node, Operation, Workload } from "../api/types";
 import { buildHistory, repositoryError, repositoryMaxLength } from "../lib/builds";
 import { useOnline } from "../lib/hooks";
 import { actionLabels, activeOperation, isActive, reasonError, stateLabels, workerResult } from "../lib/operations";
@@ -27,7 +28,53 @@ function OperationLink({ operation, children }: { operation: Operation; children
   );
 }
 
-function LatestAttempt({ operation, hasSuccess }: { operation: Operation; hasSuccess: boolean }) {
+// The node recorded on the operation, never today's assignment: older control planes omit it, and it is then shown as not recorded.
+function ExecutionNode({ operation, settings, nodes }: { operation: Operation; settings?: BuildNodeSettings; nodes?: Node[] }) {
+  const id = operation.execution_node_id;
+  if (!id) return <span>Build node not recorded</span>;
+  const name = nodes?.find((node) => node.id === id)?.name || choiceName(settings, id);
+  return <span className="min-w-0 break-all">Built on {name === id ? <span className="font-mono">{id}</span> : name}</span>;
+}
+
+// Exactly one build node problem applies at a time; the build node read decides, and node status only explains why.
+function buildNodeStatus(settings: BuildNodeSettings | undefined, nodes: Node[] | undefined) {
+  const effectiveId = settings?.effective_node_id;
+  const choice = settings?.nodes.find((item) => item.id === effectiveId);
+  const node = nodes?.find((item) => item.id === effectiveId);
+  const ready = node?.state === "ready";
+  const supported = node?.capabilities?.build_publish === true;
+  const refused = Boolean(choice) && choice?.eligible !== true;
+  return {
+    effectiveId,
+    choice,
+    nodeName: node?.name || (effectiveId ? choiceName(settings, effectiveId) : ""),
+    eligible: choice?.eligible === true,
+    unavailable: Boolean(settings) && !choice,
+    upgradeNode: refused && ready && !supported ? node : undefined,
+    reasonShown: refused && (!node || (ready && supported)) && Boolean(nodes),
+    notReady: refused && Boolean(node) && !ready,
+  };
+}
+
+type BuildReads = Record<"settings" | "nodes" | "registry" | "operations", UseQueryResult<unknown>>;
+
+function BuildReadError({ settings, nodes, registry, operations }: BuildReads) {
+  return (
+    <QueryError
+      what={settings.isError ? "the build node" : nodes.isError ? "node status" : registry.isError ? "registry" : "the latest builds"}
+      error={settings.error ?? nodes.error ?? registry.error ?? operations.error}
+      onRetry={() => {
+        void settings.refetch();
+        void nodes.refetch();
+        void registry.refetch();
+        void operations.refetch();
+      }}
+      retrying={settings.isFetching || nodes.isFetching || registry.isFetching || operations.isFetching}
+    />
+  );
+}
+
+function LatestAttempt({ operation, hasSuccess, node }: { operation: Operation; hasSuccess: boolean; node: ReactNode }) {
   const active = isActive(operation.state);
   const error = operation.result?.error;
   return (
@@ -38,6 +85,7 @@ function LatestAttempt({ operation, hasSuccess }: { operation: Operation; hasSuc
         <span>
           Started <RelativeTime value={operation.created_at} />
         </span>
+        {node}
         <OperationLink operation={operation}>{active ? "View build progress" : "View build"}</OperationLink>
       </p>
       {error && (
@@ -56,7 +104,7 @@ function LatestAttempt({ operation, hasSuccess }: { operation: Operation; hasSuc
   );
 }
 
-function SuccessfulBuild({ operation }: { operation: Operation }) {
+function SuccessfulBuild({ operation, node }: { operation: Operation; node: ReactNode }) {
   const result = workerResult(operation);
   const images = result?.build?.images ?? [];
   const finished = result?.finished_at ?? operation.created_at;
@@ -68,6 +116,7 @@ function SuccessfulBuild({ operation }: { operation: Operation }) {
           <span>
             Published <RelativeTime value={finished} />
           </span>
+          {node}
           {result?.revision && (
             <span className="font-mono" title={result.revision}>
               {result.revision.slice(0, 7)}
@@ -98,6 +147,7 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   const nodes = useQuery(nodesQuery);
   const registry = useQuery(workloadRegistryQuery(workload.id));
   const registries = useQuery(connectionsQuery("registries"));
+  const settings = useQuery(buildNodeQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
   const statusId = useId();
@@ -108,15 +158,16 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
 
   // Builds read the resource's secrets and registry credentials, so they need both rights; operate alone is not enough.
   const canBuild = can(workload.permissions, "edit_configuration") && can(workload.permissions, "read_secrets");
-  const node = nodes.data?.find((item) => item.id === workload.node_id);
-  const ready = node?.state === "ready";
-  const supported = node?.capabilities?.build_publish === true;
+  // Eligibility comes from the authoritative build node read. Pending or failed reads block building instead of trusting cached data.
+  const { effectiveId, choice, nodeName, eligible, unavailable, upgradeNode, reasonShown, notReady } = buildNodeStatus(settings.data, nodes.data);
+  const unreadable = [settings, nodes, operations, registry].some((query) => query.isPending || query.isError);
   const registryId = registry.data?.registry_id ?? "";
   const server = registries.data?.find((item) => item.id === registryId)?.registry?.server;
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
   const history = operations.data ? buildHistory(operations.data, workload.id) : undefined;
   const latestAttempt = history?.attempt && history.attempt !== history.success ? history.attempt : undefined;
-  const blocked = !online || !ready || !supported || !registryId || Boolean(active) || queue.isPending || operations.isPending || registry.isPending;
+  const blocked = !online || unreadable || !eligible || !registryId || Boolean(active) || queue.isPending;
+  const executionNode = (operation: Operation) => <ExecutionNode operation={operation} settings={settings.data} nodes={nodes.data} />;
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -130,15 +181,20 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
   return (
     <Section
       title="Build and publish"
-      description="Builds every Compose service that has a build section and pushes the images to this resource's registry. Nothing is deployed, started or routed."
+      description="Builds every Compose service that has a build section on the build node and pushes the images to this resource's registry. Nothing is deployed, started or routed."
       flush
     >
       <div id={statusId} className="space-y-3 border-b border-line px-4 py-3 empty:hidden sm:px-6">
         {!canBuild && <p className="text-xs text-fg-muted">Building and publishing need Edit configuration and Read secrets. Results are read-only.</p>}
-        {canBuild && node && ready && !supported && (
+        {canBuild && unavailable && (
+          <Notice tone="warn" title="Build node unavailable">
+            The build node <span className="font-mono break-all">{effectiveId}</span> is not available to this resource. Building is refused until it is available again or the build node is changed.
+          </Notice>
+        )}
+        {canBuild && upgradeNode && (
           <Notice tone="warn" title="Worker upgrade needed">
-            {node.name} does not report build and publish support, which needs Docker Buildx, the Compose builder and pushing for its platform. Upgrade the worker, then verify it from the{" "}
-            <Link to="/nodes/$nodeId" params={{ nodeId: node.id }} className={linkClass}>
+            {upgradeNode.name} does not report build and publish support, which needs Docker Buildx, the Compose builder and pushing for its platform. Upgrade the worker, then verify it from the{" "}
+            <Link to="/nodes/$nodeId" params={{ nodeId: upgradeNode.id }} className={linkClass}>
               node page
             </Link>
             .
@@ -154,7 +210,14 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
           </Notice>
         )}
         {canBuild && !online && <p className="text-xs text-fg-muted">You are offline. Building is available when the connection returns.</p>}
-        {canBuild && online && node && !ready && !active && <p className="text-xs text-fg-muted">{node.name} is not ready. Building is available once the node is ready.</p>}
+        {canBuild && reasonShown && (
+          <Notice tone="warn" title="Build node unavailable">
+            <span className="break-words">
+              {nodeName}: {choice?.reason || "It cannot build for this resource."}
+            </span>
+          </Notice>
+        )}
+        {canBuild && online && notReady && !active && <p className="text-xs text-fg-muted">{nodeName} is not ready. Building is available once the node is ready.</p>}
         {canBuild && active && active.action !== "build" && (
           <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
             <span>
@@ -180,17 +243,9 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
           </Notice>
         )}
       </div>
-      {(nodes.isError || registry.isError) && (
+      {(settings.isError || nodes.isError || registry.isError || (operations.isError && operations.data)) && (
         <div className="border-b border-line p-4 sm:px-6">
-          <QueryError
-            what={nodes.isError ? "node status" : "registry"}
-            error={nodes.error ?? registry.error}
-            onRetry={() => {
-              void nodes.refetch();
-              void registry.refetch();
-            }}
-            retrying={nodes.isFetching || registry.isFetching}
-          />
+          <BuildReadError settings={settings} nodes={nodes} registry={registry} operations={operations} />
         </div>
       )}
       {canBuild && (
@@ -232,7 +287,10 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
                 Uses the saved Compose file, Git source, variables and registry. File secrets configured for build services are mounted with BuildKit, which keeps them out of image layers
                 unless the Dockerfile copies them. A build script can still read them.
               </p>
-              <p>To deploy the result, put the published digest references in your Compose file. Deployment approval and freeze rules apply then.</p>
+              <p>
+                Building never changes running containers, routes, releases or the saved Compose file. To deploy the result on the runtime node, put the published repository@sha256 references in
+                your Compose file and deploy as usual. The build node&apos;s local image IDs do not exist there. Deployment approval and freeze rules apply then.
+              </p>
             </div>
             <ReasonField id="build-reason" value={reason} onChange={setReason} />
             <div className="flex justify-end">
@@ -254,9 +312,9 @@ export function ResourceBuild({ workload }: { workload: Workload }) {
         <p className="px-4 py-4 text-[13px] text-fg-muted sm:px-6">No builds in the recent operation history.</p>
       ) : (
         <>
-          {latestAttempt && <LatestAttempt operation={latestAttempt} hasSuccess={Boolean(history.success)} />}
+          {latestAttempt && <LatestAttempt operation={latestAttempt} hasSuccess={Boolean(history.success)} node={executionNode(latestAttempt)} />}
           {history.success ? (
-            <SuccessfulBuild operation={history.success} />
+            <SuccessfulBuild operation={history.success} node={executionNode(history.success)} />
           ) : (
             <p className="px-4 py-4 text-[13px] text-fg-muted sm:px-6">No successful build in the recent operation history.</p>
           )}

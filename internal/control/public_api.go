@@ -61,6 +61,8 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/workloads/{id}/build-node", "workloads:read", "Read designated build-worker metadata and eligibility without credentials", nil, map[string]any{}, 200, s.buildNode},
+		{"PUT", "/workloads/{id}/build-node", "configuration:write", "Select an explicit team-authorized build worker; active builds retain their original executor", buildNodeInput{}, apiOK{}, 200, s.buildNode},
 		{"GET", "/managed-registries", "workloads:read", "Read team managed-registry metadata without credentials", nil, map[string]any{}, 200, s.managedRegistries},
 		{"POST", "/managed-registries", "workloads:write", "Team administrators provision an authenticated registry through normal deployment admission", managedRegistryInput{}, map[string]string{}, 202, s.managedRegistries},
 		{"PUT", "/managed-registries/{id}", "configuration:write", "Team administrators save retention or repair a failed certificate selection", managedRegistryChangeInput{}, apiOK{}, 200, s.managedRegistries},

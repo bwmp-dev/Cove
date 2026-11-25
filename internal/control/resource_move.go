@@ -117,6 +117,7 @@ func (s *Server) moveResource(w http.ResponseWriter, r *http.Request) {
 		{`SELECT EXISTS(SELECT 1 FROM deployment_sequences WHERE workload_ids ? $1)`, "Remove this resource from its deployment sequence before moving."},
 	}
 	if review.CrossTeam {
+		checks = append(checks, struct{ query, message string }{`SELECT EXISTS(SELECT 1 FROM workload_build_nodes WHERE workload_id=$1)`, "Clear the designated build node before transferring teams; completed build history retains its original worker."})
 		checks = append(checks, struct{ query, message string }{`SELECT EXISTS(SELECT 1 FROM workload_connections WHERE workload_id=$1) OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1)`, "Disconnect team-owned registry, storage and Git provider connections before transferring teams."})
 		review.Effects = append(review.Effects, "Resource API tokens, deploy hooks and webhook secrets are revoked. Existing SSH deploy keys and saved credentials transfer with the resource; remove credentials that must remain with the source team first.")
 	}
