@@ -308,8 +308,8 @@ func (e *Engine) recoverBuild(ctx context.Context, workload string) error {
 	if err != nil {
 		return err
 	}
-	var owner string
-	if json.Unmarshal(data, &owner) != nil || owner != pending.Owner {
+	owner, _, decodeErr := decodeBuildOwner(data)
+	if decodeErr != nil || owner != pending.Owner {
 		return errors.New("build cleanup owner does not match this worker")
 	}
 	if err := e.cleanupBuildInputs(j.Request); err != nil {

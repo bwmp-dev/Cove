@@ -65,6 +65,17 @@ class WorkerCleanupTests(unittest.TestCase):
         self.assertTrue(self.owned("volume", {}, name=builder + "_state"))
         self.assertFalse(self.owned("volume", {}, name=builder + "_state-foreign"))
 
+    def test_protected_cache_owner_keeps_cleanup_scoped(self):
+        metadata = 'OWNER {"cove_build_cache_protocol":1,"owner":"' + self.owner + '"}\n'
+        with patch.object(fixture, "run", return_value=subprocess.CompletedProcess([], 0, metadata, "")):
+            state = fixture.worker_fixture_state("fixture", self.name)
+        self.assertEqual(state["owner"], self.owner)
+        self.assertTrue(fixture.owns_worker_resource("container", {"Name": "probe", "Labels": {"cove.managed": "build-cache-probe", "cove.owner": self.owner}}, self.name, state, True))
+        for value in ('{"cove_build_cache_protocol":2,"owner":"' + self.owner + '"}', '{"cove_build_cache_protocol":1,"owner":123}'):
+            with patch.object(fixture, "run", return_value=subprocess.CompletedProcess([], 0, 'OWNER ' + value + '\n', "")):
+                with self.assertRaises(RuntimeError):
+                    fixture.worker_fixture_state("fixture", self.name)
+
     def test_inspect_handles_each_docker_missing_resource_error(self):
         for kind, error in (("container", "No such container"), ("network", "network not found"), ("volume", "no such volume")):
             with self.subTest(kind=kind), patch.object(fixture.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", error)):

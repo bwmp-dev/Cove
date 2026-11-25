@@ -68,6 +68,8 @@ export interface Capabilities {
   managed_registry?: boolean;
   // The worker mounts saved variables as files under /run/secrets.
   file_secrets?: boolean;
+  // The worker can verify and enforce a hard build-cache cap on a dedicated filesystem. Linux workers only.
+  build_cache_limits?: boolean;
   protocol: number;
   os: string;
   arch: string;

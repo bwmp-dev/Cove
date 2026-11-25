@@ -14,6 +14,7 @@ import (
 )
 
 type Probe struct {
+	BuildCacheLimits     bool         `json:"build_cache_limits"`
 	RemoteBuilds         bool         `json:"remote_builds"`
 	ManagedRegistry      bool         `json:"managed_registry"`
 	ImageScanning        bool         `json:"image_scanning"`
@@ -161,6 +162,7 @@ func Inspect(ctx context.Context) Probe {
 	if out, err := exec.CommandContext(ctx, "docker", "compose", "version", "--short").Output(); err == nil {
 		p.Compose = strings.TrimSpace(string(out))
 	}
+	p.BuildCacheLimits = runtime.GOOS == "linux" && p.BuildPublish
 	p.RemoteBuilds = p.BuildPublish
 	p.JobImageLifecycle = p.ImageLifecycle
 	p.ImageUpdates = p.ImageLifecycle

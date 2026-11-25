@@ -388,6 +388,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/workloads/{id}/networks", s.admin(http.HandlerFunc(s.workloadNetworks)))
 	mux.Handle("GET /api/notifications/health-history", s.admin(http.HandlerFunc(s.healthDeliveryHistory)))
 	mux.Handle("GET /api/notifications/health", s.admin(http.HandlerFunc(s.healthAlerts)))
+	mux.Handle("GET /api/nodes/{id}/build-cache", s.admin(http.HandlerFunc(s.buildCache)))
+	mux.Handle("PUT /api/nodes/{id}/build-cache", s.admin(http.HandlerFunc(s.buildCache)))
 	mux.Handle("GET /api/nodes", s.admin(http.HandlerFunc(s.listNodes)))
 	mux.Handle("GET /api/nodes/{id}/cleanup-policy", s.admin(http.HandlerFunc(s.nodeCleanupControl)))
 	mux.Handle("PUT /api/nodes/{id}/cleanup-policy", s.admin(http.HandlerFunc(s.nodeCleanupControl)))

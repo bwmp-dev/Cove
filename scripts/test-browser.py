@@ -84,7 +84,11 @@ def worker_fixture_state(image, fixture):
         kind, value = line.split(" ", 1)
         if kind == "OWNER":
             state["owner"] = json.loads(value)
-            if state["owner"] is not None and not re.fullmatch(r"[a-f0-9]{32}", state["owner"]):
+            if isinstance(state["owner"], dict):
+                if set(state["owner"]) != {"cove_build_cache_protocol", "owner"} or state["owner"]["cove_build_cache_protocol"] != 1:
+                    raise RuntimeError("Unknown fixture worker owner protocol")
+                state["owner"] = state["owner"]["owner"]
+            if state["owner"] is not None and (not isinstance(state["owner"], str) or not re.fullmatch(r"[a-f0-9]{32}", state["owner"])):
                 raise RuntimeError("Invalid fixture worker owner")
         elif kind == "BACKUP_OWNER":
             owner = json.loads(value)

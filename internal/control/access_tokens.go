@@ -21,7 +21,7 @@ type apiScope struct {
 }
 
 var apiScopes = []apiScope{
-	{[]string{"view", "edit_configuration"}, "nodes:manage", 3, "Instance administrators only: inspect and change shared node listeners and Cloudflare Tunnel publishing; personal tokens only.", true, true},
+	{[]string{"view", "edit_configuration"}, "nodes:manage", 3, "Instance administrators only: inspect and change shared node listeners, Cloudflare Tunnel publishing and verified build-cache filesystems; personal tokens only.", true, true},
 	{[]string{"view", "manage_backups", "edit_configuration", "read_secrets"}, "pitr:configure", 3, "Configure encrypted PostgreSQL PITR capture and its required restart.", false, false},
 	{[]string{"view", "manage_backups"}, "pitr:backup", 2, "Queue a PostgreSQL PITR base backup.", false, false},
 	{[]string{"view", "manage_backups", "edit_configuration"}, "pitr:forget", 3, "Delete disabled PITR history after confirmation.", false, false},

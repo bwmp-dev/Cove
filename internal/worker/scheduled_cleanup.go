@@ -93,8 +93,16 @@ func (e *Engine) CleanupPolicy(ctx context.Context, in CleanupControl) (*Cleanup
 		p, err := e.cleanupPlan(ctx, s.Policy)
 		return &s, p, err
 	case "run":
+		unlock, err := e.lockNodeChange(false)
+		if err != nil {
+			return &s, nil, err
+		}
+		defer unlock()
+		if err := e.requireInterlockedHostSchedule(); err != nil {
+			return &s, nil, err
+		}
 		e.mu.Lock()
-		if e.draining || e.hasMoveFence() || len(e.active) > 0 || len(e.pending) > 0 || len(e.recovering) > 0 {
+		if e.draining || e.hasMoveFence() || e.hostChanging || e.proxyRunning || e.customRunning || e.customUnsettled || len(e.active) > 0 || len(e.pending) > 0 || len(e.recovering) > 0 {
 			e.mu.Unlock()
 			return nil, nil, errors.New("wait for worker operations and recovery before cleanup")
 		}
@@ -125,7 +133,11 @@ func (e *Engine) CleanupPolicy(ctx context.Context, in CleanupControl) (*Cleanup
 				if ownerErr != nil {
 					return &s, plan, ownerErr
 				}
-				args = []string{"docker", "buildx", "prune", "--builder", "cove-" + owner, "--force", "--filter", "id=" + item.ID, "--filter", fmt.Sprintf("until=%dh", s.Policy.MinimumAgeHours)}
+				builder, builderErr := e.cleanupBuilder(ctx, owner)
+				if builderErr != nil || builder == "" {
+					return &s, plan, errors.Join(errors.New("the owned cleanup builder changed; refresh the preview"), builderErr)
+				}
+				args = []string{"docker", "buildx", "prune", "--builder", builder, "--force", "--filter", "id=" + item.ID, "--filter", fmt.Sprintf("until=%dh", s.Policy.MinimumAgeHours)}
 				env = []string{"BUILDX_CONFIG=" + filepath.Join(e.Root, "buildx")}
 			default:
 				return &s, plan, errors.New("invalid cleanup item")
@@ -273,9 +285,13 @@ func (e *Engine) cleanupPlan(ctx context.Context, p CleanupPolicy) (*CleanupPlan
 		}
 	}
 	if p.BuildCache && owner != "" {
-		if _, err := os.Stat(filepath.Join(e.Root, "builder-ready.json")); err == nil {
+		builder, err := e.cleanupBuilder(ctx, owner)
+		if err != nil {
+			return nil, err
+		}
+		if builder != "" {
 			out := &limitedBuffer{Limit: 1024 * 1024}
-			args := []string{"docker", "buildx", "du", "--builder", "cove-" + owner, "--format=json"}
+			args := []string{"docker", "buildx", "du", "--builder", builder, "--format=json"}
 			if err = e.Run(ctx, e.Root, args, []string{"BUILDX_CONFIG=" + filepath.Join(e.Root, "buildx")}, out); err != nil {
 				return nil, errors.New("Cove build cache inspection unavailable")
 			}
@@ -330,8 +346,6 @@ func (e *Engine) cleanupPlan(ctx context.Context, p CleanupPolicy) (*CleanupPlan
 				}
 
 			}
-		} else if !os.IsNotExist(err) {
-			return nil, err
 		}
 	}
 	sort.Slice(plan.Items, func(i, j int) bool {

@@ -22,6 +22,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "build-cache-filesystem" {
+		if err := BuildCacheFilesystem(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 2 && os.Args[1] == "registry-storage" {
 		file, err := os.Open("/config/registry.json")
 		if err == nil {

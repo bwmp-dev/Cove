@@ -62,6 +62,8 @@ func main() {
 		err = worker.RunFilesystemSnapshotReaper(ctx, os.Args[2], false)
 	case "snapshot-host":
 		err = worker.RunFilesystemSnapshotHost(ctx, os.Stdin, os.Stdout)
+	case "build-cache-filesystem":
+		err = worker.BuildCacheFilesystem(os.Stdout)
 	case "registry-storage":
 		var file *os.File
 		file, err = os.Open("/config/registry.json")

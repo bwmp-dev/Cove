@@ -3,7 +3,6 @@ package worker
 import (
 	"bytes"
 	"context"
-	"cove/internal/outbound"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/csv"
@@ -23,14 +22,8 @@ func (e *Engine) buildOwner() (string, error) {
 	path := filepath.Join(e.Root, "build-owner.json")
 	data, err := os.ReadFile(path)
 	if err == nil {
-		var owner string
-		if json.Unmarshal(data, &owner) != nil || len(owner) != 32 {
-			return "", errors.New("invalid build owner")
-		}
-		if _, err := hex.DecodeString(owner); err != nil {
-			return "", err
-		}
-		return owner, nil
+		owner, _, err := decodeBuildOwner(data)
+		return owner, err
 	}
 	if !os.IsNotExist(err) {
 		return "", err
@@ -82,28 +75,18 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 		return err
 	}
 	buildEnv := append(append([]string{}, env...), "BUILDX_CONFIG="+filepath.Join(e.Root, "buildx"), "BUILDKIT_PROGRESS=plain")
-	proxy := outbound.Environment()
-	if saved, err := readOutboundConfig(e.Root); err != nil {
+	proxy, err := e.buildProxy(env)
+	if err != nil {
 		return err
-	} else if saved != nil {
-		proxy = *saved
 	}
-	for _, variable := range env {
-		key, value, ok := strings.Cut(variable, "=")
-		if !ok {
-			continue
-		}
-		switch key {
-		case "HTTP_PROXY":
-			proxy.HTTP = value
-		case "HTTPS_PROXY":
-			proxy.HTTPS = value
-		case "NO_PROXY":
-			proxy.NoProxy = value
-		}
-	}
-	if err := proxy.Validate(); err != nil {
+	state, err := e.readBuildCache()
+	if err != nil {
 		return err
+	}
+	if state.Current != nil {
+		if err = ValidateBuildCacheProxy(proxy); err != nil {
+			return err
+		}
 	}
 	if log, ok := out.(*boundedLog); ok {
 		log.secrets = append(log.secrets, proxy.Secrets()...)
@@ -111,49 +94,59 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 	encoded, _ := json.Marshal(proxy)
 	digest := sha256.Sum256(encoded)
 	fingerprint := hex.EncodeToString(digest[:])
-	marker := filepath.Join(e.Root, "builder-ready.json")
-	data, err := os.ReadFile(marker)
-	if err != nil && !os.IsNotExist(err) {
+	location, err := e.recoverBuildCache(ctx, out, true)
+	if err != nil {
 		return err
 	}
-	var previous string
-	_ = json.Unmarshal(data, &previous)
-	ready := previous == fingerprint || string(data) == "true" && proxy.HTTP == "" && proxy.HTTPS == "" && proxy.NoProxy == ""
-	if !ready {
-		if len(data) > 0 {
-			if err := e.Run(ctx, dir, []string{"docker", "buildx", "rm", "--force", "cove-" + owner}, buildEnv, out); err != nil {
-				return errors.New("could not refresh the private builder's outbound proxy")
-			}
-		}
-		create := []string{"docker", "buildx", "create", "--name", "cove-" + owner, "--driver", "docker-container", "--driver-opt", "default-load=true"}
-		for _, variable := range proxy.Env() {
-			var encoded bytes.Buffer
-			writer := csv.NewWriter(&encoded)
-			if err := writer.Write([]string{"env." + variable}); err != nil {
-				return err
-			}
-			writer.Flush()
-			if err := writer.Error(); err != nil {
-				return err
-			}
-			create = append(create, "--driver-opt", strings.TrimSuffix(encoded.String(), "\n"))
-		}
-		if err := e.Run(ctx, dir, create, buildEnv, out); err != nil {
-			// Creation can survive a crash before its ready marker; replace only our private configuration's named builder.
-			inspected := &limitedBuffer{Limit: 4096}
-			inspectErr := e.Run(ctx, dir, []string{"docker", "buildx", "inspect", "cove-" + owner, "--format", "{{.Driver}}"}, buildEnv, inspected)
-			if inspectErr != nil || strings.TrimSpace(inspected.data.String()) != "docker-container" {
-				return err
-			}
-			if removeErr := e.Run(ctx, dir, []string{"docker", "buildx", "rm", "--force", "cove-" + owner}, buildEnv, out); removeErr != nil {
-				return errors.Join(err, removeErr)
-			}
-			if createErr := e.Run(ctx, dir, create, buildEnv, out); createErr != nil {
-				return createErr
-			}
-		}
-		if err := writeJSON(marker, fingerprint); err != nil {
+	builder := "cove-" + owner
+	if location != nil {
+		builder = cacheBuilderName(*location)
+	}
+	if location == nil {
+		marker := filepath.Join(e.Root, "builder-ready.json")
+		data, err := os.ReadFile(marker)
+		if err != nil && !os.IsNotExist(err) {
 			return err
+		}
+		var previous string
+		_ = json.Unmarshal(data, &previous)
+		ready := previous == fingerprint || string(data) == "true" && proxy.HTTP == "" && proxy.HTTPS == "" && proxy.NoProxy == ""
+		if !ready {
+			if len(data) > 0 {
+				if err := e.Run(ctx, dir, []string{"docker", "buildx", "rm", "--force", "cove-" + owner}, buildEnv, out); err != nil {
+					return errors.New("could not refresh the private builder's outbound proxy")
+				}
+			}
+			create := []string{"docker", "buildx", "create", "--name", "cove-" + owner, "--driver", "docker-container", "--driver-opt", "default-load=true"}
+			for _, variable := range proxy.Env() {
+				var encoded bytes.Buffer
+				writer := csv.NewWriter(&encoded)
+				if err := writer.Write([]string{"env." + variable}); err != nil {
+					return err
+				}
+				writer.Flush()
+				if err := writer.Error(); err != nil {
+					return err
+				}
+				create = append(create, "--driver-opt", strings.TrimSuffix(encoded.String(), "\n"))
+			}
+			if err := e.Run(ctx, dir, create, buildEnv, out); err != nil {
+				// Creation can survive a crash before its ready marker; replace only our private configuration's named builder.
+				inspected := &limitedBuffer{Limit: 4096}
+				inspectErr := e.Run(ctx, dir, []string{"docker", "buildx", "inspect", "cove-" + owner, "--format", "{{.Driver}}"}, buildEnv, inspected)
+				if inspectErr != nil || strings.TrimSpace(inspected.data.String()) != "docker-container" {
+					return err
+				}
+				if removeErr := e.Run(ctx, dir, []string{"docker", "buildx", "rm", "--force", "cove-" + owner}, buildEnv, out); removeErr != nil {
+					return errors.Join(err, removeErr)
+				}
+				if createErr := e.Run(ctx, dir, create, buildEnv, out); createErr != nil {
+					return createErr
+				}
+			}
+			if err := writeJSON(marker, fingerprint); err != nil {
+				return err
+			}
 		}
 	}
 	for name := range services {
@@ -163,12 +156,17 @@ func (e *Engine) buildImages(ctx context.Context, dir string, args, env []string
 	if err := writeJSON(override, map[string]any{"services": services}); err != nil {
 		return err
 	}
-	buildArgs := append(append([]string{}, args...), "--file", override, "build", "--builder", "cove-"+owner)
+	buildArgs := append(append([]string{}, args...), "--file", override, "build", "--builder", builder)
 	// BuildKit does not include secret contents in its cache key.
 	if secretBuild || noCache {
 		buildArgs = append(buildArgs, "--no-cache")
 	}
-	return e.Run(ctx, dir, buildArgs, buildEnv, out)
+	if location == nil {
+		return e.Run(ctx, dir, buildArgs, buildEnv, out)
+	}
+	var tail cacheDiagnosticTail
+	failure := e.Run(ctx, dir, buildArgs, buildEnv, io.MultiWriter(out, &tail))
+	return e.finishCappedBuild(ctx, *location, failure, tail, out)
 }
 
 func (e *Engine) cleanupLoop(ctx context.Context) {

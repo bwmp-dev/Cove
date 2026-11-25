@@ -61,6 +61,8 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/nodes/{id}/build-cache", "nodes:manage", "Inspect actual dedicated build-cache filesystem verification; instance administrators only", nil, worker.BuildCacheStatus{}, 200, s.buildCache},
+		{"PUT", "/nodes/{id}/build-cache", "nodes:manage", "Verify or explicitly disable an operator-provided cache filesystem; no storage is provisioned", worker.BuildCacheSettings{}, worker.BuildCacheStatus{}, 200, s.buildCache},
 		{"GET", "/workloads/{id}/build-node", "workloads:read", "Read designated build-worker metadata and eligibility without credentials", nil, map[string]any{}, 200, s.buildNode},
 		{"PUT", "/workloads/{id}/build-node", "configuration:write", "Select an explicit team-authorized build worker; active builds retain their original executor", buildNodeInput{}, apiOK{}, 200, s.buildNode},
 		{"GET", "/managed-registries", "workloads:read", "Read team managed-registry metadata without credentials", nil, map[string]any{}, 200, s.managedRegistries},

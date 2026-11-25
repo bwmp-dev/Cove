@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
 import { CleanupPreview } from "../components/CleanupPreview";
+import { BuildCacheSection } from "../components/BuildCache";
 import { ComposeAdoption, reviewFromHash } from "../components/ComposeAdoption";
 import { NodeCleanup } from "../components/NodeCleanup";
 import { NodeMounts } from "../components/NodeMounts";
@@ -223,6 +224,7 @@ function NodeDetail({ node }: { node: Node }) {
         <Section title="Capabilities" description="Reported by the worker during the last verification.">
           <Capabilities node={node} />
         </Section>
+        <BuildCacheSection node={node} />
 
         </div>
         <div className="space-y-5">
