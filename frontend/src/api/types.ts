@@ -462,7 +462,7 @@ export interface Route {
   policy?: RoutePolicy;
 }
 
-export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "adopt" | "image_check" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy" | "pitr_configure" | "pitr_backup" | "pitr_forget" | "pitr_restore" | "move";
+export type OperationAction = "deploy" | "stop" | "start" | "restart" | "rollback" | "backup" | "restore" | "drill" | "restore_copy" | "preview_remove" | "routes" | "adopt" | "image_check" | "image_scan" | "build" | "rollout_promote" | "rollout_abort" | "restart_unhealthy" | "suspend" | "resume" | "idle_policy" | "pitr_configure" | "pitr_backup" | "pitr_forget" | "pitr_restore" | "move";
 export type OperationState = "queued" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
 
 export interface WorkerOperation {
@@ -475,6 +475,7 @@ export interface WorkerOperation {
   error?: string;
   revision?: string;
   image_check?: ImageCheck;
+  image_scan?: ImageScan;
   build?: BuildResult;
   rollout?: RolloutStatus;
   // Reported only by workers with the job_runs capability.
@@ -598,6 +599,54 @@ export interface ImageStatus {
 export interface ImageCheck {
   checked_at: string;
   images: ImageStatus[];
+}
+
+export type ScanSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
+
+export interface ScanFinding {
+  id: string;
+  package: string;
+  installed: string;
+  // Missing or empty means the scanner reported no fixed version, not that the package is safe.
+  fixed?: string;
+  severity: ScanSeverity;
+}
+
+// Coverage values are "scanned", "not_detected" or "unknown"; Java archives are "not_detected" or "not_scanned".
+// Any other value is shown as unknown.
+export interface ScanCoverage {
+  os: string;
+  other_languages: string;
+  java_archives: string;
+  java_message?: string;
+}
+
+export interface ScannedImage {
+  service: string;
+  image_id: string;
+  // Derived from the scanned image and its platform descriptor. Multi-platform images can share an image_id, so this
+  // identifies the image when present.
+  image_identity?: string;
+  config_digest: string;
+  // "complete" or "unknown"; any other value is unknown.
+  state: string;
+  message?: string;
+  // Counts by severity, including findings beyond the stored list.
+  counts: Record<string, number>;
+  findings: ScanFinding[];
+  truncated: boolean;
+  end_of_life: boolean;
+  coverage: ScanCoverage;
+}
+
+export interface ImageScan {
+  scanner_image: string;
+  scanner_version: string;
+  database: { digest: string; updated_at: string; next_update: string };
+  checked_at: string;
+  state: string;
+  message?: string;
+  images: ScannedImage[];
 }
 
 // The most recent successful image check. Stale means a deploy or rollback succeeded after it.

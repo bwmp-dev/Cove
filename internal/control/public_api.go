@@ -61,6 +61,9 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/workloads/{id}/image-scanning", "workloads:read", "Read team/node scanner opt-in metadata", nil, map[string]any{}, 200, s.imageScanning},
+		{"PUT", "/workloads/{id}/image-scanning", "configuration:write", "Change team/node scan opt-in; team administrator required", imageScanningInput{}, map[string]any{}, 200, s.imageScanning},
+		{"GET", "/workloads/{id}/image-scans", "workloads:read", "Read bounded vulnerability findings and unknown/stale coverage", nil, map[string]any{}, 200, s.workloadImageScans},
 		{"GET", "/workloads/{id}/image-update-policy", "workloads:read", "Read image update policy and candidate metadata", nil, map[string]any{}, 200, s.imageUpdatePolicy},
 		{"PUT", "/workloads/{id}/image-update-policy", "workloads:write", "Save image update ownership; enabling requires Operate and an operate-granting token scope", worker.ImageUpdatePolicy{}, map[string]any{}, 200, s.imageUpdatePolicy},
 		{"GET", "/workloads/{id}/registry-webhook", "workloads:read", "Read registry webhook metadata without its token", nil, registryWebhookStatus{}, 200, s.registryWebhook},
@@ -190,7 +193,7 @@ func (s *Server) publicRoutes() []publicRoute {
 		{"PUT", "/workloads/{id}/routes", "workloads:write", "Replace public routes using normal ingress reconciliation", struct {
 			Routes []worker.Route `json:"routes"`
 		}{}, map[string]any{}, 200, s.updateRoutes},
-		{"POST", "/workloads/{id}/operations", "workloads:operate", "Queue an operation, including pull_latest deploy, rollout_promote/abort, image_check and build; restore/drill additionally require workloads:restore, build requires Edit configuration and Read secrets", apiOperationInput{}, apiID{}, 202, s.queueOperation},
+		{"POST", "/workloads/{id}/operations", "workloads:operate", "Queue an operation, including pull_latest deploy, rollout_promote/abort, image_check, image_scan and build; restore/drill additionally require workloads:restore, build requires Edit configuration and Read secrets", apiOperationInput{}, apiID{}, 202, s.queueOperation},
 		{"GET", "/workloads/{id}/autoscale-policy", "workloads:read", "Read CPU replica autoscaling policy and state", nil, map[string]any{}, 200, s.autoscalePolicy},
 		{"PUT", "/workloads/{id}/autoscale-policy", "workloads:write", "Set CPU replica autoscaling policy; queued scaling deploys use normal admission", worker.AutoscalePolicy{}, map[string]any{}, 200, s.autoscalePolicy},
 		{"GET", "/workloads/{id}/idle-policy", "workloads:read", "Read idle sleep policy", nil, worker.IdlePolicy{}, 200, s.idlePolicy},

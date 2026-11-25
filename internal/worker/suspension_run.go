@@ -484,7 +484,7 @@ func (e *Engine) suspensionGate(ctx context.Context, r Request, out io.Writer) (
 		}
 		return false, syncDirectory(filepath.Dir(path))
 	}
-	if r.Action == "image_check" || r.Action == "build" || r.Action == "restart_unhealthy" {
+	if r.Action == "image_check" || r.Action == "image_scan" || r.Action == "build" || r.Action == "restart_unhealthy" {
 		return false, nil
 	}
 	if r.Action == "backup" || r.Action == "restore" && r.ResumeSuspended {

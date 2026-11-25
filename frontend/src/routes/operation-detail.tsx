@@ -23,12 +23,13 @@ import { findPlacement } from "../lib/hierarchy";
 import { resultSummary } from "../lib/rollouts";
 import { buttonClass, inputClass, linkClass } from "../lib/styles";
 import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
-import type { SuspensionResult, WorkloadSummary } from "../api/types";
+import type { SuspensionResult, WorkerOperation, WorkloadSummary } from "../api/types";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
 import { idleReason } from "../lib/idle";
 import { ScaleOutcome } from "../components/CpuAutoscale";
+import { ScanOutcome } from "../components/ImageScans";
 
 const route = getRouteApi("/app/operations/$operationId");
 
@@ -127,6 +128,12 @@ function SuspensionOutcome({ suspension }: { suspension: SuspensionResult }) {
       </p>
     </div>
   );
+}
+
+function imageScanRows(operation: Operation, worker: WorkerOperation | null, active: boolean, workloadId: string | undefined) {
+  if (worker?.image_scan) return [{ term: "Vulnerability scan", value: <ScanOutcome scan={worker.image_scan} workloadId={workloadId} /> }];
+  if (operation.action === "image_scan" && worker && !active) return [{ term: "Vulnerability scan", value: <span className="text-fg-muted">No report was recorded.</span> }];
+  return [];
 }
 
 const stateDescriptions = {
@@ -324,6 +331,7 @@ export function OperationPage() {
                   ]
                 : []),
               ...(worker?.scale ? [{ term: "CPU scaling", value: <ScaleOutcome scale={worker.scale} /> }] : []),
+              ...imageScanRows(operation, worker, active, workload?.id),
               ...(worker?.suspension ? [{ term: suspensionTerms[worker.suspension.reason], value: <SuspensionOutcome suspension={worker.suspension} /> }] : []),
               ...(worker?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{worker.revision}</span> }] : []),
               ...(!worker ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),

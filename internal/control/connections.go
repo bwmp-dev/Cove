@@ -405,6 +405,43 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if r.Action == "image_scan" {
+		if err := s.requireImageScanning(ctx, r.Workload); err != nil {
+			return err
+		}
+		var prepared bool
+		err := s.DB.QueryRow(ctx, `SELECT drift_prepared FROM operations WHERE id=$1`, r.ID).Scan(&prepared)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if !prepared {
+			c, err := s.outboundConfig(ctx)
+			if err != nil {
+				return err
+			}
+			if s.propagateOutbound(c) {
+				r.OutboundProxy = &c
+			}
+		}
+		if r.OutboundProxy != nil {
+			var supported bool
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'outbound_proxy')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+				return err
+			}
+			if !supported {
+				return errors.New("upgrade and verify scanner outbound proxy support before scanning")
+			}
+		}
+		if !prepared {
+			payload, err := s.sealJSON(r)
+			if err != nil {
+				return err
+			}
+			_, err = s.DB.Exec(ctx, `UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1`, r.ID, payload)
+			return err
+		}
+		return nil
+	}
 	var driftPrepared bool
 	err := s.DB.QueryRow(ctx, `SELECT drift_prepared FROM operations WHERE id=$1`, r.ID).Scan(&driftPrepared)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {

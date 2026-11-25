@@ -124,8 +124,8 @@ export function NotificationFields({ initial, error }: { initial?: Notification;
     ) : (
       <>
         <ChoiceGroup<RoutingMode> legend="Events" name="routing" value={routing} onChange={setRouting} choices={[
-          { value: "groups", label: "By result", description: "Operation successes, failures and health alerts. Security, configuration, import, adoption and image update events are not included." },
-          { value: "events", label: "Specific events", description: "Choose exact operation, health, security, configuration, import, adoption and image update events." },
+          { value: "groups", label: "By result", description: "Operation successes, failures and health alerts. Security, configuration, import, adoption, image update and vulnerability scan events are not included." },
+          { value: "events", label: "Specific events", description: "Choose exact operation, health, security, configuration, import, adoption, image update and vulnerability scan events." },
         ]} />
         {routing === "groups" ? (
           <div className="flex flex-wrap gap-1.5" role="group" aria-label="Result groups">

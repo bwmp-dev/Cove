@@ -112,6 +112,7 @@ func (s *Server) mcpServer(r *http.Request) *mcp.Server {
 		{"pull_and_deploy", "Pull referenced images and queue a deployment through normal admission.", "workloads:operate", "POST", "/workloads/{id}/operations", "deploy"},
 		{"rollout_promote", "Promote a staged rollout through normal deployment admission.", "workloads:operate", "POST", "/workloads/{id}/operations", "rollout_promote"},
 		{"rollout_abort", "Abort a staged rollout and recover the retained generation.", "workloads:operate", "POST", "/workloads/{id}/operations", "rollout_abort"},
+		{"image_scan", "Scan retained deployed images without starting, waking or deploying; explicit team/node opt-in required.", "workloads:operate", "POST", "/workloads/{id}/operations", "image_scan"},
 		{"image_check", "Queue a registry digest check without deploying.", "workloads:operate", "POST", "/workloads/{id}/operations", "image_check"},
 		{"restart", "Queue a resource restart.", "workloads:operate", "POST", "/workloads/{id}/operations", "restart"},
 		{"logs", "Read a bounded container log snapshot.", "logs:read", "GET", "/workloads/{id}/logs", ""},

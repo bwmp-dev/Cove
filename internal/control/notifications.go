@@ -157,18 +157,30 @@ func (s *Server) deliverNotification(ctx context.Context, operation, connection 
 	status := "sent"
 	message := ""
 	n := c.Notification
+	scanEvent, scanSummary, scanAllowed, err := s.scanNotification(ctx, operation, action)
+	if err != nil {
+		return err
+	}
+	eventName := operationEvent(action, state)
+	if action == "image_scan" {
+		eventName = scanEvent
+	}
 	if n.Owner {
 		n.Email, err = s.notificationOwnerEmail(ctx, team, subject)
 		if err != nil {
 			return err
 		}
 	}
-	if !notificationMatches(n, operationEvent(action, state)) || n.Owner && n.Email == "" {
+	if !scanAllowed || !notificationMatches(n, eventName) || n.Owner && n.Email == "" {
 		status = "skipped"
 	} else {
 		event := map[string]string{"delivery_id": operation + ":" + connection, "event": "operation." + state, "operation_id": operation, "resource": name, "action": action, "state": state, "url": s.PublicURL + "/operations/" + operation, "message": "Cove: " + action + " " + state + " for " + name + ". " + s.PublicURL + "/operations/" + operation}
 		if len(n.Events) > 0 {
-			event["event"] = operationEvent(action, state)
+			event["event"] = eventName
+		}
+		if action == "image_scan" {
+			event["event"] = eventName
+			event["message"] = "Cove: " + scanSummary + " " + event["url"]
 		}
 		if err = s.sendNotification(ctx, n, event); err != nil {
 			message = err.Error()

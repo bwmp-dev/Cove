@@ -34,7 +34,7 @@ it("routes outcome events only when they are selected by name", async () => {
   vi.mocked(request).mockImplementation((method, path) => Promise.resolve(path === "/api/notifications/events" ? ["backup.failed", "security.lockout", "import.failed"] : method === "GET" ? [] : { id: "n1" }));
   render(<QueryClientProvider client={new QueryClient()}><Connections kind="notifications" /></QueryClientProvider>);
   fireEvent.click(await screen.findByRole("button", { name: "Add notification" }));
-  expect(screen.getByText(/Security, configuration, import, adoption and image update events are not included/)).toBeInTheDocument();
+  expect(screen.getByText(/Security, configuration, import, adoption, image update and vulnerability scan events are not included/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("radio", { name: /Specific events/ }));
   expect(await screen.findByRole("group", { name: "Account security" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("checkbox", { name: "Sign-in lockout" }));

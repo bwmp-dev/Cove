@@ -120,6 +120,7 @@ const outcomeGroups = {
   certificates: { title: "Certificates", description: "Certificate requests and renewals by a resource's issuers that did not finish. Messages name the event only, without hostnames or keys. Open the resource's Domains page for details." },
   tunnels: { title: "Cloudflare Tunnel", description: "A node's Cloudflare Tunnel publishing or cleanup starting to report an error. Messages name the event only, without hostnames, tokens or error details. Only administrator teams' channels receive it. Open the node's Proxy configuration page for details." },
   images: { title: "Image updates", description: "Newer images found by a resource's image update policy, sent once per candidate. Ordinary image checks do not send this event." },
+  scans: { title: "Vulnerability scans", description: "One event when a manually queued vulnerability scan finishes, sent only while the team's scanning setting for the resource's node allows scans and has notifications on. Messages summarise the result; findings and coverage are on the resource's Registry page." },
 } satisfies Record<string, { title: string; description: string }>;
 
 const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: string }> = {
@@ -153,6 +154,9 @@ const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: 
   "certificate.failed": { group: "certificates", label: "Certificate issuance or renewal failed" },
   "tunnel.failed": { group: "tunnels", label: "Cloudflare Tunnel failed" },
   "image.update_available": { group: "images", label: "Image update available" },
+  "image.vulnerabilities": { group: "scans", label: "Scan found known vulnerabilities" },
+  "image.scan_completed": { group: "scans", label: "Scan completed with no known vulnerabilities" },
+  "image.scan_unknown": { group: "scans", label: "Scan coverage unknown" },
 };
 
 export interface EventGroup {

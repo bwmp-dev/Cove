@@ -100,13 +100,14 @@ func TestJobScheduleRetainsTicksBlockedByImageMetadata(t *testing.T) {
 	f := newAccountFixture(t)
 	f.sql(`INSERT INTO nodes(id,name,address,port,public_key,private_key,state,capabilities) VALUES('metadata-node','Node','localhost',22,'',$1,'ready','{"job_runs":true}')`, []byte{})
 	f.sql(`INSERT INTO projects(id,name,team_id) VALUES('metadata-project','Project','default')`)
-	for _, policy := range []string{"skip", "queue_one", "replace"} {
-		input := workloadInput{Name: policy, NodeID: "metadata-node", ProjectID: "metadata-project", Kind: "job", JobService: "task", Compose: "services:\n  task:\n    image: busybox:1.37\n    command: ['true']\n"}
+	for _, test := range []struct{ policy, action string }{{"skip", "image_check"}, {"queue_one", "image_check"}, {"replace", "image_check"}, {"skip", "image_scan"}, {"queue_one", "image_scan"}, {"replace", "image_scan"}} {
+		policy := test.policy
+		input := workloadInput{Name: policy + "-" + test.action, NodeID: "metadata-node", ProjectID: "metadata-project", Kind: "job", JobService: "task", Compose: "services:\n  task:\n    image: busybox:1.37\n    command: ['true']\n"}
 		id := jsonString(t, f.call("root", "default", "POST", "/api/workloads", input, 201), "id")
 		f.call("root", "default", "PUT", "/api/workloads/"+id+"/schedule", map[string]any{"cron": "* * * * *", "overlap_policy": policy}, 200)
 		f.sql(`UPDATE workloads SET next_job_at=now()-interval '1 minute' WHERE id=$1`, id)
 		check := resourceID()
-		f.sql(`INSERT INTO operations(id,workload_id,action,state,payload) VALUES($1,$2,'image_check','running',$3)`, check, id, []byte{})
+		f.sql(`INSERT INTO operations(id,workload_id,action,state,payload) VALUES($1,$2,$3,'running',$4)`, check, id, test.action, []byte{})
 		for range 2 {
 			if err := f.s.scheduleJobs(context.Background()); err != nil {
 				t.Fatal(err)

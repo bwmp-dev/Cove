@@ -191,9 +191,10 @@ def main():
     certificate_dns = "--certificate-dns" in sys.argv[1:]
     cloudflare_tunnel = "--cloudflare-tunnel" in sys.argv[1:]
     registry_hooks = "--registry-webhooks" in sys.argv[1:]
+    image_scans = "--image-scans" in sys.argv[1:]
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image = name + "-panel:development"
     worker_image = name + "-worker:development"
@@ -213,12 +214,24 @@ def main():
     extra_images = []
     tunnel_bridges = []
     env = os.environ.copy()
-    if registry_hooks:
+    if registry_hooks or image_scans:
         registry_image_id = run("docker", "image", "inspect", "--format", "{{.Id}}", "registry:2.8.3", capture_output=True, text=True).stdout.strip()
         # Docker Desktop reports the manifest ID; docker save/load on classic engines reports the config ID.
         if registry_image_id not in (REGISTRY_HOOK_PIN.split("@", 1)[1], REGISTRY_HOOK_CONFIG):
             raise RuntimeError("Cached registry fixture does not match the pinned manifest/config; refusing execution")
-        env.update(COVE_BROWSER_REGISTRY_HOOKS="1", COVE_BROWSER_REGISTRY_IMAGE=registry_image_id, COVE_BROWSER_REGISTRY_PIN=REGISTRY_HOOK_PIN)
+        env.update(COVE_BROWSER_REGISTRY_IMAGE=registry_image_id, COVE_BROWSER_REGISTRY_PIN=REGISTRY_HOOK_PIN)
+        if registry_hooks:
+            env["COVE_BROWSER_REGISTRY_HOOKS"] = "1"
+    if image_scans:
+        from scanner_fixture import SCANNER_PIN
+        digest = SCANNER_PIN.split("@", 1)[1]
+        if subprocess.run(["docker", "image", "inspect", SCANNER_PIN], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            scanner_image_id = run("docker", "image", "inspect", "--format", "{{.Id}}", digest, capture_output=True, text=True).stdout.strip()
+            if scanner_image_id != digest:
+                raise RuntimeError("The cached scanner must match the exact release digest")
+        if not env.get("COVE_BROWSER_SCANNER_DATABASE"):
+            raise RuntimeError("COVE_BROWSER_SCANNER_DATABASE must name the cached main database archive")
+        env["COVE_BROWSER_IMAGE_SCANS"] = "1"
     env.update(POSTGRES_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_PASSWORD=secrets.token_hex(24),
                COVE_ADMIN_TOKEN=secrets.token_hex(32),
@@ -374,6 +387,9 @@ def main():
                 worker_image, "-ec",
                 'test -z "$(ls -A /fixture)" || { echo "Refusing existing /var/lib/cove state" >&2; exit 1; }; cp -a /var/lib/cove/. /fixture/; printf %s "$1" > /fixture/.browser-owner; chown -R cove:cove /fixture', "sh", name)
             worker_state_owned = True
+            if image_scans:
+                from scanner_fixture import seed_scanner_database
+                seed_scanner_database(run, worker_image, name, env["COVE_BROWSER_SCANNER_DATABASE"])
             worker = name + "-worker"
             if cloudflare_tunnel:
                 shim = fixture / "docker-shim"
@@ -388,7 +404,8 @@ def main():
                 run("docker", "start", worker, stdout=subprocess.DEVNULL)
             else:
                 run("docker", "run", "-d", "--name", worker, "--network", name, "--network-alias", "worker",
-                    "-p", "127.0.0.1::22", "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
+                    "-p", "127.0.0.1::22", *(["-e", "COVE_IMAGE_SCANNING=1"] if image_scans else []),
+                    "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
             if worker not in containers:
                 containers.append(worker)
 

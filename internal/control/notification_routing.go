@@ -8,7 +8,7 @@ import (
 )
 
 var channelOutcomeEvents = []string{
-	"image.update_available",
+	"image.update_available", "image.vulnerabilities", "image.scan_completed", "image.scan_unknown",
 	"tunnel.failed",
 	"certificate.failed",
 	"identity.provisioned", "identity.deprovisioned", "identity.membership_changed", "identity.sync_failed",

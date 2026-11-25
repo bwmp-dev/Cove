@@ -289,10 +289,17 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
  state text NOT NULL DEFAULT 'pending', attempts integer NOT NULL DEFAULT 0, last_error text NOT NULL DEFAULT '',
  next_attempt timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(operation_id,connection_id)
 );
+CREATE TABLE IF NOT EXISTS image_scanning_settings (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ enabled boolean NOT NULL DEFAULT false, notify boolean NOT NULL DEFAULT false,
+ PRIMARY KEY(team_id,node_id)
+);
 CREATE OR REPLACE FUNCTION cove_notify_operation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  INSERT INTO notification_deliveries(operation_id,connection_id)
   SELECT NEW.id,c.id FROM infrastructure_connections c JOIN workloads w ON w.team_id=c.team_id
-  WHERE w.id=NEW.workload_id AND c.kind='notification' AND c.created_at<=NEW.created_at ON CONFLICT DO NOTHING;
+  WHERE w.id=NEW.workload_id AND c.kind='notification' AND c.created_at<=NEW.created_at
+  AND (NEW.action<>'image_scan' OR EXISTS(SELECT 1 FROM image_scanning_settings ss WHERE ss.team_id=w.team_id AND ss.node_id=w.node_id AND ss.notify)) ON CONFLICT DO NOTHING;
  RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS cove_operation_notification ON operations;

@@ -35,6 +35,12 @@ class WorkerCleanupTests(unittest.TestCase):
         self.assertFalse(self.owned("volume", {"cove.managed": "ingress", "cove.browser-fixture": "other-fixture"}))
         self.assertFalse(self.owned("container", {}, Mounts=[{"Type": "bind", "Source": "/var/lib/cove/links/state"}]))
 
+    def test_scanner_helpers_require_exact_fixture_worker_owner(self):
+        labels = {"cove.managed": "image-scan", "cove.image-scan-owner": self.owner}
+        self.assertTrue(self.owned("container", labels))
+        self.assertFalse(self.owned("container", {**labels, "cove.image-scan-owner": "d" * 32}))
+        self.assertFalse(self.owned("container", {**labels, "cove.owner": "foreign"}))
+
     def test_legacy_validator_requires_an_owned_volume(self):
         self.state["volumes"] = {"cove-ingress"}
         mounts = [{"Type": "volume", "Name": "cove-ingress"}]

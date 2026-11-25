@@ -76,6 +76,19 @@ it("groups image update notices as a one-off outcome event, never a health condi
   expect(incidentConditions(["image.update_available"])).toEqual([]);
 });
 
+it("groups vulnerability scan results as one-off outcome events, never health conditions or result groups", () => {
+  const catalogue = ["image.vulnerabilities", "image.scan_completed", "image.scan_unknown", "operation.succeeded"];
+  const groups = groupNotificationEvents(catalogue);
+  expect(groups.map((group) => group.title)).toEqual(["Vulnerability scans", "Other operations"]);
+  expect(groups[0]?.events).toEqual([
+    { value: "image.vulnerabilities", label: "Scan found known vulnerabilities" },
+    { value: "image.scan_completed", label: "Scan completed with no known vulnerabilities" },
+    { value: "image.scan_unknown", label: "Scan coverage unknown" },
+  ]);
+  expect(groups[0]?.health).toBe(false);
+  expect(incidentConditions(catalogue)).toEqual([]);
+});
+
 it("sends exact events without the legacy switches", () => {
   expect(notificationFromForm(form([["provider", "slack"], ["url", " https://hooks.example.com/x "], ["enabled", "on"], ["routing", "events"], ["success", "on"], ["events", "backup.failed"], ["events", "drill.failed"]]))).toEqual({
     provider: "slack", url: "https://hooks.example.com/x", enabled: true, success: false, failure: false, health: false, events: ["backup.failed", "drill.failed"],
