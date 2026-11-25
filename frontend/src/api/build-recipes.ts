@@ -12,6 +12,33 @@ export interface BuildRecipe {
   start_command: string;
 }
 
+// Cloud Native Buildpacks eligibility and resource needs, as the server reports them. The panel never derives these itself.
+export interface BuildpacksSettings {
+  supported: boolean;
+  reason: string;
+  lifecycle_version: string;
+  builder_version: string;
+  platform_api: string;
+  pinned_images: string[];
+  // Operation-owned disk state with a monitored target, not a hard storage cap. Other modes are not recognised.
+  work_storage: "disk";
+  work_hard_cap: false;
+  work_target_bytes: number;
+  // Each build's phase limit is set at admission from available memory minus the safety headroom, clamped to this range.
+  minimum_phase_memory_bytes: number;
+  maximum_phase_memory_bytes: number;
+  memory_safety_bytes: number;
+  required_available_memory_bytes: number;
+  required_docker_disk_bytes: number;
+  required_worker_disk_bytes: number;
+  // The most a build reserves against team budgets, helpers included.
+  quota_memory_mb: number;
+  quota_cpu: number;
+  builder_download_bytes: number;
+  builder_unpacked_bytes: number;
+  experimental: boolean;
+}
+
 export interface BuildRecipeSettings {
   recipe: BuildRecipe;
   can_edit: boolean;
@@ -25,6 +52,8 @@ export interface BuildRecipeSettings {
   start_command_set: boolean;
   railpack_version: string;
   pinned_images: string[];
+  // Missing from older servers or malformed: Cloud Native Buildpacks eligibility is then unknown and treated as unavailable.
+  buildpacks?: BuildpacksSettings;
 }
 
 const path = (workloadId: string) => `/api/workloads/${encodeURIComponent(workloadId)}/build-recipe`;
@@ -49,14 +78,68 @@ function flag(record: Record<string, unknown>, key: string) {
   return value;
 }
 
+function strings(value: unknown) {
+  if (!Array.isArray(value)) throw incomplete();
+  return value.map((item) => {
+    if (typeof item !== "string") throw incomplete();
+    return item;
+  });
+}
+
+function size(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) throw incomplete();
+  return value;
+}
+
+function positive(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw incomplete();
+  return value;
+}
+
+// Unlike the rest of the read, an unusable buildpacks object leaves the older engines usable; it only makes this engine's eligibility unknown.
+function parseBuildpacks(value: unknown): BuildpacksSettings | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.work_storage !== "disk" || value.work_hard_cap !== false) return undefined;
+  try {
+    const minimum = size(value, "minimum_phase_memory_bytes");
+    const maximum = size(value, "maximum_phase_memory_bytes");
+    if (minimum > maximum) return undefined;
+    return {
+      supported: flag(value, "supported"),
+      reason: text(value, "reason"),
+      lifecycle_version: text(value, "lifecycle_version"),
+      builder_version: text(value, "builder_version"),
+      platform_api: text(value, "platform_api"),
+      pinned_images: strings(value.pinned_images),
+      work_storage: "disk",
+      work_hard_cap: false,
+      work_target_bytes: size(value, "work_target_bytes"),
+      minimum_phase_memory_bytes: minimum,
+      maximum_phase_memory_bytes: maximum,
+      memory_safety_bytes: size(value, "memory_safety_bytes"),
+      required_available_memory_bytes: size(value, "required_available_memory_bytes"),
+      required_docker_disk_bytes: size(value, "required_docker_disk_bytes"),
+      required_worker_disk_bytes: size(value, "required_worker_disk_bytes"),
+      quota_memory_mb: size(value, "quota_memory_mb"),
+      quota_cpu: positive(value, "quota_cpu"),
+      builder_download_bytes: size(value, "builder_download_bytes"),
+      builder_unpacked_bytes: size(value, "builder_unpacked_bytes"),
+      experimental: flag(value, "experimental"),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 // A response missing any field cannot say what the next build does, so it fails the read rather than defaulting to Compose.
 export function parseBuildRecipeSettings(data: unknown): BuildRecipeSettings {
   if (!isRecord(data) || !isRecord(data.recipe)) throw incomplete();
   const recipe = data.recipe;
   const engine = text(recipe, "engine");
   if (engine === "") throw incomplete();
-  const pinned = data.pinned_images;
-  if (!Array.isArray(pinned)) throw incomplete();
+  const buildpacks = parseBuildpacks(data.buildpacks);
   return {
     recipe: {
       engine,
@@ -75,10 +158,8 @@ export function parseBuildRecipeSettings(data: unknown): BuildRecipeSettings {
     build_command_set: flag(data, "build_command_set"),
     start_command_set: flag(data, "start_command_set"),
     railpack_version: text(data, "railpack_version"),
-    pinned_images: pinned.map((image) => {
-      if (typeof image !== "string") throw incomplete();
-      return image;
-    }),
+    pinned_images: strings(data.pinned_images),
+    ...(buildpacks ? { buildpacks } : {}),
   };
 }
 

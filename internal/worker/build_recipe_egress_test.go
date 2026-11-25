@@ -48,6 +48,28 @@ func TestBuildRecipeEgressRejectsPrivateAndMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildRecipeEgressNormalizesResolverIPv4WithoutAllowingMappedLiterals(t *testing.T) {
+	p := testRecipeEgress(t)
+	ctx := context.Background()
+	if err := p.checkTarget(ctx, &url.URL{Scheme: "http", Host: "1.1.1.1"}); err != nil {
+		t.Fatal("ordinary public IPv4 was rejected by the real resolver path", err)
+	}
+	addresses, err := p.lookup(ctx, "localhost")
+	if err != nil || len(addresses) == 0 {
+		t.Fatal("local resolver fixture unavailable", addresses, err)
+	}
+	for _, address := range addresses {
+		if address.Is4In6() {
+			t.Fatal("resolver IPv4 answer was not normalized", address)
+		}
+	}
+	for _, host := range []string{"localhost", "[::ffff:1.1.1.1]", "[::ffff:169.254.169.254]", "169.254.169.254"} {
+		if err := p.checkTarget(ctx, &url.URL{Scheme: "http", Host: host}); err == nil {
+			t.Fatal("private or explicitly mapped literal was accepted", host)
+		}
+	}
+}
+
 func TestBuildRecipeEgressPinsResolvedAddress(t *testing.T) {
 	p := testRecipeEgress(t)
 	p.lookup = func(context.Context, string) ([]netip.Addr, error) {

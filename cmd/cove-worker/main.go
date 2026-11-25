@@ -32,7 +32,7 @@ func main() {
 			if len(os.Args) == 3 {
 				expectedArgs = 3
 			}
-		case "tunnel", "healthcheck", "snapshot-reap", "build-recipe-output":
+		case "tunnel", "healthcheck", "snapshot-reap", "build-recipe-output", "buildpacks-helper":
 			expectedArgs = 3
 		case "host-security-run", "firewall-revert-attempt":
 			expectedArgs = 5
@@ -41,7 +41,7 @@ func main() {
 		}
 	}
 	if len(os.Args) != expectedArgs {
-		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two; host-security-run needs root, owner and manager; firewall-revert-attempt needs root, owner and attempt; build-recipe-output needs one argument; certificate-probe accepts an optional file")
+		fmt.Fprintln(os.Stderr, "usage: cove-worker COMMAND [ARGS]; tunnel, healthcheck and snapshot-reap need one argument; firewall-revert and firewall-restore need two; host-security-run needs root, owner and manager; firewall-revert-attempt needs root, owner and attempt; build-recipe-output and buildpacks-helper need one argument; certificate-probe accepts an optional file")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -72,6 +72,12 @@ func main() {
 		err = worker.RunFilesystemSnapshotReaper(ctx, os.Args[2], false)
 	case "snapshot-host":
 		err = worker.RunFilesystemSnapshotHost(ctx, os.Stdin, os.Stdout)
+	case "buildpacks-helper":
+		if len(os.Args) != 3 {
+			err = fmt.Errorf("buildpacks helper action required")
+		} else {
+			err = worker.RunBuildpacksHelper(ctx, os.Args[2], os.Stdout)
+		}
 	case "build-recipe-output":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("planner output kind required")

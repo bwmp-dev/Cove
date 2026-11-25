@@ -62,7 +62,7 @@ type apiTunnelView struct {
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
 		{"GET", "/workloads/{id}/build-recipe", "workloads:read", "Read explicit build-engine metadata; custom commands require Edit configuration", nil, map[string]any{}, 200, s.buildRecipe},
-		{"PUT", "/workloads/{id}/build-recipe", "configuration:write", "Save an explicit Compose, static-output or Railpack build recipe", worker.BuildRecipe{}, apiOK{}, 200, s.buildRecipe},
+		{"PUT", "/workloads/{id}/build-recipe", "configuration:write", "Save an explicit Compose, static-output, Railpack or Cloud Native Buildpacks build recipe", worker.BuildRecipe{}, apiOK{}, 200, s.buildRecipe},
 		{"GET", "/nodes/{id}/build-cache", "nodes:manage", "Inspect actual dedicated build-cache filesystem verification; instance administrators only", nil, worker.BuildCacheStatus{}, 200, s.buildCache},
 		{"PUT", "/nodes/{id}/build-cache", "nodes:manage", "Verify or explicitly disable an operator-provided cache filesystem; no storage is provisioned", worker.BuildCacheSettings{}, worker.BuildCacheStatus{}, 200, s.buildCache},
 		{"GET", "/workloads/{id}/build-node", "workloads:read", "Read designated build-worker metadata and eligibility without credentials", nil, map[string]any{}, 200, s.buildNode},

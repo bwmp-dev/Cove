@@ -72,6 +72,8 @@ export interface Capabilities {
   build_cache_limits?: boolean;
   // The worker can build with explicit static output and Railpack recipes. The build recipe read decides whether a resource can use them.
   build_recipes?: boolean;
+  // The worker can build Cloud Native Buildpacks recipes. Eligibility and its reasons come from the build recipe read.
+  buildpacks?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -480,8 +482,14 @@ export interface OperationBuildRecipe {
   engine: string;
   service?: string;
   version?: string;
+  // Recorded by Cloud Native Buildpacks builds, alongside the lifecycle version in version.
+  builder_version?: string;
+  platform_api?: string;
   pinned_images?: string[];
   static_runtime?: string;
+  // Cloud Native Buildpacks phase memory limit set at admission, and the available memory it was derived from. Absent until admission.
+  phase_memory_bytes?: number;
+  admission_available_memory_bytes?: number;
 }
 
 export interface WorkerOperation {

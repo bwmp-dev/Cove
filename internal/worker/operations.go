@@ -27,6 +27,7 @@ var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
 	BuildRecipe            *BuildRecipe              `json:"build_recipe,omitempty"`
+	BuildpacksAdmission    *BuildpacksAdmission      `json:"buildpacks_admission,omitempty"`
 	BuildPlatform          string                    `json:"build_platform,omitempty"`
 	ManagedRegistry        *ManagedRegistryOperation `json:"managed_registry,omitempty"`
 	DatabaseMetadata       json.RawMessage           `json:"database_metadata,omitempty"`
@@ -316,6 +317,14 @@ func ValidateRequest(r Request) error {
 			return err
 		}
 	}
+	if r.BuildpacksAdmission != nil {
+		if r.Action != "build" || r.BuildRecipe == nil || r.BuildRecipe.Engine != "buildpacks" {
+			return errors.New("CNB memory admission requires its explicit build recipe")
+		}
+		if err := r.BuildpacksAdmission.Validate(); err != nil {
+			return err
+		}
+	}
 	if r.BuildPlatform != "" && (r.Action != "build" || !buildPlatformPattern.MatchString(r.BuildPlatform)) {
 		return errors.New("build platform must name the runtime Linux architecture")
 	}
@@ -543,11 +552,20 @@ func (e *Engine) read(id string) (journal, error) {
 	return j, err
 }
 func (e *Engine) Submit(r Request) (Operation, error) {
+	if r.BuildRecipe != nil && r.BuildRecipe.Engine == "buildpacks" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		return e.submitBuildpacks(ctx, r)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.submitLocked(r)
 }
 func (e *Engine) submitLocked(r Request) (Operation, error) {
+	return e.submitBuildpacksLocked(r, nil)
+}
+
+func (e *Engine) submitBuildpacksLocked(r Request, admission *BuildpacksAdmission) (Operation, error) {
 	if e.moving(r.Workload) {
 		return Operation{}, errors.New("resource is fenced by an unfinished node move")
 	}
@@ -573,6 +591,10 @@ func (e *Engine) submitLocked(r Request) (Operation, error) {
 	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC(), Scale: r.Scale}, Request: r, Digest: digest}
 	if r.Action == "build" {
 		j.Operation.BuildRecipe = BuildRecipeSummary(r.BuildRecipe)
+		if admission != nil {
+			j.Operation.BuildRecipe.PhaseMemoryBytes = admission.PhaseMemoryBytes
+			j.Operation.BuildRecipe.AdmissionAvailableMemoryBytes = admission.AvailableMemoryBytes
+		}
 	}
 	if err = writeJSON(e.path(r.ID), j); err != nil {
 		return Operation{}, err
@@ -1034,6 +1056,13 @@ func (e *Engine) execute(parent context.Context, j journal) {
 			j.Operation.Error = "The operation completed, but its runtime configuration baseline could not be recorded; inspect the resource before retrying."
 		} else if errors.Is(err, errBuildCacheFull) {
 			j.Operation.Error = "The verified build cache filesystem is full. Owned cache cleanup was requested; check the node before retrying."
+		}
+		var memoryFailure *buildpacksMemoryError
+		if errors.As(err, &memoryFailure) {
+			j.Operation.Error = memoryFailure.Error()
+		}
+		if errors.Is(err, errBuildpacksPressure) {
+			j.Operation.Error = errBuildpacksPressure.Error()
 		}
 		if ctx.Err() != nil {
 			j.Operation.State = "interrupted"

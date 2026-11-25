@@ -26,7 +26,7 @@ func TestExecutableWorkerDispatch(t *testing.T) {
 		t.Fatalf("build worker: %v\n%s", err, output)
 	}
 	for command, arguments := range map[string]int{
-		"healthcheck": 1, "tunnel": 1, "snapshot-reap": 1, "build-recipe-output": 1,
+		"healthcheck": 1, "tunnel": 1, "snapshot-reap": 1, "build-recipe-output": 1, "buildpacks-helper": 1,
 		"build-recipe-plan": 0, "build-recipe-egress": 0, "static-site": 0, "build-cache-filesystem": 0,
 		"firewall-revert": 2, "firewall-restore": 2, "host-security-run": 3, "firewall-revert-attempt": 3,
 		"probe": 0, "rpc": 0, "daemon": 0, "ingress-prepare": 0,

@@ -55,6 +55,9 @@ func (e *Engine) recipeContainerFile(ctx context.Context, r Request, role, path 
 
 func (e *Engine) cleanupRecipeResources(ctx context.Context, r Request) error {
 	for _, resource := range []struct{ kind, role string }{
+		{"container", "cnb-analyzer"}, {"container", "cnb-detector"}, {"container", "cnb-restorer"}, {"container", "cnb-builder"}, {"container", "cnb-exporter"},
+		{"container", "cnb-keeper"}, {"container", "cnb-stage"}, {"container", "cnb-lifecycle-stage"}, {"container", "cnb-secret-stage"}, {"container", "cnb-owner"},
+		{"volume", "cnb-work"}, {"volume", "cnb-meta"}, {"volume", "cnb-inputs"}, {"volume", "cnb-secrets"},
 		{"container", "planner"}, {"container", "egress"}, {"container", "stage"}, {"container", "config-stage"},
 		{"volume", "inputs"}, {"volume", "egress-config"}, {"network", "network"},
 	} {
@@ -135,7 +138,14 @@ func (e *Engine) prepareRecipeEgress(ctx context.Context, r Request, network str
 	}
 	version, err := e.output(ctx, "docker", "version", "--format", "{{.Server.Version}}")
 	if err != nil || !recipeDockerIsolation(version) {
-		return "", "", errors.New("Railpack metadata isolation requires Docker 28 or newer; upgrade and verify Docker on the build node")
+		return "", "", errors.New("confined build egress requires Docker 28 or newer; upgrade and verify Docker on the build node")
+	}
+	if r.BuildRecipe != nil && r.BuildRecipe.Engine == "buildpacks" {
+		var err error
+		proxies, err = e.buildpacksProxies(r, proxies)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	name := recipeResourceName(r, "network")
 	create := []string{"docker", "network", "create", "--internal", "--opt", "com.docker.network.bridge.gateway_mode_ipv4=isolated"}
@@ -164,7 +174,8 @@ func (e *Engine) prepareRecipeEgress(ctx context.Context, r Request, network str
 	if err != nil {
 		return "", "", err
 	}
-	config := recipeEgressConfig{Listen: address + ":3128", HTTPProxy: proxies["HTTP_PROXY"], HTTPSProxy: proxies["HTTPS_PROXY"], NoProxy: proxies["NO_PROXY"], Roots: roots}
+	buildpacks := r.BuildRecipe != nil && r.BuildRecipe.Engine == "buildpacks"
+	config := recipeEgressConfig{Listen: address + ":3128", HTTPProxy: proxies["HTTP_PROXY"], HTTPSProxy: proxies["HTTPS_PROXY"], NoProxy: proxies["NO_PROXY"], Roots: roots, Build: buildpacks}
 	if _, err := newRecipeEgress(config); err != nil {
 		return "", "", err
 	}
@@ -181,8 +192,14 @@ func (e *Engine) prepareRecipeEgress(ctx context.Context, r Request, network str
 	}
 	stage := []string{"docker", "create", "--pull", "never", "--name", recipeResourceName(r, "config-stage"), "--network", "none", "--read-only", "--cap-drop", "ALL", "--mount", "type=volume,src=" + recipeResourceName(r, "egress-config") + ",dst=/config", "--entrypoint", "/bin/true"}
 	stage = append(stage, recipeResourceLabels(r)...)
-	stage = append(stage, RailpackBuilderImage)
-	if err := e.Run(ctx, e.Root, stage, nil, io.Discard); err != nil {
+	stageImage := RailpackBuilderImage
+	var dockerEnvironment []string
+	if buildpacks {
+		stageImage = BuildpacksBuilderImage
+		dockerEnvironment = []string{"DOCKER_CONFIG=" + filepath.Join(e.recipeInputs(r), "cnb-docker-config")}
+	}
+	stage = append(stage, stageImage)
+	if err := e.Run(ctx, e.Root, stage, dockerEnvironment, io.Discard); err != nil {
 		return "", "", err
 	}
 	// Docker cp preserves the private source mode; only this unprivileged relay needs read access in the private volume.
@@ -196,7 +213,7 @@ func (e *Engine) prepareRecipeEgress(ctx context.Context, r Request, network str
 	proxy := []string{"docker", "create", "--pull", "never", "--name", recipeResourceName(r, "egress"), "--network", "bridge", "--read-only", "--user", "65534:65534", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--cpus", "0.25", "--memory", "64m", "--pids-limit", "32", "--mount", "type=volume,src=" + recipeResourceName(r, "egress-config") + ",dst=/config,readonly"}
 	proxy = append(proxy, recipeResourceLabels(r)...)
 	proxy = append(proxy, image, "build-recipe-egress")
-	if err := e.Run(ctx, e.Root, proxy, nil, io.Discard); err != nil {
+	if err := e.Run(ctx, e.Root, proxy, dockerEnvironment, io.Discard); err != nil {
 		return "", "", err
 	}
 	if err := e.Run(ctx, e.Root, []string{"docker", "network", "connect", "--ip", address, name, recipeResourceName(r, "egress")}, nil, io.Discard); err != nil {

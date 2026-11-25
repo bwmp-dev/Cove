@@ -198,14 +198,15 @@ def main():
     image_scans = "--image-scans" in sys.argv[1:]
     managed_registry = "--managed-registry" in sys.argv[1:]
     build_nodes = "--build-nodes" in sys.argv[1:]
-    build_recipes = "--build-recipes" in sys.argv[1:]
+    buildpacks = "--buildpacks" in sys.argv[1:]
+    build_recipes = "--build-recipes" in sys.argv[1:] or buildpacks
     if build_nodes and not managed_registry:
         raise ValueError("Build-node acceptance requires the managed-registry TLS fixture")
     if build_recipes and (not managed_registry or build_nodes):
         raise ValueError("Recipe acceptance requires its own managed-registry fixture")
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes", "--build-recipes")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes", "--build-recipes", "--buildpacks")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image = name + "-panel:development"
     worker_image = name + "-worker:development"
@@ -420,9 +421,11 @@ def main():
                 run("docker", "cp", str(fixture / "cert.pem"), worker+":/var/lib/cove/tunnel-fixture-ca.pem")
                 run("docker", "start", worker, stdout=subprocess.DEVNULL)
             else:
+                # Only the trusted Cove worker shares its disposable daemon's accounting view.
+                accounting = ["--pid=host", "--cgroupns=host", "-v", "/var/run/docker.pid:/var/run/docker.pid:ro", "-v", "/var/lib/docker:/var/lib/docker:ro"] if buildpacks else []
                 run("docker", "run", "-d", "--name", worker, "--network", name, "--network-alias", "worker",
                     "-p", "127.0.0.1::22", *(["-e", "COVE_IMAGE_SCANNING=1"] if image_scans else []),
-                    "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
+                    *accounting, "-v", "/var/lib/cove:/var/lib/cove", "-v", "/var/run/docker.sock:/var/run/docker.sock", worker_image, stdout=subprocess.DEVNULL)
             if worker not in containers:
                 containers.append(worker)
             if managed_registry_config:
@@ -430,6 +433,9 @@ def main():
             if build_recipes:
                 from build_recipes_fixture import install_build_recipes_fixture
                 install_build_recipes_fixture(run, name, worker, env)
+            if buildpacks:
+                from buildpacks_fixture import install_buildpacks_fixture
+                install_buildpacks_fixture(run, name, worker, env, fixture)
 
             enrollment = api("POST", "/api/nodes", {"name": "ready-browser-worker", "address": "worker", "port": 22})
             credential = re.search(r"Authorization: Bearer ([^']+)", enrollment["setup_command"]).group(1)

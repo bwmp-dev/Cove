@@ -5,7 +5,7 @@ import { buildRecipeQuery, useSaveBuildRecipe, type BuildRecipe, type BuildRecip
 import { errorMessage, isStatus } from "../api/client";
 import { workloadOperationsQuery } from "../api/queries";
 import type { Operation, Workload } from "../api/types";
-import { composeServices, engineLabel, engineLabels, isRecipeEngine, railpackDisclosure, recipeErrors, recipePayload, sameRecipe, type RecipeErrors } from "../lib/build-recipes";
+import { composeServices, engineLabel, engineLabels, formatCPU, formatGB, formatMemory, isRecipeEngine, railpackDisclosure, recipeEngines, recipeErrors, recipePayload, sameRecipe, savedRecipeBlocker, type RecipeErrors } from "../lib/build-recipes";
 import { useOnline } from "../lib/hooks";
 import { activeOperation } from "../lib/operations";
 import { can } from "../lib/permissions";
@@ -23,6 +23,8 @@ const engineHints: Record<string, string> = {
   static:
     "Publishes files that are already built in the checkout. No build command runs. Dotfiles, symbolic links and special files are excluded or refused, and directory listings are not served. The runtime runs as a non-root user on a read-only filesystem and cannot use mounts, devices or added capabilities.",
   railpack: "Railpack plans and builds the image for the selected service from its source directory. Other services keep their Compose builds.",
+  buildpacks:
+    "The pinned Paketo builder's normal detection order builds the image for the selected service from its source directory; a Procfile there can set its launch process. Other services keep their Compose builds.",
 };
 
 function saveBlocker(settings: UseQueryResult<BuildRecipeSettings>, operations: UseQueryResult<Operation[]>, active: boolean, online: boolean) {
@@ -40,6 +42,10 @@ function engineUnavailable(engine: string, data: BuildRecipeSettings, isJob: boo
   if (engine === "compose") return undefined;
   if (engine === "static" && isJob) return "jobs cannot use static output";
   if (!data.source_ready) return "needs a Git source that uses the saved Compose configuration";
+  if (engine === "buildpacks") {
+    if (!data.buildpacks) return "eligibility not reported";
+    return data.buildpacks.supported ? undefined : "unavailable on the build node";
+  }
   if (!data.supported) return "the build worker does not support it";
   return undefined;
 }
@@ -160,6 +166,7 @@ function RecipeBody({ workload, settings, value, editable, errors, disabled, onC
     <>
       {editable ? <RecipeEditor workload={workload} settings={settings} value={value} errors={errors} disabled={disabled} onChange={onChange} /> : <RecipeSummary settings={settings} />}
       {value.engine === "railpack" && <RailpackDetails settings={settings} />}
+      {value.engine === "buildpacks" && <BuildpacksDetails settings={settings} />}
     </>
   );
 }
@@ -181,6 +188,9 @@ function EngineChange({ from, to }: { from: BuildRecipe; to: BuildRecipe }) {
         </p>
       )}
       {to.engine === "static" && <p>The static runtime runs as a non-root user on a read-only filesystem and cannot use mounts, devices or added capabilities.</p>}
+      {to.engine === "buildpacks" && (
+        <p>The pinned Paketo builder detects the app, and a Procfile in the source directory can set its launch process. Its lifecycle OCI-layout export is experimental upstream.</p>
+      )}
       <p>This changes future builds only. Nothing is built, deployed or restarted now.</p>
     </div>
   );
@@ -232,10 +242,11 @@ function SavedRecipeState({ settings, canEdit }: { settings: BuildRecipeSettings
       </Notice>
     );
   }
-  if (engine === "compose" || (settings.supported && settings.reason === "")) return null;
+  const blocker = savedRecipeBlocker(settings);
+  if (!blocker) return null;
   return (
     <Notice tone="warn" title={`The saved ${engineLabels[engine]} recipe cannot build`}>
-      <p className="break-words">{settings.reason || "The build worker does not support this recipe."}</p>
+      <p className="break-words">{blocker}</p>
       <p className="mt-1">Builds are refused until this is resolved{canEdit ? " or you choose another engine" : ""}. The saved recipe is not changed automatically.</p>
     </Notice>
   );
@@ -246,7 +257,7 @@ function engineOptions(settings: BuildRecipeSettings, isJob: boolean) {
   const saved = settings.recipe.engine;
   return (
     <>
-      {(["compose", "static", "railpack"] as const).map((engine) => {
+      {recipeEngines.map((engine) => {
         const reason = engineUnavailable(engine, settings, isJob);
         return (
           <option key={engine} value={engine} disabled={Boolean(reason) && engine !== saved}>
@@ -268,29 +279,14 @@ function RecipeEditor({ workload, settings, value, errors, disabled, onChange }:
   const services = composeServices(workload.compose);
   const serviceMissing = value.service !== "" && !services.includes(value.service);
   const engine = value.engine;
-  const showsFields = engine === "static" || engine === "railpack";
-  const engineBlocked = engineUnavailable("railpack", settings, isJob);
+  const showsFields = engine === "static" || engine === "railpack" || engine === "buildpacks";
   return (
     <SettingRows>
       <Field id="build-recipe-engine" label="Build engine" hint={engineHints[engine] ?? "Cove does not know this engine and will not build with it."} layout="row">
         <Select id="build-recipe-engine" className={inputClass} value={engine} disabled={disabled} onChange={(event) => onChange({ engine: event.target.value })} aria-describedby="build-recipe-engine-hint">
           {engineOptions(settings, isJob)}
         </Select>
-        {engineBlocked && (
-          <p className="text-xs text-fg-muted">
-            {settings.source_ready ? (
-              <>Static output and Railpack need a build worker that supports them. Upgrade and verify the build node.</>
-            ) : (
-              <>
-                Static output and Railpack need a Git source that uses the saved Compose configuration. Change it on the{" "}
-                <Link to="/resources/$resourceId/source" params={{ resourceId: workload.id }} className={linkClass}>
-                  Source page
-                </Link>
-                ; Cove does not change it for you.
-              </>
-            )}
-          </p>
-        )}
+        <EngineAvailability workload={workload} settings={settings} isJob={isJob} />
       </Field>
       {showsFields && (
         <>
@@ -333,6 +329,36 @@ function RecipeEditor({ workload, settings, value, errors, disabled, onChange }:
         </>
       )}
     </SettingRows>
+  );
+}
+
+function EngineAvailability({ workload, settings, isJob }: { workload: Workload; settings: BuildRecipeSettings; isJob: boolean }) {
+  const engineBlocked = engineUnavailable("railpack", settings, isJob);
+  // A saved Cloud Native Buildpacks recipe already explains its refusal above the form.
+  const buildpacksBlocked = settings.source_ready && settings.recipe.engine !== "buildpacks" && Boolean(engineUnavailable("buildpacks", settings, isJob));
+  return (
+    <>
+      {engineBlocked && (
+        <p className="text-xs text-fg-muted">
+          {settings.source_ready ? (
+            <>Static output and Railpack need a build worker that supports them. Upgrade and verify the build node.</>
+          ) : (
+            <>
+              Static output, Railpack and Cloud Native Buildpacks need a Git source that uses the saved Compose configuration. Change it on the{" "}
+              <Link to="/resources/$resourceId/source" params={{ resourceId: workload.id }} className={linkClass}>
+                Source page
+              </Link>
+              ; Cove does not change it for you.
+            </>
+          )}
+        </p>
+      )}
+      {buildpacksBlocked && (
+        <p className="text-xs break-words text-fg-muted">
+          Cloud Native Buildpacks is unavailable: {settings.buildpacks ? settings.buildpacks.reason || "the build node cannot run it." : "this server did not report its eligibility, so Cove treats it as unavailable."}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -437,6 +463,82 @@ function RailpackDetails({ settings }: { settings: BuildRecipeSettings }) {
           </ul>
         ) : (
           <p>No pinned images were reported.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Value({ children }: { children: string }) {
+  return <span className="text-fg tabular-nums">{children}</span>;
+}
+
+// Every number comes from the server's read; without it the panel says nothing about sizes, versions or pins.
+function BuildpacksDetails({ settings }: { settings: BuildRecipeSettings }) {
+  const buildpacks = settings.buildpacks;
+  return (
+    <div className="space-y-3">
+      <Notice tone="info" title="Cloud Native Buildpacks builds with the pinned Paketo builder">
+        <p>Builds use the pinned official Paketo builder&apos;s buildpacks. No repository-selected replacement builder, external or inline buildpacks or image extensions are supported.</p>
+        <p className="mt-1">The selected service must be the only Compose service with a build definition. Other image-only services are unchanged.</p>
+        <p className="mt-1">
+          Analyze, detect, restore, build and export run on the effective build node without a Docker socket or registry, Git or host credentials. Only the build phase receives the selected
+          build secrets; a buildpack can read those values and can copy them into its output, as in any other build. Detection gets no Cove secret values.
+        </p>
+        <p className="mt-1">The lifecycle&apos;s OCI-layout export is experimental upstream. Cove validates the output before importing and publishing it. Building never deploys.</p>
+        <p className="mt-1">
+          With default build networking, buildpacks download toolchains and packages from upstream through Cove&apos;s confined HTTP(S) egress path. A build network of none is enforced, so
+          dependency downloads fail clearly. Configured HTTP(S) proxies are applied through the trusted relay. Private, host and cloud metadata destinations and non-HTTP(S) build egress are
+          unavailable, and host or custom build networks are refused. The pins cover the lifecycle, builder and run images, not the toolchains or packages buildpacks download, so these builds are
+          neither reproducible nor fully pinned.
+        </p>
+      </Notice>
+      <div className="space-y-1.5 text-xs text-fg-muted">
+        {buildpacks ? (
+          <>
+            <p className="font-medium text-fg">Resources on the build node</p>
+            <ul aria-label="Cloud Native Buildpacks resource needs" className="list-disc space-y-0.5 pl-4">
+              <li>
+                Work is operation-owned disk state with a monitored <Value>{formatMemory(buildpacks.work_target_bytes)}</Value> target, not a hard storage cap. Cove cancels the build when it
+                observes the target overrun or node resource pressure; brief growth between checks is possible. There is no persistent Cloud Native Buildpacks cache, and this state is separate from
+                the BuildKit hard cache limits. Cleanup is journaled; a failed or cancelled build can leave cleanup pending until the worker recovers.
+              </li>
+              <li>
+                The node needs at least <Value>{formatMemory(buildpacks.required_available_memory_bytes)}</Value> of actually available memory. At admission the phase memory limit is the
+                available memory minus <Value>{formatMemory(buildpacks.memory_safety_bytes)}</Value> of safety headroom, clamped between{" "}
+                <Value>{formatMemory(buildpacks.minimum_phase_memory_bytes)}</Value> and <Value>{formatMemory(buildpacks.maximum_phase_memory_bytes)}</Value> and rounded down to a whole MiB. The
+                limit is recorded in the operation and build history, and a build that exceeds it can fail. There is no operator memory setting.
+              </li>
+              <li>
+                The node needs <Value>{formatMemory(buildpacks.required_docker_disk_bytes)}</Value> of free Docker storage and <Value>{formatMemory(buildpacks.required_worker_disk_bytes)}</Value> of
+                free worker-state storage. The builder image is about <Value>{formatGB(buildpacks.builder_download_bytes)}</Value> to download and about{" "}
+                <Value>{formatGB(buildpacks.builder_unpacked_bytes)}</Value> once unpacked.
+              </li>
+              <li>
+                Where a team budget is configured, a build temporarily reserves its phase memory limit plus helper overhead, up to <Value>{formatMemory(buildpacks.quota_memory_mb * 1024 ** 2)}</Value>,
+                and <Value>{formatCPU(buildpacks.quota_cpu)}</Value> including helpers. The memory figure is a maximum; most builds get a smaller phase limit. Builds wait for the node&apos;s other
+                build and cache operations.
+              </li>
+              <li>Before publishing, the worker rechecks current memory, disk, architecture, policy and the frozen build metadata. A queued build is not a promise that it runs under resource pressure.</li>
+            </ul>
+            <p className="pt-1">
+              Lifecycle <span className="font-mono text-fg">{buildpacks.lifecycle_version}</span>, builder <span className="font-mono text-fg">{buildpacks.builder_version}</span> and platform API{" "}
+              <span className="font-mono text-fg">{buildpacks.platform_api}</span>, with these pinned images:
+            </p>
+            {buildpacks.pinned_images.length > 0 ? (
+              <ul aria-label="Pinned Cloud Native Buildpacks images" className="space-y-1">
+                {buildpacks.pinned_images.map((image) => (
+                  <li key={image} className="font-mono break-all text-fg">
+                    {image}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>No pinned images were reported.</p>
+            )}
+          </>
+        ) : (
+          <p>This server did not report the resource needs, versions or pinned images for Cloud Native Buildpacks.</p>
         )}
       </div>
     </div>

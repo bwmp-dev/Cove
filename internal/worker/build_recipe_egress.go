@@ -20,6 +20,7 @@ import (
 )
 
 type recipeEgressConfig struct {
+	Build      bool   `json:"build,omitempty"`
 	Listen     string `json:"listen"`
 	HTTPProxy  string `json:"http_proxy,omitempty"`
 	HTTPSProxy string `json:"https_proxy,omitempty"`
@@ -108,7 +109,7 @@ func newRecipeEgress(config recipeEgressConfig) (*recipeEgress, error) {
 		}
 		proxy, err := url.Parse(value)
 		if err != nil || proxy.Hostname() == "" || proxy.Scheme != "http" && proxy.Scheme != "https" || proxy.RawQuery != "" || proxy.Fragment != "" || proxy.Path != "" && proxy.Path != "/" {
-			return nil, errors.New("Railpack planning requires an HTTP or HTTPS outbound proxy")
+			return nil, errors.New("confined builds require an HTTP or HTTPS outbound proxy")
 		}
 		if ip, err := netip.ParseAddr(proxy.Hostname()); err == nil && (ip.IsLoopback() || ip.IsLinkLocalUnicast() || !ip.IsGlobalUnicast() || ip.String() == "168.63.129.16" || netip.MustParsePrefix("100.64.0.0/10").Contains(ip)) {
 			return nil, errors.New("planner outbound proxy cannot be a host-local or metadata endpoint")
@@ -118,8 +119,20 @@ func newRecipeEgress(config recipeEgressConfig) (*recipeEgress, error) {
 		}
 	}
 	p := &recipeEgress{config: config, semaphore: make(chan struct{}, 8), connections: map[net.Conn]bool{}, remaining: 64 << 20}
+	if config.Build {
+		p.remaining = 3 << 30
+	}
 	p.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
-		return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		if literal, err := netip.ParseAddr(host); err == nil {
+			return []netip.Addr{literal}, nil
+		}
+		addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		// Resolver IPv4 answers can be represented as mapped IPv6 addresses.
+		// Normalize those answers while keeping explicit mapped literals refused.
+		for index := range addresses {
+			addresses[index] = addresses[index].Unmap()
+		}
+		return addresses, err
 	}
 	p.dial = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}).DialContext
 	p.transport = &http.Transport{Proxy: p.proxy, DialContext: p.safeDial, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 20 * time.Second, IdleConnTimeout: 20 * time.Second, MaxResponseHeaderBytes: 32 << 10, MaxIdleConns: 8, DisableCompression: true}
@@ -206,17 +219,21 @@ func (p *recipeEgress) checkTarget(ctx context.Context, target *url.URL) error {
 func (p *recipeEgress) copy(destination io.Writer, source io.Reader) error {
 	buffer := make([]byte, 32<<10)
 	var total int64
+	limit := int64(8 << 20)
+	if p.config.Build {
+		limit = 2 << 30
+	}
 	for {
 		n, err := source.Read(buffer)
 		if n > 0 {
 			p.mu.Lock()
-			permitted := p.remaining >= int64(n) && total+int64(n) <= 8<<20
+			permitted := p.remaining >= int64(n) && total+int64(n) <= limit
 			if permitted {
 				p.remaining -= int64(n)
 			}
 			p.mu.Unlock()
 			if !permitted {
-				return errors.New("planner metadata transfer limit exceeded")
+				return errors.New("confined build egress transfer limit exceeded")
 			}
 			total += int64(n)
 			if _, err := destination.Write(buffer[:n]); err != nil {
@@ -319,6 +336,9 @@ func (p *recipeEgress) tunnel(ctx context.Context, w http.ResponseWriter, r *htt
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); delete(p.connections, local); delete(p.connections, remote); p.mu.Unlock() }()
 	deadline := time.Now().Add(90 * time.Second)
+	if p.config.Build {
+		deadline = time.Now().Add(20 * time.Minute)
+	}
 	_ = local.SetDeadline(deadline)
 	_ = remote.SetDeadline(deadline)
 	if _, err = buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
@@ -401,6 +421,9 @@ func RunBuildRecipeEgress(ctx context.Context) error {
 		return err
 	}
 	server := &http.Server{Handler: p, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 90 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 15 * time.Second, MaxHeaderBytes: 32 << 10}
+	if config.Build {
+		server.ReadTimeout, server.WriteTimeout = 20*time.Minute, 20*time.Minute
+	}
 	stop := context.AfterFunc(ctx, func() {
 		_ = server.Close()
 		p.transport.CloseIdleConnections()
