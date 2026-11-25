@@ -236,7 +236,7 @@ func (s *Server) moveResource(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "could not suspend source automation", 503)
 			return
 		}
-		for _, query := range []string{`DELETE FROM api_tokens WHERE workload_id=$1`, `DELETE FROM deploy_hooks WHERE workload_id=$1`, `DELETE FROM webhook_deliveries WHERE workload_id=$1`} {
+		for _, query := range []string{`DELETE FROM api_tokens WHERE workload_id=$1`, `DELETE FROM deploy_hooks WHERE workload_id=$1`, `DELETE FROM webhook_deliveries WHERE workload_id=$1`, `DELETE FROM registry_webhooks WHERE workload_id=$1`} {
 			if _, err = tx.Exec(ctx, query, id); err != nil {
 				http.Error(w, "could not revoke source access", 503)
 				return

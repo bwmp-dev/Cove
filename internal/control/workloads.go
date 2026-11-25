@@ -458,6 +458,10 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "could not pause automatic deployments", 500)
 				return
 			}
+			if _, err = tx.Exec(r.Context(), "UPDATE registry_webhooks SET pending_at=NULL,last_ignored_reason='Resource manually stopped; pending push ignored.' WHERE workload_id=$1", request.Workload); err != nil {
+				http.Error(w, "could not pause registry deployments", 503)
+				return
+			}
 		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -679,6 +683,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.dispatchGithubFeedback(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.dispatchRegistryWebhooks(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchNotifications(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -785,6 +792,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if proceed, err := s.scheduledJobDispatch(ctx, id, false); err != nil || !proceed {
 		return err
 	}
+	if proceed, err := s.registryWebhookDispatch(ctx, id, false); err != nil || !proceed {
+		return err
+	}
 	var cancelRequested bool
 	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested FROM operations WHERE id=$1", id).Scan(&cancelRequested); err != nil {
 		return err
@@ -882,6 +892,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	}
 	if !cancelRequested {
 		if proceed, err := s.scheduledJobDispatch(ctx, id, true); err != nil || !proceed {
+			return err
+		}
+		if proceed, err := s.registryWebhookDispatch(ctx, id, true); err != nil || !proceed {
 			return err
 		}
 	}

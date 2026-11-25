@@ -52,6 +52,8 @@ func revokeSCIMAccess(ctx context.Context, tx pgx.Tx, user string) error {
 		"DELETE FROM project_status_pages WHERE creator_id=$1",
 		"UPDATE workloads SET job_schedule_creator_id=NULL,next_job_at=NULL,job_pending_at=NULL WHERE job_schedule_creator_id=$1",
 		"UPDATE operations SET cancel_requested=true,updated_at=now() WHERE id IN (SELECT operation_id FROM scheduled_job_runs WHERE creator_id=$1) AND state IN ('queued','running')",
+		"UPDATE registry_webhooks SET creator_id=NULL,pending_at=NULL WHERE creator_id=$1",
+		"UPDATE operations SET cancel_requested=true,updated_at=now() WHERE id IN (SELECT operation_id FROM registry_webhook_runs WHERE creator_id=$1) AND state IN ('queued','running')",
 		"DELETE FROM api_tokens WHERE user_id=$1",
 		"DELETE FROM account_actions WHERE user_id=$1",
 		"DELETE FROM webauthn_challenges WHERE user_id=$1",

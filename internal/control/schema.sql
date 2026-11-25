@@ -1754,3 +1754,38 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS cove_tunnel_notifications ON node_cloudflare_tunnels;
 CREATE TRIGGER cove_tunnel_notifications AFTER UPDATE OF phase,last_error ON node_cloudflare_tunnels FOR EACH ROW EXECUTE FUNCTION cove_notify_tunnel_outcome();
+CREATE TABLE IF NOT EXISTS registry_webhooks (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ id text NOT NULL UNIQUE,
+ registry_id text NOT NULL REFERENCES infrastructure_connections(id) ON DELETE RESTRICT,
+ registry_server text NOT NULL,
+	provider text NOT NULL CHECK(provider IN ('distribution','docker_hub','ghcr')),
+ enabled boolean NOT NULL,
+ filters jsonb NOT NULL CHECK(jsonb_typeof(filters)='array' AND jsonb_array_length(filters) BETWEEN 1 AND 32),
+ secret bytea NOT NULL,
+ last_received_at timestamptz,
+ last_matched_at timestamptz,
+	pending_at timestamptz,
+	next_dispatch_at timestamptz NOT NULL DEFAULT now(),
+	last_operation_id text REFERENCES operations(id) ON DELETE SET NULL,
+	last_error text NOT NULL DEFAULT '',
+	last_ignored_reason text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE registry_webhooks ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+CREATE TABLE IF NOT EXISTS registry_webhook_runs (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ creator_id text REFERENCES users(id) ON DELETE SET NULL,
+ dispatch_started boolean NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS registry_webhook_deliveries (
+ webhook_id text NOT NULL REFERENCES registry_webhooks(id) ON DELETE CASCADE,
+ event_key text NOT NULL CHECK(event_key ~ '^[a-f0-9]{64}$'),
+	source_key text NOT NULL CHECK(source_key ~ '^[a-f0-9]{64}$'),
+ image_key text NOT NULL CHECK(image_key ~ '^[a-f0-9]{64}$'),
+ received_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(webhook_id,event_key),
+	UNIQUE(webhook_id,source_key)
+);
+CREATE INDEX IF NOT EXISTS registry_webhook_deliveries_age ON registry_webhook_deliveries(webhook_id,received_at);

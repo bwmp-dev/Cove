@@ -61,6 +61,10 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/workloads/{id}/registry-webhook", "workloads:read", "Read registry webhook metadata without its token", nil, registryWebhookStatus{}, 200, s.registryWebhook},
+		{"PUT", "/workloads/{id}/registry-webhook", "workloads:write", "Save registry webhook ownership; enabling also requires Operate and workloads:operate token scope", registryWebhookInput{}, registryWebhookStatus{}, 200, s.registryWebhook},
+		{"POST", "/workloads/{id}/registry-webhook/rotate", "workloads:write", "Rotate webhook token once and claim ownership; also requires Operate and workloads:operate token scope", nil, registryWebhookStatus{}, 200, s.registryWebhook},
+		{"DELETE", "/workloads/{id}/registry-webhook", "workloads:write", "Remove registry webhook and cancel unsubmitted owned deployments", nil, apiOK{}, 200, s.registryWebhook},
 		{"GET", "/nodes/{id}/cloudflare-tunnel", "nodes:manage", "Inspect sealed tunnel publishing metadata; instance administrators only", nil, nodeTunnelStatus{}, 200, s.nodeCloudflareTunnel},
 		{"PUT", "/nodes/{id}/cloudflare-tunnel", "nodes:manage", "Configure public exact-host tunnel publishing with an owned Cloudflare connection", nodeTunnelConfiguration{}, nodeTunnelStatus{}, 202, s.nodeCloudflareTunnel},
 		{"DELETE", "/nodes/{id}/cloudflare-tunnel", "nodes:manage", "Disable the connector and clean up only proven owned provider resources", nil, nodeTunnelStatus{}, 202, s.nodeCloudflareTunnel},
