@@ -166,7 +166,7 @@ func (s *Server) admitDeployment(ctx context.Context, id string) (bool, error) {
 	if err = tx.QueryRow(ctx, `SELECT w.team_id,o.admitted_at IS NOT NULL,o.cancel_requested,o.action FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1`, id).Scan(&team, &admitted, &cancelled, &action); err != nil {
 		return false, err
 	}
-	if admitted || cancelled || action != "deploy" && action != "rollback" && action != "rollout_promote" && action != "pitr_configure" && action != "move" {
+	if admitted || cancelled || action != "deploy" && action != "rollback" && action != "rollout_promote" && action != "pitr_configure" && action != "move" && action != "registry_maintenance" {
 		return true, nil
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('cove-quota:'||$1,0))`, team); err != nil {
@@ -186,7 +186,7 @@ func (s *Server) admitDeployment(ctx context.Context, id string) (bool, error) {
 	if reason != "" {
 		return holdDeployment(ctx, tx, id, reason)
 	}
-	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT deployments FROM team_quotas WHERE team_id=$1),0),(SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND o.action IN ('deploy','rollback','rollout_promote','pitr_configure','move'))`, team).Scan(&maximum, &used); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT deployments FROM team_quotas WHERE team_id=$1),0),(SELECT count(*) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running') AND o.action IN ('deploy','rollback','rollout_promote','pitr_configure','move','registry_maintenance'))`, team).Scan(&maximum, &used); err != nil {
 		return false, err
 	}
 	if maximum > 0 && used >= maximum {

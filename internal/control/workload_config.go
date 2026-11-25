@@ -75,6 +75,14 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authorization unavailable", 503)
 		return
 	}
+	var managedRegistry bool
+	if err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM managed_registries WHERE id=$1)`, r.PathValue("id")).Scan(&managedRegistry); err != nil {
+		http.Error(w, "managed resource metadata unavailable", 503)
+		return
+	}
+	if managedRegistry {
+		level = 1
+	}
 	deployed, err := deployedWorkload(r.Context(), s.DB, r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
@@ -106,7 +114,7 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authorization unavailable", 503)
 		return
 	}
-	if previewSource != "" || pendingAdoption != "" {
+	if previewSource != "" || pendingAdoption != "" || managedRegistry {
 		names = permissions(level)
 	}
 	// Protected preview routes keep their password hash on the server.

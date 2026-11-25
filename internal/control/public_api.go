@@ -61,6 +61,13 @@ type apiTunnelView struct {
 
 func (s *Server) publicRoutes() []publicRoute {
 	return []publicRoute{
+		{"GET", "/managed-registries", "workloads:read", "Read team managed-registry metadata without credentials", nil, map[string]any{}, 200, s.managedRegistries},
+		{"POST", "/managed-registries", "workloads:write", "Team administrators provision an authenticated registry through normal deployment admission", managedRegistryInput{}, map[string]string{}, 202, s.managedRegistries},
+		{"PUT", "/managed-registries/{id}", "configuration:write", "Team administrators save retention or repair a failed certificate selection", managedRegistryChangeInput{}, apiOK{}, 200, s.managedRegistries},
+		{"POST", "/managed-registries/{id}/retry", "workloads:operate", "Team administrators retry failed provisioning through normal deployment admission", nil, map[string]string{}, 202, s.managedRegistries},
+		{"POST", "/managed-registries/{id}/gc", "workloads:operate", "Team administrators queue offline retention under approval, freeze and deployment windows", nil, map[string]string{}, 202, s.managedRegistries},
+		{"DELETE", "/managed-registries/{id}", "workloads:write", "Team administrators remove a registry, retaining data unless explicitly requested and unreferenced", managedRegistryRemoveInput{}, map[string]string{}, 202, s.managedRegistries},
+		{"DELETE", "/managed-registries/{id}/record", "workloads:write", "Team administrators forget only a removed registry whose data has been purged", nil, apiOK{}, 200, s.deleteManagedRegistryRecord},
 		{"GET", "/workloads/{id}/image-scanning", "workloads:read", "Read team/node scanner opt-in metadata", nil, map[string]any{}, 200, s.imageScanning},
 		{"PUT", "/workloads/{id}/image-scanning", "configuration:write", "Change team/node scan opt-in; team administrator required", imageScanningInput{}, map[string]any{}, 200, s.imageScanning},
 		{"GET", "/workloads/{id}/image-scans", "workloads:read", "Read bounded vulnerability findings and unknown/stale coverage", nil, map[string]any{}, 200, s.workloadImageScans},

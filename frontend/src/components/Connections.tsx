@@ -9,7 +9,7 @@ import { canManageTeamDestinations, currentTeam, managesTeam } from "../lib/perm
 import { useSession } from "../lib/session";
 import { isFormError, notificationFromForm, notificationTestDescription, providerLabel, providerSpec, routingSummary, type NotificationFormError } from "../lib/notifications";
 import { b2PathError, storageFromForm, storageProtocols, storageSummary } from "../lib/storage";
-import { inputClass } from "../lib/styles";
+import { inputClass, linkClass } from "../lib/styles";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { NotificationFields } from "./NotificationFields";
 import { Button, EmptyState, Field, LoadingRows, Notice, QueryError, Section } from "./ui";
@@ -119,6 +119,11 @@ function notificationSummary(connection: Connection) {
   return parts.join(" · ");
 }
 
+// Generated for a managed registry: only Cove changes or removes it, through the registry's own actions.
+function ManagedConnectionNote({ registryId }: { registryId: string }) {
+  return <p className="text-xs text-fg-muted">Managed by Cove for a managed registry. <a href={`#managed-registry-${registryId}`} className={linkClass}>View managed registry</a></p>;
+}
+
 export function Connections({ kind }: { kind: ConnectionKind }) {
   const session = useSession();
   const manager = kind === "notifications" ? canManageTeamDestinations(session) : Boolean(session?.is_admin) || managesTeam(currentTeam(session));
@@ -136,7 +141,7 @@ export function Connections({ kind }: { kind: ConnectionKind }) {
   return <div className="min-w-0 space-y-4 px-4 pt-5 sm:px-6">
     {manager && <Button variant="primary" disabled={!online} onClick={() => setEdit("new")}>Add {kind === "registries" ? "registry" : kind === "notifications" ? "notification" : "storage location"}</Button>}
     {deletion.isError && <Notice tone="error">{errorMessage(deletion.error)}</Notice>}
-    {query.data.length === 0 ? <EmptyState title="No connections yet">{manager ? "Add a connection for this team." : "A team administrator can add connections."}</EmptyState> : <ul className="divide-y divide-line">{query.data.map((connection) => <li key={connection.id} className="flex flex-wrap items-center justify-between gap-3 py-4"><div className="min-w-0"><h2 className="text-sm font-medium">{connection.name}</h2><p className="break-all text-xs text-fg-muted">{connection.registry?.server ?? (connection.storage ? storageSummary(connection.storage) : notificationSummary(connection))}</p>{connection.warning && <p className="mt-1 text-xs text-warn">{connection.warning}</p>}</div>{manager && <div className="flex gap-2"><Button size="sm" disabled={!online} onClick={() => setTest(connection)}>Test</Button><Button size="sm" disabled={!online} onClick={() => setEdit(connection)}>Edit</Button><Button size="sm" disabled={!online || deletion.isPending} onClick={() => setRemove(connection)}>Delete</Button></div>}</li>)}</ul>}
+    {query.data.length === 0 ? <EmptyState title="No connections yet">{manager ? "Add a connection for this team." : "A team administrator can add connections."}</EmptyState> : <ul className="divide-y divide-line">{query.data.map((connection) => <li key={connection.id} className="flex flex-wrap items-center justify-between gap-3 py-4"><div className="min-w-0"><h2 className="text-sm font-medium">{connection.name}</h2><p className="break-all text-xs text-fg-muted">{connection.registry?.server ?? (connection.storage ? storageSummary(connection.storage) : notificationSummary(connection))}</p>{connection.warning && <p className="mt-1 text-xs text-warn">{connection.warning}</p>}{connection.managed_registry_id && <ManagedConnectionNote registryId={connection.managed_registry_id} />}</div>{manager && <div className="flex gap-2"><Button size="sm" disabled={!online} onClick={() => setTest(connection)}>Test</Button>{!connection.managed_registry_id && <><Button size="sm" disabled={!online} onClick={() => setEdit(connection)}>Edit</Button><Button size="sm" disabled={!online || deletion.isPending} onClick={() => setRemove(connection)}>Delete</Button></>}</div>}</li>)}</ul>}
     <ConfirmDialog open={remove !== null} title={`Delete ${remove?.name ?? "connection"}?`} confirmLabel="Delete" danger onCancel={() => setRemove(null)} onConfirm={() => { if (remove) deletion.mutate(remove.id); }}>Connections in use by a resource cannot be deleted. Removing a notification also removes its delivery history.</ConfirmDialog>
   </div>;
 }

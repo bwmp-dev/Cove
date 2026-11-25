@@ -1822,3 +1822,48 @@ ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS creator_id text RE
 ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS generation text NOT NULL DEFAULT '';
 ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS dispatch_started boolean NOT NULL DEFAULT false;
 ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS processed_check_id text REFERENCES operations(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS managed_registries (
+ id text PRIMARY KEY REFERENCES workloads(id) ON DELETE RESTRICT,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
+ hostname text NOT NULL,
+ credentials bytea NOT NULL,
+ retention jsonb NOT NULL,
+ state text NOT NULL DEFAULT 'provisioning' CHECK(state IN ('provisioning','ready','maintenance','removing','failed','removed')),
+ previous_state text NOT NULL DEFAULT '',
+ connection_id text UNIQUE REFERENCES infrastructure_connections(id) ON DELETE RESTRICT,
+ operation_id text REFERENCES operations(id) ON DELETE RESTRICT,
+ last_error text NOT NULL DEFAULT '', data_retained boolean NOT NULL DEFAULT false,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_managed_registry_per_team ON managed_registries(team_id) WHERE state<>'removed';
+CREATE UNIQUE INDEX IF NOT EXISTS managed_registry_hostname ON managed_registries(hostname) WHERE state<>'removed';
+CREATE OR REPLACE FUNCTION cove_managed_registry_admission() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE registry_state text;
+BEGIN
+ IF NEW.state IN ('queued','running') AND NEW.action IN ('build','deploy','rollback') THEN
+  FOR registry_state IN SELECT m.state FROM managed_registries m JOIN workloads w ON w.team_id=m.team_id WHERE w.id=NEW.workload_id AND (m.state<>'removed' OR m.data_retained) ORDER BY m.id FOR SHARE OF m LOOP
+   IF registry_state IN ('maintenance','removing') THEN
+    RAISE EXCEPTION 'managed registry maintenance holds team publishers' USING ERRCODE='23514',CONSTRAINT='cove_managed_registry_busy';
+   END IF;
+  END LOOP;
+  SELECT m.state INTO registry_state FROM managed_registries m JOIN workload_connections c ON c.connection_id=m.connection_id WHERE c.workload_id=NEW.workload_id AND c.kind='registry' FOR SHARE OF m;
+  IF registry_state IS NOT NULL AND registry_state<>'ready' THEN
+   RAISE EXCEPTION 'managed registry is not ready for publishing or deployment' USING ERRCODE='23514',CONSTRAINT='cove_managed_registry_busy';
+  END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_managed_registry_admission ON operations;
+CREATE TRIGGER cove_managed_registry_admission BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_managed_registry_admission();
+CREATE OR REPLACE FUNCTION cove_managed_registry_binding() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE registry_state text;
+BEGIN
+ SELECT state INTO registry_state FROM managed_registries WHERE connection_id=NEW.connection_id FOR SHARE;
+ IF registry_state IS NOT NULL AND registry_state<>'ready' THEN
+  RAISE EXCEPTION 'managed registry is not ready for new connections' USING ERRCODE='23514',CONSTRAINT='cove_managed_registry_busy';
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_managed_registry_binding ON workload_connections;
+CREATE TRIGGER cove_managed_registry_binding BEFORE INSERT OR UPDATE OF connection_id ON workload_connections FOR EACH ROW EXECUTE FUNCTION cove_managed_registry_binding();

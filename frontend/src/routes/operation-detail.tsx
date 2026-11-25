@@ -23,7 +23,7 @@ import { findPlacement } from "../lib/hierarchy";
 import { resultSummary } from "../lib/rollouts";
 import { buttonClass, inputClass, linkClass } from "../lib/styles";
 import { PendingRolloutMessage, usePendingRollout } from "../components/StagedRollout";
-import type { SuspensionResult, WorkerOperation, WorkloadSummary } from "../api/types";
+import type { ManagedRegistryResult, SuspensionResult, WorkerOperation, WorkloadSummary } from "../api/types";
 import { useEnvironmentHold } from "../components/EnvironmentSuspension";
 import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
@@ -134,6 +134,22 @@ function imageScanRows(operation: Operation, worker: WorkerOperation | null, act
   if (worker?.image_scan) return [{ term: "Vulnerability scan", value: <ScanOutcome scan={worker.image_scan} workloadId={workloadId} /> }];
   if (operation.action === "image_scan" && worker && !active) return [{ term: "Vulnerability scan", value: <span className="text-fg-muted">No report was recorded.</span> }];
   return [];
+}
+
+const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
+
+// Manifest counts only: reclaimed space is not measured, and a removal reports whether the data volume was kept.
+function RegistryMaintenanceOutcome({ result }: { result: ManagedRegistryResult }) {
+  return (
+    <div className="space-y-1">
+      <p>{result.removed ? (result.data_retained ? "Registry removed; its data volume was kept on the node" : "Registry removed; no data volume was kept") : `${plural(result.deleted, "manifest")} deleted of ${plural(result.manifests, "manifest")} found`}</p>
+      {result.storage?.hard_cap_verified !== true && <p className="text-xs text-fg-muted">The registry storage has no verified hard cap.</p>}
+    </div>
+  );
+}
+
+function registryMaintenanceRows(worker: WorkerOperation | null) {
+  return worker?.managed_registry ? [{ term: "Registry maintenance", value: <RegistryMaintenanceOutcome result={worker.managed_registry} /> }] : [];
 }
 
 const stateDescriptions = {
@@ -332,6 +348,7 @@ export function OperationPage() {
                 : []),
               ...(worker?.scale ? [{ term: "CPU scaling", value: <ScaleOutcome scale={worker.scale} /> }] : []),
               ...imageScanRows(operation, worker, active, workload?.id),
+              ...registryMaintenanceRows(worker),
               ...(worker?.suspension ? [{ term: suspensionTerms[worker.suspension.reason], value: <SuspensionOutcome suspension={worker.suspension} /> }] : []),
               ...(worker?.revision ? [{ term: "Git revision", value: <span className="font-mono text-xs break-all">{worker.revision}</span> }] : []),
               ...(!worker ? [{ term: "Worker status", value: <span className="text-fg-muted">Not yet acknowledged by the worker</span> }] : []),

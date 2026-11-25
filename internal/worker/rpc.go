@@ -19,87 +19,89 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
-	Publishing      *CloudflarePublishing      `json:"publishing,omitempty"`
-	Exposures       *IngressExposureRequest    `json:"exposures,omitempty"`
-	Database        *DatabaseInspectionRequest `json:"database_inspection,omitempty"`
-	Bucket          *ObjectBucket              `json:"object_bucket,omitempty"`
-	Diff            *ReleaseComparisonRequest  `json:"release_comparison,omitempty"`
-	Proxy           *outbound.Config           `json:"outbound_proxy,omitempty"`
-	Adoption        *AdoptionRequest           `json:"adoption,omitempty"`
-	Exec            *ExecRequest               `json:"exec,omitempty"`
-	Links           *LinkConfig                `json:"links,omitempty"`
-	Ingress         *IngressConfigRequest      `json:"ingress,omitempty"`
-	Tunnel          *TunnelRequest             `json:"tunnel,omitempty"`
-	Promotion       *PromotionExport           `json:"promotion,omitempty"`
-	Registry        *Registry                  `json:"registry,omitempty"`
-	Storage         *StorageLocation           `json:"storage,omitempty"`
-	Terminal        *TerminalRequest           `json:"terminal,omitempty"`
-	Method          string                     `json:"method"`
-	Request         *Request                   `json:"request,omitempty"`
-	ID              string                     `json:"id,omitempty"`
-	Snapshot        *VolumeSnapshotConfig      `json:"snapshot,omitempty"`
-	Stream          *StreamRequest             `json:"stream,omitempty"`
-	TrafficControl  *ProxyTrafficControl       `json:"traffic_control,omitempty"`
-	CleanupControl  *CleanupControl            `json:"cleanup_control,omitempty"`
-	JournalPrune    *JournalPruneRequest       `json:"journal_prune,omitempty"`
-	Files           *FileRequest               `json:"files,omitempty"`
-	Telemetry       *TelemetryRequest          `json:"telemetry,omitempty"`
-	Move            *MoveRequest               `json:"move,omitempty"`
-	Firewall        *FirewallControl           `json:"firewall,omitempty"`
-	HostMaintenance *HostMaintenanceRequest    `json:"host_maintenance,omitempty"`
-	Identity        *IdentityRequest           `json:"identity,omitempty"`
+	RegistryCertificate string                     `json:"registry_certificate,omitempty"`
+	Publishing          *CloudflarePublishing      `json:"publishing,omitempty"`
+	Exposures           *IngressExposureRequest    `json:"exposures,omitempty"`
+	Database            *DatabaseInspectionRequest `json:"database_inspection,omitempty"`
+	Bucket              *ObjectBucket              `json:"object_bucket,omitempty"`
+	Diff                *ReleaseComparisonRequest  `json:"release_comparison,omitempty"`
+	Proxy               *outbound.Config           `json:"outbound_proxy,omitempty"`
+	Adoption            *AdoptionRequest           `json:"adoption,omitempty"`
+	Exec                *ExecRequest               `json:"exec,omitempty"`
+	Links               *LinkConfig                `json:"links,omitempty"`
+	Ingress             *IngressConfigRequest      `json:"ingress,omitempty"`
+	Tunnel              *TunnelRequest             `json:"tunnel,omitempty"`
+	Promotion           *PromotionExport           `json:"promotion,omitempty"`
+	Registry            *Registry                  `json:"registry,omitempty"`
+	Storage             *StorageLocation           `json:"storage,omitempty"`
+	Terminal            *TerminalRequest           `json:"terminal,omitempty"`
+	Method              string                     `json:"method"`
+	Request             *Request                   `json:"request,omitempty"`
+	ID                  string                     `json:"id,omitempty"`
+	Snapshot            *VolumeSnapshotConfig      `json:"snapshot,omitempty"`
+	Stream              *StreamRequest             `json:"stream,omitempty"`
+	TrafficControl      *ProxyTrafficControl       `json:"traffic_control,omitempty"`
+	CleanupControl      *CleanupControl            `json:"cleanup_control,omitempty"`
+	JournalPrune        *JournalPruneRequest       `json:"journal_prune,omitempty"`
+	Files               *FileRequest               `json:"files,omitempty"`
+	Telemetry           *TelemetryRequest          `json:"telemetry,omitempty"`
+	Move                *MoveRequest               `json:"move,omitempty"`
+	Firewall            *FirewallControl           `json:"firewall,omitempty"`
+	HostMaintenance     *HostMaintenanceRequest    `json:"host_maintenance,omitempty"`
+	Identity            *IdentityRequest           `json:"identity,omitempty"`
 }
 type RPCResponse struct {
-	Publishing      *CloudflarePublishingStatus `json:"publishing,omitempty"`
-	Exposures       *IngressExposureStatus      `json:"exposures,omitempty"`
-	ExposurePlan    *IngressExposurePlan        `json:"exposure_plan,omitempty"`
-	Database        *DatabaseInspection         `json:"database_inspection,omitempty"`
-	Comparison      *ReleaseComparison          `json:"release_comparison,omitempty"`
-	Adopted         *AdoptionRequest            `json:"adopted,omitempty"`
-	ComposeProjects []ComposeProject            `json:"compose_projects,omitempty"`
-	Adoption        *AdoptionPlan               `json:"adoption,omitempty"`
-	ImportedCompose *ImportedCompose            `json:"imported_compose,omitempty"`
-	Drift           *DriftReport                `json:"drift,omitempty"`
-	SourceFiles     *SourceFiles                `json:"source_files,omitempty"`
-	Exec            *ExecResult                 `json:"exec,omitempty"`
-	Links           *LinkStatus                 `json:"links,omitempty"`
-	Ingress         *IngressConfigState         `json:"ingress,omitempty"`
-	IngressFile     *IngressConfigFile          `json:"ingress_file,omitempty"`
-	IngressResult   *IngressConfigResult        `json:"ingress_result,omitempty"`
-	RestoreCopy     *RestoreCopy                `json:"restore_copy,omitempty"`
-	Images          map[string]string           `json:"images,omitempty"`
-	Inventory       *PreviewInventory           `json:"inventory,omitempty"`
-	Cleanup         *CleanupPreview             `json:"cleanup,omitempty"`
-	Preflight       *PreflightReport            `json:"preflight,omitempty"`
-	Terminal        *TerminalResponse           `json:"terminal,omitempty"`
-	Releases        []Release                   `json:"releases,omitempty"`
-	Backups         []BackupRecord              `json:"backups,omitempty"`
-	Maintenance     *Maintenance                `json:"maintenance,omitempty"`
-	Probe           *Probe                      `json:"probe,omitempty"`
-	Operation       *Operation                  `json:"operation,omitempty"`
-	Logs            string                      `json:"logs,omitempty"`
-	Error           string                      `json:"error,omitempty"`
-	Containers      []Container                 `json:"containers,omitempty"`
-	Snapshot        *SnapshotPreview            `json:"snapshot,omitempty"`
-	TrafficState    *ProxyTrafficState          `json:"traffic_state,omitempty"`
-	TrafficPlan     *ProxyTrafficPlan           `json:"traffic_plan,omitempty"`
-	Traffic         *TrafficReport              `json:"traffic,omitempty"`
-	CleanupState    *CleanupState               `json:"cleanup_state,omitempty"`
-	CleanupPlan     *CleanupPlan                `json:"cleanup_plan,omitempty"`
-	JournalPrune    *JournalPruneResult         `json:"journal_prune,omitempty"`
-	Observations    *WorkloadObservations       `json:"observations,omitempty"`
-	Files           *FileResponse               `json:"files,omitempty"`
-	Telemetry       *Telemetry                  `json:"telemetry,omitempty"`
-	CPUScale        *CPUScaleObservation        `json:"cpu_scale,omitempty"`
-	Idle            *IdleStatus                 `json:"idle,omitempty"`
-	Rollout         *RolloutStatus              `json:"rollout,omitempty"`
-	Suspension      *SuspensionStatus           `json:"suspension,omitempty"`
-	Move            *MoveState                  `json:"move,omitempty"`
-	GPUs            *GPUInventory               `json:"gpus,omitempty"`
-	Firewall        *FirewallResult             `json:"firewall,omitempty"`
-	HostPatches     *HostPatchStatus            `json:"host_patches,omitempty"`
-	Identity        *IdentityState              `json:"identity,omitempty"`
-	PITR            *PITRStatus                 `json:"pitr,omitempty"`
+	RegistryReferences []string                    `json:"registry_references,omitempty"`
+	Publishing         *CloudflarePublishingStatus `json:"publishing,omitempty"`
+	Exposures          *IngressExposureStatus      `json:"exposures,omitempty"`
+	ExposurePlan       *IngressExposurePlan        `json:"exposure_plan,omitempty"`
+	Database           *DatabaseInspection         `json:"database_inspection,omitempty"`
+	Comparison         *ReleaseComparison          `json:"release_comparison,omitempty"`
+	Adopted            *AdoptionRequest            `json:"adopted,omitempty"`
+	ComposeProjects    []ComposeProject            `json:"compose_projects,omitempty"`
+	Adoption           *AdoptionPlan               `json:"adoption,omitempty"`
+	ImportedCompose    *ImportedCompose            `json:"imported_compose,omitempty"`
+	Drift              *DriftReport                `json:"drift,omitempty"`
+	SourceFiles        *SourceFiles                `json:"source_files,omitempty"`
+	Exec               *ExecResult                 `json:"exec,omitempty"`
+	Links              *LinkStatus                 `json:"links,omitempty"`
+	Ingress            *IngressConfigState         `json:"ingress,omitempty"`
+	IngressFile        *IngressConfigFile          `json:"ingress_file,omitempty"`
+	IngressResult      *IngressConfigResult        `json:"ingress_result,omitempty"`
+	RestoreCopy        *RestoreCopy                `json:"restore_copy,omitempty"`
+	Images             map[string]string           `json:"images,omitempty"`
+	Inventory          *PreviewInventory           `json:"inventory,omitempty"`
+	Cleanup            *CleanupPreview             `json:"cleanup,omitempty"`
+	Preflight          *PreflightReport            `json:"preflight,omitempty"`
+	Terminal           *TerminalResponse           `json:"terminal,omitempty"`
+	Releases           []Release                   `json:"releases,omitempty"`
+	Backups            []BackupRecord              `json:"backups,omitempty"`
+	Maintenance        *Maintenance                `json:"maintenance,omitempty"`
+	Probe              *Probe                      `json:"probe,omitempty"`
+	Operation          *Operation                  `json:"operation,omitempty"`
+	Logs               string                      `json:"logs,omitempty"`
+	Error              string                      `json:"error,omitempty"`
+	Containers         []Container                 `json:"containers,omitempty"`
+	Snapshot           *SnapshotPreview            `json:"snapshot,omitempty"`
+	TrafficState       *ProxyTrafficState          `json:"traffic_state,omitempty"`
+	TrafficPlan        *ProxyTrafficPlan           `json:"traffic_plan,omitempty"`
+	Traffic            *TrafficReport              `json:"traffic,omitempty"`
+	CleanupState       *CleanupState               `json:"cleanup_state,omitempty"`
+	CleanupPlan        *CleanupPlan                `json:"cleanup_plan,omitempty"`
+	JournalPrune       *JournalPruneResult         `json:"journal_prune,omitempty"`
+	Observations       *WorkloadObservations       `json:"observations,omitempty"`
+	Files              *FileResponse               `json:"files,omitempty"`
+	Telemetry          *Telemetry                  `json:"telemetry,omitempty"`
+	CPUScale           *CPUScaleObservation        `json:"cpu_scale,omitempty"`
+	Idle               *IdleStatus                 `json:"idle,omitempty"`
+	Rollout            *RolloutStatus              `json:"rollout,omitempty"`
+	Suspension         *SuspensionStatus           `json:"suspension,omitempty"`
+	Move               *MoveState                  `json:"move,omitempty"`
+	GPUs               *GPUInventory               `json:"gpus,omitempty"`
+	Firewall           *FirewallResult             `json:"firewall,omitempty"`
+	HostPatches        *HostPatchStatus            `json:"host_patches,omitempty"`
+	Identity           *IdentityState              `json:"identity,omitempty"`
+	PITR               *PITRStatus                 `json:"pitr,omitempty"`
 }
 
 func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
@@ -380,6 +382,47 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: err.Error()}
 		}
 		return RPCResponse{Telemetry: result}
+	case "managed_registry_verify":
+		if err := VerifyManagedRegistry(ctx, r.Registry, r.RegistryCertificate, r.Proxy); err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{}
+	case "managed_registry_recover":
+		if !identifier.MatchString(r.ID) || r.Request == nil || r.Request.ID != r.ID || r.Request.Action != "registry_maintenance" {
+			return RPCResponse{Error: "invalid registry operation"}
+		}
+		if _, err := e.Cancel(*r.Request); err != nil {
+			return RPCResponse{Error: "registry recovery could not retire the original submission"}
+		}
+		e.mu.Lock()
+		j, err := e.read(r.ID)
+		if err != nil || j.Request.Action != "registry_maintenance" || e.busy(j.Request.Workload) {
+			e.mu.Unlock()
+			return RPCResponse{Error: "registry operation unavailable or active"}
+		}
+		e.active[j.Request.Workload] = true
+		e.mu.Unlock()
+		err = e.recoverManagedRegistry(ctx, j)
+		e.mu.Lock()
+		delete(e.active, j.Request.Workload)
+		e.mu.Unlock()
+		if err != nil {
+			return RPCResponse{Error: "registry recovery remains pending"}
+		}
+		op, err := e.Status(r.ID)
+		if err != nil {
+			return RPCResponse{Error: "registry recovery status unavailable"}
+		}
+		return RPCResponse{Operation: &op}
+	case "managed_registry_references":
+		if r.Registry == nil {
+			return RPCResponse{Error: "registry scope required"}
+		}
+		refs, err := e.ManagedRegistryReferences(ctx, r.ID, r.Registry.Server)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{RegistryReferences: refs}
 	case "cloudflare_publishing", "cloudflare_publishing_apply", "cloudflare_publishing_disable":
 		var status CloudflarePublishingStatus
 		var err error

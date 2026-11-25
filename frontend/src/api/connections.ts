@@ -7,7 +7,8 @@ export interface Registry { server: string; username: string; password?: string 
 export interface Storage { ca_certificate?: string; protocol: string; endpoint: string; path: string; username?: string; password?: string; access_key?: string; secret_key?: string; region?: string; host_key?: string; tls_mode?: string }
 export interface Notification { health?: boolean; provider: string; url?: string; enabled: boolean; success: boolean; failure: boolean; events?: string[]; email?: string; owner?: boolean; signing_secret?: string; signing_secret_set?: boolean; token?: string; token_set?: boolean; target?: string; user_key?: string; user_key_set?: boolean }
 // warning is set on storage locations created by the Garage add-on, which live on the same node as the data they protect.
-export interface Connection { id: string; name: string; warning?: string; registry?: Registry; storage?: Storage; notification?: Notification }
+// managed_registry_id marks the registry connection Cove generated for a managed registry. Only Cove changes or removes it.
+export interface Connection { id: string; name: string; warning?: string; managed_registry_id?: string; registry?: Registry; storage?: Storage; notification?: Notification }
 export function connectionsQuery(kind: ConnectionKind) {
   return queryOptions({ queryKey: ["connections", kind], queryFn: ({ signal }) => request<Connection[]>("GET", `/api/${kind}`, undefined, signal) });
 }

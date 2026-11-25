@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"cove/internal/worker"
 	"errors"
 	"net/http"
@@ -91,17 +92,24 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	for _, query := range []string{"DELETE FROM api_tokens WHERE workload_id=$1", "DELETE FROM webhook_deliveries WHERE workload_id=$1", "DELETE FROM operation_dependencies WHERE prerequisite_id IN (SELECT id FROM operations WHERE workload_id=$1)", "DELETE FROM operations WHERE workload_id=$1", "DELETE FROM workloads WHERE id=$1"} {
-		if _, err = tx.Exec(r.Context(), query, r.PathValue("id")); err != nil {
-			http.Error(w, "could not delete workload", 500)
-			return
-		}
+	if err = deleteWorkloadRecords(r.Context(), tx, r.PathValue("id")); err != nil {
+		http.Error(w, "could not delete workload", 500)
+		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		http.Error(w, "could not delete workload", 500)
 		return
 	}
 	respond(w, 200, map[string]bool{"ok": true})
+}
+
+func deleteWorkloadRecords(ctx context.Context, tx pgx.Tx, id string) error {
+	for _, query := range []string{"DELETE FROM api_tokens WHERE workload_id=$1", "DELETE FROM webhook_deliveries WHERE workload_id=$1", "DELETE FROM operation_dependencies WHERE prerequisite_id IN (SELECT id FROM operations WHERE workload_id=$1)", "DELETE FROM operations WHERE workload_id=$1", "DELETE FROM workloads WHERE id=$1"} {
+		if _, err := tx.Exec(ctx, query, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {

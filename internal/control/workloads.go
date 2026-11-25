@@ -434,6 +434,9 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, err = tx.Exec(r.Context(), "INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,$3,$4)", id, request.Workload, in.Action, payload)
+	if managedRegistryAdmissionError(w, err) {
+		return
+	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		http.Error(w, "workload already has an active operation", 409)
@@ -543,7 +546,7 @@ func (s *Server) nodeRPCUsing(ctx context.Context, db interface {
 		return worker.RPCResponse{}, err
 	}
 	if !proxySupported {
-		if request.Proxy != nil && (request.Request != nil || request.Method == "registry_test" || request.Method == "export_release") {
+		if request.Proxy != nil && (request.Request != nil || request.Method == "registry_test" || request.Method == "managed_registry_verify" || request.Method == "export_release") {
 			return worker.RPCResponse{}, errOutboundWorkerUnsupported
 		}
 		request.Proxy = nil
@@ -660,16 +663,20 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.reconcileIdentities(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.reconcileManagedRegistries(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.scheduleRestoreDrills(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
-		if err := s.scheduleJobs(ctx); err != nil && ctx.Err() == nil {
+		// Registry admission rolls scheduling back; retain due work for the next pass.
+		if err := s.scheduleJobs(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
 			return err
 		}
 		if err := s.scheduleImageChecks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
-		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil {
+		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
 			return err
 		}
 		if err := s.scheduleCertificateDNSIntents(ctx); err != nil && ctx.Err() == nil {
@@ -681,10 +688,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.scheduleUnhealthyRestarts(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
-		if err := s.reconcilePreviews(ctx); err != nil && ctx.Err() == nil {
+		if err := s.reconcilePreviews(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
 			return err
 		}
-		if err := s.reconcileEnvironmentPreviews(ctx); err != nil && ctx.Err() == nil {
+		if err := s.reconcileEnvironmentPreviews(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
 			return err
 		}
 		if err := s.scheduleBackups(ctx); err != nil && ctx.Err() == nil {
@@ -693,7 +700,7 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.schedulePITR(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
-		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil {
+		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
 			return err
 		}
 		if err := s.dispatchConnectedGitFeedback(ctx); err != nil && ctx.Err() == nil {
@@ -702,10 +709,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.dispatchGithubFeedback(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
-		if err := s.dispatchImageUpdates(ctx); err != nil && ctx.Err() == nil {
+		if err := s.dispatchImageUpdates(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
 			return err
 		}
-		if err := s.dispatchRegistryWebhooks(ctx); err != nil && ctx.Err() == nil {
+		if err := s.dispatchRegistryWebhooks(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
 			return err
 		}
 		if err := s.dispatchNotifications(ctx); err != nil && ctx.Err() == nil {

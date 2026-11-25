@@ -111,7 +111,7 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 		environments[source] = id
 	}
 	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,COALESCE(w.environment_id,''),w.project_id,w.node_id,
- CASE WHEN $4 THEN 3 ELSE cove_access($5,w.team_id,w.project_id,COALESCE(e.id,'')) END
+ CASE WHEN $4 THEN 3 ELSE cove_access($5,w.team_id,w.project_id,COALESCE(e.id,'')) END,EXISTS(SELECT 1 FROM managed_registries m WHERE m.id=w.id)
  FROM workloads w LEFT JOIN environments e ON e.id=w.environment_id
 	 WHERE w.team_id=$1 AND (($2='workload' AND w.id=$3) OR ($2='environment' AND e.id=$3) OR ($2='project' AND w.project_id=$3)) ORDER BY w.id`, p.Team, kind, source, p.Admin, p.ID)
 	if err != nil {
@@ -122,12 +122,13 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 		configuration                  []byte
 		id, environment, project, node string
 		level                          int
+		managedRegistry                bool
 	}
 	items := []item{}
 	clonedResources := map[string]string{}
 	for rows.Next() {
 		var v item
-		if err = rows.Scan(&v.id, &v.configuration, &v.environment, &v.project, &v.node, &v.level); err != nil {
+		if err = rows.Scan(&v.id, &v.configuration, &v.environment, &v.project, &v.node, &v.level, &v.managedRegistry); err != nil {
 			break
 		}
 		items = append(items, v)
@@ -145,6 +146,10 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, v := range items {
+		if v.managedRegistry {
+			http.Error(w, "managed registries cannot be cloned; select application resources instead", 409)
+			return
+		}
 		if v.level < 3 {
 			http.Error(w, "permission denied", 403)
 			return

@@ -205,7 +205,7 @@ func (s *Server) emergencyOverride(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "operation unavailable", 503)
 		return
 	}
-	result, err := tx.Exec(r.Context(), `UPDATE operations o SET emergency_override_by=$2,emergency_override_reason=$3,emergency_override_at=now() FROM workloads w WHERE o.id=$1 AND w.id=o.workload_id AND w.team_id=$4 AND o.state='queued' AND o.admitted_at IS NULL AND NOT o.cancel_requested AND o.action IN ('deploy','rollback') AND o.emergency_override_at IS NULL`, r.PathValue("id"), actor(r).ID, in.Reason, actor(r).Team)
+	result, err := tx.Exec(r.Context(), `UPDATE operations o SET emergency_override_by=$2,emergency_override_reason=$3,emergency_override_at=now() FROM workloads w WHERE o.id=$1 AND w.id=o.workload_id AND w.team_id=$4 AND o.state='queued' AND o.admitted_at IS NULL AND NOT o.cancel_requested AND o.action IN ('deploy','rollback','registry_maintenance') AND o.emergency_override_at IS NULL`, r.PathValue("id"), actor(r).ID, in.Reason, actor(r).Team)
 	if err != nil {
 		http.Error(w, "could not override deployment", 503)
 		return

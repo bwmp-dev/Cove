@@ -14,6 +14,7 @@ import (
 )
 
 type Probe struct {
+	ManagedRegistry      bool         `json:"managed_registry"`
 	ImageScanning        bool         `json:"image_scanning"`
 	ImageUpdates         bool         `json:"image_updates"`
 	CloudflarePublishing bool         `json:"cloudflare_publishing"`
@@ -128,6 +129,7 @@ func Inspect(ctx context.Context) Probe {
 	p.ScheduledCleanup = true
 	p.JournalRetention = true
 	p.MountMetrics = runtime.GOOS == "linux"
+	p.ManagedRegistry = runtime.GOOS == "linux"
 	p.EnvironmentPreviews = runtime.GOOS == "linux"
 	p.GuardedHooks = true
 	p.IngressExposures = runtime.GOOS == "linux"
