@@ -219,6 +219,7 @@ func configureHostPatchPolicy(ctx context.Context, hostRoot, workerRoot, owner s
 		}
 		return markInterlockedHostSchedule(ctx, workerRoot, owner, run)
 	}
+	timerPresent := false
 	for _, suffix := range []string{".service", ".timer"} {
 		filename := filepath.Join(unitDirectory, unit+suffix)
 		if _, err := os.Lstat(filename); os.IsNotExist(err) {
@@ -227,9 +228,36 @@ func configureHostPatchPolicy(ctx context.Context, hostRoot, workerRoot, owner s
 		if err := ownedHostPolicyFile(filename, marker); err != nil {
 			return err
 		}
+		timerPresent = timerPresent || suffix == ".timer"
 	}
-	if _, err = run(ctx, "/usr/bin/systemctl", "disable", "--now", unit+".timer"); err != nil {
-		return fmt.Errorf("host schedule disable could not be confirmed: %w", err)
+	if timerPresent {
+		if _, err = run(ctx, "/usr/bin/systemctl", "disable", "--now", unit+".timer"); err != nil {
+			return fmt.Errorf("host schedule disable could not be confirmed: %w", err)
+		}
 	}
-	return markInterlockedHostSchedule(ctx, workerRoot, owner, run)
+	state, err := run(ctx, "/usr/bin/systemctl", "show", "--property=ActiveState", "--value", unit+".timer")
+	if err != nil || strings.TrimSpace(state) != "inactive" && strings.TrimSpace(state) != "failed" {
+		return errors.New("host schedule timer is not confirmed inactive; inspect it before retrying disable")
+	}
+	if err = markInterlockedHostSchedule(ctx, workerRoot, owner, run); err != nil {
+		return err
+	}
+	for _, suffix := range []string{".service", ".timer"} {
+		filename := filepath.Join(unitDirectory, unit+suffix)
+		if err = ownedHostPolicyFile(filename, marker); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err = os.Remove(filename); err != nil {
+			return err
+		}
+	}
+	if err = syncDirectory(unitDirectory); err != nil {
+		return err
+	}
+	if _, err = run(ctx, "/usr/bin/systemctl", "daemon-reload"); err != nil {
+		return errors.New("host schedule is disabled but unit cleanup reload could not be confirmed; retry disable")
+	}
+	return nil
 }

@@ -13,10 +13,11 @@ import { Select } from "./Select";
 import { StatusLabel } from "./status";
 import { Button, Field, LoadingRows, Notice, QueryError, Section, Subsection } from "./ui";
 
-const description = "Cove's own allow-list for application ports that Cove resources publish and for ports of the shared proxy's extra listeners on this host. Inspecting reads the host without changing it.";
+const description =
+  "Cove's own allow-list for ports published on this host by running Cove resources, the shared proxy's extra listeners and the private-link gateway. Ports bound only to loopback are not listed. Inspecting reads the host without changing it.";
 
 const scope =
-  "Cove changes only its own nftables table for currently published Cove application ports. UFW, other nftables tables, default policies, SSH, the panel port and ports 80 and 443 are never changed. Existing connections stay open, and other firewall rules on the host can still deny traffic.";
+  "Cove changes only its own nftables table for the host ports it currently lists. UFW, other nftables tables, default policies, SSH, the panel port and ports 80 and 443 are never changed. Existing connections stay open, and other firewall rules on the host can still deny traffic.";
 
 const sourcesHint = "One IPv4 or IPv6 CIDR prefix per line, such as 192.0.2.0/24 or 2001:db8::/32. Leave empty to deny new connections from everywhere.";
 
@@ -423,7 +424,7 @@ function HostInventory({ result }: { result: FirewallResult }) {
   return (
     <>
       <div className="grid gap-0 divide-y divide-line md:grid-cols-2 md:divide-x md:divide-y-0">
-        <Subsection title="Published application ports" description="Host ports published by running Cove resources and by the shared proxy's extra listeners. Protected ports cannot be restricted.">
+        <Subsection title="Published application ports" description="Host ports published by running Cove resources, the shared proxy's extra listeners and the private-link gateway, excluding loopback-only bindings. Protected ports cannot be restricted. Restricting the gateway's port can interrupt private links to this worker.">
           <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
             {available.length === 0 && <li className="text-fg-muted">None found.</li>}
             {available.map((port) => (

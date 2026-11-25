@@ -54,7 +54,8 @@ func inspectHostSSHPorts(ctx context.Context, run snapshotCommand) ([]uint16, er
 	}
 	ports := []uint16{22}
 	for _, line := range strings.Split(output, "\n") {
-		if !strings.Contains(line, "sshd") && !strings.Contains(line, "systemd") {
+		// systemd can own a socket-activated SSH listener; other systemd-* processes are not SSH.
+		if !strings.Contains(line, `("sshd",`) && !strings.Contains(line, `("systemd",`) {
 			continue
 		}
 		fields := strings.Fields(line)

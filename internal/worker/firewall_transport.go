@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -72,19 +73,21 @@ func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
 	if len(ids) > 512 {
 		return nil, errors.New("firewall inspection supports at most 512 running Compose containers")
 	}
-	proxy, err := e.output(ctx, "docker", "ps", "-q", "--no-trunc", "--filter", "label=cove.managed=ingress")
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range strings.Fields(proxy) {
-		if !slices.Contains(ids, id) {
-			ids = append(ids, id)
+	for _, managed := range []string{"ingress", "link"} {
+		shared, err := e.output(ctx, "docker", "ps", "-q", "--no-trunc", "--filter", "label=cove.managed="+managed)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range strings.Fields(shared) {
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
 		}
 	}
 	if len(ids) == 0 {
 		return []FirewallPort{}, nil
 	}
-	if len(ids) > 513 {
+	if len(ids) > 514 {
 		return nil, errors.New("firewall container inventory exceeds its limit")
 	}
 	for _, id := range ids {
@@ -110,12 +113,12 @@ func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
 		} else if err != nil {
 			return nil, err
 		}
-		sharedProxy := item.Name == "/cove-ingress" && item.Labels["cove.managed"] == "ingress"
+		sharedInfrastructure := item.Name == "/cove-ingress" && item.Labels["cove.managed"] == "ingress" || item.Name == "/"+linkGatewayName && item.Labels["cove.managed"] == "link"
 		workload := strings.TrimPrefix(item.Labels["com.docker.compose.project"], "cove-")
-		if !sharedProxy && (workload == item.Labels["com.docker.compose.project"] || !workloadIdentifier.MatchString(workload)) {
+		if !sharedInfrastructure && (workload == item.Labels["com.docker.compose.project"] || !workloadIdentifier.MatchString(workload)) {
 			continue
 		}
-		if !sharedProxy {
+		if !sharedInfrastructure {
 			info, err := os.Lstat(filepath.Join(e.Root, "workloads", workload))
 			if os.IsNotExist(err) {
 				continue
@@ -133,6 +136,15 @@ func (e *Engine) firewallPorts(ctx context.Context) ([]FirewallPort, error) {
 				number, err := strconv.ParseUint(binding.HostPort, 10, 16)
 				if err != nil || number == 0 {
 					return nil, errors.New("invalid published application port")
+				}
+				if binding.HostIP != "" {
+					address, err := netip.ParseAddr(binding.HostIP)
+					if err != nil {
+						return nil, errors.New("invalid published application address")
+					}
+					if address.Unmap().IsLoopback() {
+						continue
+					}
 				}
 				ports[FirewallPort{Protocol: protocol, Port: uint16(number)}] = true
 				if len(ports) > 1024 {

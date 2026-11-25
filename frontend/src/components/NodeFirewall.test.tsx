@@ -81,12 +81,17 @@ it("inspects only when asked and shows rules, ports and read-only host output", 
   mockApi({ get: () => Promise.resolve(inspected) });
   renderSection();
   expect(screen.getByText(/Not inspected yet/)).toBeInTheDocument();
+  expect(screen.getByText(/Cove's own allow-list/)).toHaveTextContent("running Cove resources, the shared proxy's extra listeners and the private-link gateway. Ports bound only to loopback are not listed.");
   expect(request).not.toHaveBeenCalled();
   await inspect();
   const rules = screen.getByRole("list", { name: "Current Cove rules" });
   expect(within(rules).getByText("TCP 8080")).toBeInTheDocument();
   expect(within(rules).getByText("192.0.2.0/24")).toBeInTheDocument();
   expect(screen.getByText("(protected)")).toBeInTheDocument();
+  const scope = screen.getByText(/Host ports published by running Cove resources/);
+  expect(scope).toHaveTextContent("the shared proxy's extra listeners and the private-link gateway, excluding loopback-only bindings");
+  expect(scope).toHaveTextContent("Restricting the gateway's port can interrupt private links to this worker.");
+  expect(screen.getByText(/never changed/)).toHaveTextContent("SSH, the panel port and ports 80 and 443 are never changed");
   const output = screen.getByRole("region", { name: "UFW status" });
   expect(output).toHaveAttribute("tabindex", "0");
   expect(output).toHaveTextContent("Status: inactive");

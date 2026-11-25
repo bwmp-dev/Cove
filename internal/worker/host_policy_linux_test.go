@@ -104,10 +104,11 @@ func TestHostPatchScheduleOnOwnedLinuxVM(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		for _, args := range [][]string{{"disable", "--now", unit + ".timer"}, {"unmask", "--runtime", unit + ".service"}} {
-			if _, err := snapshotHostCommand(cleanup, append([]string{"/usr/bin/systemctl"}, args...)...); err != nil {
-				t.Error(err)
-			}
+		if err := configureHostPatchPolicy(cleanup, "/", root, owner, false, snapshotHostCommand); err != nil {
+			t.Error(err)
+		}
+		if _, err := snapshotHostCommand(cleanup, "/usr/bin/systemctl", "unmask", "--runtime", unit+".service"); err != nil {
+			t.Error(err)
 		}
 		for _, suffix := range []string{".service", ".timer"} {
 			filename := "/etc/systemd/system/" + unit + suffix
@@ -137,5 +138,23 @@ func TestHostPatchScheduleOnOwnedLinuxVM(t *testing.T) {
 	if err != nil || status.PolicyEnabled {
 		t.Fatal("real security timer was not disabled", status, err)
 	}
-	t.Log("Native systemd timer enabled and disabled; masked service applied no package changes.")
+	for attempt := 0; attempt < 2; attempt++ {
+		for _, suffix := range []string{".service", ".timer"} {
+			if _, err := os.Lstat("/etc/systemd/system/" + unit + suffix); !os.IsNotExist(err) {
+				t.Fatal("disabled schedule left a native unit file", suffix, err)
+			}
+		}
+		if err = configureHostPatchPolicy(ctx, "/", root, owner, false, snapshotHostCommand); err != nil {
+			t.Fatal("repeated disable was not idempotent", err)
+		}
+		if attempt == 0 {
+			if err = configureHostPatchPolicy(ctx, "/", root, owner, true, snapshotHostCommand); err != nil {
+				t.Fatal("removed schedule could not be re-enabled", err)
+			}
+			if err = configureHostPatchPolicy(ctx, "/", root, owner, false, snapshotHostCommand); err != nil {
+				t.Fatal("re-enabled schedule could not be removed", err)
+			}
+		}
+	}
+	t.Log("Native systemd timer enabled, disabled without unit residue, retried and re-enabled; masked service applied no package changes.")
 }
