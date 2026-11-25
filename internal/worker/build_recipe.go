@@ -34,6 +34,7 @@ type BuildRecipeInfo struct {
 	PlatformAPI                   string   `json:"platform_api,omitempty"`
 	PhaseMemoryBytes              uint64   `json:"phase_memory_bytes,omitempty"`
 	AdmissionAvailableMemoryBytes uint64   `json:"admission_available_memory_bytes,omitempty"`
+	PlannerSHA256                 string   `json:"planner_sha256,omitempty"`
 }
 
 func BuildRecipeSummary(recipe *BuildRecipe) *BuildRecipeInfo {
@@ -48,6 +49,10 @@ func BuildRecipeSummary(recipe *BuildRecipe) *BuildRecipeInfo {
 			info.Version, info.BuilderVersion, info.PlatformAPI = BuildpacksLifecycleVersion, BuildpacksBuilderVersion, "0.13"
 			info.PinnedImages = []string{BuildpacksLifecycleImage, BuildpacksBuilderImage, BuildpacksRunImage}
 		}
+		if info.Engine == "nixpacks" {
+			info.Version = NixpacksVersion
+			info.PinnedImages = []string{NixpacksBaseImage}
+		}
 	}
 	return info
 }
@@ -56,11 +61,14 @@ func ValidateRecipeOutbound(recipe BuildRecipe, proxy outbound.Config) error {
 	if recipe.Engine == "railpack" && (proxy.HTTP != "" || proxy.HTTPS != "") {
 		return errors.New("Railpack is unavailable with a configured build outbound proxy: the pinned Railpack frontend does not apply the proxy to its build steps")
 	}
+	if recipe.Engine == "nixpacks" && (proxy.HTTP != "" || proxy.HTTPS != "") {
+		return errors.New("Nixpacks is unavailable with an outbound build proxy: the shared BuildKit network cannot enforce proxy-only egress for generated build commands")
+	}
 	return nil
 }
 
 func (e *Engine) validateRecipeOutbound(r Request, env []string) error {
-	if r.BuildRecipe == nil || r.BuildRecipe.Engine != "railpack" {
+	if r.BuildRecipe == nil || r.BuildRecipe.Engine != "railpack" && r.BuildRecipe.Engine != "nixpacks" {
 		return nil
 	}
 	if r.OutboundProxy != nil {
@@ -96,8 +104,8 @@ func ValidateBuildRecipe(recipe BuildRecipe) error {
 		}
 		return nil
 	}
-	if recipe.Engine != "static" && recipe.Engine != "railpack" && recipe.Engine != "buildpacks" {
-		return errors.New("select an explicit supported build engine: compose, static, railpack or buildpacks")
+	if recipe.Engine != "static" && recipe.Engine != "railpack" && recipe.Engine != "buildpacks" && recipe.Engine != "nixpacks" {
+		return errors.New("select an explicit supported build engine: compose, static, railpack, buildpacks or nixpacks")
 	}
 	if !serviceIdentifier.MatchString(recipe.Service) || !recipeRelativePath(recipe.Directory) {
 		return errors.New("select a Compose service and a clean relative project directory")
@@ -111,7 +119,7 @@ func ValidateBuildRecipe(recipe BuildRecipe) error {
 			return errors.New("Cloud Native Buildpacks uses the pinned builder's detection and the source's launch configuration; clear static output and command overrides")
 		}
 	} else if recipe.Output != "" || len(recipe.BuildCommand) > 8192 || len(recipe.StartCommand) > 8192 || strings.ContainsRune(recipe.BuildCommand+recipe.StartCommand, '\x00') {
-		return errors.New("Railpack accepts optional build/start commands up to 8192 bytes and no static output directory")
+		return errors.New("Railpack and Nixpacks accept optional build/start commands up to 8192 bytes and no static output directory")
 	}
 	return nil
 }
@@ -145,6 +153,9 @@ func ValidateRecipeSource(recipe BuildRecipe, source *GitSource, compose, kind s
 			return err
 		}
 		return validateBuildpacksPolicy(build)
+	}
+	if recipe.Engine == "nixpacks" {
+		return validateNixpacksBuildPolicy(build)
 	}
 	return validateRailpackBuildPolicy(build)
 }

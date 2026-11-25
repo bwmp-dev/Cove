@@ -4,15 +4,16 @@ import type { Operation } from "../api/types";
 import { workerResult } from "./operations";
 import { byteLength } from "./workload-form";
 
-export type RecipeEngine = "compose" | "static" | "railpack" | "buildpacks";
+export type RecipeEngine = "compose" | "static" | "railpack" | "buildpacks" | "nixpacks";
 
-export const recipeEngines: readonly RecipeEngine[] = ["compose", "static", "railpack", "buildpacks"];
+export const recipeEngines: readonly RecipeEngine[] = ["compose", "static", "railpack", "buildpacks", "nixpacks"];
 
 export const engineLabels: Record<RecipeEngine, string> = {
   compose: "Existing Compose / Dockerfile",
   static: "Static output",
   railpack: "Railpack",
   buildpacks: "Cloud Native Buildpacks",
+  nixpacks: "Nixpacks",
 };
 
 export const commandMaxBytes = 8192;
@@ -76,7 +77,7 @@ export function recipeErrors(draft: BuildRecipe, isJob: boolean): RecipeErrors {
     const output = pathError(draft.output, "output directory");
     if (output) errors.output = output;
   }
-  if (draft.engine === "railpack") {
+  if (draft.engine === "railpack" || draft.engine === "nixpacks") {
     const build = commandError(draft.build_command);
     if (build) errors.build_command = build;
     const start = commandError(draft.start_command);
@@ -85,7 +86,7 @@ export function recipeErrors(draft: BuildRecipe, isJob: boolean): RecipeErrors {
   return errors;
 }
 
-// Why the saved recipe cannot build now, or nothing when it can. Unknown Cloud Native Buildpacks eligibility counts as unavailable.
+// Why the saved recipe cannot build now, or nothing when it can. Unknown Cloud Native Buildpacks or Nixpacks eligibility counts as unavailable.
 export function savedRecipeBlocker(settings: BuildRecipeSettings) {
   const engine = settings.recipe.engine;
   if (engine === "compose") return undefined;
@@ -96,6 +97,12 @@ export function savedRecipeBlocker(settings: BuildRecipeSettings) {
     if (!settings.buildpacks.supported) return settings.buildpacks.reason || "The build node cannot run Cloud Native Buildpacks builds.";
     return undefined;
   }
+  if (engine === "nixpacks") {
+    if (settings.reason) return settings.reason;
+    if (!settings.nixpacks) return "This server did not report usable Nixpacks eligibility, so it is treated as unavailable.";
+    if (!settings.nixpacks.supported) return settings.nixpacks.reason || "The build node cannot run Nixpacks builds.";
+    return undefined;
+  }
   if (!settings.supported || settings.reason) return settings.reason || "The build worker does not support this recipe.";
   return undefined;
 }
@@ -103,6 +110,11 @@ export function savedRecipeBlocker(settings: BuildRecipeSettings) {
 // Decimal gigabytes, for download sizes that registries report in bytes.
 export function formatGB(bytes: number) {
   return `${(bytes / 1e9).toFixed(2)} GB`;
+}
+
+// Decimal megabytes, for downloads too small to read in gigabytes.
+export function formatMB(bytes: number) {
+  return `${(bytes / 1e6).toFixed(1)} MB`;
 }
 
 const mib = 1024 ** 2;
@@ -134,6 +146,18 @@ export function recordedPhaseMemory(operation: Operation) {
   return `Phase memory limit ${formatMemory(limit)} (from ${formatMemory(available)} available at admission)`;
 }
 
+const recordedDigest = /^sha256:[0-9a-f]{64}$/;
+
+// The planner release archive checksum this Nixpacks build recorded. Never taken from today's settings: absent means not recorded.
+export function recordedPlannerChecksum(operation: Operation) {
+  const recipe = workerResult(operation)?.build_recipe;
+  if (recipe?.engine !== "nixpacks") return undefined;
+  const checksum: unknown = recipe.planner_sha256;
+  if (checksum === undefined || checksum === "") return "Planner archive checksum not recorded";
+  if (typeof checksum !== "string" || !recordedDigest.test(checksum)) return "Planner archive checksum unavailable";
+  return `Planner archive checksum ${checksum}`;
+}
+
 // Service names from the saved Compose file. An unreadable file yields none and the saved choice is still shown.
 export function composeServices(compose: string) {
   const document = parseDocument(compose, { logLevel: "silent" });
@@ -147,7 +171,7 @@ export function composeServices(compose: string) {
 export function recordedEngine(operation: Operation) {
   const recipe = workerResult(operation)?.build_recipe;
   if (!recipe?.engine) return "Build engine not recorded";
-  const version = recipe.engine === "railpack" && recipe.version ? ` ${recipe.version}` : "";
+  const version = (recipe.engine === "railpack" || recipe.engine === "nixpacks") && recipe.version ? ` ${recipe.version}` : "";
   const service = recipe.service ? ` for ${recipe.service}` : "";
   if (recipe.engine === "buildpacks") {
     const parts = [recipe.version && `lifecycle ${recipe.version}`, recipe.builder_version && `builder ${recipe.builder_version}`, recipe.platform_api && `platform API ${recipe.platform_api}`].filter(Boolean);

@@ -79,7 +79,7 @@ func (e *Engine) prepareBuiltinEnvironment(ctx context.Context, r Request, dir s
 	if err := json.Unmarshal(config["services"], &services); err != nil {
 		return "", err
 	}
-	for _, service := range services {
+	for name, service := range services {
 		environment := map[string]*string{}
 		if raw := service["environment"]; len(raw) > 0 && string(raw) != "null" {
 			if err := json.Unmarshal(raw, &environment); err != nil {
@@ -97,7 +97,9 @@ func (e *Engine) prepareBuiltinEnvironment(ctx context.Context, r Request, dir s
 			return "", err
 		}
 		service["environment"] = raw
-		if raw := service["build"]; len(raw) > 0 && string(raw) != "null" {
+		// These recipe engines do not translate Compose build arguments.
+		injectBuildArgs := r.BuildRecipe == nil || r.BuildRecipe.Service != name || r.BuildRecipe.Engine != "buildpacks" && r.BuildRecipe.Engine != "nixpacks"
+		if raw := service["build"]; injectBuildArgs && len(raw) > 0 && string(raw) != "null" {
 			var build map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &build); err != nil {
 				return "", err
@@ -132,6 +134,14 @@ func (e *Engine) prepareBuiltinEnvironment(ctx context.Context, r Request, dir s
 	}
 	config["services"] = raw
 
+	rendered, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	var snapshot map[string]any
+	if err := unmarshalCompose(rendered, &snapshot); err != nil {
+		return "", err
+	}
 	path := filepath.Join(dir, "builtin-"+r.ID+".json")
-	return path, writeJSON(path, config)
+	return path, writeJSON(path, literalCompose(snapshot))
 }

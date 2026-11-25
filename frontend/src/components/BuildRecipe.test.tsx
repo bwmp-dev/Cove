@@ -3,7 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { BuildRecipe, BuildRecipeSettings, BuildpacksSettings } from "../api/build-recipes";
+import type { BuildRecipe, BuildRecipeSettings, BuildpacksSettings, NixpacksSettings } from "../api/build-recipes";
 import { ApiError, request } from "../api/client";
 import type { Operation, Permission, Workload } from "../api/types";
 import { railpackDisclosure } from "../lib/build-recipes";
@@ -73,6 +73,30 @@ function buildpacks(overrides: Partial<BuildpacksSettings> = {}): BuildpacksSett
 
 const cnbRecipe: BuildRecipe = { ...composeRecipe, engine: "buildpacks", service: "web", directory: "app" };
 
+const nixBase = `ghcr.io/railwayapp/nixpacks@sha256:${"d4".repeat(32)}`;
+const nixDigest = `sha256:${"0f".repeat(32)}`;
+
+function nixpacks(overrides: Partial<NixpacksSettings> = {}): NixpacksSettings {
+  return {
+    supported: true,
+    reason: "",
+    version: "1.41.0",
+    planner_sha256: nixDigest,
+    planner_download_bytes: 3717141,
+    base_image: nixBase,
+    base_download_bytes: 138966568,
+    maintenance: true,
+    proxy_supported: false,
+    planner_memory_bytes: 536870912,
+    planner_cpu: 1,
+    planner_timeout_seconds: 60,
+    planner_output_bytes: 134217728,
+    ...overrides,
+  };
+}
+
+const nixRecipe: BuildRecipe = { ...composeRecipe, engine: "nixpacks", service: "web", directory: "app" };
+
 function settings(overrides: Partial<BuildRecipeSettings> = {}): BuildRecipeSettings {
   return {
     recipe: composeRecipe,
@@ -87,6 +111,7 @@ function settings(overrides: Partial<BuildRecipeSettings> = {}): BuildRecipeSett
     railpack_version: "0.43.1",
     pinned_images: pins,
     buildpacks: buildpacks(),
+    nixpacks: nixpacks(),
     ...overrides,
   };
 }
@@ -145,7 +170,7 @@ it("defaults to the existing Compose build and offers only the supported engines
   const engine = await screen.findByRole("combobox", { name: "Build engine" });
   expect(engine).toHaveTextContent("Existing Compose / Dockerfile");
   await user.click(engine);
-  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Existing Compose / Dockerfile", "Static output", "Railpack", "Cloud Native Buildpacks"]);
+  expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Existing Compose / Dockerfile", "Static output", "Railpack", "Cloud Native Buildpacks", "Nixpacks"]);
   expect(screen.queryByText(/detect/i)).not.toBeInTheDocument();
 });
 
@@ -285,10 +310,10 @@ it("shows a stale saved recipe as it is and lets Compose clear it", async () => 
 });
 
 it("keeps an unknown saved engine visible instead of treating it as Compose", async () => {
-  serve({ read: () => Promise.resolve(settings({ recipe: { ...composeRecipe, engine: "nixpacks", service: "web", directory: "." } })) });
+  serve({ read: () => Promise.resolve(settings({ recipe: { ...composeRecipe, engine: "kaniko", service: "web", directory: "." } })) });
   renderSetting();
   expect(await screen.findByText("The saved build engine is not recognised")).toBeInTheDocument();
-  expect(screen.getByRole("combobox", { name: "Build engine" })).toHaveTextContent("Unknown engine (nixpacks)");
+  expect(screen.getByRole("combobox", { name: "Build engine" })).toHaveTextContent("Unknown engine (kaniko)");
   expect(saveButton()).toBeDisabled();
 });
 
@@ -650,6 +675,287 @@ it("shows readers the saved Cloud Native Buildpacks recipe and its disclosures r
   expect(screen.getByText("app")).toBeInTheDocument();
   expect(screen.getByRole("list", { name: "Pinned Cloud Native Buildpacks images" })).toBeInTheDocument();
   expect(screen.queryByText(/Build command|Start command|Output directory/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Save build recipe" })).not.toBeInTheDocument();
+});
+
+// A read without the nixpacks object, as an older server sends it.
+function withoutNixpacks(overrides: Partial<BuildRecipeSettings> = {}): BuildRecipeSettings {
+  const read = settings(overrides);
+  delete read.nixpacks;
+  return read;
+}
+
+it("confirms the change to Nixpacks, clears the static output and saves the exact six-field payload", async () => {
+  const user = userEvent.setup();
+  serve({ read: () => Promise.resolve(settings({ recipe: { ...composeRecipe, engine: "static", service: "web", directory: "site", output: "dist" } })) });
+  renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  await choose(user, "Build engine", "Nixpacks");
+  expect(screen.queryByLabelText(/^Output directory/)).not.toBeInTheDocument();
+  expect(screen.getByLabelText(/^Build command/)).toHaveValue("");
+  expect(screen.getByText("Overrides the build command Nixpacks plans. Leave empty to use its plan.")).toBeInTheDocument();
+  await type(user, "Start command", "./start.sh");
+  await user.click(saveButton());
+  const dialog = await screen.findByRole("dialog", { name: "Change the build engine?" });
+  expect(dialog).toHaveTextContent("From Static output to Nixpacks.");
+  expect(dialog).toHaveTextContent("Nixpacks is in maintenance mode upstream, which recommends Railpack.");
+  expect(dialog).toHaveTextContent("outbound build proxies are unavailable");
+  expect(puts()).toHaveLength(0);
+  await user.click(within(dialog).getByRole("button", { name: "Change build engine" }));
+  await waitFor(() => expect(puts()).toEqual([["PUT", "/api/workloads/w1/build-recipe", { engine: "nixpacks", service: "web", directory: "site", output: "", build_command: "", start_command: "./start.sh" }]]));
+  expect(await screen.findByText(/Build recipe saved/)).toBeInTheDocument();
+});
+
+it("saves a Nixpacks recipe without commands and asks before going back to Compose", async () => {
+  const user = userEvent.setup();
+  serve({ read: () => Promise.resolve(settings({ recipe: { ...nixRecipe, build_command: "make", start_command: "./run" }, build_command_set: true, start_command_set: true })) });
+  renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  await type(user, "Build command", "");
+  await type(user, "Start command", "");
+  await user.click(saveButton());
+  await waitFor(() => expect(puts()).toEqual([["PUT", "/api/workloads/w1/build-recipe", nixRecipe]]));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await choose(user, "Build engine", "Existing Compose / Dockerfile");
+  await user.click(saveButton());
+  await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Change build engine" }));
+  await waitFor(() => expect(puts()[1]).toEqual(["PUT", "/api/workloads/w1/build-recipe", composeRecipe]));
+});
+
+it("lets jobs choose Nixpacks", async () => {
+  const user = userEvent.setup();
+  serve();
+  renderSetting(workload({ kind: "job" }));
+  await user.click(await screen.findByRole("combobox", { name: "Build engine" }));
+  expect(screen.getByRole("option", { name: "Nixpacks" })).not.toHaveAttribute("aria-disabled");
+});
+
+it("refuses oversized Nixpacks commands before saving", async () => {
+  const user = userEvent.setup();
+  serve({ read: () => Promise.resolve(settings({ recipe: nixRecipe })) });
+  renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  await user.click(screen.getByLabelText(/^Start command/));
+  await user.paste("x".repeat(8193));
+  await user.click(saveButton());
+  expect(screen.getByText("Use at most 8192 bytes (currently 8193).")).toBeInTheDocument();
+  expect(screen.getByLabelText(/^Start command/)).toHaveAttribute("aria-invalid", "true");
+  expect(puts()).toHaveLength(0);
+});
+
+const unknownArch = "the pinned Nixpacks planner requires a Linux amd64 or arm64 build node";
+
+it.each([
+  ["an older server that omits it", withoutNixpacks(), "Nixpacks (eligibility unknown)", /did not report usable eligibility/],
+  ["an unreadable nixpacks object", { ...withoutNixpacks(), nixpacks: { ...nixpacks(), planner_timeout_seconds: "60" } }, "Nixpacks (eligibility unknown)", /did not report usable eligibility/],
+  ["an unrecognised maintenance flag", { ...withoutNixpacks(), nixpacks: { ...nixpacks(), maintenance: false } }, "Nixpacks (eligibility unknown)", /did not report usable eligibility/],
+  ["a proxy flag it does not describe", { ...withoutNixpacks(), nixpacks: { ...nixpacks(), proxy_supported: true } }, "Nixpacks (eligibility unknown)", /did not report usable eligibility/],
+  ["a supported status without a pinned planner", { ...withoutNixpacks(), nixpacks: { ...nixpacks(), planner_sha256: "", planner_download_bytes: 0 } }, "Nixpacks (eligibility unknown)", /did not report usable eligibility/],
+  ["an old worker", settings({ nixpacks: nixpacks({ supported: false, reason: "upgrade and verify the effective build worker before using Nixpacks" }) }), "Nixpacks (unavailable on the build node)", /before using Nixpacks/],
+  ["an unknown architecture", settings({ nixpacks: nixpacks({ supported: false, reason: unknownArch, planner_sha256: "", planner_download_bytes: 0, base_download_bytes: 0 }) }), "Nixpacks (unavailable on the build node)", /requires a Linux amd64 or arm64/],
+])("keeps Nixpacks unavailable for %s while the other engines stay usable", async (_case, read, option, hint) => {
+  const user = userEvent.setup();
+  serve({ read: () => Promise.resolve(read) });
+  renderSetting();
+  await user.click(await screen.findByRole("combobox", { name: "Build engine" }));
+  expect(screen.getByRole("option", { name: option })).toHaveAttribute("aria-disabled", "true");
+  expect(screen.getByRole("option", { name: "Railpack" })).not.toHaveAttribute("aria-disabled");
+  expect(screen.getByRole("option", { name: "Cloud Native Buildpacks" })).not.toHaveAttribute("aria-disabled");
+  await user.keyboard("{Escape}");
+  expect(screen.getByText(hint)).toBeInTheDocument();
+});
+
+it("keeps Nixpacks unavailable without a ready Git source", async () => {
+  const user = userEvent.setup();
+  serve({ read: () => Promise.resolve(settings({ source_ready: false })) });
+  renderSetting();
+  await user.click(await screen.findByRole("combobox", { name: "Build engine" }));
+  expect(screen.getByRole("option", { name: /^Nixpacks \(needs a Git source/ })).toHaveAttribute("aria-disabled", "true");
+  await user.keyboard("{Escape}");
+  expect(screen.getByText(/Cloud Native Buildpacks and Nixpacks need a Git source/)).toBeInTheDocument();
+});
+
+it("keeps an unsupported saved Nixpacks recipe selected, shows the top-level reason and lets Compose clear it", async () => {
+  const user = userEvent.setup();
+  const reason = "Nixpacks is unavailable while an outbound build proxy is configured";
+  serve({ read: () => Promise.resolve(settings({ recipe: nixRecipe, reason, nixpacks: nixpacks({ supported: false, reason: unknownArch }) })) });
+  renderSetting();
+  expect(await screen.findByText("The saved Nixpacks recipe cannot build")).toBeInTheDocument();
+  expect(screen.getByText(reason)).toBeInTheDocument();
+  expect(screen.queryByText(unknownArch)).not.toBeInTheDocument();
+  expect(screen.getByText(/not changed automatically/)).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Build engine" })).toHaveTextContent("Nixpacks (unavailable on the build node)");
+  expect(screen.getByLabelText(/^Source directory/)).toHaveValue("app");
+  await choose(user, "Build engine", "Existing Compose / Dockerfile");
+  await user.click(saveButton());
+  await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Change build engine" }));
+  await waitFor(() => expect(puts()).toEqual([["PUT", "/api/workloads/w1/build-recipe", composeRecipe]]));
+});
+
+it("treats a saved Nixpacks recipe as unable to build when the server omits its eligibility", async () => {
+  serve({ read: () => Promise.resolve(withoutNixpacks({ recipe: nixRecipe })) });
+  renderSetting();
+  expect(await screen.findByText("The saved Nixpacks recipe cannot build")).toBeInTheDocument();
+  expect(screen.getByText(/did not report usable Nixpacks eligibility, so it is treated as unavailable/)).toBeInTheDocument();
+  expect(screen.getByText(/did not report usable Nixpacks eligibility, versions, pins or planner limits/)).toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Nixpacks resource limits" })).not.toBeInTheDocument();
+});
+
+it.each([
+  [400, "Nixpacks is unavailable while an outbound build proxy is configured"],
+  [400, "Nixpacks cannot use Compose build args on the selected service"],
+  [409, "wait for active operations before changing the build recipe"],
+])("keeps the Nixpacks draft when the server answers %i: %s", async (status, message) => {
+  const user = userEvent.setup();
+  serve({ save: () => Promise.reject(new ApiError(status, message)) });
+  renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  await choose(user, "Build engine", "Nixpacks");
+  await choose(user, "Service", "web");
+  await type(user, "Source directory", "app");
+  await type(user, "Build command", "npm run build");
+  await user.click(saveButton());
+  await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Change build engine" }));
+  expect(await screen.findByText("The build recipe was not saved")).toBeInTheDocument();
+  expect(screen.getByText(message)).toBeInTheDocument();
+  expect(puts()).toEqual([["PUT", "/api/workloads/w1/build-recipe", { engine: "nixpacks", service: "web", directory: "app", output: "", build_command: "npm run build", start_command: "" }]]);
+  expect(screen.getByRole("combobox", { name: "Build engine" })).toHaveTextContent("Nixpacks");
+  expect(screen.getByLabelText(/^Build command/)).toHaveValue("npm run build");
+  expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+  expect(screen.queryByText(/Build recipe saved/)).not.toBeInTheDocument();
+});
+
+it("shows the Nixpacks disclosures with the server's version, pins and planner limits", async () => {
+  const user = userEvent.setup();
+  serve();
+  renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  expect(screen.queryByText("Nixpacks is in maintenance mode")).not.toBeInTheDocument();
+  await choose(user, "Build engine", "Nixpacks");
+  expect(screen.getByText("Nixpacks is in maintenance mode")).toBeInTheDocument();
+  expect(screen.getByText(/its maintainers recommend Railpack instead. Cove still supports it as an explicit choice/)).toBeInTheDocument();
+  expect(screen.getByText(/normal builds download Nix, system and language packages from upstream/)).toBeInTheDocument();
+  expect(screen.getByText(/neither reproducible nor fully pinned/)).toBeInTheDocument();
+  expect(screen.getByText(/Planning runs offline in an unprivileged, bounded container with no Docker socket, no Git, registry or host credentials and no Cove secret values/)).toBeInTheDocument();
+  expect(screen.getByText(/generated build.sh is never executed/)).toBeInTheDocument();
+  expect(screen.getByText(/A build network of none is enforced for the generated RUN steps, so dependency downloads can fail/)).toBeInTheDocument();
+  expect(screen.getByText(/Outbound build proxies are unavailable because the shared builder cannot enforce proxy-only egress/)).toBeInTheDocument();
+  expect(screen.getByText(/never planner inputs or ordinary ARG or ENV values/)).toBeInTheDocument();
+  expect(screen.getByText(/does not forward environment variables as Nixpacks variables/)).toBeInTheDocument();
+  expect(screen.getByText(/is reserved for generated output, so source that contains it is refused/)).toBeInTheDocument();
+  expect(screen.getByText(/Cove does not accept arbitrary Dockerfiles here/)).toBeInTheDocument();
+  expect(screen.queryByText(/proxy support|proxies are applied|reproducible builds/i)).not.toBeInTheDocument();
+  const limits = screen.getByRole("list", { name: "Nixpacks resource limits" });
+  expect(limits).toHaveTextContent("Planning is limited to 512 MiB of memory, 1 CPU and 60 seconds.");
+  expect(limits).toHaveTextContent("Up to 128 MiB of planner output is held in temporary memory within that limit; it is not the build cache limit.");
+  expect(limits).toHaveTextContent("The planner archive is about 3.7 MB to download and the base image about 0.14 GB.");
+  expect(screen.getByText("Planner archive checksum").nextElementSibling).toHaveTextContent(nixDigest);
+  expect(screen.getByText("Base image").nextElementSibling).toHaveTextContent(nixBase);
+  expect(screen.getByText("1.41.0")).toBeInTheDocument();
+});
+
+it("renders whatever Nixpacks values the server reports instead of built-in numbers", async () => {
+  const armDigest = `sha256:${"91".repeat(32)}`;
+  const armBase = `ghcr.io/railwayapp/nixpacks@sha256:${"ab".repeat(32)}`;
+  const other = nixpacks({ version: "1.42.0", planner_sha256: armDigest, planner_download_bytes: 4111227, base_image: armBase, base_download_bytes: 1_235_771_180, planner_memory_bytes: 768 * 1024 ** 2, planner_cpu: 1.5, planner_timeout_seconds: 90, planner_output_bytes: 64 * 1024 ** 2 });
+  serve({ read: () => Promise.resolve(settings({ recipe: nixRecipe, nixpacks: other })) });
+  renderSetting();
+  const limits = await screen.findByRole("list", { name: "Nixpacks resource limits" });
+  expect(limits).toHaveTextContent("Planning is limited to 768 MiB of memory, 1.5 CPUs and 90 seconds.");
+  expect(limits).toHaveTextContent("Up to 64 MiB of planner output");
+  expect(limits).toHaveTextContent("about 4.1 MB to download and the base image about 1.24 GB");
+  expect(limits).not.toHaveTextContent(/512 MiB|60 seconds|128 MiB|3\.7 MB|0\.14 GB/);
+  expect(screen.getByText("1.42.0")).toBeInTheDocument();
+  expect(screen.getByText(armDigest)).toBeInTheDocument();
+  expect(screen.getByText(armBase)).toBeInTheDocument();
+  expect(screen.queryByText(nixDigest)).not.toBeInTheDocument();
+  expect(screen.queryByText(nixBase)).not.toBeInTheDocument();
+});
+
+it("shows an unpinned architecture's Nixpacks metadata without claiming download sizes or a checksum", async () => {
+  serve({ read: () => Promise.resolve(settings({ recipe: nixRecipe, reason: unknownArch, nixpacks: nixpacks({ supported: false, reason: unknownArch, planner_sha256: "", planner_download_bytes: 0, base_download_bytes: 0 }) })) });
+  renderSetting();
+  const limits = await screen.findByRole("list", { name: "Nixpacks resource limits" });
+  expect(limits).toHaveTextContent("No planner archive is pinned for this build node's architecture, so download sizes are not known.");
+  expect(screen.queryByText("Planner archive checksum")).not.toBeInTheDocument();
+  expect(screen.getByText(nixBase)).toBeInTheDocument();
+});
+
+it("blocks Nixpacks saves during an active operation", async () => {
+  const user = userEvent.setup();
+  serve({ read: () => Promise.resolve(settings({ recipe: nixRecipe, active_operation_id: "op1" })) });
+  renderSetting();
+  expect(await screen.findByText("An operation is in progress")).toBeInTheDocument();
+  await type(user, "Source directory", "web");
+  expect(saveButton()).toBeDisabled();
+  expect(puts()).toHaveLength(0);
+});
+
+it("blocks Nixpacks saves when operations cannot be read", async () => {
+  serve({ read: () => Promise.resolve(settings({ recipe: nixRecipe })), operations: () => Promise.reject(new Error("down")) });
+  renderSetting();
+  expect(await screen.findByText("Operations could not be read")).toBeInTheDocument();
+  expect(puts()).toHaveLength(0);
+});
+
+it("blocks Nixpacks saves while offline and keeps the draft", async () => {
+  const user = userEvent.setup();
+  serve({ read: () => Promise.resolve(settings({ recipe: nixRecipe })) });
+  renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  await type(user, "Build command", "make");
+  vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+  act(() => void window.dispatchEvent(new Event("offline")));
+  expect(await screen.findByText("You are offline")).toBeInTheDocument();
+  expect(saveButton()).toBeDisabled();
+  expect(screen.getByLabelText(/^Build command/)).toHaveValue("make");
+  expect(puts()).toHaveLength(0);
+});
+
+it("hides a stale Nixpacks recipe after a failed refresh and keeps the draft", async () => {
+  const user = userEvent.setup();
+  let fail = false;
+  serve({ read: () => (fail ? Promise.reject(new Error("refresh failed")) : Promise.resolve(settings({ recipe: nixRecipe }))) });
+  const client = renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  await type(user, "Start command", "./run");
+  fail = true;
+  await client.refetchQueries({ queryKey: ["workloads", "w1", "build-recipe"] });
+  expect(await screen.findByText("Could not load the current build recipe")).toBeInTheDocument();
+  expect(screen.queryByText("Nixpacks is in maintenance mode")).not.toBeInTheDocument();
+  expect(saveButton()).toBeDisabled();
+  fail = false;
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByLabelText(/^Start command/)).toHaveValue("./run");
+});
+
+it("keeps the Nixpacks success notice while the refreshed recipe is still loading", async () => {
+  const user = userEvent.setup();
+  let hold = false;
+  serve({
+    read: () => (hold ? new Promise(() => undefined) : Promise.resolve(settings({ recipe: nixRecipe }))),
+    save: () => {
+      hold = true;
+      return Promise.resolve({ ok: true });
+    },
+  });
+  renderSetting();
+  await screen.findByRole("combobox", { name: "Build engine" });
+  await type(user, "Build command", "make");
+  await user.click(saveButton());
+  expect(await screen.findByText(/Build recipe saved/)).toBeInTheDocument();
+  expect(screen.getByLabelText(/^Build command/)).toHaveValue("make");
+});
+
+it("shows readers the saved Nixpacks recipe and its disclosures without command text", async () => {
+  serve({ read: () => Promise.resolve(settings({ can_edit: false, recipe: nixRecipe, build_command_set: true })) });
+  renderSetting(workload({ permissions: ["read", "operate"] }));
+  expect(await screen.findByText("Nixpacks is in maintenance mode")).toBeInTheDocument();
+  expect(screen.getByText("Custom command saved")).toBeInTheDocument();
+  expect(screen.getByText("Nixpacks plan")).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Nixpacks resource limits" })).toBeInTheDocument();
   expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Save build recipe" })).not.toBeInTheDocument();

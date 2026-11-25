@@ -14,6 +14,8 @@ import (
 )
 
 type Probe struct {
+	Nixpacks             bool                `json:"nixpacks"`
+	NixpacksReason       string              `json:"nixpacks_reason,omitempty"`
 	Buildpacks           bool                `json:"buildpacks"`
 	BuildpacksReason     string              `json:"buildpacks_reason,omitempty"`
 	BuildpacksCapacity   *BuildpacksCapacity `json:"buildpacks_capacity,omitempty"`
@@ -168,6 +170,13 @@ func Inspect(ctx context.Context) Probe {
 	}
 	p.BuildCacheLimits = runtime.GOOS == "linux" && p.BuildPublish
 	p.BuildRecipes = runtime.GOOS == "linux" && p.BuildPublish && recipeDockerIsolation(p.Docker)
+	p.Nixpacks = p.BuildRecipes && NixpacksSupported()
+	if p.Nixpacks {
+		engine := &Engine{Root: "/var/lib/cove", Run: RunCommand}
+		if err := engine.checkNixpacksPlatform(ctx, "linux/"+p.Arch); err != nil {
+			p.Nixpacks, p.NixpacksReason = false, err.Error()
+		}
+	}
 	_, buildpacksArchError := buildpacksArchitecture(p.Arch)
 	p.Buildpacks = p.BuildRecipes && buildpacksArchError == nil
 	if p.Buildpacks {

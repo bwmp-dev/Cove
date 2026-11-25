@@ -74,6 +74,8 @@ export interface Capabilities {
   build_recipes?: boolean;
   // The worker can build Cloud Native Buildpacks recipes. Eligibility and its reasons come from the build recipe read.
   buildpacks?: boolean;
+  // The worker can plan and build Nixpacks recipes. Eligibility and its reasons come from the build recipe read.
+  nixpacks?: boolean;
   protocol: number;
   os: string;
   arch: string;
@@ -490,6 +492,8 @@ export interface OperationBuildRecipe {
   // Cloud Native Buildpacks phase memory limit set at admission, and the available memory it was derived from. Absent until admission.
   phase_memory_bytes?: number;
   admission_available_memory_bytes?: number;
+  // Recorded by Nixpacks builds: the checksum of the planner release archive (not an image or the extracted binary). Older or queued builds may omit it.
+  planner_sha256?: string;
 }
 
 export interface WorkerOperation {

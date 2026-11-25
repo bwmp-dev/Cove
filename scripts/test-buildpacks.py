@@ -120,10 +120,11 @@ def main():
             running = inside("docker", "inspect", "--format", "{{.Id}}|{{.Image}}|{{.State.StartedAt}}|{{.RestartCount}}", "fixture-running").stdout
             request = {"id": operation, "workload": workload, "kind": "service", "action": "build",
                        "source": {"repository": "https://git.fixture.invalid/app.git", "branch": "main", "inline_compose": True},
-                       "compose": "services:\n  app:\n    image: busybox:1.37\n    environment:\n      DOLLAR_VALUE: ${DOLLAR_VALUE:?required}\n    labels:\n      literal$$key: value$$literal\n    command: [\"printf\", \"$$SHELL\"]\n    build:\n      context: .\n      network: none\n",
+                       "compose": "services:\n  app:\n    image: busybox:1.37\n    environment:\n      DOLLAR_VALUE: ${DOLLAR_VALUE:?required}\n      COVE_PROJECT: ${COVE_PROJECT:?required}\n    labels:\n      literal$$key: value$$literal\n    command: [\"printf\", \"$$SHELL\"]\n    build:\n      context: .\n      network: none\n",
                        "build_recipe": {"engine": "buildpacks", "service": "app", "directory": ".", "output": "", "build_command": "", "start_command": ""},
                        "build": {"repository": "fixture/cnb", "no_cache": True},
-                       "environment": {"BUILD_TOKEN": "fixture-selected-cnb-value", "UNSELECTED_TOKEN": "fixture-unselected-cnb-value", "DOLLAR_VALUE": "resolved-$VALUE-$$PAIR"},
+                       "environment": {"BUILD_TOKEN": "fixture-selected-cnb-value", "UNSELECTED_TOKEN": "fixture-unselected-cnb-value", "DOLLAR_VALUE": "resolved-$VALUE-$$PAIR", "COVE_PROJECT": "fixture-project"},
+                       "builtin_defaults": {"COVE_PROJECT": "fixture-project"},
                        "file_secrets": [{"name": "TOKEN", "variable": "BUILD_TOKEN", "build_services": ["app"]}],
                        "registry": {"server": "127.0.0.1:15000", "username": "fixture", "password": "fixture-not-a-real-credential"}}
             rpc("submit_build_recipe", request=request)
@@ -140,13 +141,13 @@ def main():
                 raise RuntimeError("CNB operation timed out")
             write("/tmp/original-compose.yaml", request["compose"].encode())
             def compose_service(path):
-                resolved = inside("env", "DOLLAR_VALUE=" + request["environment"]["DOLLAR_VALUE"], "docker", "compose", "--project-name", "cove-cnb-dollar", "--file", path, "config", "--format", "json")
+                resolved = inside("env", "DOLLAR_VALUE=" + request["environment"]["DOLLAR_VALUE"], "COVE_PROJECT=fixture-project", "docker", "compose", "--project-name", "cove-cnb-dollar", "--file", path, "config", "--format", "json")
                 return json.loads(resolved.stdout)["services"]["app"]
             before = compose_service("/tmp/original-compose.yaml")
             after = compose_service("/tmp/cnb-recipe-captured.json")
             for field in ("environment", "labels", "command"):
                 assert before[field] == after[field], "CNB recipe changed dollar values in " + field
-            records.append({"real_compose_dollar_round_trip": True, "fields": ["environment", "labels", "command"]})
+            records.append({"builtin_defaults_without_implicit_build_args": True, "real_compose_dollar_round_trip": True, "fields": ["environment", "labels", "command"]})
             limit = status["build_recipe"]["phase_memory_bytes"]
             available = status["build_recipe"]["admission_available_memory_bytes"]
             assert limit == min(4 << 30, ((available - (2 << 30)) // (1 << 20)) * (1 << 20))

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -591,6 +592,9 @@ func (e *Engine) submitBuildpacksLocked(r Request, admission *BuildpacksAdmissio
 	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC(), Scale: r.Scale}, Request: r, Digest: digest}
 	if r.Action == "build" {
 		j.Operation.BuildRecipe = BuildRecipeSummary(r.BuildRecipe)
+		if r.BuildRecipe != nil && r.BuildRecipe.Engine == "nixpacks" {
+			j.Operation.BuildRecipe.PlannerSHA256 = NixpacksPlannerDigest(runtime.GOARCH)
+		}
 		if admission != nil {
 			j.Operation.BuildRecipe.PhaseMemoryBytes = admission.PhaseMemoryBytes
 			j.Operation.BuildRecipe.AdmissionAvailableMemoryBytes = admission.AvailableMemoryBytes

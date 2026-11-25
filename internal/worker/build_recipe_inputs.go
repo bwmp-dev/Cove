@@ -24,7 +24,7 @@ func recipeBuildPolicy(build map[string]any) (string, map[string]string, error) 
 		}
 	}
 	if network != "" && network != "default" && network != "none" {
-		return "", nil, errors.New("Railpack planning supports the default or none build network; host and application networks are refused")
+		return "", nil, errors.New("build recipes support the default or none build network; host and application networks are refused")
 	}
 	proxies := map[string]string{}
 	arguments, _ := build["args"].(map[string]any)
@@ -185,6 +185,14 @@ func (e *Engine) prepareRecipeBuild(ctx context.Context, r Request, dir string, 
 		if err != nil {
 			return "", err
 		}
+	} else if r.BuildRecipe.Engine == "nixpacks" {
+		original, _ := service["build"].(map[string]any)
+		generated, err := e.prepareNixpacksBuild(ctx, r, project, original)
+		if err != nil {
+			return "", err
+		}
+		build = generated
+		fmt.Fprintln(out, "Nixpacks generated inputs validated with Cove's pinned base. Nixpacks is in maintenance mode and upstream recommends Railpack. Build steps may download upstream Nix, system and language packages.")
 	} else {
 		original, _ := service["build"].(map[string]any)
 		if err := validateRailpackBuildPolicy(original); err != nil {

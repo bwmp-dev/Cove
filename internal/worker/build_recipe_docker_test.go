@@ -16,7 +16,7 @@ import (
 
 func runBuildRecipeTestProcess() bool {
 	mise := filepath.Base(os.Args[0]) == "mise-"+RailpackMiseVersion
-	if !mise && (len(os.Args) < 2 || os.Args[1] != "build-recipe-plan" && os.Args[1] != "build-recipe-output" && os.Args[1] != "build-recipe-egress" && os.Args[1] != "buildpacks-helper") {
+	if !mise && (len(os.Args) < 2 || os.Args[1] != "build-recipe-plan" && os.Args[1] != "build-recipe-output" && os.Args[1] != "build-recipe-egress" && os.Args[1] != "buildpacks-helper" && os.Args[1] != "nixpacks-plan" && os.Args[1] != "nixpacks-output" && os.Args[1] != "nixpacks-exit") {
 		return false
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -27,6 +27,12 @@ func runBuildRecipeTestProcess() bool {
 		err = RunRailpackMise(ctx, os.Args[1:], os.Stdout, os.Stderr)
 	case os.Args[1] == "build-recipe-plan":
 		err = RunRailpackPlanner(ctx)
+	case os.Args[1] == "nixpacks-plan":
+		err = RunNixpacksPlanner(ctx)
+	case os.Args[1] == "nixpacks-output":
+		err = ReadNixpacksOutput(os.Stdout)
+	case os.Args[1] == "nixpacks-exit":
+		err = ReadRailpackOutput("exit", os.Stdout)
 	case os.Args[1] == "build-recipe-egress":
 		err = RunBuildRecipeEgress(ctx)
 	case len(os.Args) == 3 && os.Args[1] == "buildpacks-helper":

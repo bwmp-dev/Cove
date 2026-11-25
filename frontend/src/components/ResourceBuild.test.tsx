@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
 import type { BuildNodeSettings } from "../api/build-nodes";
-import { useSaveBuildRecipe, type BuildRecipeSettings, type BuildpacksSettings } from "../api/build-recipes";
+import { useSaveBuildRecipe, type BuildRecipeSettings, type BuildpacksSettings, type NixpacksSettings } from "../api/build-recipes";
 import type { Node, Operation, OperationBuildRecipe, Workload } from "../api/types";
 import { ResourceBuild } from "./ResourceBuild";
 
@@ -259,7 +259,8 @@ it("refuses to build a saved explicit recipe the server reports as unusable", as
   serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: { engine: "static", service: "web", directory: "site", output: "dist", build_command: "", start_command: "" }, reason: "the selected static service is absent from saved Compose" })) });
   renderBuild();
   expect(await screen.findByText("The build recipe cannot build")).toBeInTheDocument();
-  expect(screen.getByText(/absent from saved Compose/)).toBeInTheDocument();
+  expect(screen.getByText("the selected static service is absent from saved Compose", { exact: true }).tagName).toBe("P");
+  expect(screen.getByText("Change the build recipe above or resolve the problem to build.", { exact: true }).tagName).toBe("P");
   expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
 });
 
@@ -271,9 +272,9 @@ it("refuses to build a saved recipe on a worker without recipe support", async (
 });
 
 it("refuses to build an engine this panel does not recognise", async () => {
-  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: { engine: "nixpacks", service: "web", directory: ".", output: "", build_command: "", start_command: "" } })) });
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: { engine: "kaniko", service: "web", directory: ".", output: "", build_command: "", start_command: "" } })) });
   renderBuild();
-  expect(await screen.findByText(/Unknown engine \(nixpacks\)/)).toBeInTheDocument();
+  expect(await screen.findByText(/Unknown engine \(kaniko\)/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
 });
 
@@ -449,4 +450,108 @@ it("shows no phase memory for builds by other engines", async () => {
   renderBuild();
   expect(await screen.findByText("Railpack 0.43.1 for web")).toBeInTheDocument();
   expect(screen.queryByText(/Phase memory/)).not.toBeInTheDocument();
+});
+
+const nixRecipe = { engine: "nixpacks", service: "web", directory: ".", output: "", build_command: "", start_command: "" };
+const nixBase = `ghcr.io/railwayapp/nixpacks@sha256:${"d4".repeat(32)}`;
+const nixDigest = `sha256:${"0f".repeat(32)}`;
+
+function nixpacks(overrides: Partial<NixpacksSettings> = {}): NixpacksSettings {
+  return {
+    supported: true,
+    reason: "",
+    version: "1.41.0",
+    planner_sha256: nixDigest,
+    planner_download_bytes: 3717141,
+    base_image: nixBase,
+    base_download_bytes: 138966568,
+    maintenance: true,
+    proxy_supported: false,
+    planner_memory_bytes: 536870912,
+    planner_cpu: 1,
+    planner_timeout_seconds: 60,
+    planner_output_bytes: 134217728,
+    ...overrides,
+  };
+}
+
+it("builds a saved Nixpacks recipe with the unchanged build payload", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: nixRecipe, supported: false, nixpacks: nixpacks() })) });
+  renderBuild();
+  const button = screen.getByRole("button", { name: "Build and publish" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "team/app" } });
+  fireEvent.click(button);
+  await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/workloads/w1/operations", { action: "build", build: { repository: "team/app", no_cache: false } }));
+});
+
+it.each([
+  ["the server omits its eligibility", recipeSettings({ recipe: nixRecipe }), /did not report usable Nixpacks eligibility/],
+  ["the build node is an old worker", recipeSettings({ recipe: nixRecipe, nixpacks: nixpacks({ supported: false, reason: "upgrade and verify the effective build worker before using Nixpacks" }) }), /before using Nixpacks/],
+  ["the server refuses a configured proxy", recipeSettings({ recipe: nixRecipe, reason: "Nixpacks is unavailable while an outbound build proxy is configured", nixpacks: nixpacks() }), /outbound build proxy is configured/],
+])("refuses to build a saved Nixpacks recipe when %s", async (_case, read, reason) => {
+  serve({ recipe: () => Promise.resolve(read) });
+  renderBuild();
+  expect(await screen.findByText("The build recipe cannot build")).toBeInTheDocument();
+  expect(screen.getByText(reason)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Build and publish" })).toBeDisabled();
+});
+
+it("shows an unpunctuated Nixpacks refusal apart from the recovery step", async () => {
+  const reason = "Nixpacks is unavailable while an outbound build proxy is configured";
+  serve({ recipe: () => Promise.resolve(recipeSettings({ recipe: nixRecipe, reason, nixpacks: nixpacks() })) });
+  renderBuild();
+  expect(await screen.findByText("The build recipe cannot build")).toBeInTheDocument();
+  expect(screen.getByText(reason, { exact: true }).tagName).toBe("P");
+  expect(screen.getByText("Change the build recipe above or resolve the problem to build.", { exact: true }).tagName).toBe("P");
+  expect(screen.queryByText(/^Nixpacks: /)).not.toBeInTheDocument();
+});
+
+it("keeps Compose builds available when Nixpacks eligibility is unknown", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings()) });
+  renderBuild();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Build and publish" })).toBeEnabled());
+  expect(screen.queryByText("The build recipe cannot build")).not.toBeInTheDocument();
+});
+
+it("blocks building after a failed refresh of a usable Nixpacks recipe", async () => {
+  let fail = false;
+  serve({ recipe: () => (fail ? Promise.reject(new Error("down")) : Promise.resolve(recipeSettings({ recipe: nixRecipe, nixpacks: nixpacks() }))) });
+  const client = renderBuild();
+  const button = screen.getByRole("button", { name: "Build and publish" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fail = true;
+  await client.refetchQueries({ queryKey: ["workloads", "w1", "build-recipe"] });
+  expect(await screen.findByText("Could not load the build recipe")).toBeInTheDocument();
+  expect(button).toBeDisabled();
+});
+
+it("shows the Nixpacks version and planner archive checksum a build recorded, independent of the current settings", async () => {
+  const recorded = `sha256:${"12".repeat(32)}`;
+  serve({
+    recipe: () => Promise.resolve(recipeSettings({ recipe: nixRecipe, nixpacks: nixpacks({ version: "1.42.0" }) })),
+    operations: [build("nix", "succeeded", true, "n1", { engine: "nixpacks", service: "web", version: "1.41.0", pinned_images: [nixBase], planner_sha256: recorded })],
+  });
+  renderBuild();
+  expect(await screen.findByText("Nixpacks 1.41.0 for web")).toBeInTheDocument();
+  expect(screen.getByText(`Planner archive checksum ${recorded}`)).toBeInTheDocument();
+  expect(screen.queryByText(new RegExp(nixDigest))).not.toBeInTheDocument();
+  expect(screen.queryByText(/1\.42\.0/)).not.toBeInTheDocument();
+});
+
+it("never takes the planner archive checksum from current settings for a build that did not record one", async () => {
+  serve({
+    recipe: () => Promise.resolve(recipeSettings({ recipe: nixRecipe, nixpacks: nixpacks() })),
+    operations: [build("nix", "queued", false, "n1", { engine: "nixpacks", service: "web", version: "1.41.0" })],
+  });
+  renderBuild();
+  expect(await screen.findByText("Planner archive checksum not recorded")).toBeInTheDocument();
+  expect(screen.queryByText(new RegExp(nixDigest))).not.toBeInTheDocument();
+});
+
+it("shows no planner archive checksum for builds by other engines", async () => {
+  serve({ recipe: () => Promise.resolve(recipeSettings()), operations: [build("rp", "succeeded", true, "n1", { engine: "railpack", service: "web", version: "0.43.1", planner_sha256: nixDigest })] });
+  renderBuild();
+  expect(await screen.findByText("Railpack 0.43.1 for web")).toBeInTheDocument();
+  expect(screen.queryByText(/Planner archive checksum/)).not.toBeInTheDocument();
 });

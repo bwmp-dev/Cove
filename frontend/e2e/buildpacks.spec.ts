@@ -1020,7 +1020,8 @@ test("buildpacks: a node below the admission gate disables Cloud Native Buildpac
     await expect(recipeForm.getByText(reason, { exact: true })).toBeVisible();
     const buildSection = page.getByRole("region", { name: "Build and publish", exact: true });
     await expect(buildSection.getByText("The build recipe cannot build", { exact: true })).toBeVisible();
-    await expect(buildSection.getByText(`Cloud Native Buildpacks: ${reason} Change the build recipe above or resolve the problem to build.`)).toBeVisible();
+    await expect(buildSection.getByText(reason, { exact: true })).toBeVisible();
+    await expect(buildSection.getByText("Change the build recipe above or resolve the problem to build.", { exact: true })).toBeVisible();
     await expect(buildSection.getByRole("button", { name: "Build and publish", exact: true })).toBeDisabled();
     await expect(recipeStatus).toHaveText("No unsaved changes");
     await capture("buildpacks-saved-blocked");

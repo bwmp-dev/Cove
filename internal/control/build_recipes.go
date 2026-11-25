@@ -63,7 +63,7 @@ func (s *Server) buildRecipe(w http.ResponseWriter, r *http.Request) {
 	if !sourceReady {
 		reason = "select a Git source using the saved Compose configuration before choosing a recipe"
 	} else if !supported {
-		reason = "upgrade and verify the effective build worker before using static output, Railpack or Cloud Native Buildpacks"
+		reason = "upgrade and verify the effective build worker before using static output, Railpack, Cloud Native Buildpacks or Nixpacks"
 	} else if recipe.Engine != "compose" {
 		if err := worker.ValidateRecipeSource(recipe, config.Source, config.Compose, config.Kind); err != nil {
 			reason = err.Error()
@@ -71,7 +71,7 @@ func (s *Server) buildRecipe(w http.ResponseWriter, r *http.Request) {
 			reason = err.Error()
 		}
 	}
-	if reason == "" && recipe.Engine == "railpack" {
+	if reason == "" && (recipe.Engine == "railpack" || recipe.Engine == "nixpacks") {
 		proxy, err := s.outboundConfig(r.Context())
 		if err != nil {
 			reason = "outbound policy unavailable"
@@ -90,10 +90,18 @@ func (s *Server) buildRecipe(w http.ResponseWriter, r *http.Request) {
 	if recipe.Engine == "buildpacks" && reason == "" && !buildpacks.Supported {
 		reason = buildpacks.Reason
 	}
+	nixpacks, err := readNixpacksSupport(r.Context(), s.DB, node)
+	if err != nil {
+		http.Error(w, "build recipe capabilities unavailable", 503)
+		return
+	}
+	if recipe.Engine == "nixpacks" && reason == "" && !nixpacks.Supported {
+		reason = nixpacks.Reason
+	}
 	if !canEdit {
 		recipe.BuildCommand, recipe.StartCommand = "", ""
 	}
-	respond(w, 200, map[string]any{"recipe": recipe, "can_edit": canEdit, "source_ready": sourceReady, "supported": supported, "reason": reason, "build_node_id": node, "active_operation_id": active, "build_command_set": customBuild, "start_command_set": customStart, "railpack_version": worker.RailpackVersion, "pinned_images": []string{worker.RailpackFrontendImage, worker.RailpackBuilderImage, worker.RailpackRuntimeImage}, "buildpacks": buildpacks})
+	respond(w, 200, map[string]any{"recipe": recipe, "can_edit": canEdit, "source_ready": sourceReady, "supported": supported, "reason": reason, "build_node_id": node, "active_operation_id": active, "build_command_set": customBuild, "start_command_set": customStart, "railpack_version": worker.RailpackVersion, "pinned_images": []string{worker.RailpackFrontendImage, worker.RailpackBuilderImage, worker.RailpackRuntimeImage}, "buildpacks": buildpacks, "nixpacks": nixpacks})
 }
 
 func (s *Server) saveBuildRecipe(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +172,12 @@ func (s *Server) saveBuildRecipe(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if recipe.Engine == "nixpacks" {
+			if err := requireNixpacks(r.Context(), tx, node); err != nil {
+				http.Error(w, err.Error(), 409)
+				return
+			}
+		}
 		protected, problem := s.sealJSON(recipe)
 		if problem != nil {
 			http.Error(w, "build recipe could not be protected", 500)
@@ -220,6 +234,11 @@ func (s *Server) prepareBuildRecipe(ctx context.Context, request *worker.Request
 	}
 	if recipe.Engine == "buildpacks" {
 		if err := requireBuildpacks(ctx, s.DB, node); err != nil {
+			return err
+		}
+	}
+	if recipe.Engine == "nixpacks" {
+		if err := requireNixpacks(ctx, s.DB, node); err != nil {
 			return err
 		}
 	}

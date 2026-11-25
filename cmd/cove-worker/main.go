@@ -72,6 +72,12 @@ func main() {
 		err = worker.RunFilesystemSnapshotReaper(ctx, os.Args[2], false)
 	case "snapshot-host":
 		err = worker.RunFilesystemSnapshotHost(ctx, os.Stdin, os.Stdout)
+	case "nixpacks-plan":
+		err = worker.RunNixpacksPlanner(ctx)
+	case "nixpacks-output":
+		err = worker.ReadNixpacksOutput(os.Stdout)
+	case "nixpacks-exit":
+		err = worker.ReadRailpackOutput("exit", os.Stdout)
 	case "buildpacks-helper":
 		if len(os.Args) != 3 {
 			err = fmt.Errorf("buildpacks helper action required")

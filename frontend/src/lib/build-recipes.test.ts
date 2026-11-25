@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { parseBuildRecipeSettings } from "../api/build-recipes";
 import type { Operation, OperationBuildRecipe } from "../api/types";
-import { commandError, composeServices, formatCPU, formatGB, formatMemory, pathError, recipePayload, recordedEngine, recordedPhaseMemory, savedRecipeBlocker } from "./build-recipes";
+import { commandError, composeServices, formatCPU, formatGB, formatMB, formatMemory, pathError, recipeErrors, recipePayload, recordedEngine, recordedPhaseMemory, recordedPlannerChecksum, savedRecipeBlocker } from "./build-recipes";
 
 it.each([".", "site", "apps/web/dist", "a.b/c-d_e"])("accepts the clean relative path %s", (value) => {
   expect(pathError(value, "directory")).toBeNull();
@@ -23,6 +23,16 @@ it("sends only the fields that belong to the engine", () => {
   expect(recipePayload({ ...draft, engine: "static" })).toEqual({ engine: "static", service: "web", directory: "app", output: "dist", build_command: "", start_command: "" });
   expect(recipePayload({ ...draft, engine: "compose" })).toEqual({ engine: "compose", service: "", directory: "", output: "", build_command: "", start_command: "" });
   expect(recipePayload({ ...draft, engine: "buildpacks" })).toEqual({ engine: "buildpacks", service: "web", directory: "app", output: "", build_command: "", start_command: "" });
+  expect(recipePayload({ ...draft, engine: "nixpacks" })).toEqual({ engine: "nixpacks", service: "web", directory: "app", output: "", build_command: "make", start_command: "run" });
+});
+
+it("validates Nixpacks like Railpack: optional commands up to 8192 bytes, for services and jobs", () => {
+  const draft = { engine: "nixpacks", service: "web", directory: ".", output: "", build_command: "", start_command: "" };
+  expect(recipeErrors(draft, false)).toEqual({});
+  expect(recipeErrors(draft, true)).toEqual({});
+  expect(recipeErrors({ ...draft, build_command: "x".repeat(8192), start_command: "é".repeat(4096) }, true)).toEqual({});
+  expect(recipeErrors({ ...draft, build_command: "x".repeat(8193), start_command: "é".repeat(4097) }, false)).toEqual({ build_command: "Use at most 8192 bytes (currently 8193).", start_command: "Use at most 8192 bytes (currently 8194)." });
+  expect(recipeErrors({ ...draft, service: "", directory: "../x" }, false)).toEqual({ service: "Choose a Compose service.", directory: "Paths cannot contain .. segments." });
 });
 
 it("lists the saved Compose services and nothing for an unreadable file", () => {
@@ -179,4 +189,88 @@ it("describes a recorded Cloud Native Buildpacks build with its versions", () =>
     "Cloud Native Buildpacks (lifecycle 0.21.29, builder 0.0.230, platform API 0.13) for web",
   );
   expect(recordedEngine(buildOperation({ engine: "buildpacks", service: "web" }))).toBe("Cloud Native Buildpacks for web");
+});
+
+const nixpacks = {
+  supported: true,
+  reason: "",
+  version: "1.41.0",
+  planner_sha256: `sha256:${"0f".repeat(32)}`,
+  planner_download_bytes: 3717141,
+  base_image: `ghcr.io/railwayapp/nixpacks@sha256:${"d4".repeat(32)}`,
+  base_download_bytes: 138966568,
+  maintenance: true as const,
+  proxy_supported: false as const,
+  planner_memory_bytes: 536870912,
+  planner_cpu: 1,
+  planner_timeout_seconds: 60,
+  planner_output_bytes: 134217728,
+};
+
+it("reads the nixpacks object and treats a missing, malformed or unrecognised one as unknown without failing the read", () => {
+  expect(parseBuildRecipeSettings({ ...valid, nixpacks }).nixpacks).toEqual(nixpacks);
+  expect(parseBuildRecipeSettings(valid).nixpacks).toBeUndefined();
+  for (const broken of [
+    null,
+    [],
+    { ...nixpacks, supported: "true" },
+    { ...nixpacks, reason: undefined },
+    { ...nixpacks, version: "" },
+    { ...nixpacks, maintenance: false },
+    { ...nixpacks, maintenance: undefined },
+    { ...nixpacks, proxy_supported: true },
+    { ...nixpacks, proxy_supported: "false" },
+    { ...nixpacks, planner_sha256: "sha256:ABC" },
+    { ...nixpacks, planner_sha256: "0f".repeat(32) },
+    { ...nixpacks, base_image: "ghcr.io/railwayapp/nixpacks:ubuntu-1745885067" },
+    { ...nixpacks, base_image: `nixpacks@sha256:${"D4".repeat(32)}` },
+    { ...nixpacks, planner_download_bytes: -1 },
+    { ...nixpacks, base_download_bytes: 1.5 },
+    { ...nixpacks, planner_memory_bytes: 0 },
+    { ...nixpacks, planner_cpu: 0 },
+    { ...nixpacks, planner_timeout_seconds: "60" },
+    { ...nixpacks, planner_output_bytes: undefined },
+  ]) {
+    const read = parseBuildRecipeSettings({ ...valid, nixpacks: broken });
+    expect(read.nixpacks).toBeUndefined();
+    expect(read.recipe.engine).toBe("compose");
+  }
+});
+
+it("accepts unpinned metadata only when Nixpacks is not supported", () => {
+  const unknownArch = { ...nixpacks, supported: false, reason: "the pinned Nixpacks planner requires a Linux amd64 or arm64 build node", planner_sha256: "", planner_download_bytes: 0, base_download_bytes: 0 };
+  expect(parseBuildRecipeSettings({ ...valid, nixpacks: unknownArch }).nixpacks).toEqual(unknownArch);
+  expect(parseBuildRecipeSettings({ ...valid, nixpacks: { ...unknownArch, supported: true } }).nixpacks).toBeUndefined();
+  expect(parseBuildRecipeSettings({ ...valid, nixpacks: { ...nixpacks, planner_download_bytes: 0 } }).nixpacks).toBeUndefined();
+  expect(parseBuildRecipeSettings({ ...valid, nixpacks: { ...nixpacks, base_download_bytes: 0 } }).nixpacks).toBeUndefined();
+  const other = { ...nixpacks, planner_cpu: 0.5, planner_sha256: `sha256:${"91".repeat(32)}`, planner_download_bytes: 4111227, base_download_bytes: 135771180 };
+  expect(parseBuildRecipeSettings({ ...valid, nixpacks: other }).nixpacks).toEqual(other);
+});
+
+it("blocks a saved Nixpacks recipe unless the server confirms it can build, with the top-level reason first", () => {
+  const saved = { ...parseBuildRecipeSettings(valid), recipe: { ...valid.recipe, engine: "nixpacks", service: "web", directory: "." } };
+  expect(savedRecipeBlocker({ ...saved, nixpacks })).toBeUndefined();
+  expect(savedRecipeBlocker(saved)).toMatch(/did not report usable Nixpacks eligibility/);
+  expect(savedRecipeBlocker({ ...saved, nixpacks: { ...nixpacks, supported: false, reason: "upgrade and verify the effective build worker before using Nixpacks" } })).toBe(
+    "upgrade and verify the effective build worker before using Nixpacks",
+  );
+  expect(savedRecipeBlocker({ ...saved, nixpacks: { ...nixpacks, supported: false } })).toMatch(/cannot run Nixpacks/);
+  expect(savedRecipeBlocker({ ...saved, reason: "Nixpacks is unavailable while an outbound build proxy is configured", nixpacks })).toBe("Nixpacks is unavailable while an outbound build proxy is configured");
+});
+
+it("describes a recorded Nixpacks build with its version and the recorded planner archive checksum only", () => {
+  const digest = `sha256:${"0f".repeat(32)}`;
+  const recorded = buildOperation({ engine: "nixpacks", service: "web", version: "1.41.0", pinned_images: [nixpacks.base_image], planner_sha256: digest });
+  expect(recordedEngine(recorded)).toBe("Nixpacks 1.41.0 for web");
+  expect(recordedPlannerChecksum(recorded)).toBe(`Planner archive checksum ${digest}`);
+  expect(recordedPlannerChecksum(buildOperation({ engine: "nixpacks", service: "web", version: "1.41.0" }))).toBe("Planner archive checksum not recorded");
+  expect(recordedPlannerChecksum(buildOperation({ engine: "nixpacks", planner_sha256: "" }))).toBe("Planner archive checksum not recorded");
+  expect(recordedPlannerChecksum(buildOperation({ engine: "nixpacks", planner_sha256: "md5:abc" }))).toBe("Planner archive checksum unavailable");
+  expect(recordedPlannerChecksum(buildOperation({ engine: "railpack", planner_sha256: digest }))).toBeUndefined();
+  expect(recordedPlannerChecksum(buildOperation())).toBeUndefined();
+});
+
+it("formats small downloads as decimal megabytes", () => {
+  expect(formatMB(3717141)).toBe("3.7 MB");
+  expect(formatMB(4111227)).toBe("4.1 MB");
 });

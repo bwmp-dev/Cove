@@ -39,6 +39,25 @@ export interface BuildpacksSettings {
   experimental: boolean;
 }
 
+// Nixpacks eligibility, pins and planner limits, as the server reports them for the effective build node's architecture.
+export interface NixpacksSettings {
+  supported: boolean;
+  reason: string;
+  version: string;
+  // Checksum of the pinned release archive. Empty, with zero download sizes, when the node's architecture has no pinned planner.
+  planner_sha256: string;
+  planner_download_bytes: number;
+  base_image: string;
+  base_download_bytes: number;
+  // Fixed by the contract: the panel only describes a maintenance-mode engine without outbound proxy support.
+  maintenance: true;
+  proxy_supported: false;
+  planner_memory_bytes: number;
+  planner_cpu: number;
+  planner_timeout_seconds: number;
+  planner_output_bytes: number;
+}
+
 export interface BuildRecipeSettings {
   recipe: BuildRecipe;
   can_edit: boolean;
@@ -54,6 +73,8 @@ export interface BuildRecipeSettings {
   pinned_images: string[];
   // Missing from older servers or malformed: Cloud Native Buildpacks eligibility is then unknown and treated as unavailable.
   buildpacks?: BuildpacksSettings;
+  // Missing from older servers or malformed: Nixpacks eligibility is then unknown and treated as unavailable.
+  nixpacks?: NixpacksSettings;
 }
 
 const path = (workloadId: string) => `/api/workloads/${encodeURIComponent(workloadId)}/build-recipe`;
@@ -133,6 +154,45 @@ function parseBuildpacks(value: unknown): BuildpacksSettings | undefined {
   }
 }
 
+function count(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw incomplete();
+  return value;
+}
+
+const plannerDigest = /^sha256:[0-9a-f]{64}$/;
+const pinnedImage = /^[^\s@]+@sha256:[0-9a-f]{64}$/;
+
+// As with buildpacks, an unusable object only makes Nixpacks eligibility unknown. A supported status must carry a real pin, checksum and sizes.
+function parseNixpacks(value: unknown): NixpacksSettings | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.maintenance !== true || value.proxy_supported !== false) return undefined;
+  try {
+    const settings: NixpacksSettings = {
+      supported: flag(value, "supported"),
+      reason: text(value, "reason"),
+      version: text(value, "version"),
+      planner_sha256: text(value, "planner_sha256"),
+      planner_download_bytes: count(value, "planner_download_bytes"),
+      base_image: text(value, "base_image"),
+      base_download_bytes: count(value, "base_download_bytes"),
+      maintenance: true,
+      proxy_supported: false,
+      planner_memory_bytes: size(value, "planner_memory_bytes"),
+      planner_cpu: positive(value, "planner_cpu"),
+      planner_timeout_seconds: size(value, "planner_timeout_seconds"),
+      planner_output_bytes: size(value, "planner_output_bytes"),
+    };
+    if (settings.version === "" || !pinnedImage.test(settings.base_image)) return undefined;
+    if (settings.planner_sha256 !== "" && !plannerDigest.test(settings.planner_sha256)) return undefined;
+    const pinned = settings.planner_sha256 !== "" && settings.planner_download_bytes > 0 && settings.base_download_bytes > 0;
+    if (settings.supported && !pinned) return undefined;
+    return settings;
+  } catch {
+    return undefined;
+  }
+}
+
 // A response missing any field cannot say what the next build does, so it fails the read rather than defaulting to Compose.
 export function parseBuildRecipeSettings(data: unknown): BuildRecipeSettings {
   if (!isRecord(data) || !isRecord(data.recipe)) throw incomplete();
@@ -140,6 +200,7 @@ export function parseBuildRecipeSettings(data: unknown): BuildRecipeSettings {
   const engine = text(recipe, "engine");
   if (engine === "") throw incomplete();
   const buildpacks = parseBuildpacks(data.buildpacks);
+  const nixpacks = parseNixpacks(data.nixpacks);
   return {
     recipe: {
       engine,
@@ -160,6 +221,7 @@ export function parseBuildRecipeSettings(data: unknown): BuildRecipeSettings {
     railpack_version: text(data, "railpack_version"),
     pinned_images: strings(data.pinned_images),
     ...(buildpacks ? { buildpacks } : {}),
+    ...(nixpacks ? { nixpacks } : {}),
   };
 }
 

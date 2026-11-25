@@ -179,7 +179,7 @@ func TestBuiltinComposeLocalConfigPreservesLiteralValues(t *testing.T) {
 	}
 	directory := t.TempDir()
 	compose := filepath.Join(directory, "compose.yaml")
-	content := "services:\n  app:\n    image: busybox:1.37\n    environment:\n      EXPLICIT: ${VALUE}\n    build:\n      context: .\n      args:\n        COVE_PROJECT: explicit\n"
+	content := "services:\n  app:\n    image: busybox:1.37\n    environment:\n      EXPLICIT: ${VALUE}\n    labels:\n      literal$$key: value$$literal\n    command: [printf, '$$SHELL']\n    build:\n      context: .\n      args:\n        COVE_PROJECT: explicit\n"
 	if err := os.WriteFile(compose, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +205,8 @@ func TestBuiltinComposeLocalConfigPreservesLiteralValues(t *testing.T) {
 	var config struct {
 		Services map[string]struct {
 			Environment map[string]string `json:"environment"`
+			Labels      map[string]string `json:"labels"`
+			Command     []string          `json:"command"`
 			Build       struct {
 				Args map[string]string `json:"args"`
 			} `json:"build"`
@@ -214,6 +216,9 @@ func TestBuiltinComposeLocalConfigPreservesLiteralValues(t *testing.T) {
 		t.Fatal("invalid Compose output")
 	}
 	app := config.Services["app"]
+	if len(app.Labels) != 1 || app.Labels["literal$$$$key"] != "value$$literal" || len(app.Command) != 2 || app.Command[1] != "$$SHELL" {
+		t.Fatalf("Compose reread changed literal label keys or command tokens: %#v", app)
+	}
 	if app.Environment["EXPLICIT"] != "dollar-$$NOT_EXPANDED" || app.Environment[CoveURL] != "https://app.example/$$literal" || app.Build.Args[CoveProject] != "explicit" || app.Build.Args[CoveRelease] != "release" {
 		t.Fatalf("Compose reread changed literal values or overrides: %#v", app)
 	}
