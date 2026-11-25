@@ -64,6 +64,7 @@ type snapshotHostIndex struct {
 }
 
 type snapshotHostResponse struct {
+	Pending   bool                `json:"pending,omitempty"`
 	Error     string              `json:"error,omitempty"`
 	Plans     []snapshotMountPlan `json:"plans,omitempty"`
 	Sources   []string            `json:"sources,omitempty"`

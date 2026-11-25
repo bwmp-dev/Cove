@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -69,20 +70,19 @@ func (e *Engine) SnapshotPreview(ctx context.Context, workload string, maxBytes 
 
 func (e *Engine) performFilesystemBackup(ctx context.Context, r Request, mounts []backupMount, running []string, current deployedState, out io.Writer) (handled bool, reason string, result error) {
 	request := snapshotRequest(r, mounts, running)
-	request.Action = "inspect"
-	owner, err := e.backupHelperOwner(false)
-	if err != nil {
-		return true, "", err
-	}
-	index, err := snapshotIndex(e.Root, owner)
-	if err != nil {
-		return true, "", err
-	}
-	for _, workload := range index.Workloads {
-		if workload == r.Workload {
+	if _, err := os.Lstat(snapshotScope(e.Root)); err == nil {
+		request.Action = "pending"
+		pending, err := e.callSnapshotHost(ctx, request)
+		if err != nil {
+			return true, "", err
+		}
+		if pending.Pending {
 			return true, "", errors.New("restart the worker to recover the pending filesystem snapshot before another backup")
 		}
+	} else if !os.IsNotExist(err) {
+		return true, "", err
 	}
+	request.Action = "inspect"
 	preview, err := e.callSnapshotHost(ctx, request)
 	if err != nil {
 		return false, "Host snapshot inspection is unavailable; check host tools and privileges", nil

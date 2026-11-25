@@ -131,6 +131,22 @@ func cleanupSnapshotState(ctx context.Context, state snapshotHostState, run snap
 }
 
 func runSnapshotHost(ctx context.Context, request snapshotHostRequest, run snapshotCommand) (response snapshotHostResponse, result error) {
+	if request.Action == "recover" {
+		if request.Workload != "recovery" || request.Operation != "recovery" {
+			return response, errors.New("invalid startup snapshot recovery request")
+		}
+		return response, RunFilesystemSnapshotReaper(ctx, request.Root, true)
+	}
+	if request.Action == "pending" {
+		index, err := snapshotIndex(request.Root, request.Owner)
+		if err != nil {
+			return response, err
+		}
+		for _, workload := range index.Workloads {
+			response.Pending = response.Pending || workload == request.Workload
+		}
+		return response, nil
+	}
 	if request.Action == "inspect" {
 		return inspectSnapshotHost(ctx, request, run)
 	}
@@ -292,29 +308,11 @@ func RunFilesystemSnapshotReaper(ctx context.Context, root string, force bool) e
 }
 
 func (e *Engine) recoverFilesystemSnapshots(ctx context.Context) error {
-	owner, err := e.backupHelperOwner(false)
-	if os.IsNotExist(err) {
+	if _, err := os.Lstat(snapshotScope(e.Root)); os.IsNotExist(err) {
 		return nil
-	}
-	if err != nil {
+	} else if err != nil {
 		return err
 	}
-	index, err := snapshotIndex(e.Root, owner)
-	if err != nil {
-		return err
-	}
-	for _, workload := range index.Workloads {
-		state, err := readSnapshotState(e.Root, owner, workload)
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		operation := state.Operation
-		if operation == "" {
-			operation = "recovery"
-		}
-		if _, err := e.callSnapshotHost(ctx, snapshotHostRequest{Action: "cleanup", Workload: workload, Operation: operation}); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := e.callSnapshotHost(ctx, snapshotHostRequest{Action: "recover", Workload: "recovery", Operation: "recovery"})
+	return err
 }

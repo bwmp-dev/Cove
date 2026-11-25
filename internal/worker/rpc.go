@@ -797,7 +797,8 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 		return err
 	}
 	defer unlock()
-	if _, err := os.Lstat(filepath.Join(e.Root, "host-maintenance", "firewall-arming.json")); err == nil {
+	// The helper owns this root-only scope; an unprivileged daemon cannot rule out a pending checkpoint.
+	if _, err := os.Lstat(filepath.Join(e.Root, "host-maintenance", "firewall-arming.json")); err == nil || os.IsPermission(err) {
 		cleanup, cancelCleanup := context.WithTimeout(ctx, time.Minute)
 		_, err := e.runFirewallHost(cleanup, FirewallControl{Action: "recover"})
 		cancelCleanup()
