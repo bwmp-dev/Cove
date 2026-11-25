@@ -72,7 +72,19 @@ func (s *Server) managedRegistries(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "managed registries unavailable", 503)
 			return
 		}
-		respond(w, 200, map[string]any{"registries": items, "can_manage": s.teamAdmin(r, team)})
+		canManage := s.teamAdmin(r, team)
+		if credential, scoped := r.Context().Value(apiCredentialKey{}).(apiCredential); scoped {
+			permitted := false
+			for _, route := range s.publicRoutes() {
+				registryRoute := route.Path == "/managed-registries" || strings.HasPrefix(route.Path, "/managed-registries/")
+				if registryRoute && route.Method != "GET" && containsScope(credential.Scopes, route.Scope) {
+					permitted = true
+					break
+				}
+			}
+			canManage = canManage && permitted
+		}
+		respond(w, 200, map[string]any{"registries": items, "can_manage": canManage})
 		return
 	}
 	if !s.teamAdmin(r, team) {

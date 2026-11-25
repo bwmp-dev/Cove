@@ -436,7 +436,14 @@ func ValidateRequest(r Request) error {
 			return errors.New("previews require a repository Compose file")
 		}
 	case "build":
-		if r.Build == nil || !repositoryPath.MatchString(r.Build.Repository) || len(r.Build.Repository) > 128 || r.Preview || r.EnvironmentPreview != nil {
+		if r.Build == nil || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("build requires a registry repository path outside managed previews")
+		}
+		prefix, _, qualified := strings.Cut(r.Build.Repository, "/")
+		if qualified && (strings.ContainsAny(prefix, ".:") || prefix == "localhost" || r.Registry != nil && strings.EqualFold(prefix, r.Registry.Server)) {
+			return errors.New("build repository must be a path without a registry host, tag or digest; the connected registry is added automatically")
+		}
+		if !repositoryPath.MatchString(r.Build.Repository) || len(r.Build.Repository) > 128 {
 			return errors.New("build requires a registry repository path outside managed previews")
 		}
 		if (r.Source == nil || r.Source.InlineCompose) && (len(r.Compose) == 0 || len(r.Compose) > 1024*1024) {

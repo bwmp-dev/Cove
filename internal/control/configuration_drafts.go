@@ -495,7 +495,9 @@ func (s *Server) applyProjectConfiguration(w http.ResponseWriter, r *http.Reques
 		}
 		cpu, memory := configuredUsage(config)
 		if exists {
-			_, err = tx.Exec(ctx, `UPDATE workloads SET name=$2,configuration=$3,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END WHERE id=$1`, id, config.Name, sealed, resourceKind(config), cpu, memory)
+			if !reflect.DeepEqual(config, old.Configuration) {
+				_, err = tx.Exec(ctx, `UPDATE workloads SET name=$2,configuration=$3,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END WHERE id=$1`, id, config.Name, sealed, resourceKind(config), cpu, memory)
+			}
 		} else {
 			_, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,project_id,environment_id,team_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10)`, id, config.NodeID, config.Name, sealed, resourceKind(config), project, environments[resource.Environment], team, cpu, memory)
 		}

@@ -24,7 +24,7 @@ func ValidatePreviewRegistryImages(pins map[string]string, server string) error 
 		return errors.New("CI preview images require a connected registry and complete service digests")
 	}
 	if err := validateImagePins(pins); err != nil {
-		return err
+		return errors.New("CI preview images require valid service names and immutable image digests")
 	}
 	for _, image := range pins {
 		repository, digest, ok := strings.Cut(strings.TrimPrefix(image, server+"/"), "@")
