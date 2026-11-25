@@ -20,10 +20,11 @@ import (
 // previewSnapshot is the recipe a preview was created with, plus its access credentials. Later
 // recipe edits apply to new previews; an existing preview keeps its data and routing decisions.
 type previewSnapshot struct {
-	Recipe   previewRecipe `json:"recipe"`
-	Username string        `json:"username,omitempty"`
-	Password string        `json:"password,omitempty"`
-	Auth     string        `json:"auth,omitempty"`
+	Recipe   previewRecipe    `json:"recipe"`
+	CI       *previewCIInputs `json:"ci,omitempty"`
+	Username string           `json:"username,omitempty"`
+	Password string           `json:"password,omitempty"`
+	Auth     string           `json:"auth,omitempty"`
 }
 
 // previewBaseline pins what production ran when the preview was created. Resources without a
@@ -52,9 +53,14 @@ type previewResourceRow struct {
 	DataState, DataOperation, DeployOperation string
 	RoutesOperation, RemoveOperation          string
 	Routes                                    []worker.Route
+	CIImages                                  map[string]string
+	CIRegistry, CIIdentity, CIRevision        string
 }
 
 func (r previewResourceRow) desiredKey() string {
+	if r.CIIdentity != "" {
+		return "ci:" + r.CIIdentity
+	}
 	if r.BranchRevision != "" {
 		return "branch:" + r.BranchRevision
 	}
@@ -97,7 +103,15 @@ func (s *Server) loadPreviewRow(ctx context.Context, q interface {
 
 func (s *Server) loadPreviewResources(ctx context.Context, q interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 }, id string) ([]previewResourceRow, error) {
+	p, err := s.loadPreviewRow(ctx, q, id, false)
+	if err != nil {
+		return nil, err
+	}
+	if p.Snapshot.CI != nil && (validatePreviewCIImages(p.Snapshot.CI.Images, p.Snapshot.CI.Bindings) != nil || p.Snapshot.CI.Identity != previewCIInputIdentity(p.Snapshot.CI.Revision, p.Snapshot.CI.Images)) {
+		return nil, errors.New("saved CI preview inputs are incomplete")
+	}
 	rows, err := q.Query(ctx, `SELECT r.base_id,r.resource_id,r.name,r.kind,w.node_id,r.position,r.repository_id,r.baseline,r.baseline_revision,r.baseline_release,r.branch_revision,r.deployed_key,r.deploying_key,r.isolation,r.data_state,r.data_operation,r.deploy_operation,r.routes_operation,r.remove_operation,r.routes FROM environment_preview_resources r JOIN workloads w ON w.id=r.resource_id WHERE r.preview_id=$1 ORDER BY r.position,r.name,r.base_id`, id)
 	if err != nil {
 		return nil, err
@@ -118,6 +132,15 @@ func (s *Server) loadPreviewResources(ctx context.Context, q interface {
 		}
 		if err = json.Unmarshal(routes, &item.Routes); err != nil {
 			return nil, err
+		}
+		if p.Snapshot.CI != nil {
+			if binding, ok := p.Snapshot.CI.Bindings[item.BaseID]; ok {
+				item.CIImages = p.Snapshot.CI.Images[item.BaseID]
+				if worker.ValidatePreviewRegistryImages(item.CIImages, binding.Server) != nil {
+					return nil, errors.New("saved CI preview images are invalid")
+				}
+				item.CIRegistry, item.CIIdentity, item.CIRevision = binding.Server, p.Snapshot.CI.Identity, p.Snapshot.CI.Revision
+			}
 		}
 		list = append(list, item)
 	}
@@ -143,6 +166,15 @@ func (s *Server) createPreviewRecord(ctx context.Context, tx pgx.Tx, project str
 	var existing string
 	err := tx.QueryRow(ctx, `SELECT id FROM environment_previews WHERE project_id=$1 AND suffix=$2`, project, suffix).Scan(&existing)
 	if err == nil {
+		if len(branches) > 0 {
+			p, problem := s.loadPreviewRow(ctx, tx, existing, true)
+			if problem != nil {
+				return "", false, problem
+			}
+			if p.Snapshot.CI != nil {
+				return "", false, errors.New("preview key is reserved for CI image submissions")
+			}
+		}
 		return existing, false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -200,7 +232,11 @@ func (s *Server) createPreviewRecord(ctx context.Context, tx pgx.Tx, project str
 			return "", false, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,'environment preview created',$2,201,$3)`, previewActor(approvedBy), id, team); err != nil {
+	createdActor := previewActor(approvedBy)
+	if len(branches) == 0 && approvedBy == "" {
+		createdActor = "CI preview credential"
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,'environment preview created',$2,201,$3)`, createdActor, id, team); err != nil {
 		return "", false, err
 	}
 	return id, true, nil
@@ -279,7 +315,7 @@ func (s *Server) advancePreview(ctx context.Context, id string) error {
 	if p.State != "deleting" && !p.Pinned {
 		expired := p.LastActivity.Add(time.Duration(p.Snapshot.Recipe.TTLHours) * time.Hour).Before(time.Now())
 		if expired {
-			return s.requestPreviewDeletion(ctx, s.DB, id, "inactive for "+fmt.Sprint(p.Snapshot.Recipe.TTLHours)+" hours")
+			return s.expirePreview(ctx, id)
 		}
 	}
 	switch p.State {
@@ -292,13 +328,14 @@ func (s *Server) advancePreview(ctx context.Context, id string) error {
 		if previewDrifted(resources) {
 			return s.markPreviewDrifted(ctx, id)
 		}
-		return s.setPreviewState(ctx, s.DB, id, "ready", "ready", p.Detail, 5*time.Minute)
+		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1 AND state='ready' AND stage='ready'`, id)
+		return err
 	case "awaiting_approval":
-		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1`, id)
+		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1 AND state='awaiting_approval'`, id)
 		return err
 	case "failed":
 		// A failed preview waits for an explicit retry; only its expiry is checked here.
-		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1`, id)
+		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1 AND state='failed'`, id)
 		return err
 	}
 	switch p.Stage {
@@ -403,6 +440,18 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 	if current.Environment != "" || current.Stage != "plan" || current.State != "creating" {
 		return tx.Commit(ctx)
 	}
+	if previewCIHash(current.Snapshot.CI) != previewCIHash(p.Snapshot.CI) {
+		return tx.Commit(ctx)
+	}
+	if p.Snapshot.CI != nil {
+		for id, binding := range p.Snapshot.CI.Bindings {
+			actual, _, problem := s.previewCIBinding(ctx, tx, p.Team, p.Base, id, recipe)
+			if problem != nil || previewCIHash(actual) != previewCIHash(binding) {
+				tx.Rollback(ctx)
+				return s.failPreview(ctx, p.ID, "plan", "CI resource scope changed before preview planning. Issue a replacement credential and use a new preview key.")
+			}
+		}
+	}
 	branches := map[int64]string{}
 	rows, err := tx.Query(ctx, `SELECT repository_id,head FROM environment_preview_branches WHERE preview_id=$1`, p.ID)
 	if err != nil {
@@ -486,6 +535,16 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 				return s.failPreview(ctx, p.ID, "plan", "Database private configuration cannot be isolated")
 			}
 			baseline.Compose = config.Compose
+		}
+		if p.Snapshot.CI != nil {
+			if binding, ok := p.Snapshot.CI.Bindings[src.ID]; ok {
+				names, problem := previewCIServices(baseline.Compose)
+				if problem != nil || previewCIHash(names) != previewCIHash(binding.Services) {
+					tx.Rollback(ctx)
+					return s.failPreview(ctx, p.ID, "plan", "Deploy the saved Compose service set before creating a CI preview.")
+				}
+				config.Source = nil
+			}
 		}
 		if src.Kind == "job" && baseline.Source != nil {
 			pinned := *baseline.Source
@@ -948,7 +1007,12 @@ func (s *Server) previewDeployRequest(ctx context.Context, tx pgx.Tx, p *preview
 	isolation.Images = nil
 	isolation.Refresh = false
 	request.EnvironmentPreview = &isolation
-	if resource.BranchRevision != "" && config.Source != nil {
+	if resource.CIIdentity != "" {
+		request.Source = nil
+		request.Compose = resource.Baseline.Compose
+		request.ImagePins = resource.CIImages
+		request.EnvironmentPreview.ImageRegistry = resource.CIRegistry
+	} else if resource.BranchRevision != "" && config.Source != nil {
 		source := *config.Source
 		source.Revision = resource.BranchRevision
 		source.Token = ""
@@ -1046,6 +1110,17 @@ func (s *Server) deployPreviewStage(ctx context.Context, p *previewRow) error {
 		tx, err := s.DB.Begin(ctx)
 		if err != nil {
 			return err
+		}
+		if p.Snapshot.CI != nil {
+			current, problem := s.loadPreviewRow(ctx, tx, p.ID, true)
+			if problem != nil {
+				tx.Rollback(ctx)
+				return problem
+			}
+			if current.Stage != "deploy" || (current.State != "creating" && current.State != "updating") || current.Snapshot.CI == nil || current.Snapshot.CI.Identity != p.Snapshot.CI.Identity {
+				tx.Rollback(ctx)
+				return nil
+			}
 		}
 		active, err := activeOperation(ctx, tx, resource.ResourceID)
 		if err != nil || active {

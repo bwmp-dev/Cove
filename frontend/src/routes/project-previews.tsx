@@ -1,13 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link } from "@tanstack/react-router";
-import { GitBranch, KeyRound, Plus } from "lucide-react";
+import { Container, GitBranch, KeyRound, Plus } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 import { errorMessage } from "../api/client";
 import { projectsQuery, type Project } from "../api/projects";
-import { fetchPreviewCredentials, previewListQuery, previewQuery, recipeQuery, useRequestPreview, type EnvironmentPreview, type PreviewResource } from "../api/previews";
+import { fetchPreviewCredentials, previewQuery, recipeQuery, usePreviewList, useRequestPreview, type EnvironmentPreview, type PreviewResource } from "../api/previews";
 import { CopyButton } from "../components/CopyButton";
 import { Dialog } from "../components/ConfirmDialog";
 import { PreviewActions } from "../components/PreviewActions";
+import { PreviewImages } from "../components/PreviewImages";
 import { PreviewRecipeEditor } from "../components/PreviewRecipe";
 import { RelativeTime } from "../components/RelativeTime";
 import { StatusLabel } from "../components/status";
@@ -27,6 +28,7 @@ export function ProjectPreviews() {
   return (
     <>
       <PreviewList project={project} />
+      <PreviewImages projectId={project.id} />
       {can(project.permissions, "edit") ? (
         <PreviewRecipeEditor project={project} />
       ) : (
@@ -39,13 +41,13 @@ export function ProjectPreviews() {
 }
 
 function PreviewList({ project }: { project: Project }) {
-  const list = useQuery(previewListQuery(project.id));
+  const list = usePreviewList(project.id);
   const [requesting, setRequesting] = useState(false);
   const editable = can(project.permissions, "edit");
   return (
     <Section
       title="Environment previews"
-      description="One preview per branch name across your repositories, each with its own copy of the production environment and its data."
+      description="Matching repository branches and CI image submissions each create or update an isolated preview, set up from production configuration and data as your saved recipe specifies."
       flush
       actions={
         editable && (
@@ -78,7 +80,7 @@ function PreviewList({ project }: { project: Project }) {
             </div>
           )}
           {list.data.previews.length === 0 ? (
-            <p className="px-4 py-3 text-[13px] text-fg-muted">No previews yet. Push a branch that matches the recipe, or create one from an existing branch.</p>
+            <p className="px-4 py-3 text-[13px] text-fg-muted">No previews yet. Push a branch that matches the recipe, submit CI-built images, or create one from an existing branch.</p>
           ) : (
             <ul aria-label={`Previews in ${project.name}`} className="divide-y divide-line">
               {list.data.previews.map((preview) => (
@@ -111,7 +113,13 @@ function PreviewRow({ preview, projectId }: { preview: EnvironmentPreview; proje
           <StatusLabel tone={state.tone} label={state.label} pulse={state.tone === "info"} />
           {preview.pinned && <span className="text-xs text-fg-muted">Kept</span>}
         </div>
-        <ul className="mt-1 space-y-0.5 text-xs text-fg-muted">
+        {preview.ci && (
+          <p className="mt-1 flex min-w-0 items-center gap-x-1.5 text-xs text-fg-muted">
+            <Container aria-hidden className="size-3 shrink-0 text-fg-subtle" />
+            CI-built images
+          </p>
+        )}
+        <ul className="mt-1 space-y-0.5 text-xs text-fg-muted empty:hidden">
           {preview.branches.map((branch) => (
             <li key={branch.repository_id} className="flex min-w-0 flex-wrap items-center gap-x-1.5">
               <GitBranch aria-hidden className="size-3 shrink-0 text-fg-subtle" />
@@ -143,12 +151,19 @@ function RequestPreview({ projectId, onClose }: { projectId: string; onClose: ()
   const recipe = useQuery(recipeQuery(projectId, ""));
   const [suffix, setSuffix] = useState("");
   const prefix = recipe.data?.recipe.branch_pattern.replace(/\*$/, "") ?? "";
+  // Mirrors the server's guard: branch previews need an enabled saved recipe with a repository. CI-only recipes have none.
+  const branchless = recipe.data !== undefined && (!recipe.data.saved || !recipe.data.recipe.enabled || recipe.data.recipe.repositories.length === 0);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     create.mutate(suffix.trim(), { onSuccess: onClose });
   }
   return (
     <form onSubmit={submit} className="space-y-4">
+      {branchless && (
+        <Notice tone="warn" title="Branch previews are not set up">
+          Creating a preview from a branch needs an enabled, saved recipe with at least one selected repository. Previews from CI-built images are created by CI submissions, not here.
+        </Notice>
+      )}
       <Field id={id} label="Branch" hint={`The branch must already exist in at least one selected repository. Creating it here counts as approval.`}>
         <div className="flex min-w-0 items-center rounded-md border border-line-input bg-panel focus-within:border-info focus-within:ring-1 focus-within:ring-info">
           <span className="shrink-0 pl-2.5 font-mono text-[13px] text-fg-muted">{prefix}</span>
@@ -164,7 +179,7 @@ function RequestPreview({ projectId, onClose }: { projectId: string; onClose: ()
         <Button variant="ghost" onClick={onClose} disabled={create.isPending}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" disabled={!online || suffix.trim() === ""} pending={create.isPending}>
+        <Button type="submit" variant="primary" disabled={!online || branchless || suffix.trim() === ""} pending={create.isPending}>
           Create preview
         </Button>
       </div>
@@ -206,19 +221,7 @@ export function PreviewStatus({ previewId }: { previewId: string }) {
           <DefinitionList
             items={[
               { term: "Status", value: <span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1"><StatusLabel tone={state.tone} label={state.label} pulse={state.tone === "info"} />{data.state !== "ready" && data.state !== "failed" && <span className="text-xs text-fg-muted">{stageLabels[data.stage]}</span>}</span> },
-              {
-                term: "Branches",
-                value: (
-                  <ul className="space-y-0.5">
-                    {data.branches.map((branch) => (
-                      <li key={branch.repository_id} className="break-all">
-                        <span className="font-mono text-xs">{branch.branch}</span> <span className="text-fg-muted">in</span> <span className="font-mono text-xs">{branch.repository}</span>{" "}
-                        {branch.head ? <span className="font-mono text-xs text-fg-muted">{shortRevision(branch.head)}</span> : <span className="text-xs text-fg-muted">(deleted)</span>}
-                      </li>
-                    ))}
-                  </ul>
-                ),
-              },
+              sourceItem(data),
               { term: "Removal", value: data.state === "deleting" ? `Removing: ${data.delete_reason}` : data.expires_at ? <>Removed if inactive <RelativeTime value={data.expires_at} /></> : "Kept until deleted" },
               {
                 term: "Access",
@@ -248,6 +251,23 @@ export function PreviewStatus({ previewId }: { previewId: string }) {
         <PreviewResources resources={data.resources ?? []} />
       </div>
     </Section>
+  );
+}
+
+function sourceItem(preview: EnvironmentPreview) {
+  return preview.ci ? { term: "Source", value: "CI-built images" } : { term: "Branches", value: <PreviewBranches preview={preview} /> };
+}
+
+function PreviewBranches({ preview }: { preview: EnvironmentPreview }) {
+  return (
+    <ul className="space-y-0.5">
+      {preview.branches.map((branch) => (
+        <li key={branch.repository_id} className="break-all">
+          <span className="font-mono text-xs">{branch.branch}</span> <span className="text-fg-muted">in</span> <span className="font-mono text-xs">{branch.repository}</span>{" "}
+          {branch.head ? <span className="font-mono text-xs text-fg-muted">{shortRevision(branch.head)}</span> : <span className="text-xs text-fg-muted">(deleted)</span>}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -328,6 +348,7 @@ function PreviewResources({ resources }: { resources: PreviewResource[] }) {
 
 function RunsLabel({ resource }: { resource: PreviewResource }) {
   if (resource.source === "disabled") return <>Not running</>;
+  if (resource.source === "ci") return <CIImages resource={resource} />;
   return (
     <>
       {resource.source === "branch" ? "Branch " : "Production "}
@@ -339,6 +360,26 @@ function RunsLabel({ resource }: { resource: PreviewResource }) {
         </>
       )}
     </>
+  );
+}
+
+function CIImages({ resource }: { resource: PreviewResource }) {
+  const images = Object.entries(resource.ci_images ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    <span className="block space-y-0.5">
+      <span className="block">
+        CI-built images{resource.revision && <>, revision <span className="font-mono break-all text-fg">{resource.revision}</span></>}
+      </span>
+      {images.length > 0 && (
+        <span className="block space-y-0.5">
+          {images.map(([service, image]) => (
+            <span key={service} className="block font-mono break-all">
+              <span className="text-fg">{service}</span> {image}
+            </span>
+          ))}
+        </span>
+      )}
+    </span>
   );
 }
 

@@ -200,6 +200,9 @@ def main():
     build_nodes = "--build-nodes" in sys.argv[1:]
     buildpacks = "--buildpacks" in sys.argv[1:]
     nixpacks = "--nixpacks" in sys.argv[1:]
+    ci_previews = "--ci-previews" in sys.argv[1:]
+    if ci_previews and (not managed_registry or build_nodes or buildpacks or nixpacks or "--build-recipes" in sys.argv[1:]):
+        raise ValueError("CI preview acceptance requires its own managed-registry fixture")
     build_recipes = "--build-recipes" in sys.argv[1:] or buildpacks or nixpacks
     if buildpacks and nixpacks:
         raise ValueError("Choose one isolated Buildpacks or Nixpacks source fixture")
@@ -209,7 +212,7 @@ def main():
         raise ValueError("Recipe acceptance requires its own managed-registry fixture")
     if certificate_dns and cloudflare_tunnel:
         raise ValueError("Choose one isolated certificate or Tunnel provider fixture")
-    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes", "--build-recipes", "--buildpacks", "--nixpacks")]
+    browser_args = [value for value in sys.argv[1:] if value not in ("--certificate-dns", "--cloudflare-tunnel", "--registry-webhooks", "--image-scans", "--managed-registry", "--build-nodes", "--build-recipes", "--buildpacks", "--nixpacks", "--ci-previews")]
     name = "cove-browser-" + secrets.token_hex(6)
     panel_image = name + "-panel:development"
     worker_image = name + "-worker:development"
@@ -434,6 +437,9 @@ def main():
                 containers.append(worker)
             if managed_registry_config:
                 managed_registry_config.install(worker_image, worker)
+            if ci_previews:
+                from ci_previews_fixture import install_ci_previews_fixture
+                install_ci_previews_fixture(run, name, worker, env, fixture, openssl)
             if build_recipes:
                 from build_recipes_fixture import install_build_recipes_fixture
                 install_build_recipes_fixture(run, name, worker, env)

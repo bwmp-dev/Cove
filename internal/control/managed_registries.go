@@ -389,6 +389,17 @@ func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team,
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
+	ciReferences, err := s.previewCIRegistryReferences(ctx, tx, team, server)
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range ciReferences {
+		refs[ref] = true
+	}
+	if len(refs) > worker.MaxManagedRegistryReferences {
+		return nil, errors.New("registry reference inventory exceeds bound")
+	}
 	result := make([]string, 0, len(refs))
 	for ref := range refs {
 		result = append(result, ref)

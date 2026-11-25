@@ -47,6 +47,7 @@ func revokeSCIMAccess(ctx context.Context, tx pgx.Tx, user string) error {
 		"UPDATE enrollments SET consumed_at=now() WHERE consumed_at IS NULL AND node_id IN (SELECT node_id FROM node_provisions WHERE creator_id=$1 AND phase IN ('queued','creating','server_pending','enrolling'))",
 		"UPDATE node_provisions SET phase=CASE WHEN phase='queued' THEN 'cancelled' ELSE 'uncertain' END,configuration=CASE WHEN phase='queued' THEN '\\x'::bytea ELSE configuration END,last_error='Creator deprovisioned; enrollment revoked. Inspect any existing server before explicitly reconciling or abandoning tracking.',updated_at=now() WHERE creator_id=$1 AND phase IN ('queued','creating','server_pending','enrolling')",
 		"DELETE FROM access_tokens WHERE user_id=$1",
+		"DELETE FROM preview_ci_credentials WHERE user_id=$1",
 		"DELETE FROM deploy_hooks WHERE creator_id=$1",
 		"DELETE FROM project_status_shares WHERE creator_id=$1",
 		"DELETE FROM project_status_pages WHERE creator_id=$1",

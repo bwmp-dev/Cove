@@ -6,6 +6,7 @@ import { can } from "../lib/permissions";
 import { inputClass } from "../lib/styles";
 import { ActionMenu, type MenuAction } from "./ActionMenu";
 import { Dialog } from "./ConfirmDialog";
+import { CIApprovalButton } from "./PreviewCIApproval";
 import { Button, Field, Notice } from "./ui";
 
 const offline = "Unavailable while offline.";
@@ -40,11 +41,11 @@ export function PreviewActions({ preview, size = "md" }: { preview: EnvironmentP
   const failure = action.error ?? pin.error;
   return (
     <div className="flex flex-wrap items-center justify-end gap-2">
-      {preview.state === "awaiting_approval" && editable && (
+      {preview.state === "awaiting_approval" && editable && (preview.ci ? <CIApprovalButton preview={preview} size={size} disabled={!online} /> : (
         <Button size={size} variant="primary" disabled={!online} pending={action.isPending} onClick={() => action.mutate({ id: preview.id, action: "approve" })}>
           Approve
         </Button>
-      )}
+      ))}
       {preview.state === "failed" && operable && (
         <Button size={size} disabled={!online} pending={action.isPending} onClick={() => action.mutate({ id: preview.id, action: "retry" })}>
           Retry

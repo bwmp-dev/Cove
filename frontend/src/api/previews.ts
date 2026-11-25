@@ -1,4 +1,5 @@
-import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { request } from "./client";
 import { keys } from "./queries";
 import type { Permission } from "./types";
@@ -149,7 +150,8 @@ export interface PreviewResource {
   resource_id: string;
   name: string;
   kind: "service" | "job";
-  source: "branch" | "baseline" | "disabled";
+  source: "branch" | "baseline" | "disabled" | "ci";
+  // For source "ci", the full commit the CI submission named.
   revision: string;
   baseline_revision: string;
   baseline_release: string;
@@ -161,12 +163,24 @@ export interface PreviewResource {
   routes: string[];
   published: boolean;
   operation: string;
+  // For source "ci": each Compose service and the immutable registry digest it runs.
+  ci_images?: Record<string, string>;
 }
 
 export interface PreviewDataReport {
   volumes?: { target: string; mode: string; files: number; bytes: number; digest?: string }[];
   database?: { engine: string; snapshot_at: string; dump_bytes: number };
   seeded?: { engine: string; snapshot_at: string; tables?: number; rows?: number; verified?: boolean };
+}
+
+// What an editor reviews before approving a CI preview. Only the preview detail returns it.
+export interface PreviewCIInputs {
+  // Binds an approval to exactly these inputs; the server refuses an approval for any other identity.
+  identity: string;
+  revision: string;
+  recipe_version: number;
+  // Production resource ID, then Compose service, then its registry reference pinned by digest.
+  images: Record<string, Record<string, string>>;
 }
 
 export interface EnvironmentPreview {
@@ -182,11 +196,14 @@ export interface EnvironmentPreview {
   pinned: boolean;
   access: "private" | "public";
   delete_reason: string;
+  // Created from CI-built images instead of Git branch discovery.
+  ci: boolean;
   last_activity_at: string;
   expires_at: string | null;
   created_at: string;
   branches: PreviewBranch[];
   resources?: PreviewResource[];
+  ci_inputs?: PreviewCIInputs;
   permissions: Permission[];
 }
 
@@ -208,6 +225,8 @@ export const previewKeys = {
   recipe: (projectId: string, environmentId: string) => ["previews", "recipe", projectId, environmentId] as const,
   list: (projectId: string) => ["previews", "list", projectId] as const,
   detail: (id: string) => ["previews", "detail", id] as const,
+  // Under "previews" so saving the recipe also rechecks the CI image scope.
+  images: (projectId: string) => ["previews", "images", projectId] as const,
 };
 
 export const recipeQuery = (projectId: string, environmentId: string) =>
@@ -227,6 +246,27 @@ export const previewListQuery = (projectId: string) =>
     queryFn: ({ signal }) => request<PreviewList>("GET", `/api/projects/${encodeURIComponent(projectId)}/environment-previews`, undefined, signal),
     refetchInterval: (query) => (query.state.data?.previews.some((preview) => settling.has(preview.state)) ? 4_000 : 30_000),
   });
+
+// Preview environments are created and removed after the triggering request returns, so the project
+// hierarchy is refreshed when a poll shows a preview environment appear or go away.
+export function usePreviewList(projectId: string) {
+  const list = useQuery(previewListQuery(projectId));
+  const client = useQueryClient();
+  const topology = list.data?.previews
+    .map((preview) => `${preview.id}:${preview.environment_id}`)
+    .sort()
+    .join(",");
+  const seen = useRef(topology);
+  useEffect(() => {
+    if (topology === undefined) return;
+    if (seen.current !== undefined && seen.current !== topology) {
+      void client.invalidateQueries({ queryKey: keys.projects });
+      void client.invalidateQueries({ queryKey: keys.workloads });
+    }
+    seen.current = topology;
+  }, [client, topology]);
+  return list;
+}
 
 export const previewQuery = (id: string) =>
   queryOptions({
@@ -262,6 +302,14 @@ export function usePreviewAction() {
   const invalidate = useInvalidatePreviews();
   return useMutation({
     mutationFn: ({ id, action }: { id: string; action: PreviewAction }) => request<{ ok: boolean }>("POST", `/api/environment-previews/${encodeURIComponent(id)}/${action}`),
+    onSettled: invalidate,
+  });
+}
+
+export function useApproveCIInputs() {
+  const invalidate = useInvalidatePreviews();
+  return useMutation({
+    mutationFn: ({ id, identity }: { id: string; identity: string }) => request<{ ok: boolean }>("POST", `/api/environment-previews/${encodeURIComponent(id)}/approve`, { ci_identity: identity }),
     onSettled: invalidate,
   });
 }

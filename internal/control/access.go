@@ -433,7 +433,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		if strings.HasSuffix(path, "/status-share") || strings.HasSuffix(path, "/status-page") || strings.Contains(path, "/configuration/drafts") {
 			return s.requirePermission(w, r, "project", id, "edit_configuration")
 		}
-		if r.Method == "GET" && r.Context().Value(apiRouteKey{}) != nil {
+		if r.Method == "GET" && (r.Context().Value(apiRouteKey{}) != nil || strings.HasSuffix(path, "/preview-images")) {
 			return s.requireAccess(w, r, "project", id, 1)
 		}
 		if r.Method == "GET" && strings.HasSuffix(path, "/connections") {

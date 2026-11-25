@@ -675,6 +675,14 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		if !supported {
 			return errors.New("upgrade and verify the worker before deploying environment previews")
 		}
+		if r.EnvironmentPreview.ImageRegistry != "" {
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'preview_ci_images')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+				return err
+			}
+			if !supported {
+				return errors.New("upgrade and verify the worker before deploying CI preview images")
+			}
+		}
 	}
 	if r.Action == "deploy" && r.GuardedDeploy != nil && *r.GuardedDeploy {
 		var supported bool
@@ -784,6 +792,9 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	}
 	if r.Action == "build" && r.Registry == nil {
 		return errors.New("connect a registry before building images")
+	}
+	if r.EnvironmentPreview != nil && r.EnvironmentPreview.ImageRegistry != "" && (r.Registry == nil || r.Registry.Server != r.EnvironmentPreview.ImageRegistry) {
+		return errors.New("the CI preview registry connection is missing or changed")
 	}
 	if r.Backup != nil && r.Backup.StorageID != "" {
 		c, err := s.readConnection(ctx, r.Backup.StorageID, team, "storage")

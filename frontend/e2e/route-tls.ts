@@ -99,12 +99,15 @@ export interface Verified {
 }
 
 // An HTTPS request with SNI for hostname, verified against the test CA. Rejects when the ingress serves any
-// certificate the CA did not issue for that hostname.
-export function verified(hostname: string, ca: string, path = "/"): Promise<Verified> {
+// certificate the CA did not issue for that hostname. An optional Authorization value is sent as given.
+export function verified(hostname: string, ca: string, path = "/", authorization?: string): Promise<Verified> {
+  if (authorization !== undefined && /[\r\n]/.test(authorization)) return Promise.reject(new Error("The Authorization value must not contain CR or LF"));
   const { pipe, close } = ingressTunnel();
   const socket = connect({ socket: pipe, servername: hostname, ca, rejectUnauthorized: true });
+  const headers: Record<string, string> = { Host: hostname, Connection: "close" };
+  if (authorization !== undefined) headers.Authorization = authorization;
   return new Promise<Verified>((resolve, reject) => {
-    const request = httpsRequest({ createConnection: () => socket, host: hostname, path, method: "GET", headers: { Host: hostname, Connection: "close" }, timeout: 30_000 }, (response) => {
+    const request = httpsRequest({ createConnection: () => socket, host: hostname, path, method: "GET", headers, timeout: 30_000 }, (response) => {
       const peer = (response.socket as TLSSocket).getPeerCertificate();
       const fingerprint = createHash("sha256").update(peer.raw).digest("hex");
       let body = "";

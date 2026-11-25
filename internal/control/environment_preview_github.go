@@ -255,6 +255,13 @@ func (s *Server) applyPreviewSignal(ctx context.Context, project string, reposit
 		return "", err != nil, err
 	}
 	suffix := strings.TrimPrefix(branch, prefix)
+	var ciKey bool
+	if err = s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM preview_ci_slots WHERE project_id=$1 AND suffix=$2)`, project, suffix).Scan(&ciKey); err != nil {
+		return "", true, err
+	}
+	if ciKey {
+		return "This preview key is reserved for CI image submissions.", false, nil
+	}
 	// A branch that names an existing preview through another repository joins it.
 	err = s.DB.QueryRow(ctx, `SELECT id FROM environment_previews WHERE project_id=$1 AND suffix=$2 AND state<>'deleting'`, project, suffix).Scan(&previewID)
 	if err == nil {
@@ -263,6 +270,13 @@ func (s *Server) applyPreviewSignal(ctx context.Context, project string, reposit
 			return "", true, err
 		}
 		defer tx.Rollback(ctx)
+		p, problem := s.loadPreviewRow(ctx, tx, previewID, true)
+		if problem != nil {
+			return "", true, problem
+		}
+		if p.Snapshot.CI != nil {
+			return "This preview key is reserved for CI image submissions.", false, nil
+		}
 		if _, err = tx.Exec(ctx, `INSERT INTO environment_preview_branches(preview_id,repository_id,repository,branch,head,checked_at) VALUES($1,$2,$3,$4,'',now()) ON CONFLICT DO NOTHING`, previewID, repository, repositoryName(clone), branch); err != nil {
 			return "", true, err
 		}
@@ -350,7 +364,7 @@ func (s *Server) updatePreviewBranch(ctx context.Context, id string, repository 
 	if err != nil {
 		return err
 	}
-	if p.State == "deleting" {
+	if p.State == "deleting" || p.Snapshot.CI != nil {
 		return tx.Commit(ctx)
 	}
 	var previous string
