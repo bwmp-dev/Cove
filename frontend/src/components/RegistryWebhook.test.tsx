@@ -61,6 +61,7 @@ function policyStatus(enabled: boolean | null): ImageUpdatePolicyStatus {
     stale: true,
     updates: null,
     ownership_required: false,
+    retained_images: {},
   };
 }
 

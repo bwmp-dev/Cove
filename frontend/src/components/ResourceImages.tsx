@@ -270,8 +270,9 @@ function ServiceImages({ workload }: { workload: Workload }) {
         onCancel={() => setConfirmPull(false)}
         onDeploy={(reason) => queue.mutate({ action: "deploy", pull_latest: true, reason }, { onSettled: () => setConfirmPull(false) })}
       >
-        This deploys the saved configuration again after pulling the currently configured tags, so containers are replaced. Newer version tags are not selected, and
-        services with a build section are rebuilt instead of pulled. Deployment approval and freeze rules still apply.
+        This deploys the saved configuration again, so containers are replaced. Services whose image an active automatic image update policy applied keep running
+        that exact image; other services pull their configured tags first. Newer version tags are not selected, and services with a build section are rebuilt
+        instead of pulled. Deployment approval and freeze rules still apply.
       </DeployDialog>
     </Section>
   );

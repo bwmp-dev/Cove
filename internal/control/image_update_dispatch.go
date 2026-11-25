@@ -57,13 +57,18 @@ func (s *Server) dispatchImageUpdate(ctx context.Context, id string) error {
 	}
 	var policyData []byte
 	var generation, consumed string
+	var retainedData []byte
 	var lastCheck *string
 	var updated time.Time
-	if err = tx.QueryRow(ctx, `SELECT policy,generation,consumed_candidate,processed_check_id,updated_at FROM image_update_policies WHERE workload_id=$1 FOR UPDATE`, id).Scan(&policyData, &generation, &consumed, &lastCheck, &updated); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT policy,generation,consumed_candidate,processed_check_id,updated_at,retained_images FROM image_update_policies WHERE workload_id=$1 FOR UPDATE`, id).Scan(&policyData, &generation, &consumed, &lastCheck, &updated, &retainedData); err != nil {
 		return err
 	}
 	var policy worker.ImageUpdatePolicy
 	if err = json.Unmarshal(policyData, &policy); err != nil {
+		return err
+	}
+	var retained map[string]retainedImageUpdate
+	if err = json.Unmarshal(retainedData, &retained); err != nil {
 		return err
 	}
 	var ownerAllowed bool
@@ -151,7 +156,7 @@ func (s *Server) dispatchImageUpdate(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	if policy.Mode == "auto" && updates.State == "available" && updates.Key != consumed {
+	if policy.Mode == "auto" && updates.State == "available" && (updates.Key != consumed || missingRetainedImageTargets(updates.Pins, retained)) {
 		if !withinDeploymentWindow(policy.WindowStart, policy.WindowEnd, time.Now().UTC().Format("15:04")) {
 			return finish("Waiting for the image update UTC maintenance window.")
 		}

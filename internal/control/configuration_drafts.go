@@ -505,6 +505,9 @@ func (s *Server) applyProjectConfiguration(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			return fail("could not save resource", 409)
 		}
+		if err = s.pruneImageUpdateRetention(ctx, tx, id, config); err != nil {
+			return fail("retained image versions unavailable", 503)
+		}
 		if _, err = tx.Exec(ctx, `INSERT INTO configuration_resource_keys(project_id,key,workload_id) VALUES($1,$2,$3) ON CONFLICT(workload_id) DO NOTHING`, project, resource.Key, id); err != nil {
 			return fail("resource key is already in use", 409)
 		}

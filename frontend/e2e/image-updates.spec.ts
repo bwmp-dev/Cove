@@ -87,7 +87,8 @@ interface Operation {
   created_at: string;
   approval_required?: boolean;
   approved_at?: string | null;
-  result: { error?: string } | null;
+  reason?: string;
+  result:{ error?: string } | null;
 }
 
 interface PolicyStatus {
@@ -100,6 +101,7 @@ interface PolicyStatus {
   last_error: string;
   stale: boolean;
   updates: { state: string; message?: string; candidates: { service: string; current: string; target: string }[] } | null;
+  retained_images: Record<string, { configured: string; image: string }>;
 }
 
 const compose = (image: string) =>
@@ -121,7 +123,9 @@ const compose = (image: string) =>
 const utc = (date: Date) => date.toISOString().slice(11, 16);
 const terminal = /^(succeeded|failed|cancelled|interrupted)$/;
 
-test("image updates: a notify policy finds an in-range tag and an approved automatic policy deploys its exact digest", async ({ page }, testInfo) => {
+const rollbackPause = "Automatic image updates were turned off by a rollback request. Turn the policy on and save to resume automatic updates.";
+
+test("image updates: a notify policy finds an in-range tag and an approved automatic policy deploys and retains its exact digest", async ({ page }, testInfo) => {
   test.skip(!enabled, "Needs scripts/test-browser.py --registry-webhooks");
   test.setTimeout(900_000);
   const { owner, database } = fixtureOwner();
@@ -189,8 +193,9 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
     return image;
   };
 
-  // The initial release must pull the published 1.0.0, so the local tag is removed before the first deploy.
-  const initialImage = publish("1.0.0", "first");
+  // The versions staging used: v1.10.0 is lower than v1.12.0 by SemVer although it sorts after it as text.
+  // The initial release must pull the published v1.10.0, so the local tag is removed before the first deploy.
+  const initialImage = publish("v1.10.0", "first");
   docker("image", "rm", initialImage);
 
   const project = (await (await page.request.post(panelPath("/api/projects"), { headers, data: { name: "Image update project" } })).json()) as { id: string };
@@ -276,7 +281,7 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
     return policyStatus();
   };
 
-  // 1. An enabled notify policy for app with ^1.0.0, created with the keyboard from the Registry page.
+  // 1. An enabled notify policy for app with ^1.10.0, created with the keyboard from the Registry page.
   await page.goto(panelPath(`/resources/${id}/registry`));
   await expect(policy.getByRole("button", { name: "Create policy", exact: true })).toBeVisible({ timeout: 30_000 });
   await policy.getByRole("switch", { name: "Enable image update policy", exact: true }).focus();
@@ -286,22 +291,22 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
   await page.keyboard.press("Enter");
   await page.getByRole("option", { name: "app", exact: true }).click();
   await policy.getByLabel("Version range 1", { exact: true }).focus();
-  await page.keyboard.type("^1.0.0");
+  await page.keyboard.type("^1.10.0");
   await capture(page, testInfo, "image-updates-form");
-  await savePolicy("Create policy", { enabled: true, mode: "notify", rules: [{ service: "app", range: "^1.0.0" }], window_start: "", window_end: "" });
+  await savePolicy("Create policy", { enabled: true, mode: "notify", rules: [{ service: "app", range: "^1.10.0" }], window_start: "", window_end: "" });
   await expect(policy.getByText("Policy created", { exact: true })).toBeVisible();
 
-  publish("1.1.0", "second");
-  publish("2.0.0", "forbidden-major");
+  publish("v1.12.0", "second");
+  publish("v2.0.0", "forbidden-major");
 
-  // 2. Notify finds 1.1.0, never 2.0.0, and leaves the running container alone.
+  // 2. Notify finds v1.12.0, never v2.0.0, and leaves the running container alone.
   const notified = await discover((status) => status.updates?.state === "available");
   const candidate = notified.updates?.candidates.find((item) => item.service === "app");
-  expect(candidate?.target).toMatch(new RegExp(`^${repository.replace(/[.]/g, "\\.")}:1\\.1\\.0@sha256:[a-f0-9]{64}$`));
+  expect(candidate?.target).toMatch(new RegExp(`^${repository.replace(/[.]/g, "\\.")}:v1\\.12\\.0@sha256:[a-f0-9]{64}$`));
   const target = candidate?.target ?? "";
   const targetDigest = target.split("@")[1] ?? "";
   await page.goto(panelPath(`/resources/${id}/registry`));
-  await expect(policy.getByRole("list", { name: "Update candidates", exact: true })).toContainText(`1.1.0@${targetDigest}`, { timeout: 30_000 });
+  await expect(policy.getByRole("list", { name: "Update candidates", exact: true })).toContainText(`v1.12.0@${targetDigest}`, { timeout: 30_000 });
   await expect(policy.getByText("Update available", { exact: true })).toBeVisible();
   await page.waitForTimeout(20_000);
   expect((await deploys()).length).toBe(deployCount);
@@ -318,7 +323,7 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
   await page.getByRole("option", { name: "Deploy automatically", exact: true }).click();
   await policy.getByLabel("Starts", { exact: true }).fill(closedStart);
   await policy.getByLabel("Ends", { exact: true }).fill(closedEnd);
-  await savePolicy("Save policy", { enabled: true, mode: "auto", rules: [{ service: "app", range: "^1.0.0" }], window_start: closedStart, window_end: closedEnd }, "Turn on automatic updates");
+  await savePolicy("Save policy", { enabled: true, mode: "auto", rules: [{ service: "app", range: "^1.10.0" }], window_start: closedStart, window_end: closedEnd }, "Turn on automatic updates");
   await discover((status) => status.updates?.state === "available");
   await expect.poll(async () => (await policyStatus()).last_error, { timeout: 180_000 }).toMatch(/maintenance window/i);
   expect((await deploys()).length).toBe(deployCount);
@@ -329,7 +334,7 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
   // 4. Clearing the window resets the policy and queues one ordinary deploy, held for approval.
   await policy.getByLabel("Starts", { exact: true }).fill("");
   await policy.getByLabel("Ends", { exact: true }).fill("");
-  await savePolicy("Save policy", { enabled: true, mode: "auto", rules: [{ service: "app", range: "^1.0.0" }], window_start: "", window_end: "" });
+  await savePolicy("Save policy", { enabled: true, mode: "auto", rules: [{ service: "app", range: "^1.10.0" }], window_start: "", window_end: "" });
   await expect.poll(async () => {
     await failIfCheckFailed();
     return (await deploys()).length;
@@ -357,7 +362,7 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
   expect(updated.id).not.toBe(initial.id);
   expect(updated.version).toBe("second");
   // The deploy ran the exact pinned candidate, not a re-pulled tag: the running image ID matches an independent inspect
-  // of the candidate reference, which an ordinary deploy also keeps as Config.Image. The saved Compose still names 1.0.0.
+  // of the candidate reference, which an ordinary deploy also keeps as Config.Image. The saved Compose still names v1.10.0.
   owned.images.push(`${repository}@${targetDigest}`);
   expect(updated.imageId).toBe(docker("image", "inspect", "--format", "{{.Id}}", target));
   expect(updated.image).toBe(target);
@@ -373,9 +378,141 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
   await expect(policy.getByText("Current", { exact: true })).toBeVisible({ timeout: 30_000 });
   await capture(page, testInfo, "image-updates-updated");
 
+  // 6. The applied digest is retained for app while the policy stays on and automatic.
+  expect((await policyStatus()).retained_images).toEqual({ app: { configured: initialImage, image: target } });
+  await expect(policy.getByRole("list", { name: "Retained images", exact: true })).toContainText(target);
+  await capture(page, testInfo, "image-updates-retained");
+
+  const queue = async (data: Record<string, unknown>) => {
+    const response = await page.request.post(panelPath(`/api/workloads/${id}/operations`), { headers, data });
+    expect(response.ok(), await response.text()).toBe(true);
+    return ((await response.json()) as { id: string }).id;
+  };
+  // Later deploys are approved through the API the operation page uses; the page's own flow is covered above.
+  const approveAndFinish = async (operationId: string) => {
+    await expect.poll(async () => (await operation(operationId)).approval_required === true, { timeout: 120_000 }).toBe(true);
+    const approved = await page.request.post(panelPath(`/api/operations/${operationId}/approve`), { headers, data: {} });
+    expect(approved.ok(), await approved.text()).toBe(true);
+    const result = await finished(operationId);
+    expect(result.state, result.result?.error).toBe("succeeded");
+  };
+  const settled = () => expect.poll(async () => (await policyStatus()).active_operation_id, { timeout: 300_000, intervals: [3_000] }).toBeNull();
+  const runsApplied = () => {
+    const running = container();
+    expect(running).toMatchObject({ image: target, imageId: updated.imageId, version: "second" });
+    return running;
+  };
+  const retained = { app: { configured: initialImage, image: target } };
+
+  // 7. An ordinary manual deploy keeps the exact applied digest; the saved Compose keeps the base tag.
+  await approveAndFinish(await queue({ action: "deploy" }));
+  runsApplied();
+  expect(((await (await page.request.get(panelPath(`/api/workloads/${id}`))).json()) as { compose: string }).compose).toContain(`image: ${initialImage}`);
+  expect((await policyStatus()).retained_images).toEqual(retained);
+
+  // 8. An ordinary restart keeps running the applied image, not the configured tag.
+  const restarted = await finished(await queue({ action: "restart" }));
+  expect(restarted.state, restarted.result?.error).toBe("succeeded");
+  runsApplied();
+
+  // 9. A matching registry push of the configured tag only requests a check while the policy is on; it never downgrades.
+  const registry = await page.request.post(panelPath("/api/registries"), { headers, data: { name: "Image update fixture registry", registry: { server, username: "fixture", password: "fixture-unused" } } });
+  expect([200, 201], await registry.text()).toContain(registry.status());
+  const selected = await page.request.put(panelPath(`/api/workloads/${id}/registry`), { headers, data: { registry_id: ((await registry.json()) as { id: string }).id } });
+  expect(selected.ok(), await selected.text()).toBe(true);
+  const hook = await page.request.put(panelPath(`/api/workloads/${id}/registry-webhook`), { headers, data: { provider: "distribution", enabled: true, filters: [{ repository: "team/app", tag: "v1.10.0" }] } });
+  expect(hook.status(), await hook.text()).toBe(201);
+  const { endpoint, token } = (await hook.json()) as { endpoint: string; token: string };
+  const hookPath = new URL(endpoint).pathname;
+  expect(hookPath.startsWith(panelPath("/hooks/registry/"))).toBe(true);
+  const baseDigest = docker("image", "inspect", "--format", "{{range .RepoDigests}}{{.}} {{end}}", initial.imageId).split(/\s+/).find((digest) => digest.startsWith(`${repository}@`))?.split("@")[1];
+  if (!baseDigest) throw new Error("The base release has no registry digest");
+  const hookStatus = async () => {
+    const response = await page.request.get(panelPath(`/api/workloads/${id}/registry-webhook`));
+    const text = await response.text();
+    expect(response.status(), text).toBe(200);
+    return JSON.parse(text) as { pending_at: string | null; last_ignored_reason: string };
+  };
+  await settled();
+  const beforePush = (await deploys()).length;
+  const checkBeforePush = (await policyStatus()).last_check_id;
+  const pushed = await page.request.post(hookPath, {
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    data: { events: [{ id: `image-updates-${Date.now()}`, timestamp: new Date().toISOString(), action: "push", target: { mediaType: "application/vnd.docker.distribution.manifest.v2+json", repository: "team/app", tag: "v1.10.0", digest: baseDigest } }] },
+  });
+  expect(pushed.status(), await pushed.text()).toBe(202);
+  expect(await pushed.json()).toMatchObject({ status: "accepted", new_events: 1 });
+  // The dispatcher hands the push to the policy, which then runs its own fresh check; both must be observed.
+  await expect.poll(async () => {
+    await failIfCheckFailed();
+    const pushState = await hookStatus();
+    const status = await policyStatus();
+    return (
+      pushState.pending_at === null &&
+      pushState.last_ignored_reason.includes("Image update policy requested a fresh check") &&
+      status.last_check_id !== null &&
+      status.last_check_id !== checkBeforePush &&
+      !status.stale &&
+      status.updates?.state === "current"
+    );
+  }, { timeout: 300_000, intervals: [3_000] }).toBe(true);
+  await settled();
+  expect((await deploys()).length).toBe(beforePush);
+  runsApplied();
+  expect((await policyStatus()).retained_images).toEqual(retained);
+
+  // 10. Saving a different image for app clears its retention, and the next deploy runs the saved tag.
+  const savedTag = `${repository}:v1.12.0`;
+  const current = (await (await page.request.get(panelPath(`/api/workloads/${id}`))).json()) as { name: string; node_id: string };
+  const changed = await page.request.put(panelPath(`/api/workloads/${id}`), { headers, data: { name: current.name, node_id: current.node_id, kind: "service", compose: compose(savedTag) } });
+  expect([200, 202], await changed.text()).toContain(changed.status());
+  expect((await policyStatus()).retained_images).toEqual({});
+  await settled();
+  await approveAndFinish(await queue({ action: "deploy" }));
+  expect(container()).toMatchObject({ image: savedTag, version: "second" });
+
+  // 11. Requesting a rollback turns the policy off at once, before approval, and says how to resume.
+  await page.goto(panelPath(`/operations/${automatic.id}`));
+  const rollback = page.getByRole("button", { name: "Roll back to this release", exact: true });
+  await expect(rollback).toBeEnabled({ timeout: 30_000 });
+  await rollback.click();
+  const rollbackDialog = page.getByRole("dialog", { name: "Roll back to this release?" });
+  await expect(rollbackDialog).toContainText("Requesting a rollback turns off this resource's image update policy if it is set to deploy automatically");
+  await rollbackDialog.getByLabel(/Reason/).fill("Image update retention check");
+  const rollbackRequest = page.waitForResponse((response) => new URL(response.url()).pathname === panelPath(`/api/workloads/${id}/operations`) && response.request().method() === "POST");
+  await rollbackDialog.getByRole("button", { name: "Roll back", exact: true }).click();
+  const rollbackResponse = await rollbackRequest;
+  expect(rollbackResponse.ok(), await rollbackResponse.text()).toBe(true);
+  const rollbackId = ((await rollbackResponse.json()) as { id: string }).id;
+  await expect(page).toHaveURL(new RegExp(`/operations/${rollbackId}$`));
+  const paused = await policyStatus();
+  expect(paused.configuration?.enabled).toBe(false);
+  expect(paused.retained_images).toEqual({});
+  expect(paused.last_error).toBe(rollbackPause);
+  expect(await operation(rollbackId)).toMatchObject({ action: "rollback", state: "queued" });
+  await approveAndFinish(rollbackId);
+  const rollbackReason = (await operation(rollbackId)).reason ?? "";
+  expect(rollbackReason).toContain("Image update retention check");
+  expect(rollbackReason).toContain("Rollback paused automatic image updates.");
+  // Rollback recreates the release from its immutable snapshot, which names the local image ID, not the registry reference.
+  expect(container()).toMatchObject({ image: updated.imageId, imageId: updated.imageId, version: "second" });
+  expect((await policyStatus()).configuration?.enabled).toBe(false);
+
+  // 12. One explicit save turns the policy back on.
+  await settled();
+  await page.goto(panelPath(`/resources/${id}/registry`));
+  await expect(policy.getByText(rollbackPause, { exact: true })).toBeVisible({ timeout: 30_000 });
   await policy.getByRole("switch", { name: "Enable image update policy", exact: true }).focus();
   await page.keyboard.press("Space");
-  await savePolicy("Save policy", { enabled: false, mode: "auto", rules: [{ service: "app", range: "^1.0.0" }], window_start: "", window_end: "" });
+  await savePolicy("Save policy", { enabled: true, mode: "auto", rules: [{ service: "app", range: "^1.10.0" }], window_start: "", window_end: "" }, "Turn on automatic updates");
+  expect((await policyStatus()).configuration?.enabled).toBe(true);
+  await settled();
+  await page.goto(panelPath(`/resources/${id}/registry`));
+  await expect(policy.getByRole("button", { name: "Save policy", exact: true })).toBeVisible({ timeout: 30_000 });
+
+  await policy.getByRole("switch", { name: "Enable image update policy", exact: true }).focus();
+  await page.keyboard.press("Space");
+  await savePolicy("Save policy", { enabled: false, mode: "auto", rules: [{ service: "app", range: "^1.10.0" }], window_start: "", window_end: "" });
   expect((await policyStatus()).configuration?.enabled).toBe(false);
   await capture(page, testInfo, "image-updates-disabled");
 });

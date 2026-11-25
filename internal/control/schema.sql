@@ -1852,6 +1852,7 @@ ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS creator_id text RE
 ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS generation text NOT NULL DEFAULT '';
 ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS dispatch_started boolean NOT NULL DEFAULT false;
 ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS processed_check_id text REFERENCES operations(id) ON DELETE SET NULL;
+ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS retained_images jsonb NOT NULL DEFAULT '{}' CHECK(jsonb_typeof(retained_images)='object');
 
 CREATE TABLE IF NOT EXISTS managed_registries (
  id text PRIMARY KEY REFERENCES workloads(id) ON DELETE RESTRICT,

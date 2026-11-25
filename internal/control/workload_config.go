@@ -340,6 +340,9 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
+		err = s.pruneImageUpdateRetention(r.Context(), tx, r.PathValue("id"), in)
+	}
+	if err == nil {
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {

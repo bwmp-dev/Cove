@@ -24,7 +24,7 @@ func testRegistryUpdateDocker(t *testing.T, updates bool) {
 	if runtime.GOOS != "linux" || os.Getenv("COVE_TEST_REGISTRY_HOOK_DOCKER") != "1" {
 		t.Skip("requires an explicitly selected isolated Linux Docker daemon and local PostgreSQL")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	docker := func(args ...string) string {
 		t.Helper()
@@ -44,7 +44,7 @@ func testRegistryUpdateDocker(t *testing.T, updates bool) {
 	f := newRegistryHookFixture(t, "distribution", server)
 	reference := server + "/team/app:stable"
 	if updates {
-		reference = server + "/team/app:1.0.0"
+		reference = server + "/team/app:v1.10.0"
 	}
 
 	compose := "services:\n  app:\n    image: " + reference + "\n    pull_policy: always\n    command: [sh, -c, 'cat /version > /tmp/seen; sleep 300']\n    healthcheck:\n      test: [CMD, 'true']\n      interval: 1s\n      timeout: 1s\n      retries: 10\n"
@@ -194,10 +194,10 @@ func testRegistryUpdateDocker(t *testing.T, updates bool) {
 	f.call("root", "default", "PUT", "/api/projects/project/deployment-policy", deploymentPolicy{Approval: true}, 200)
 	if updates {
 		f.sql(`UPDATE nodes SET capabilities=capabilities || '{"image_updates":true,"exact_promotion":true}'::jsonb WHERE id='node'`)
-		f.call("root", "default", "PUT", f.path+"/image-update-policy", worker.ImageUpdatePolicy{Enabled: true, Mode: "auto", Rules: []worker.ImageUpdateRule{{Service: "app", Range: "^1.0.0"}}}, 200)
-		reference = server + "/team/app:2.0.0"
+		f.call("root", "default", "PUT", f.path+"/image-update-policy", worker.ImageUpdatePolicy{Enabled: true, Mode: "auto", Rules: []worker.ImageUpdateRule{{Service: "app", Range: ">=1.10.0 <2.0.0"}}}, 200)
+		reference = server + "/team/app:v2.0.0"
 		push("forbidden-major")
-		reference = server + "/team/app:1.1.0"
+		reference = server + "/team/app:v1.12.0"
 	}
 	push("second")
 	wait("native push requested redeploy", func() bool { return f.status().Pending != nil })
@@ -251,6 +251,44 @@ func testRegistryUpdateDocker(t *testing.T, updates bool) {
 	logs, _ := engine.Logs(lastID)
 	if strings.Contains(logs, "generated-fixture-only") || strings.Contains(logs, f.token) {
 		t.Fatal("credentials leaked into operation logs")
+	}
+	if updates {
+		applied := docker("inspect", "--format", "{{.Image}}", container)
+		if !strings.Contains(request.ImagePins["app"], "/team/app:v1.12.0@sha256:") {
+			t.Fatal("automatic version was not the verified v1.12.0 candidate", request.ImagePins)
+		}
+		f.call("root", "default", "PUT", "/api/projects/project/deployment-policy", deploymentPolicy{}, 200)
+		ordinary := jsonString(t, f.call("root", "default", "POST", f.path+"/operations", map[string]any{"action": "deploy", "pull_latest": true}, 202), "id")
+		settled(ordinary)
+		container = docker("ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+f.id)
+		if docker("inspect", "--format", "{{.Image}}", container) != applied || docker("exec", container, "cat", "/tmp/seen") != "second" {
+			t.Fatal("ordinary deploy reverted the automatically applied digest")
+		}
+		restart := jsonString(t, f.call("root", "default", "POST", f.path+"/operations", map[string]any{"action": "restart"}, 202), "id")
+		settled(restart)
+		if docker("inspect", "--format", "{{.Image}}", container) != applied {
+			t.Fatal("restart changed the automatically applied digest")
+		}
+		var current struct {
+			ComposePath string `json:"compose_path"`
+		}
+		data, err := os.ReadFile(filepath.Join(engine.Root, "workloads", f.id, "current.json"))
+		if err != nil || json.Unmarshal(data, &current) != nil || current.ComposePath == "" {
+			t.Fatal("retained release snapshot", err)
+		}
+		// Restart does not recreate missing containers; force reconstruction from its same immutable snapshot separately.
+		docker("compose", "--project-name", "cove-"+f.id, "--file", current.ComposePath, "up", "--detach", "--force-recreate", "--no-build", "--pull", "never")
+		container = docker("ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+f.id)
+		if docker("inspect", "--format", "{{.Image}}", container) != applied || docker("exec", container, "cat", "/tmp/seen") != "second" {
+			t.Fatal("forced recreation from the retained snapshot reverted its image")
+		}
+		var saved struct {
+			Compose string `json:"compose"`
+		}
+		if err := json.Unmarshal(f.call("root", "default", "GET", f.path, nil, 200).Body.Bytes(), &saved); err != nil || !strings.Contains(saved.Compose, "/team/app:v1.10.0") {
+			t.Fatal("automatic retention rewrote the saved base version", saved.Compose, err)
+		}
+		t.Log("Verified automatic v1.12.0 exact image survives ordinary deploy, restart and explicit snapshot force-recreate while saved Compose stays v1.10.0")
 	}
 	f.call("root", "default", "DELETE", f.path+"/registry-webhook", nil, 200)
 }

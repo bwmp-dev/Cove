@@ -129,6 +129,16 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "target networking unavailable", 409)
 		return
 	}
+	retainedPreview := request
+	if _, err = s.retainImageUpdatesForRequest(r.Context(), tx, &retainedPreview); err != nil {
+		var retained *imageUpdateRetentionError
+		if errors.As(err, &retained) {
+			http.Error(w, retained.Error(), 409)
+		} else {
+			http.Error(w, "Retained automatic image versions are unavailable; check the image update policy before deploying.", 503)
+		}
+		return
+	}
 	if err = worker.ValidateRequest(request); err != nil {
 		http.Error(w, "invalid promotion configuration", 400)
 		return

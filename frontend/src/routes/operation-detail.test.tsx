@@ -121,6 +121,7 @@ it("sends an optional reason with a rollback", async () => {
   await waitFor(() => expect(rollback).toBeEnabled());
   fireEvent.click(rollback);
   const dialog = await screen.findByRole("dialog", { name: "Roll back to this release?" });
+  expect(within(dialog).getByText(/Requesting a rollback turns off this resource's image update policy if it is set to deploy automatically, even if the rollback waits for approval or fails\./)).toHaveTextContent("Turn the policy on and save it to resume automatic updates.");
   fireEvent.change(within(dialog).getByLabelText(/Reason/), { target: { value: "Bad migration" } });
   fireEvent.click(within(dialog).getByRole("button", { name: "Roll back" }));
   await waitFor(() => expect(request).toHaveBeenCalledWith("POST", "/api/workloads/w1/operations", { action: "rollback", release: "op-1", reason: "Bad migration" }));

@@ -191,7 +191,11 @@ func TestImageUpdateDispatchGuards(t *testing.T) {
 				}
 				f.sql(`UPDATE workloads SET configuration=$2 WHERE id=$1`, f.id, changed)
 			case "already consumed":
-				f.sql(`UPDATE image_update_policies SET consumed_candidate=$2 WHERE workload_id=$1`, f.id, update.Key)
+				retained, err := json.Marshal(map[string]retainedImageUpdate{"app": {Configured: "registry.example.test/team/app:stable", Image: update.Pins["app"]}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.sql(`UPDATE image_update_policies SET consumed_candidate=$2,retained_images=$3 WHERE workload_id=$1`, f.id, update.Key, retained)
 			}
 			if err = f.s.dispatchImageUpdates(ctx); err != nil {
 				t.Fatal(err)

@@ -200,6 +200,10 @@ func (s *Server) composeAdoptions(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "could not update pending configuration", 503)
 				return
 			}
+			if err = s.pruneImageUpdateRetention(ctx, tx, item.Request.Workload, item.Configuration); err != nil {
+				http.Error(w, "retained image versions unavailable", 503)
+				return
+			}
 		}
 		payload, err = s.sealJSON(saved)
 		if err == nil {

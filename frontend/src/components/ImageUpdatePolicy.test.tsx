@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, request } from "../api/client";
-import type { ImageUpdatePolicyStatus } from "../api/image-updates";
+import { imageUpdatePolicyKey, type ImageUpdatePolicyStatus } from "../api/image-updates";
 import type { Workload } from "../api/types";
 import { ImageUpdatePolicy } from "./ImageUpdatePolicy";
 
@@ -50,6 +50,7 @@ function status(extra: Partial<ImageUpdatePolicyStatus> = {}): ImageUpdatePolicy
     stale: false,
     updates: null,
     ownership_required: false,
+    retained_images: {},
     ...extra,
   };
 }
@@ -292,6 +293,49 @@ it("shows a recorded hold such as the maintenance window as a policy message", a
   expect(await screen.findByText("Latest policy message")).toBeInTheDocument();
   expect(screen.getByText("Waiting for the image update UTC maintenance window.")).toBeInTheDocument();
   expect(screen.getByText("10:00–11:00 UTC")).toBeInTheDocument();
+});
+
+it("shows images retained by automatic updates and explains what keeps and clears them", async () => {
+  serve(() =>
+    saved(
+      { mode: "auto" },
+      { retained_images: { app: { configured: "registry.example.test/team/app:v1.10.0", image: "registry.example.test/team/app:v1.12.0@sha256:abc" } } },
+    ),
+  );
+  renderPolicy();
+  const list = await screen.findByRole("list", { name: "Retained images" });
+  expect(within(list).getByText("app")).toBeInTheDocument();
+  expect(within(list).getByText("registry.example.test/team/app:v1.10.0")).toBeInTheDocument();
+  expect(within(list).getByText("registry.example.test/team/app:v1.12.0@sha256:abc")).toBeInTheDocument();
+  expect(screen.getByText(/Ordinary deploys, Pull images and redeploy, restart and scale keep running them/)).toHaveTextContent(
+    "Saving a different image for a service in Compose clears its retained image, and its next deploy uses the saved image. Turning the policy off, switching to notify only or requesting a rollback clears them. A deploy that cannot keep them is refused rather than using the configured tags.",
+  );
+});
+
+it("reads a missing retained map as empty and copies only known retained fields", async () => {
+  serve(() => ({ ...saved({ mode: "auto" }), retained_images: undefined }));
+  const client = renderPolicy();
+  expect(await screen.findByText("Status")).toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Retained images" })).not.toBeInTheDocument();
+  expect(client.getQueryData<ImageUpdatePolicyStatus>(imageUpdatePolicyKey("w1"))?.retained_images).toEqual({});
+  cleanup();
+
+  serve(() => ({
+    ...saved({ mode: "auto" }),
+    retained_images: {
+      app: { configured: "app:1", image: "app:2@sha256:abc", token: "secret" },
+      broken: null,
+      db: { configured: 7 },
+      list: ["app:1", "app:2"],
+      text: "app:2",
+      blank: { configured: "", image: "app:2@sha256:abc" },
+      partial: { configured: "app:1" },
+    },
+  }));
+  const next = renderPolicy();
+  const list = await screen.findByRole("list", { name: "Retained images" });
+  expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+  expect(next.getQueryData<ImageUpdatePolicyStatus>(imageUpdatePolicyKey("w1"))?.retained_images).toEqual({ app: { configured: "app:1", image: "app:2@sha256:abc" } });
 });
 
 it("keeps unknown and unrecognised results unknown and marks incomplete candidates", async () => {

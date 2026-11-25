@@ -57,6 +57,7 @@ function RollbackRelease({ workload, release }: { workload: WorkloadSummary; rel
       rollback.mutate({ release, reason }, { onSettled: () => setConfirm(false), onSuccess: ({ id }) => void navigate({ to: "/operations/$operationId", params: { operationId: id } }) });
     }}>
       <p>This restores the saved Compose configuration and local images. It does not restore database contents or volumes, undo migrations, or edit your saved resource configuration. The worker must still have this release and its images.</p>
+      <p className="mt-2">Requesting a rollback turns off this resource&apos;s image update policy if it is set to deploy automatically, even if the rollback waits for approval or fails. Turn the policy on and save it to resume automatic updates.</p>
       <div className="mt-4"><ReasonField id="rollback-reason" value={reason} onChange={setReason} /></div>
     </ConfirmDialog>
   </>;

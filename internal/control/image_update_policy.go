@@ -114,7 +114,13 @@ func (s *Server) imageUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "could not save policy", 503)
 			return
 		}
-		_, err = tx.Exec(r.Context(), `INSERT INTO image_update_policies(workload_id,policy,generation,creator_id) VALUES($1,$2,$3,NULLIF($4,'')) ON CONFLICT(workload_id) DO UPDATE SET policy=$2,generation=$3,creator_id=NULLIF($4,''),last_check_id=NULL,processed_check_id=NULL,last_operation_id=NULL,consumed_candidate='',last_error='',updated_at=now()`, id, data, resourceID(), actor(r).ID)
+		_, err = tx.Exec(r.Context(), `INSERT INTO image_update_policies(workload_id,policy,generation,creator_id) VALUES($1,$2,$3,NULLIF($4,'')) ON CONFLICT(workload_id) DO UPDATE SET policy=$2,generation=$3,creator_id=NULLIF($4,''),last_check_id=NULL,processed_check_id=NULL,last_operation_id=NULL,consumed_candidate='',last_error='',retained_images=CASE WHEN $5 THEN image_update_policies.retained_images ELSE '{}'::jsonb END,updated_at=now()`, id, data, resourceID(), actor(r).ID, policy.Enabled && policy.Mode == "auto")
+		if err == nil && policy.Enabled && policy.Mode == "auto" {
+			var config workloadInput
+			if err = s.unsealJSON(encrypted, &config); err == nil {
+				err = s.pruneImageUpdateRetention(r.Context(), tx, id, config)
+			}
+		}
 		if err == nil {
 			_, err = tx.Exec(r.Context(), `UPDATE workloads SET next_image_check_at=now() WHERE id=$1`, id)
 		}
@@ -139,19 +145,23 @@ func (s *Server) imageUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) readImageUpdatePolicy(ctx context.Context, id string) (map[string]any, error) {
-	var data []byte
+	var data, retainedData []byte
 	var checked, operation *string
 	var message string
 	var ownerAllowed bool
-	err := s.DB.QueryRow(ctx, `SELECT p.policy,p.last_check_id,p.last_operation_id,p.last_error,cove_automation_allowed(p.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate') AND cove_automation_allowed(p.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'edit_configuration') FROM image_update_policies p JOIN workloads w ON w.id=p.workload_id WHERE p.workload_id=$1`, id).Scan(&data, &checked, &operation, &message, &ownerAllowed)
+	err := s.DB.QueryRow(ctx, `SELECT p.policy,p.last_check_id,p.last_operation_id,p.last_error,p.retained_images,cove_automation_allowed(p.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate') AND cove_automation_allowed(p.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'edit_configuration') FROM image_update_policies p JOIN workloads w ON w.id=p.workload_id WHERE p.workload_id=$1`, id).Scan(&data, &checked, &operation, &message, &retainedData, &ownerAllowed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return map[string]any{"ownership_required": false, "configuration": nil, "last_check_id": nil, "last_operation_id": nil, "last_error": "", "updates": nil, "checked_at": nil}, nil
+		return map[string]any{"retained_images": map[string]retainedImageUpdate{}, "ownership_required": false, "configuration": nil, "last_check_id": nil, "last_operation_id": nil, "last_error": "", "updates": nil, "checked_at": nil}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	var policy worker.ImageUpdatePolicy
 	if err = json.Unmarshal(data, &policy); err != nil {
+		return nil, err
+	}
+	retained := map[string]retainedImageUpdate{}
+	if err = json.Unmarshal(retainedData, &retained); err != nil {
 		return nil, err
 	}
 	var updates json.RawMessage
@@ -167,7 +177,7 @@ func (s *Server) readImageUpdatePolicy(ctx context.Context, id string) (map[stri
 			checkedAt = &value
 		}
 	}
-	return map[string]any{"ownership_required": !ownerAllowed, "configuration": policy, "last_check_id": checked, "last_operation_id": operation, "last_error": message, "updates": updates, "checked_at": checkedAt}, nil
+	return map[string]any{"retained_images": retained, "ownership_required": !ownerAllowed, "configuration": policy, "last_check_id": checked, "last_operation_id": operation, "last_error": message, "updates": updates, "checked_at": checkedAt}, nil
 }
 
 func imageUpdateConfigurationHash(configuration []byte) string {

@@ -78,7 +78,8 @@ func TestCPUScalingDocker(t *testing.T) {
 		}
 		return op
 	}
-	run(Request{ID: "initial", Action: "deploy", Compose: compose, Rollout: options, Limits: map[string]ServiceLimits{"app": {CPUs: 0.5, MemoryMB: 32}}}, "succeeded")
+	appliedImage := command("docker", "image", "inspect", "--format", "{{.Id}}", "busybox:1.37")
+	run(Request{ID: "initial", Action: "deploy", Compose: compose, ImagePins: map[string]string{"app": appliedImage}, Rollout: options, Limits: map[string]ServiceLimits{"app": {CPUs: 0.5, MemoryMB: 32}}}, "succeeded")
 	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, DisableKeepAlives: true}}
 	request := func() error {
 		req, _ := http.NewRequestWithContext(ctx, "GET", "https://127.0.0.1/", nil)
@@ -149,6 +150,9 @@ func TestCPUScalingDocker(t *testing.T) {
 		t.Fatal(ids)
 	}
 	for _, id := range ids {
+		if image := command("docker", "inspect", "--format", "{{.Image}}", id); image != appliedImage {
+			t.Fatal("scale-up changed the retained immutable image", image, appliedImage)
+		}
 		command("docker", "exec", id, "touch", "/tmp/quiet")
 	}
 	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
@@ -192,6 +196,8 @@ func TestCPUScalingDocker(t *testing.T) {
 	run(Request{ID: "scale-down", Action: "deploy", Compose: compose, Rollout: options, Scale: &CPUScaleOptions{Generation: sample.Generation, Before: sample.Replicas, Replicas: next, CPUPercent: sample.CPUPercent}}, "succeeded")
 	if got := strings.Fields(command("docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+workload)); len(got) != 1 {
 		t.Fatal(got)
+	} else if image := command("docker", "inspect", "--format", "{{.Image}}", got[0]); image != appliedImage {
+		t.Fatal("scale-down changed the retained immutable image", image, appliedImage)
 	}
 	stop()
 	clients.Wait()

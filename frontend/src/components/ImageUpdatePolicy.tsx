@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { Plus, RotateCw, X } from "lucide-react";
 import { useId, useRef, useState, type FormEvent } from "react";
 import { errorMessage } from "../api/client";
-import { imageUpdatePolicyQuery, useSaveImageUpdatePolicy, type ImageUpdateCandidate, type ImageUpdateMode, type ImageUpdatePolicyStatus } from "../api/image-updates";
+import { imageUpdatePolicyQuery, useSaveImageUpdatePolicy, type ImageUpdateCandidate, type ImageUpdateMode, type ImageUpdatePolicyStatus, type RetainedImage } from "../api/image-updates";
 import type { Workload } from "../api/types";
 import { useOnline } from "../lib/hooks";
 import {
@@ -225,6 +225,7 @@ function PolicyStatus({ status, unreadable }: { status: ImageUpdatePolicyStatus;
         </Notice>
       )}
       {updates && <UpdateResult state={updates.state} message={updates.message} candidates={updates.candidates} mode={configuration.mode} previous={previous} />}
+      <RetainedImages retained={status.retained_images} />
       {status.last_error && (
         // The control plane also records holds here, such as waiting for the maintenance window.
         <Notice tone="warn" title="Latest policy message">
@@ -278,6 +279,27 @@ function CandidateList({ candidates, label }: { candidates: ImageUpdateCandidate
         </li>
       ))}
     </ul>
+  );
+}
+
+function RetainedImages({ retained }: { retained: Record<string, RetainedImage> }) {
+  const entries = Object.entries(retained).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      <ul aria-label="Retained images" className="divide-y divide-line rounded-md border border-line">
+        {entries.map(([service, image]) => (
+          <li key={service} className="min-w-0 space-y-1 px-3 py-2">
+            <p className="text-[13px] font-medium break-words text-fg">{service}</p>
+            <Reference label="Saved" value={image.configured} />
+            <Reference label="Applied" value={image.image} />
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs text-fg-muted">
+        Automatic updates applied these exact images. Ordinary deploys, Pull images and redeploy, restart and scale keep running them while the policy stays on and automatic. Saving a different image for a service in Compose clears its retained image, and its next deploy uses the saved image. Turning the policy off, switching to notify only or requesting a rollback clears them. A deploy that cannot keep them is refused rather than using the configured tags.
+      </p>
+    </div>
   );
 }
 
@@ -449,7 +471,7 @@ function ModeHint({ mode }: { mode: ImageUpdateMode }) {
   if (mode === "auto") {
     return (
       <>
-        Cove queues a deploy that pins every service to an exact image: the verified candidate digest for updated services, and the exact local image for the rest. Candidates are verified for the node&apos;s platform, saved Compose and image tags are never edited, and an image is never replaced by a lower version.
+        Cove queues a deploy that pins every service to an exact image: the verified candidate digest for updated services, and the exact local image for the rest. Candidates are verified for the node&apos;s platform, saved Compose and image tags are never edited, and an image is never replaced by a lower version. Later ordinary deploys keep the applied image until the service&apos;s saved image changes, the policy is turned off or set to notify only, or a rollback is requested.
       </>
     );
   }

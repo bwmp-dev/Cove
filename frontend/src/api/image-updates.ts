@@ -38,6 +38,13 @@ export interface ImageUpdateResult {
   candidates: ImageUpdateCandidate[];
 }
 
+// The exact image an automatic update applied, kept by later ordinary deploys while the policy stays on and automatic
+// and the service's saved image is still `configured`.
+export interface RetainedImage {
+  configured: string;
+  image: string;
+}
+
 export interface ImageUpdatePolicyStatus {
   configuration: ImageUpdateConfiguration | null;
   services: ImageUpdateService[];
@@ -56,11 +63,24 @@ export interface ImageUpdatePolicyStatus {
   // Whoever last saved the policy no longer holds Edit configuration and Operate access, whether or not it is on.
   // Version discovery, notifications and automatic deploys wait until that access returns or someone saves it again.
   ownership_required: boolean;
+  // Keyed by service; empty when nothing is retained or the policy is off.
+  retained_images: Record<string, RetainedImage>;
 }
 
 const path = (workloadId: string) => `/api/workloads/${encodeURIComponent(workloadId)}/image-update-policy`;
 
 export const imageUpdatePolicyKey = (workloadId: string) => ["image-update-policy", workloadId] as const;
+
+function retainedImages(value: unknown): Record<string, RetainedImage> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const retained: Record<string, RetainedImage> = {};
+  for (const [service, entry] of Object.entries(value)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const { configured, image } = entry as Partial<Record<keyof RetainedImage, unknown>>;
+    if (typeof configured === "string" && configured !== "" && typeof image === "string" && image !== "") retained[service] = { configured, image };
+  }
+  return retained;
+}
 
 // Null lists are normalised, missing booleans read as false (and a missing stale flag as stale) so unknown data never
 // enables anything or reads as current, and
@@ -85,6 +105,7 @@ function metadata(status: ImageUpdatePolicyStatus): ImageUpdatePolicyStatus {
     stale: status.stale !== false,
     updates: updates ? { state: updates.state, message: updates.message, candidates: updates.candidates ?? [] } : null,
     ownership_required: status.ownership_required === true,
+    retained_images: retainedImages(status.retained_images),
   };
 }
 

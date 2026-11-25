@@ -100,6 +100,9 @@ func (s *Server) composeBundle(w http.ResponseWriter, r *http.Request) {
 			_, err = tx.Exec(r.Context(), `UPDATE workloads SET configuration=$2 WHERE id=$1`, id, encrypted)
 		}
 		if err == nil {
+			err = s.pruneImageUpdateRetention(r.Context(), tx, id, config)
+		}
+		if err == nil {
 			err = tx.Commit(r.Context())
 		}
 		if err != nil {

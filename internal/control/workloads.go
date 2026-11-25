@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -459,6 +460,26 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	retainedPreview := request
+	if _, err = s.retainImageUpdatesForRequest(r.Context(), tx, &retainedPreview); err != nil {
+		var retained *imageUpdateRetentionError
+		if errors.As(err, &retained) {
+			http.Error(w, retained.Error(), 409)
+		} else {
+			http.Error(w, "Retained automatic image versions are unavailable; check the image update policy before deploying.", 503)
+		}
+		return
+	}
+	if in.Action == "rollback" {
+		paused, pauseErr := pauseImageUpdatesForRollback(r.Context(), tx, request.Workload)
+		if pauseErr != nil {
+			http.Error(w, "could not pause automatic image updates for rollback", 503)
+			return
+		}
+		if paused {
+			in.Reason = strings.TrimSpace(in.Reason + "\nRollback paused automatic image updates.")
+		}
+	}
 	if err = worker.ValidateRequest(request); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -943,6 +964,13 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		}
 	}
 	if !cancelRequested {
+		if err := s.prepareRetainedImageUpdates(ctx, &request); err != nil {
+			var retained *imageUpdateRetentionError
+			if errors.As(err, &retained) {
+				return s.failOperation(ctx, id, retained.Error())
+			}
+			return s.failOperation(ctx, id, "Retained automatic image versions are unavailable; check the image update policy before deploying.")
+		}
 		if err := s.prepareRouteCertificates(ctx, &request); err != nil {
 			return s.failOperation(ctx, id, "Selected route certificates are unavailable; check certificate ownership and expiry.")
 		}
@@ -1135,13 +1163,25 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 			return err
 		}
 		defer tx.Rollback(ctx)
+		var workload string
+		if err = tx.QueryRow(ctx, `SELECT id FROM workloads WHERE id=$1 FOR UPDATE`, request.Workload).Scan(&workload); err != nil {
+			return err
+		}
 		if _, err = tx.Exec(ctx, `UPDATE operations SET result=jsonb_set(result,'{rollout,phase}',to_jsonb($3::text)),updated_at=now() WHERE id=$1 AND workload_id=$2 AND action IN ('deploy','rollback') AND result->'rollout'->>'phase'='waiting'`, rollout.Release, request.Workload, rollout.Phase); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id); err != nil {
 			return err
 		}
+		if rollout.Phase == "completed" {
+			if err = s.recordAppliedImageUpdates(ctx, tx, rollout.Release); err != nil {
+				return err
+			}
+		}
 		return tx.Commit(ctx)
+	}
+	if request.Action == "deploy" && state == "succeeded" {
+		return s.commitImageUpdateOutcome(ctx, request, result)
 	}
 	_, err = s.DB.Exec(ctx, "UPDATE operations SET state=$1,result=$2,updated_at=now() WHERE id=$3", state, result, id)
 	if err == nil && state == "succeeded" && request.Action == "pitr_forget" {
