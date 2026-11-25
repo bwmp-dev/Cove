@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { KeyRound, Plus, RotateCw, Trash2, X } from "lucide-react";
 import { useId, useRef, useState, type FormEvent } from "react";
 import { errorMessage } from "../api/client";
+import { imageUpdatePolicyQuery } from "../api/image-updates";
 import { registryWebhookQuery, useRemoveRegistryWebhook, useRotateRegistryWebhook, useSaveRegistryWebhook, type RegistryWebhookProvider, type RegistryWebhookStatus } from "../api/registry-webhook";
 import type { Workload } from "../api/types";
 import { useOnline } from "../lib/hooks";
@@ -57,6 +58,11 @@ interface Actions {
 const description =
   "When the connected registry reports a push of a watched tag, Cove queues an ordinary deploy that pulls the resource’s configured image tags and redeploys. Compose and tag settings stay unchanged, and each deploy still passes approval, freeze windows, deploy windows and quotas.";
 
+// An enabled image update policy takes over matching pushes: the control plane requests a fresh image check and the
+// policy's mode, ranges and window decide what is deployed. Without one, pushes still pull and redeploy directly.
+const policyDescription =
+  "An image update policy is on for this resource, so a push of a watched tag requests a fresh image check instead of a deploy. The policy's mode, version ranges and maintenance window decide whether anything is deployed. Compose and tag settings stay unchanged.";
+
 export function RegistryWebhook({ workload }: { workload: Workload }) {
   if (workload.kind === "job" || isManagedPreview(workload)) {
     return (
@@ -72,6 +78,8 @@ export function RegistryWebhook({ workload }: { workload: Workload }) {
 
 function WebhookSection({ workload }: { workload: Workload }) {
   const status = useQuery(registryWebhookQuery(workload.id));
+  const policy = useQuery(imageUpdatePolicyQuery(workload.id));
+  const policyControls = policy.data?.configuration?.enabled === true;
   const save = useSaveRegistryWebhook(workload.id);
   const rotate = useRotateRegistryWebhook(workload.id);
   const remove = useRemoveRegistryWebhook(workload.id);
@@ -82,7 +90,7 @@ function WebhookSection({ workload }: { workload: Workload }) {
   return (
     <Section
       title="Registry webhook"
-      description={description}
+      description={policyControls ? policyDescription : description}
       width="form"
       flush
       actions={
@@ -96,13 +104,14 @@ function WebhookSection({ workload }: { workload: Workload }) {
         {!online && <Notice tone="warn" title="You are offline">Saving, rotating and removing are paused until the connection returns.</Notice>}
         {secret && <OneTimeSecret secret={secret} onClear={() => setSecret(null)} />}
         {outcome && <Notice tone="success" title={outcome} />}
+        {policy.isError && <p className="text-xs text-fg-muted">Could not read the image update policy. If one is on, it decides what a matching push deploys.</p>}
       </div>
-      <WebhookBody workload={workload} status={status} actions={actions} online={online} />
+      <WebhookBody workload={workload} status={status} actions={actions} online={online} policyControls={policyControls} />
     </Section>
   );
 }
 
-function WebhookBody({ workload, status, actions, online }: { workload: Workload; status: UseQueryResult<RegistryWebhookStatus>; actions: Actions; online: boolean }) {
+function WebhookBody({ workload, status, actions, online, policyControls }: { workload: Workload; status: UseQueryResult<RegistryWebhookStatus>; actions: Actions; online: boolean; policyControls: boolean }) {
   if (status.isPending) return <LoadingRows label="Loading registry webhook" rows={3} />;
   if (status.isError) {
     return (
@@ -116,13 +125,13 @@ function WebhookBody({ workload, status, actions, online }: { workload: Workload
   const blocked = online ? undefined : "You are offline.";
   return (
     <div className="divide-y divide-line">
-      {data.configuration && <SavedWebhook status={data} actions={actions} access={access} blocked={blocked} />}
-      <WebhookSettings workload={workload} status={data} actions={actions} access={access} blocked={blocked} />
+      {data.configuration && <SavedWebhook status={data} actions={actions} access={access} blocked={blocked} policyControls={policyControls} />}
+      <WebhookSettings workload={workload} status={data} actions={actions} access={access} blocked={blocked} policyControls={policyControls} />
     </div>
   );
 }
 
-function SavedWebhook({ status, actions, access, blocked }: { status: RegistryWebhookStatus; actions: Actions; access: WebhookAccess; blocked?: string }) {
+function SavedWebhook({ status, actions, access, blocked, policyControls }: { status: RegistryWebhookStatus; actions: Actions; access: WebhookAccess; blocked?: string; policyControls: boolean }) {
   const problem = webhookProblem(status, access);
   return (
     <Subsection title="Webhook">
@@ -131,14 +140,14 @@ function SavedWebhook({ status, actions, access, blocked }: { status: RegistryWe
           {problem.text}
         </Notice>
       )}
-      <WebhookDetails status={status} />
+      <WebhookDetails status={status} policyControls={policyControls} />
       <WebhookActivity status={status} />
       {access.canEdit && <ManageWebhook status={status} actions={actions} canOperate={access.canOperate} blocked={blocked} />}
     </Subsection>
   );
 }
 
-function WebhookSettings({ workload, status, actions, access, blocked }: { workload: Workload; status: RegistryWebhookStatus; actions: Actions; access: WebhookAccess; blocked?: string }) {
+function WebhookSettings({ workload, status, actions, access, blocked, policyControls }: { workload: Workload; status: RegistryWebhookStatus; actions: Actions; access: WebhookAccess; blocked?: string; policyControls: boolean }) {
   if (!status.registry) {
     if (status.configuration) return null;
     return (
@@ -162,7 +171,7 @@ function WebhookSettings({ workload, status, actions, access, blocked }: { workl
       </Subsection>
     );
   }
-  return <WebhookForm key={JSON.stringify(status.configuration)} status={status} actions={actions} canOperate={access.canOperate} blocked={blocked} />;
+  return <WebhookForm key={JSON.stringify(status.configuration)} status={status} actions={actions} canOperate={access.canOperate} blocked={blocked} policyControls={policyControls} />;
 }
 
 function FilterList({ filters }: { filters: { repository: string; tag: string }[] }) {
@@ -179,7 +188,7 @@ function FilterList({ filters }: { filters: { repository: string; tag: string }[
 
 const none = <span className="text-fg-muted">None yet</span>;
 
-function WebhookDetails({ status }: { status: RegistryWebhookStatus }) {
+function WebhookDetails({ status, policyControls }: { status: RegistryWebhookStatus; policyControls: boolean }) {
   const saved = status.configuration;
   if (!saved) return null;
   return (
@@ -198,7 +207,7 @@ function WebhookDetails({ status }: { status: RegistryWebhookStatus }) {
           ),
         },
         { term: "Saved for", value: <span className="font-mono text-xs break-all">{saved.registry_server}</span> },
-        { term: "Automatic deploys", value: saved.enabled ? "On" : "Off" },
+        { term: "Automatic deploys", value: saved.enabled ? (policyControls ? "On: pushes request an image check for the image update policy" : "On") : "Off" },
       ]}
     />
   );
@@ -389,7 +398,7 @@ function formStatus(save: Save, dirty: boolean, blocked: string | undefined, rot
   return "No unsaved changes";
 }
 
-function WebhookForm({ status, actions, canOperate, blocked }: { status: RegistryWebhookStatus; actions: Actions; canOperate: boolean; blocked?: string }) {
+function WebhookForm({ status, actions, canOperate, blocked, policyControls }: { status: RegistryWebhookStatus; actions: Actions; canOperate: boolean; blocked?: string; policyControls: boolean }) {
   const formRef = useRef<HTMLFormElement>(null);
   const saved = webhookDraftFrom(status);
   const [draft, setDraft] = useState<WebhookDraft>(saved);
@@ -435,7 +444,7 @@ function WebhookForm({ status, actions, canOperate, blocked }: { status: Registr
       <UnsavedChangesGuard dirty={changed} />
       <fieldset disabled={!!blocked} className="min-w-0">
         <legend className="sr-only">Registry webhook settings</legend>
-        <WebhookFields status={status} draft={draft} errors={errors} enableError={enableError} canOperate={canOperate} onChange={edit} />
+        <WebhookFields status={status} draft={draft} errors={errors} enableError={enableError} canOperate={canOperate} policyControls={policyControls} onChange={edit} />
       </fieldset>
       {save.isError && <SaveError error={save.error} existing={!!existing} />}
       <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-line px-4 py-3">
@@ -458,6 +467,7 @@ function WebhookForm({ status, actions, canOperate, blocked }: { status: Registr
           setConfirmEnable(false);
           send();
         }}
+        policyControls={policyControls}
       />
     </form>
   );
@@ -474,7 +484,7 @@ function SaveError({ error, existing }: { error: unknown; existing: boolean }) {
   );
 }
 
-function EnableDialog({ open, takesOwnership, pending, onCancel, onConfirm }: { open: boolean; takesOwnership: boolean; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
+function EnableDialog({ open, takesOwnership, pending, policyControls, onCancel, onConfirm }: { open: boolean; takesOwnership: boolean; pending: boolean; policyControls: boolean; onCancel: () => void; onConfirm: () => void }) {
   return (
     <ConfirmDialog
       open={open}
@@ -484,12 +494,14 @@ function EnableDialog({ open, takesOwnership, pending, onCancel, onConfirm }: { 
       onCancel={onCancel}
       onConfirm={onConfirm}
     >
-      Every authenticated push of a watched tag queues a deploy that pulls the resource’s configured image tags and redeploys, replacing its containers. Approval, freeze windows, deploy windows and quotas still apply, and a failed deploy is not retried automatically. You become the webhook’s owner, so pushes deploy only while you keep Edit configuration and Operate access. If someone else owned it, their pending webhook deploys are cancelled.
+      {policyControls
+        ? "While the image update policy is on, every authenticated push of a watched tag requests a fresh image check, and the policy decides whether to notify or deploy. If the policy is turned off, pushes queue a deploy that pulls the resource’s configured image tags and redeploys, replacing its containers. You become the webhook’s owner, so pushes are acted on only while you keep Edit configuration and Operate access. If someone else owned it, their pending webhook deploys are cancelled."
+        : "Every authenticated push of a watched tag queues a deploy that pulls the resource’s configured image tags and redeploys, replacing its containers. Approval, freeze windows, deploy windows and quotas still apply, and a failed deploy is not retried automatically. You become the webhook’s owner, so pushes deploy only while you keep Edit configuration and Operate access. If someone else owned it, their pending webhook deploys are cancelled."}
     </ConfirmDialog>
   );
 }
 
-function WebhookFields({ status, draft, errors, enableError, canOperate, onChange }: { status: RegistryWebhookStatus; draft: WebhookDraft; errors: FilterErrors; enableError?: string; canOperate: boolean; onChange: (draft: WebhookDraft) => void }) {
+function WebhookFields({ status, draft, errors, enableError, canOperate, policyControls, onChange }: { status: RegistryWebhookStatus; draft: WebhookDraft; errors: FilterErrors; enableError?: string; canOperate: boolean; policyControls: boolean; onChange: (draft: WebhookDraft) => void }) {
   const id = useId();
   const server = status.registry?.server;
   const providerHint = providerError(draft.provider, server) ?? "Changing the provider issues a new secret and needs the registry set up again.";
@@ -525,7 +537,7 @@ function WebhookFields({ status, draft, errors, enableError, canOperate, onChang
         disabled={(!status.worker_supported || !canOperate) && !draft.enabled}
         onChange={(event) => onChange({ ...draft, enabled: event.target.checked })}
         aria-invalid={enableError ? true : undefined}
-        description={enableError ? <span className="text-bad">{enableError}</span> : canOperate ? "Off keeps the webhook and its secret, ignores pushes and cancels queued webhook deploys." : "Turning on automatic deploys needs Operate access as well as Edit configuration. Off keeps the webhook and its secret, ignores pushes and cancels queued webhook deploys."}
+        description={enableError ? <span className="text-bad">{enableError}</span> : [canOperate ? "" : "Turning on automatic deploys needs Operate access as well as Edit configuration.", "Off keeps the webhook and its secret, ignores pushes and cancels queued webhook deploys.", policyControls ? "While the image update policy is on, a push requests an image check instead of a deploy." : ""].filter(Boolean).join(" ")}
       />
       <FilterEditor filters={draft.filters} errors={errors} onChange={(filters) => onChange({ ...draft, filters })} />
     </Subsection>

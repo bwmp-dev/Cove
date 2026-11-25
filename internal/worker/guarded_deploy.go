@@ -100,6 +100,7 @@ func (e *Engine) testDeploymentCandidate(ctx context.Context, r Request, dir str
 	if declared != "null" && declared != "{}" {
 		return "", errors.New("guarded deployment does not support images with declared persistent volumes")
 	}
+	preserveImageReference(service, refs[0])
 	service["image"] = digest
 	service["pull_policy"] = "never"
 	delete(service, "build")

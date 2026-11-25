@@ -350,6 +350,10 @@ func (s *Server) queueOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		request = worker.Request{ID: id, Workload: request.Workload, Action: "image_check", Kind: config.Kind, JobService: config.JobService}
+		if err = s.prepareImageUpdateCheck(r.Context(), tx, &request); err != nil {
+			http.Error(w, "image update configuration unavailable", 409)
+			return
+		}
 	}
 	if in.PullLatest && config.Kind == "job" {
 		http.Error(w, "pull and redeploy is unavailable for jobs; run the job explicitly", 400)
@@ -683,6 +687,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 		if err := s.dispatchGithubFeedback(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
+		if err := s.dispatchImageUpdates(ctx); err != nil && ctx.Err() == nil {
+			return err
+		}
 		if err := s.dispatchRegistryWebhooks(ctx); err != nil && ctx.Err() == nil {
 			return err
 		}
@@ -795,6 +802,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if proceed, err := s.registryWebhookDispatch(ctx, id, false); err != nil || !proceed {
 		return err
 	}
+	if proceed, err := s.imageUpdateDispatch(ctx, id, false); err != nil || !proceed {
+		return err
+	}
 	var cancelRequested bool
 	if err = s.DB.QueryRow(ctx, "SELECT cancel_requested FROM operations WHERE id=$1", id).Scan(&cancelRequested); err != nil {
 		return err
@@ -845,6 +855,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 		}
 	}
 	method := "submit"
+	if request.ImageUpdates != nil {
+		method = "submit_image_updates"
+	}
 	if request.Scale != nil {
 		method = "submit_cpu_scale"
 	}
@@ -895,6 +908,9 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 			return err
 		}
 		if proceed, err := s.registryWebhookDispatch(ctx, id, true); err != nil || !proceed {
+			return err
+		}
+		if proceed, err := s.imageUpdateDispatch(ctx, id, true); err != nil || !proceed {
 			return err
 		}
 	}

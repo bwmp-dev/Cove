@@ -615,11 +615,14 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 	case "probe":
 		p := Inspect(ctx)
 		return RPCResponse{Probe: &p}
-	case "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
+	case "submit_image_updates", "submit", "submit_cpu_scale", "submit_routes_v2", "submit_routes_v3", "submit_routes_v4", "submit_routes_v5", "submit_routes_v6":
 		if r.Request == nil {
 			return RPCResponse{Error: "request required"}
 		}
 		expected := "submit"
+		if r.Request.ImageUpdates != nil {
+			expected = "submit_image_updates"
+		}
 		if r.Request.Scale != nil {
 			expected = "submit_cpu_scale"
 		}

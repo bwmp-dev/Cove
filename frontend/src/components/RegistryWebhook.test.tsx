@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, request } from "../api/client";
+import type { ImageUpdatePolicyStatus } from "../api/image-updates";
 import type { RegistryWebhookStatus } from "../api/registry-webhook";
 import type { Workload } from "../api/types";
 import { RegistryWebhook } from "./RegistryWebhook";
@@ -42,9 +43,32 @@ function savedStatus(extra: Partial<RegistryWebhookStatus> = {}): RegistryWebhoo
 
 type Handler = (method: string, path: string, body?: unknown) => unknown;
 
-function serve(handler: Handler) {
+const policyPath = "/api/workloads/w1/image-update-policy";
+
+function policyStatus(enabled: boolean | null): ImageUpdatePolicyStatus {
+  return {
+    configuration: enabled === null ? null : { enabled, mode: "auto", rules: [{ service: "web", range: "^1.2.0" }], window_start: "", window_end: "" },
+    services: [{ service: "web", image: "registry.example.test/team/web:1.2.0", mutable: true }],
+    eligible: true,
+    unavailable_reason: "",
+    worker_supported: true,
+    node_ready: true,
+    active_operation_id: null,
+    last_check_id: null,
+    last_operation_id: null,
+    last_error: "",
+    checked_at: null,
+    stale: true,
+    updates: null,
+    ownership_required: false,
+  };
+}
+
+// The webhook section also reads the image update policy; by default no policy exists.
+function serve(handler: Handler, policy: () => unknown = () => policyStatus(null)) {
   vi.mocked(request).mockImplementation((method: string, path: string, body?: unknown) => {
     try {
+      if (path === policyPath) return Promise.resolve(policy());
       return Promise.resolve(handler(method, path, body));
     } catch (error) {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
@@ -62,7 +86,7 @@ function renderWebhook(workload: Workload = service) {
   return client;
 }
 
-const calls = (method: string) => vi.mocked(request).mock.calls.filter(([callMethod]) => callMethod === method);
+const calls = (method: string) => vi.mocked(request).mock.calls.filter(([callMethod, path]) => callMethod === method && path !== policyPath);
 
 // Nothing durable or cached may hold the one-time token.
 function expectTokenOnlyOnScreen(client: QueryClient) {
@@ -381,4 +405,36 @@ it("follows a queued webhook deploy to its outcome and discovers new pushes whil
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("says pushes request an image check instead of a deploy while an image update policy is on", async () => {
+  serve(
+    (method) => (method === "PUT" ? savedStatus() : savedStatus({ configuration: { provider: "distribution", enabled: false, filters, registry_id: "r1", registry_server: registry.server } })),
+    () => policyStatus(true),
+  );
+  renderWebhook();
+  expect(await screen.findByText(/a push of a watched tag requests a fresh image check instead of a deploy/)).toBeInTheDocument();
+  expect(screen.queryByText(/queues an ordinary deploy that pulls/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("switch", { name: "Pull and redeploy on push" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save webhook" }));
+  const dialog = screen.getByRole("dialog", { name: "Turn on automatic pull and redeploy?" });
+  expect(dialog).toHaveTextContent("requests a fresh image check, and the policy decides whether to notify or deploy");
+});
+
+it("keeps the direct pull-and-redeploy copy when the saved image update policy is off", async () => {
+  serve(() => savedStatus(), () => policyStatus(false));
+  renderWebhook();
+  expect(await screen.findByText(/queues an ordinary deploy that pulls the resource’s configured image tags/)).toBeInTheDocument();
+  expect(await screen.findByText("On")).toBeInTheDocument();
+});
+
+it("does not claim direct deploys are certain when the image update policy cannot be read", async () => {
+  serve(
+    () => savedStatus(),
+    () => {
+      throw new ApiError(503, "image update policy unavailable");
+    },
+  );
+  renderWebhook();
+  expect(await screen.findByText(/Could not read the image update policy\. If one is on, it decides what a matching push deploys\./)).toBeInTheDocument();
 });

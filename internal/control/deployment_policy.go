@@ -111,7 +111,24 @@ func (s *Server) approveDeployment(w http.ResponseWriter, r *http.Request) {
 }
 
 func deploymentGate(ctx context.Context, tx pgx.Tx, id string) (string, error) {
-	return scheduledDeploymentGate(ctx, tx, id, time.Now())
+	now := time.Now()
+	reason, err := scheduledDeploymentGate(ctx, tx, id, now)
+	if err != nil || reason != "" {
+		return reason, err
+	}
+	var start, end string
+	var override bool
+	err = tx.QueryRow(ctx, `SELECT d.window_start,d.window_end,o.emergency_override_at IS NOT NULL FROM image_update_deployments d JOIN operations o ON o.id=d.operation_id WHERE d.operation_id=$1`, id).Scan(&start, &end, &override)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !override && !withinDeploymentWindow(start, end, now.UTC().Format("15:04")) {
+		return "Waiting for the image update UTC maintenance window.", nil
+	}
+	return "", nil
 }
 
 func validDeploymentWindow(start, end string) bool {

@@ -119,6 +119,7 @@ const outcomeGroups = {
   directory: { title: "Directory provisioning", description: "Accounts and team access changed by SCIM, LDAP or GitHub team sync, and directory syncs that did not finish." },
   certificates: { title: "Certificates", description: "Certificate requests and renewals by a resource's issuers that did not finish. Messages name the event only, without hostnames or keys. Open the resource's Domains page for details." },
   tunnels: { title: "Cloudflare Tunnel", description: "A node's Cloudflare Tunnel publishing or cleanup starting to report an error. Messages name the event only, without hostnames, tokens or error details. Only administrator teams' channels receive it. Open the node's Proxy configuration page for details." },
+  images: { title: "Image updates", description: "Newer images found by a resource's image update policy, sent once per candidate. Ordinary image checks do not send this event." },
 } satisfies Record<string, { title: string; description: string }>;
 
 const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: string }> = {
@@ -151,6 +152,7 @@ const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: 
   "identity.sync_failed": { group: "directory", label: "Directory sync failed" },
   "certificate.failed": { group: "certificates", label: "Certificate issuance or renewal failed" },
   "tunnel.failed": { group: "tunnels", label: "Cloudflare Tunnel failed" },
+  "image.update_available": { group: "images", label: "Image update available" },
 };
 
 export interface EventGroup {

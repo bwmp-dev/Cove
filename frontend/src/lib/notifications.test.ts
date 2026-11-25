@@ -68,6 +68,14 @@ it("labels Cloudflare Tunnel failures as a one-off outcome event, never a health
   expect(incidentConditions(["tunnel.failed"])).toEqual([]);
 });
 
+it("groups image update notices as a one-off outcome event, never a health condition", () => {
+  const groups = groupNotificationEvents(["image.update_available", "operation.succeeded"]);
+  expect(groups.map((group) => group.title)).toEqual(["Image updates", "Other operations"]);
+  expect(groups[0]?.events).toEqual([{ value: "image.update_available", label: "Image update available" }]);
+  expect(groups[0]?.health).toBe(false);
+  expect(incidentConditions(["image.update_available"])).toEqual([]);
+});
+
 it("sends exact events without the legacy switches", () => {
   expect(notificationFromForm(form([["provider", "slack"], ["url", " https://hooks.example.com/x "], ["enabled", "on"], ["routing", "events"], ["success", "on"], ["events", "backup.failed"], ["events", "drill.failed"]]))).toEqual({
     provider: "slack", url: "https://hooks.example.com/x", enabled: true, success: false, failure: false, health: false, events: ["backup.failed", "drill.failed"],

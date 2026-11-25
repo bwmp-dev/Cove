@@ -131,6 +131,7 @@ func TestComposeCompatibilityNative(t *testing.T) {
 			}
 			if fixture.name == "literal-dollar-snapshot" {
 				original := before["services"].(map[string]any)["web"].(map[string]any)
+				original["labels"].(map[string]any)["dev.cove.image-reference"] = original["image"]
 				for _, field := range []string{"environment", "command", "labels"} {
 					first, _ := json.Marshal(original[field])
 					second, _ := json.Marshal(web[field])

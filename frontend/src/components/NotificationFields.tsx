@@ -38,7 +38,7 @@ function IncidentConditions({ provider, selected }: { provider: string; selected
   if (conditions.length === 0) return <p className="text-xs text-fg-muted">The control plane reported no health conditions with alert and recovery events.</p>;
   return <fieldset aria-describedby="notification-incident-hint">
     <legend className="text-[13px] font-medium text-fg">Health conditions</legend>
-    <p id="notification-incident-hint" className="mt-0.5 text-xs text-fg-muted">{providerSpec(provider)?.label ?? provider} receives health alerts only. Each condition opens an incident when a failure is confirmed and resolves it when the condition recovers. One-off security, configuration, import, adoption, rollout, CPU scaling and idle sleep events need another channel.</p>
+    <p id="notification-incident-hint" className="mt-0.5 text-xs text-fg-muted">{providerSpec(provider)?.label ?? provider} receives health alerts only. Each condition opens an incident when a failure is confirmed and resolves it when the condition recovers. One-off security, configuration, import, adoption, rollout, CPU scaling, idle sleep and image update events need another channel.</p>
     <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
       {conditions.map((condition) => <label key={condition.value} className={choiceClass}><Checkbox name="incident_events" value={condition.value} defaultChecked={selected.includes(condition.value)} /><span className="min-w-0 break-words">{condition.label}</span></label>)}
     </div>
@@ -124,8 +124,8 @@ export function NotificationFields({ initial, error }: { initial?: Notification;
     ) : (
       <>
         <ChoiceGroup<RoutingMode> legend="Events" name="routing" value={routing} onChange={setRouting} choices={[
-          { value: "groups", label: "By result", description: "Operation successes, failures and health alerts. Security, configuration, import and adoption events are not included." },
-          { value: "events", label: "Specific events", description: "Choose exact operation, health, security, configuration, import and adoption events." },
+          { value: "groups", label: "By result", description: "Operation successes, failures and health alerts. Security, configuration, import, adoption and image update events are not included." },
+          { value: "events", label: "Specific events", description: "Choose exact operation, health, security, configuration, import, adoption and image update events." },
         ]} />
         {routing === "groups" ? (
           <div className="flex flex-wrap gap-1.5" role="group" aria-label="Result groups">

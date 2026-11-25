@@ -14,6 +14,7 @@ import (
 )
 
 type Probe struct {
+	ImageUpdates         bool         `json:"image_updates"`
 	CloudflarePublishing bool         `json:"cloudflare_publishing"`
 	Adoption             bool         `json:"adoption"`
 	Imports              bool         `json:"imports"`
@@ -157,6 +158,7 @@ func Inspect(ctx context.Context) Probe {
 		p.Compose = strings.TrimSpace(string(out))
 	}
 	p.JobImageLifecycle = p.ImageLifecycle
+	p.ImageUpdates = p.ImageLifecycle
 	p.Metrics = inspectMetrics(ctx, "/var/lib/cove")
 	p.SharedHost = inspectSharedHost(ctx, RunCommand, "/")
 	p.Ready = p.OS == "linux" && p.Docker != "" && p.Compose != ""

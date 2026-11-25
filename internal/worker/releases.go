@@ -237,6 +237,8 @@ func (e *Engine) captureRelease(ctx context.Context, r Request, dir string, args
 		if err := e.Run(ctx, dir, []string{"docker", "image", "tag", image, strings.ToLower(retained)}, nil, &limitedBuffer{Limit: 1024}); err != nil {
 			return deployedState{}, err
 		}
+		reference, _ := service["image"].(string)
+		preserveImageReference(service, reference)
 		service["image"] = image
 		service["pull_policy"] = "never"
 		delete(service, "build")

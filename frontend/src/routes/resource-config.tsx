@@ -33,6 +33,7 @@ import { PrivateNetwork } from "../components/PrivateNetwork";
 import { ResourceOwner } from "../components/ResourceOwner";
 import { ResourceRegistry } from "../components/ResourceRegistry";
 import { RegistryWebhook } from "../components/RegistryWebhook";
+import { ImageUpdatePolicy } from "../components/ImageUpdatePolicy";
 import { ResourceImages } from "../components/ResourceImages";
 import { ResourceBuild } from "../components/ResourceBuild";
 import { supportsBuildPublish } from "../lib/builds";
@@ -1053,7 +1054,7 @@ function DatabaseNetworking({ workload }: { workload: Workload }) {
 export function ResourceRegistryPage() {
   const workload = useResource();
   const active = useActiveOperation(workload.id);
-  return <div className="space-y-6"><ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />{supportsBuildPublish(workload) && <ResourceBuild workload={workload} />}{supportsImageLifecycle(workload) && <ResourceImages workload={workload} />}<RegistryWebhook workload={workload} /></div>;
+  return <div className="space-y-6"><ResourceRegistry id={workload.id} canEdit={can(workload.permissions, "edit")} busy={Boolean(active)} />{supportsBuildPublish(workload) && <ResourceBuild workload={workload} />}{supportsImageLifecycle(workload) && <ResourceImages workload={workload} />}<ImageUpdatePolicy workload={workload} /><RegistryWebhook workload={workload} /></div>;
 }
 
 export function ResourceLimits() {

@@ -42,6 +42,7 @@ type Request struct {
 	snapshotCheck          func(context.Context) error
 	volumeMethod           string
 	snapshotFallback       string
+	ImageUpdates           *ImageUpdateOptions      `json:"image_updates,omitempty"`
 	Certificates           []RouteCertificate       `json:"certificates,omitempty"`
 	Scale                  *CPUScaleOptions         `json:"scale,omitempty"`
 	Idle                   *IdlePolicy              `json:"idle,omitempty"`
@@ -246,6 +247,14 @@ func ValidateRequest(r Request) error {
 	}
 	if r.ManagedDatabase && (r.Scale != nil || r.Rollout != nil || r.Idle != nil || r.Build != nil || r.PullLatest || r.ComposeBundle != nil) {
 		return errors.New("managed databases require explicit single-instance deployments")
+	}
+	if r.ImageUpdates != nil {
+		if r.Action != "image_check" || r.Kind == "job" || r.ManagedDatabase {
+			return errors.New("image update discovery requires a service image check")
+		}
+		if err := r.ImageUpdates.Validate(); err != nil {
+			return err
+		}
 	}
 	if err := validateCertificateRequest(r); err != nil {
 		return err

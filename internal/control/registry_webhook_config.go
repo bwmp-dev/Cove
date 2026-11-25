@@ -3,10 +3,7 @@ package control
 import (
 	"cove/internal/worker"
 	"errors"
-	"regexp"
 )
-
-var registryWebhookTag = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 
 type registryWebhookFilter struct {
 	Repository string `json:"repository"`
@@ -45,7 +42,7 @@ func validateRegistryWebhookFilter(filter registryWebhookFilter) error {
 	if err := worker.ValidateRegistryRepository(filter.Repository); err != nil {
 		return err
 	}
-	if filter.Tag != "*" && !registryWebhookTag.MatchString(filter.Tag) {
+	if filter.Tag != "*" && !worker.ValidRegistryTag(filter.Tag) {
 		return errors.New("use a registry tag of at most 128 characters, or * to watch every tag")
 	}
 	return nil

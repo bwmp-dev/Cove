@@ -3,6 +3,7 @@ module cove
 go 1.26.11
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/compose-spec/compose-go/v2 v2.17.0
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/creack/pty v1.1.24

@@ -54,6 +54,8 @@ func revokeSCIMAccess(ctx context.Context, tx pgx.Tx, user string) error {
 		"UPDATE operations SET cancel_requested=true,updated_at=now() WHERE id IN (SELECT operation_id FROM scheduled_job_runs WHERE creator_id=$1) AND state IN ('queued','running')",
 		"UPDATE registry_webhooks SET creator_id=NULL,pending_at=NULL WHERE creator_id=$1",
 		"UPDATE operations SET cancel_requested=true,updated_at=now() WHERE id IN (SELECT operation_id FROM registry_webhook_runs WHERE creator_id=$1) AND state IN ('queued','running')",
+		"UPDATE image_update_policies SET creator_id=NULL,last_error='Owner deactivated; save the policy to take ownership.' WHERE creator_id=$1",
+		"UPDATE operations SET cancel_requested=true,updated_at=now() WHERE id IN (SELECT operation_id FROM image_update_deployments WHERE creator_id=$1) AND state IN ('queued','running')",
 		"DELETE FROM api_tokens WHERE user_id=$1",
 		"DELETE FROM account_actions WHERE user_id=$1",
 		"DELETE FROM webauthn_challenges WHERE user_id=$1",

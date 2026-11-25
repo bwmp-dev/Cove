@@ -14,8 +14,9 @@ import (
 )
 
 type ImageCheck struct {
-	CheckedAt time.Time     `json:"checked_at"`
-	Images    []ImageStatus `json:"images"`
+	Updates   *ImageUpdateResult `json:"updates,omitempty"`
+	CheckedAt time.Time          `json:"checked_at"`
+	Images    []ImageStatus      `json:"images"`
 }
 
 type ImageStatus struct {
@@ -199,6 +200,10 @@ func (e *Engine) performImageCheck(ctx context.Context, r Request, env []string,
 	sort.Slice(result.Images, func(i, j int) bool {
 		return result.Images[i].Service+result.Images[i].ImageID < result.Images[j].Service+result.Images[j].ImageID
 	})
+	if r.ImageUpdates != nil {
+		updates := e.checkImageUpdates(ctx, *r.ImageUpdates, result.Images, r.Registry, env, r.OutboundProxy)
+		result.Updates = &updates
+	}
 	result.CheckedAt = time.Now().UTC()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -208,4 +213,15 @@ func (e *Engine) performImageCheck(ctx context.Context, r Request, env []string,
 	}
 	j.Operation.ImageCheck = &result
 	return writeJSON(e.path(r.ID), j)
+}
+
+func preserveImageReference(service map[string]any, reference string) {
+	labels, _ := service["labels"].(map[string]any)
+	if labels == nil {
+		labels = map[string]any{}
+	}
+	if saved, _ := labels["dev.cove.image-reference"].(string); saved == "" && reference != "" && !imageDigest.MatchString(reference) {
+		labels["dev.cove.image-reference"] = reference
+	}
+	service["labels"] = labels
 }

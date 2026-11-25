@@ -8,6 +8,7 @@ import (
 )
 
 var channelOutcomeEvents = []string{
+	"image.update_available",
 	"tunnel.failed",
 	"certificate.failed",
 	"identity.provisioned", "identity.deprovisioned", "identity.membership_changed", "identity.sync_failed",

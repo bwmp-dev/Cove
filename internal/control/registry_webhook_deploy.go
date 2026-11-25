@@ -20,6 +20,24 @@ func (s *Server) registryWebhookDeployment(id string, encrypted []byte) (worker.
 	if config.Kind != "service" || config.Source != nil || config.Database != nil {
 		return worker.Request{}, errors.New("registry redeployments require a service with saved image-only Compose, without a Git source")
 	}
+	images, err := imageOnlyServiceImages(config)
+	if err != nil {
+		return worker.Request{}, err
+	}
+	mutable := false
+	for _, image := range images {
+		mutable = mutable || !strings.Contains(image, "@")
+	}
+	if !mutable {
+		return worker.Request{}, errors.New("registry redeployments need at least one image tag rather than only pinned digests")
+	}
+	request := worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Kind: "service", PullLatest: true,
+		Compose: config.Compose, ComposeBundle: config.ComposeBundle, Environment: config.Environment, Routes: config.Routes, Private: config.Private,
+		Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
+	return request, worker.ValidateRequest(request)
+}
+
+func imageOnlyServiceImages(config workloadInput) (map[string]string, error) {
 	var compose struct {
 		Services map[string]struct {
 			Image string `yaml:"image"`
@@ -27,11 +45,11 @@ func (s *Server) registryWebhookDeployment(id string, encrypted []byte) (worker.
 		} `yaml:"services"`
 	}
 	if yaml.Unmarshal([]byte(config.Compose), &compose) != nil || len(compose.Services) == 0 {
-		return worker.Request{}, errors.New("saved image-only Compose is unavailable")
+		return nil, errors.New("saved image-only Compose is unavailable")
 	}
 	for _, service := range compose.Services {
 		if service.Build != nil {
-			return worker.Request{}, errors.New("remove Compose build services before enabling registry redeployments")
+			return nil, errors.New("remove Compose build services before enabling registry redeployments")
 		}
 	}
 	// Inline overrides must remain image-only too; preserving a bundle must not introduce a build.
@@ -44,37 +62,33 @@ func (s *Server) registryWebhookDeployment(id string, encrypted []byte) (worker.
 				} `yaml:"services"`
 			}
 			if yaml.Unmarshal([]byte(file.Content), &overlay) != nil {
-				return worker.Request{}, errors.New("saved image-only Compose override is unavailable")
+				return nil, errors.New("saved image-only Compose override is unavailable")
 			}
 			for name, service := range overlay.Services {
 				if service.Build != nil {
-					return worker.Request{}, errors.New("remove Compose build services before enabling registry redeployments")
+					return nil, errors.New("remove Compose build services before enabling registry redeployments")
 				}
 				if service.Image != "" {
 					compose.Services[name] = service
 				} else if _, exists := compose.Services[name]; !exists {
-					return worker.Request{}, errors.New("registry redeployments require an image for every Compose service")
+					return nil, errors.New("registry redeployments require an image for every Compose service")
 				}
 			}
 		}
 	}
-	mutable := false
 	for _, service := range compose.Services {
 		if service.Build != nil || service.Image == "" {
-			return worker.Request{}, errors.New("remove Compose build services before enabling registry redeployments")
+			return nil, errors.New("remove Compose build services before enabling registry redeployments")
 		}
-		mutable = mutable || !strings.Contains(service.Image, "@")
 	}
-	if !mutable {
-		return worker.Request{}, errors.New("registry redeployments need at least one image tag rather than only pinned digests")
+	images := map[string]string{}
+	for name, service := range compose.Services {
+		images[name] = service.Image
 	}
-	request := worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Kind: "service", PullLatest: true,
-		Compose: config.Compose, ComposeBundle: config.ComposeBundle, Environment: config.Environment, Routes: config.Routes, Private: config.Private,
-		Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
-	return request, worker.ValidateRequest(request)
+	return images, nil
 }
 
-func registryWebhookStopReason(ctx context.Context, tx pgx.Tx, id string) (string, error) {
+func imageAutomationStopReason(ctx context.Context, tx pgx.Tx, id string) (string, error) {
 	var stopped, paused, excluded bool
 	err := tx.QueryRow(ctx, `SELECT w.manually_stopped,EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id),w.kind<>'service' OR EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources p WHERE p.resource_id=w.id) FROM workloads w WHERE w.id=$1`, id).Scan(&stopped, &paused, &excluded)
 	if err != nil {
@@ -83,18 +97,26 @@ func registryWebhookStopReason(ctx context.Context, tx pgx.Tx, id string) (strin
 	if excluded {
 		return "Registry redeployments exclude jobs and managed previews.", nil
 	}
+	if stopped {
+		return "Resource manually stopped; push ignored.", nil
+	}
+	if paused {
+		return "Environment paused or resuming; push ignored.", nil
+	}
+	return "", nil
+}
+
+func registryWebhookStopReason(ctx context.Context, tx pgx.Tx, id string) (string, error) {
+	reason, err := imageAutomationStopReason(ctx, tx, id)
+	if err != nil || reason != "" {
+		return reason, err
+	}
 	var ownerAllowed bool
 	if err := tx.QueryRow(ctx, `SELECT cove_automation_allowed(h.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate') AND cove_automation_allowed(h.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'edit_configuration') FROM registry_webhooks h JOIN workloads w ON w.id=h.workload_id WHERE h.workload_id=$1`, id).Scan(&ownerAllowed); err != nil {
 		return "", err
 	}
 	if !ownerAllowed {
 		return "Registry webhook has no currently authorised owner; save or rotate it to take ownership.", nil
-	}
-	if stopped {
-		return "Resource manually stopped; push ignored.", nil
-	}
-	if paused {
-		return "Environment paused or resuming; push ignored.", nil
 	}
 	return "", nil
 }
@@ -197,6 +219,16 @@ func (s *Server) dispatchRegistryWebhook(ctx context.Context, id string) error {
 			return writeErr
 		}
 		return tx.Commit(ctx)
+	}
+	var updatePolicy bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM image_update_policies WHERE workload_id=$1 AND policy->>'enabled'='true')`, id).Scan(&updatePolicy); err != nil {
+		return err
+	}
+	if updatePolicy {
+		if _, err = tx.Exec(ctx, `UPDATE workloads SET next_image_check_at=now() WHERE id=$1`, id); err != nil {
+			return err
+		}
+		return finish("Image update policy requested a fresh check; its mode, version rules and maintenance window control deployment.")
 	}
 	request, err := s.registryWebhookDeployment(id, configuration)
 	if err != nil {
