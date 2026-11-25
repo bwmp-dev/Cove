@@ -604,7 +604,7 @@ func (s *Server) nodeRPCUsing(ctx context.Context, db interface {
 		return worker.RPCResponse{}, err
 	}
 	if !proxySupported {
-		if request.Proxy != nil && (request.Request != nil || request.Method == "registry_test" || request.Method == "managed_registry_verify" || request.Method == "export_release") {
+		if request.Proxy != nil && (request.Request != nil || request.Method == "registry_test" || request.Method == "managed_registry_verify" || request.Method == "export_release" || request.Method == "image_scan_database" && request.RefreshScanDatabase) {
 			return worker.RPCResponse{}, errOutboundWorkerUnsupported
 		}
 		request.Proxy = nil
@@ -700,6 +700,9 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	tunnelDone := make(chan struct{})
 	go func() { defer close(tunnelDone); s.runCloudflareTunnels(dnsContext) }()
 	defer func() { stopDNS(); <-tunnelDone }()
+	scanDone := make(chan struct{})
+	go func() { defer close(scanDone); s.runAutomaticImageScans(dnsContext) }()
+	defer func() { stopDNS(); <-scanDone }()
 	nextAuthCleanup := time.Time{}
 	nextHealthCheck := time.Time{}
 	for {

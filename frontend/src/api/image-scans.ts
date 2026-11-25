@@ -1,7 +1,7 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { keys } from "./queries";
-import type { ImageScan, ScanFinding, ScannedImage } from "./types";
+import type { ImageScan, ScanFinding, ScannedImage, ScanOrigin } from "./types";
 
 // One setting per team and node: it applies to every resource of the team on the resource's node.
 export interface ImageScanningSettings {
@@ -19,17 +19,30 @@ export interface ImageScanningSettings {
   java_archives: string;
   database_limit_bytes: number;
   database_max_age_hours: number;
+  // Saved with enabled and notify for the same team and node. Older control planes omit the automatic fields, which read as off.
+  automatic: boolean;
+  // The worker reports the automatic_image_scans capability.
+  automatic_supported: boolean;
+  // This resource holds a background scan lease. It has no operation until the scan settles, and it blocks nothing.
+  automatic_running: boolean;
+  // When the control plane next looks at this resource. A scheduling estimate, not a promise that a scan finishes then.
+  next_automatic_check_at: string | null;
+  // Why automatic scanning is holding or its last result is unknown.
+  automatic_message: string;
 }
 
 export interface ImageScanningInput {
   enabled: boolean;
   notify: boolean;
+  automatic: boolean;
 }
 
 // The latest terminal scan. state is the effective state: "complete" only when the scan succeeded with full coverage
 // on a fresh database and nothing changed the resource since.
 export interface ImageScanResults {
   state: string;
+  // Empty when the control plane did not record or recognise how the scan started.
+  origin: ScanOrigin | "";
   operation_state: string | null;
   stale: boolean;
   operation_id: string | null;
@@ -56,6 +69,11 @@ function settings(value: ImageScanningSettings): ImageScanningSettings {
     java_archives: value.java_archives ?? "",
     database_limit_bytes: typeof value.database_limit_bytes === "number" ? value.database_limit_bytes : 0,
     database_max_age_hours: typeof value.database_max_age_hours === "number" ? value.database_max_age_hours : 24,
+    automatic: value.automatic === true,
+    automatic_supported: value.automatic_supported === true,
+    automatic_running: value.automatic_running === true,
+    next_automatic_check_at: typeof value.next_automatic_check_at === "string" && value.next_automatic_check_at ? value.next_automatic_check_at : null,
+    automatic_message: typeof value.automatic_message === "string" ? value.automatic_message : "",
   };
 }
 
@@ -93,10 +111,17 @@ export function imageScan(result: ImageScan): ImageScan {
   };
 }
 
+const origins: readonly string[] = ["manual", "post_deploy", "scheduled"] satisfies ScanOrigin[];
+
+export function scanOrigin(value: unknown): ScanOrigin | "" {
+  return typeof value === "string" && origins.includes(value) ? (value as ScanOrigin) : "";
+}
+
 // A missing stale flag reads as stale and only an explicit "complete" state is complete.
 function results(value: ImageScanResults): ImageScanResults {
   return {
     state: value.state === "complete" ? "complete" : "unknown",
+    origin: scanOrigin(value.origin),
     operation_state: value.operation_state ?? null,
     stale: value.stale !== false,
     operation_id: value.operation_id ?? null,
@@ -113,11 +138,11 @@ export const imageScanningQuery = (workloadId: string) =>
   queryOptions({
     queryKey: imageScanningKey(workloadId),
     queryFn: async ({ signal }) => settings(await request<ImageScanningSettings>("GET", settingsPath(workloadId), undefined, signal)),
-    refetchInterval: (query) => (query.state.status === "error" ? false : imageScanPollInterval(Boolean(query.state.data?.active_operation_id))),
+    refetchInterval: (query) => (query.state.status === "error" ? false : imageScanPollInterval(Boolean(query.state.data?.active_operation_id) || query.state.data?.automatic_running === true)),
     retry: false,
   });
 
-// The active operation comes from the settings, so the caller passes it in to follow a running scan closely.
+// The active operation and background scan come from the settings, so the caller passes them in to follow a running scan closely.
 export const imageScansQuery = (workloadId: string, active: boolean) =>
   queryOptions({
     queryKey: imageScansKey(workloadId),

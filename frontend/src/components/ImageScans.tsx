@@ -10,6 +10,7 @@ import type { ImageScan, OperationState, ScanFinding, ScannedImage, Workload } f
 import { useNow, useOnline } from "../lib/hooks";
 import {
   activeScanOperation,
+  automaticBlocker,
   coverageLabel,
   databaseMaxAge,
   enableBlocker,
@@ -21,6 +22,7 @@ import {
   resultComplete,
   resultLabel,
   scanBlocker,
+  scanOriginLabel,
   severities,
   severityCounts,
   severityLabels,
@@ -59,14 +61,14 @@ export function ImageScans({ workload }: { workload: Workload }) {
 type Queue = ReturnType<typeof useQueueOperation>;
 type Save = ReturnType<typeof useSaveImageScanning>;
 
-// The latest result changes when the active operation finishes, which the settings poll notices first.
-function useRefreshWhenFinished(workloadId: string, active: string | null) {
+// The latest result changes when the active operation or a background scan finishes, which the settings poll notices first.
+function useRefreshWhenFinished(workloadId: string, running: boolean) {
   const client = useQueryClient();
-  const previousActive = useRef(active);
+  const previous = useRef(running);
   useEffect(() => {
-    if (previousActive.current && !active) void client.invalidateQueries({ queryKey: imageScansKey(workloadId), exact: true });
-    previousActive.current = active;
-  }, [active, client, workloadId]);
+    if (previous.current && !running) void client.invalidateQueries({ queryKey: imageScansKey(workloadId), exact: true });
+    previous.current = running;
+  }, [running, client, workloadId]);
 }
 
 function useNodeName(nodeId: string) {
@@ -77,7 +79,8 @@ function useNodeName(nodeId: string) {
 function ScanSection({ workload }: { workload: Workload }) {
   const settings = useQuery(imageScanningQuery(workload.id));
   const active = activeScanOperation(settings.data);
-  const results = useQuery(imageScansQuery(workload.id, Boolean(active)));
+  const running = Boolean(active) || settings.data?.automatic_running === true;
+  const results = useQuery(imageScansQuery(workload.id, running));
   const node = useNodeName(workload.node_id);
   const online = useOnline();
   const statusId = useId();
@@ -88,7 +91,7 @@ function ScanSection({ workload }: { workload: Workload }) {
   const [outcome, setOutcome] = useState<string | null>(null);
   const canOperate = can(workload.permissions, "operate");
   const reason = scanBlocker({ online, settings: settings.data, settingsPending: settings.isPending, settingsError: settings.isError, resultsError: results.isError, node });
-  useRefreshWhenFinished(workload.id, active);
+  useRefreshWhenFinished(workload.id, running);
 
   return (
     <Section
@@ -100,6 +103,7 @@ function ScanSection({ workload }: { workload: Workload }) {
       <div className="divide-y divide-line">
         <div id={statusId} className="space-y-2 p-4 empty:hidden" aria-live="polite">
           <ScanStatus canOperate={canOperate} reason={reason} active={active} />
+          {settings.data && !settings.isError && <AutomaticStatus settings={settings.data} />}
           <QueueOutcome queue={queue} />
         </div>
         <ScanResults results={results} maxAgeHours={databaseMaxAge(settings.data)} />
@@ -147,6 +151,24 @@ function ScanStatus({ canOperate, reason, active }: { canOperate: boolean; reaso
       {canOperate && reason && <p className="text-xs text-fg-muted">{reason}</p>}
       {active && <ActiveOperation id={active} />}
     </>
+  );
+}
+
+// Background scans have no operation until they settle, so nothing is linked and nothing is blocked while one runs.
+// Hidden after a failed refresh so a cached running or scheduled state is not presented as current.
+function AutomaticStatus({ settings }: { settings: ImageScanningSettings }) {
+  if (!settings.automatic && !settings.automatic_running) return null;
+  const next = settings.enabled && !settings.automatic_running ? settings.next_automatic_check_at : null;
+  return (
+    <div className="space-y-1 text-xs text-fg-muted">
+      {settings.automatic_running && <p>An automatic scan is running in the background. Its result appears here once it settles. It does not block deploys or manual scans, and it has no operation page while it runs. A team administrator can cancel it by saving Automatic scans off.</p>}
+      {next && (
+        <p>
+          Next automatic check <RelativeTime value={next} />. A scan runs only if the retained images lack a current result, and it may wait for a deploy, job run or vulnerability database refresh.
+        </p>
+      )}
+      {settings.automatic_message && <p className="break-words">{settings.automatic_message}</p>}
+    </div>
   );
 }
 
@@ -297,7 +319,12 @@ function ResultSummary({ data, unverified }: { data: ImageScanResults; unverifie
     <DefinitionList
       items={[
         { term: "Result", value: <StatusLabel tone={label.tone} label={label.label} /> },
-        ...(data.operation_id ? [{ term: "Operation", value: <ScanOperation id={data.operation_id} state={data.operation_state} /> }] : []),
+        ...(data.operation_id
+          ? [
+              { term: "Operation", value: <ScanOperation id={data.operation_id} state={data.operation_state} /> },
+              { term: "Source", value: <ScanSource origin={data.origin} /> },
+            ]
+          : []),
         ...(data.result ? reportItems(data.result) : []),
       ]}
     />
@@ -333,6 +360,11 @@ function ScanOperation({ id, state }: { id: string; state: string | null }) {
       <OperationLink id={id} label="View scan" />
     </span>
   );
+}
+
+export function ScanSource({ origin }: { origin: unknown }) {
+  const label = scanOriginLabel(origin);
+  return <span className={label === "Not recorded" ? "text-fg-muted" : undefined}>{label}</span>;
 }
 
 function Scanner({ scan }: { scan: ImageScan }) {
@@ -543,7 +575,7 @@ function ScanSettings({ workload, settings, save, node, online, outcome, onOutco
       </div>
       <WorkerStatus settings={data} node={node} workload={workload} />
       {data.can_manage ? (
-        <SettingsForm key={`${data.enabled}:${data.notify}`} settings={data} save={save} node={node} workload={workload} blocked={blocked} onOutcome={onOutcome} />
+        <SettingsForm key={`${data.enabled}:${data.notify}:${data.automatic}`} settings={data} save={save} node={node} workload={workload} blocked={blocked} onOutcome={onOutcome} />
       ) : (
         <ReadOnlySettings settings={data} />
       )}
@@ -566,6 +598,7 @@ function WorkerStatus({ settings, node, workload }: { settings: ImageScanningSet
       <DefinitionList
         items={[
           { term: "Worker", value: settings.worker_supported ? <StatusLabel tone="ok" label="Scanning reported" /> : <StatusLabel tone="warn" label="Scanning not reported" /> },
+          { term: "Automatic scans", value: settings.automatic_supported ? <StatusLabel tone="ok" label="Reported" /> : <StatusLabel tone="neutral" label="Not reported" /> },
           { term: "Node", value: settings.node_ready ? <StatusLabel tone="ok" label="Ready" /> : <StatusLabel tone="warn" label="Not ready" /> },
           { term: "Scanner image", value: settings.scanner_image ? <span className="font-mono text-xs break-all">{settings.scanner_image}</span> : <span className="text-fg-muted">Not reported</span> },
           {
@@ -589,7 +622,8 @@ function ReadOnlySettings({ settings }: { settings: ImageScanningSettings }) {
       <DefinitionList
         items={[
           { term: "Vulnerability scans", value: settings.enabled ? "Allowed" : "Off" },
-          { term: "Notifications", value: settings.notify ? (settings.enabled ? "On" : "On, but nothing is sent while scans are off") : "Off" },
+          { term: "Automatic scans", value: settings.automatic ? (settings.enabled ? "On" : "On, but nothing runs while scans are off") : "Off" },
+          { term: "New finding notifications", value: settings.notify ? (settings.enabled ? "On" : "On, but nothing is sent while scans are off") : "Off" },
         ]}
       />
       <p className="text-xs text-fg-muted">Only team administrators can change this setting.</p>
@@ -612,10 +646,13 @@ function SettingsForm({ settings, save, node, workload, blocked, onOutcome }: Fo
   const [draft, setDraft] = useState<ImageScanningInput | null>(null);
   const enabled = draft?.enabled ?? settings.enabled;
   const notify = draft?.notify ?? settings.notify;
+  const automatic = draft?.automatic ?? settings.automatic;
   const [confirm, setConfirm] = useState(false);
-  const dirty = enabled !== settings.enabled || notify !== settings.notify;
+  const dirty = enabled !== settings.enabled || notify !== settings.notify || automatic !== settings.automatic;
   const blocker = enableBlocker(settings, node);
   const enableError = enabled && blocker ? `${blocker}${settings.enabled ? " You can still turn scans off." : ""}` : undefined;
+  const automaticLock = automaticBlocker(settings, enabled, node);
+  const automaticError = automatic && automaticLock ? `${automaticLock} You can still turn automatic scans off.` : undefined;
 
   function edit(next: ImageScanningInput) {
     setDraft(next);
@@ -625,7 +662,7 @@ function SettingsForm({ settings, save, node, workload, blocked, onOutcome }: Fo
 
   function send() {
     save.mutate(
-      { enabled, notify },
+      { enabled, notify, automatic },
       {
         onSuccess: () => {
           onOutcome("Scanning settings saved");
@@ -641,7 +678,11 @@ function SettingsForm({ settings, save, node, workload, blocked, onOutcome }: Fo
       document.getElementById(`${id}-enabled`)?.focus();
       return;
     }
-    if (enabled && !settings.enabled) setConfirm(true);
+    if (automaticError) {
+      document.getElementById(`${id}-automatic`)?.focus();
+      return;
+    }
+    if ((enabled && !settings.enabled) || (automatic && !settings.automatic)) setConfirm(true);
     else send();
   }
 
@@ -650,8 +691,9 @@ function SettingsForm({ settings, save, node, workload, blocked, onOutcome }: Fo
       <UnsavedChangesGuard dirty={dirty} />
       <fieldset disabled={save.isPending} className="min-w-0 space-y-4">
         <legend className="sr-only">Vulnerability scan settings</legend>
-        <EnableSwitch id={`${id}-enabled`} enabled={enabled} blocker={blocker} error={enableError} node={node} onChange={(value) => edit({ enabled: value, notify })} />
-        <NotifySwitch id={`${id}-notify`} enabled={enabled} notify={notify} onChange={(value) => edit({ enabled, notify: value })} />
+        <EnableSwitch id={`${id}-enabled`} enabled={enabled} blocker={blocker} error={enableError} node={node} onChange={(value) => edit({ enabled: value, notify, automatic: value && automatic })} />
+        <AutomaticSwitch id={`${id}-automatic`} automatic={automatic} blocker={automaticLock} error={automaticError} onChange={(value) => edit({ enabled, notify, automatic: value })} />
+        <NotifySwitch id={`${id}-notify`} enabled={enabled} notify={notify} onChange={(value) => edit({ enabled, notify: value, automatic })} />
       </fieldset>
       {save.isError && (
         <Notice tone="error" title="The scanning settings were not saved">
@@ -659,10 +701,12 @@ function SettingsForm({ settings, save, node, workload, blocked, onOutcome }: Fo
           <p className="mt-1">Your changes are kept.</p>
         </Notice>
       )}
-      <SaveBar dirty={dirty} pending={save.isPending} blocked={Boolean(blocked)} label="Save scanning settings" onDiscard={() => edit({ enabled: settings.enabled, notify: settings.notify })} status={blocked ? `${blocked} Saving is paused.` : "No unsaved changes"} />
+      <SaveBar dirty={dirty} pending={save.isPending} blocked={Boolean(blocked)} label="Save scanning settings" onDiscard={() => edit({ enabled: settings.enabled, notify: settings.notify, automatic: settings.automatic })} status={blocked ? `${blocked} Saving is paused.` : "No unsaved changes"} />
       <EnableDialog
         open={confirm}
         settings={settings}
+        enabling={enabled && !settings.enabled}
+        automatic={automatic && !settings.automatic}
         node={node}
         workload={workload}
         pending={save.isPending}
@@ -701,7 +745,38 @@ function EnableSwitch({ id, enabled, blocker, error, node, onChange }: EnableSwi
         ) : locked ? (
           blocker
         ) : (
-          `Off by default. Applies to every resource of this team on ${node}. Turning it off stops new scans; a scan that is already running must be cancelled from its operation.`
+          `Off by default. Applies to every resource of this team on ${node}. Saving this off stops new scans and requests cancellation of waiting or running automatic scans. Cancel a running manual scan from its operation page.`
+        )
+      }
+    />
+  );
+}
+
+interface AutomaticSwitchProps {
+  id: string;
+  automatic: boolean;
+  blocker: string | null;
+  error?: string;
+  onChange: (automatic: boolean) => void;
+}
+
+function AutomaticSwitch({ id, automatic, blocker, error, onChange }: AutomaticSwitchProps) {
+  const locked = Boolean(blocker) && !automatic;
+  return (
+    <SwitchField
+      id={id}
+      label="Automatic scans"
+      checked={automatic}
+      disabled={locked}
+      aria-invalid={error ? true : undefined}
+      onChange={(event) => onChange(event.target.checked)}
+      description={
+        error ? (
+          <span className="text-bad">{error}</span>
+        ) : locked ? (
+          blocker
+        ) : (
+          "Off by default. Scans after a successful deploy or job run when its retained images lack a current result, and again when the node's vulnerability database changes. Automatic scans never deploy, restart or wake apps; stopped, paused, sleeping or busy resources wait. They yield to deployments and run at most one at a time per node. Saving this off requests cancellation of waiting or running automatic scans. The Allow vulnerability scans setting still controls manual scans."
         )
       }
     />
@@ -712,12 +787,13 @@ function NotifySwitch({ id, enabled, notify, onChange }: { id: string; enabled: 
   return (
     <SwitchField
       id={id}
-      label="Notify when a scan finishes"
+      label="Notify about new findings"
       checked={notify}
       onChange={(event) => onChange(event.target.checked)}
       description={
         <>
-          Each finished scan sends one Vulnerability scans event (known vulnerabilities, completed with none, or coverage unknown) to enabled notification connections that select it under Specific events. By result routing does not include them. {notify && !enabled && "Nothing is sent while scans are off. "}Choose them in{" "}
+          Manual scans notify every time they finish, whatever the result. Automatic scans notify about vulnerabilities only when a scan stores findings that were not in the previous scan of the same image, even if coverage is unknown. They also notify on an image&apos;s first automatic result, and when its result changes to having no findings or to unknown coverage. Repeating the previous automatic result does not notify, including a rescan after a vulnerability database update. When stored findings are truncated, Cove may not be able to tell that a finding is new and does not notify for it.{" "}
+          Each notification is one Vulnerability scans event, sent to enabled notification connections that select it under Specific events. By result routing does not include them. {notify && !enabled && "Nothing is sent while scans are off. "}Choose them in{" "}
           <Link to="/notifications" className={linkClass}>
             Notifications
           </Link>
@@ -731,6 +807,8 @@ function NotifySwitch({ id, enabled, notify, onChange }: { id: string; enabled: 
 interface EnableDialogProps {
   open: boolean;
   settings: ImageScanningSettings;
+  enabling: boolean;
+  automatic: boolean;
   node: string;
   workload: Workload;
   pending: boolean;
@@ -738,13 +816,26 @@ interface EnableDialogProps {
   onConfirm: () => void;
 }
 
-function EnableDialog({ open, settings, node, workload, pending, onCancel, onConfirm }: EnableDialogProps) {
+function EnableDialog({ open, settings, enabling, automatic, node, workload, pending, onCancel, onConfirm }: EnableDialogProps) {
   const limit = formatGiB(settings.database_limit_bytes);
   return (
-    <ConfirmDialog open={open} title={`Allow vulnerability scans on ${node}?`} confirmLabel="Allow scans" pending={pending} onCancel={onCancel} onConfirm={onConfirm}>
+    <ConfirmDialog
+      open={open}
+      title={enabling ? `Allow vulnerability scans on ${node}?` : `Turn on automatic scans on ${node}?`}
+      confirmLabel={enabling ? "Allow scans" : "Turn on automatic scans"}
+      pending={pending}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    >
       <p>
-        This applies to every resource of this team on {node}, not only {workload.name}. Operators of those resources can then queue scans, one at a time per node.
+        This applies to every resource of this team on {node}, not only {workload.name}.{enabling && " Operators of those resources can then queue scans, one at a time per node."}
       </p>
+      {automatic && (
+        <p className="mt-2">
+          Automatic scans start without anyone queuing them: after successful deploys and job runs whose retained images lack a current result, and when the node&apos;s vulnerability database changes. They never deploy, restart or wake apps, and they yield to
+          deployments.
+        </p>
+      )}
       <p className="mt-2">
         A scan reads the retained images&apos; metadata and exports them to a read-only archive on the node. The node may pull the pinned scanner image and refresh the vulnerability database from the public GitHub Container Registry
         {limit ? ` (up to ${limit} per refresh)` : ""}, and each scan uses node CPU, memory and disk while it runs. No credentials are used. Scans never pull application images, deploy or start containers, and results do not block deploys.

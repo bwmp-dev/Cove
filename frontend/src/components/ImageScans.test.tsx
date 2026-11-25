@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, request } from "../api/client";
 import type { ImageScanningSettings, ImageScanResults } from "../api/image-scans";
 import type { ImageScan, ScannedImage, Workload } from "../api/types";
-import { ImageScans, ScanOutcome } from "./ImageScans";
+import { ImageScans, ScanOutcome, ScanSource } from "./ImageScans";
 
 vi.mock("../api/client", async (original) => ({ ...(await original<typeof import("../api/client")>()), request: vi.fn() }));
 vi.mock("./SaveBar", async (original) => ({ ...(await original<typeof import("./SaveBar")>()), UnsavedChangesGuard: () => null }));
@@ -50,6 +50,11 @@ function settings(extra: Partial<ImageScanningSettings> = {}): ImageScanningSett
     java_archives: "not_scanned",
     database_limit_bytes: 2 * 1024 ** 3,
     database_max_age_hours: 24,
+    automatic: false,
+    automatic_supported: true,
+    automatic_running: false,
+    next_automatic_check_at: null,
+    automatic_message: "",
     ...extra,
   };
 }
@@ -87,10 +92,10 @@ function report(extra: Partial<ImageScan> = {}): ImageScan {
   };
 }
 
-const none: ImageScanResults = { state: "unknown", stale: true, operation_id: null, operation_state: null, result: null, message: "No vulnerability scan has completed." };
+const none: ImageScanResults = { state: "unknown", origin: "", stale: true, operation_id: null, operation_state: null, result: null, message: "No vulnerability scan has completed." };
 
 function results(extra: Partial<ImageScanResults> = {}): ImageScanResults {
-  return { state: "complete", operation_state: "succeeded", stale: false, operation_id: "op-scan", result: report(), ...extra };
+  return { state: "complete", origin: "manual", operation_state: "succeeded", stale: false, operation_id: "op-scan", result: report(), ...extra };
 }
 
 interface Handlers {
@@ -193,7 +198,7 @@ it("asks before allowing scans, naming the team and node scope and the cost, and
   dialog = screen.getByRole("dialog", { name: "Allow vulnerability scans on edge-1?" });
   fireEvent.click(within(dialog).getByRole("button", { name: "Allow scans" }));
   await waitFor(() => expect(calls("PUT")).toHaveLength(1));
-  expect(calls("PUT")[0]).toEqual(["PUT", settingsPath, { enabled: true, notify: false }]);
+  expect(calls("PUT")[0]).toEqual(["PUT", settingsPath, { enabled: true, notify: false, automatic: false }]);
   expect(await screen.findByText("Scanning settings saved")).toBeInTheDocument();
 });
 
@@ -220,12 +225,12 @@ it("keeps the saved notice while the refetch after a save is held open, and disa
   const toggle = await enableSwitch();
   expect(toggle).toBeChecked();
   fireEvent.click(toggle);
-  fireEvent.click(screen.getByRole("switch", { name: "Notify when a scan finishes" }));
+  fireEvent.click(screen.getByRole("switch", { name: "Notify about new findings" }));
   expect(screen.getByText(/Nothing is sent while scans are off\./)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   await waitFor(() => expect(calls("PUT")).toHaveLength(1));
-  expect(calls("PUT")[0]?.[2]).toEqual({ enabled: false, notify: true });
+  expect(calls("PUT")[0]?.[2]).toEqual({ enabled: false, notify: true, automatic: false });
   expect(await screen.findByText("Scanning settings saved")).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Allow vulnerability scans" })).not.toBeChecked();
   await act(() => {
@@ -233,9 +238,9 @@ it("keeps the saved notice while the refetch after a save is held open, and disa
     return Promise.resolve();
   });
   expect(screen.getByText("Scanning settings saved")).toBeInTheDocument();
-  expect(screen.getByRole("switch", { name: "Notify when a scan finishes" })).toBeChecked();
+  expect(screen.getByRole("switch", { name: "Notify about new findings" })).toBeChecked();
 
-  fireEvent.click(screen.getByRole("switch", { name: "Notify when a scan finishes" }));
+  fireEvent.click(screen.getByRole("switch", { name: "Notify about new findings" }));
   expect(screen.queryByText("Scanning settings saved")).not.toBeInTheDocument();
 });
 
@@ -247,11 +252,11 @@ it("keeps edits when a save is refused", async () => {
     },
   });
   renderScans();
-  fireEvent.click(await screen.findByRole("switch", { name: "Notify when a scan finishes" }));
+  fireEvent.click(await screen.findByRole("switch", { name: "Notify about new findings" }));
   fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
   expect(await screen.findByText("the node operator must enable scanning and verify a ready worker first")).toBeInTheDocument();
   expect(screen.getByText("Your changes are kept.")).toBeInTheDocument();
-  expect(screen.getByRole("switch", { name: "Notify when a scan finishes" })).toBeChecked();
+  expect(screen.getByRole("switch", { name: "Notify about new findings" })).toBeChecked();
   expect(screen.getByRole("button", { name: "Save scanning settings" })).toBeEnabled();
 });
 
@@ -303,7 +308,7 @@ it("lets an administrator turn scans off on an old worker, even during another o
   expect(toggle).not.toBeChecked();
   expect(toggle).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
-  await waitFor(() => expect(calls("PUT")[0]).toEqual(["PUT", settingsPath, { enabled: false, notify: false }]));
+  await waitFor(() => expect(calls("PUT")[0]).toEqual(["PUT", settingsPath, { enabled: false, notify: false, automatic: false }]));
   expect(await screen.findByText("Scanning settings saved")).toBeInTheDocument();
 });
 
@@ -343,7 +348,7 @@ it("does not trust cached settings after a failed refetch, and recovers with Ret
   expect(await screen.findByText("Could not refresh the scanning settings")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Scan for vulnerabilities" })).toBeDisabled();
   expect(screen.getByText("Cove cannot read the scanning settings. Scanning is paused until they load.")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("switch", { name: "Notify when a scan finishes" }));
+  fireEvent.click(screen.getByRole("switch", { name: "Notify about new findings" }));
   expect(screen.getByRole("button", { name: "Save scanning settings" })).toBeDisabled();
 
   fail = false;
@@ -393,7 +398,7 @@ it("pauses scanning and saving while offline", async () => {
   renderScans();
   expect(await screen.findByText("You are offline. Scanning is available when the connection returns.")).toBeInTheDocument();
   expect(await scanButton()).toBeDisabled();
-  fireEvent.click(screen.getByRole("switch", { name: "Notify when a scan finishes" }));
+  fireEvent.click(screen.getByRole("switch", { name: "Notify about new findings" }));
   expect(screen.getByRole("button", { name: "Save scanning settings" })).toBeDisabled();
 });
 
@@ -557,7 +562,7 @@ it("has no credential, configuration or free-text inputs", async () => {
   const { container } = renderScans();
   await screen.findAllByText("Scan completed");
   expect(container.querySelectorAll("textarea, select, input:not([role=switch])")).toHaveLength(0);
-  expect(screen.getAllByRole("switch").map((item) => item.getAttribute("aria-label") ?? item.id)).toHaveLength(2);
+  expect(screen.getAllByRole("switch").map((item) => item.getAttribute("aria-label") ?? item.id)).toHaveLength(3);
 });
 
 it("never loads scans for managed previews", () => {
@@ -619,4 +624,196 @@ it("summarises a scan on the operation page without claiming current coverage", 
   expect(screen.getByText(/1 image scanned\. No findings reported, but coverage is unknown\./)).toBeInTheDocument();
   expect(screen.getByText(/Java archive \(JAR, WAR or EAR\) dependencies were not scanned in 1 image/)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Registry page" })).toHaveAttribute("href", "/resources/w1/registry");
+});
+
+it("shows the operation page's scan source without inferring an older worker's missing origin", () => {
+  const { rerender } = render(<ScanSource origin="scheduled" />);
+  expect(screen.getByText("Automatic, after a vulnerability database update")).toBeInTheDocument();
+  rerender(<ScanSource origin={undefined} />);
+  expect(screen.getByText("Not recorded")).toHaveClass("text-fg-muted");
+});
+
+const automaticSwitch = () => screen.findByRole("switch", { name: "Automatic scans" });
+
+it("keeps automatic scans off by default and saves exactly enabled, notify and automatic after confirming", async () => {
+  let current = settings({ enabled: true });
+  serve({
+    settings: (method, body) => {
+      if (method === "PUT") current = settings(body as Partial<ImageScanningSettings>);
+      return current;
+    },
+  });
+  renderScans();
+  const toggle = await automaticSwitch();
+  expect(toggle).not.toBeChecked();
+  expect(toggle).toBeEnabled();
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
+  const dialog = screen.getByRole("dialog", { name: "Turn on automatic scans on edge-1?" });
+  expect(dialog).toHaveTextContent("This applies to every resource of this team on edge-1, not only web.");
+  expect(dialog).toHaveTextContent("They never deploy, restart or wake apps");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Turn on automatic scans" }));
+  await waitFor(() => expect(calls("PUT")).toHaveLength(1));
+  expect(calls("PUT")[0]).toEqual(["PUT", settingsPath, { enabled: true, notify: false, automatic: true }]);
+  expect(await screen.findByText("Scanning settings saved")).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Automatic scans" })).toBeChecked();
+});
+
+it("turns automatic scans off with the main switch and saves without asking", async () => {
+  serve({ settings: (method, body) => (method === "PUT" ? settings(body as Partial<ImageScanningSettings>) : settings({ enabled: true, automatic: true })) });
+  renderScans();
+  expect(await automaticSwitch()).toBeChecked();
+  fireEvent.click(await enableSwitch());
+  expect(screen.getByRole("switch", { name: "Automatic scans" })).not.toBeChecked();
+  expect(screen.getByRole("switch", { name: "Automatic scans" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await waitFor(() => expect(calls("PUT")[0]).toEqual(["PUT", settingsPath, { enabled: false, notify: false, automatic: false }]));
+});
+
+it("describes how saving each switch off cancels automatic scans and where to cancel a manual scan", async () => {
+  serve({ settings: () => settings({ enabled: true, automatic: true, next_automatic_check_at: hoursFromNow(2) }) });
+  renderScans();
+  await automaticSwitch();
+  expect(screen.getByText(/Saving this off stops new scans and requests cancellation of waiting or running automatic scans\. Cancel a running manual scan from its operation page\./)).toBeInTheDocument();
+  expect(screen.getByText(/Saving this off requests cancellation of waiting or running automatic scans\. The Allow vulnerability scans setting still controls manual scans\./)).toBeInTheDocument();
+  expect(screen.getByText(/it may wait for a deploy, job run or vulnerability database refresh\./)).toBeInTheDocument();
+  expect(screen.queryByText(/must be cancelled from its operation\./)).not.toBeInTheDocument();
+  expect(screen.queryByText(/for the resource to be running/)).not.toBeInTheDocument();
+});
+
+it.each([
+  ["a worker without the automatic capability", { automatic_supported: false }, true],
+  ["an older control plane that omits the automatic fields", { automatic_supported: undefined as unknown as boolean, automatic: undefined as unknown as boolean }, true],
+  ["an unready node", { node_ready: false }, false],
+])("cannot turn automatic scans on with %s, and keeps manual results", async (_name, extra, manual) => {
+  serve({ settings: () => settings({ enabled: true, ...extra }), results: () => results() });
+  renderScans();
+  const toggle = await automaticSwitch();
+  expect(toggle).not.toBeChecked();
+  expect(toggle).toBeDisabled();
+  expect((await screen.findAllByText("Scan completed")).length).toBeGreaterThan(0);
+  if (manual) {
+    expect(screen.getByText(/does not report automatic scans.*Manual scans are not affected\./)).toBeInTheDocument();
+    await waitFor(async () => expect(await scanButton()).toBeEnabled());
+  } else {
+    expect(screen.getByText("Automatic scans can be turned on once edge-1 is ready.")).toBeInTheDocument();
+  }
+});
+
+it("lets an administrator turn automatic scans off after the worker stops reporting them", async () => {
+  serve({ settings: (method, body) => (method === "PUT" ? settings({ ...(body as Partial<ImageScanningSettings>), automatic_supported: false }) : settings({ enabled: true, automatic: true, automatic_supported: false })) });
+  renderScans();
+  const toggle = await automaticSwitch();
+  expect(screen.getByText(/does not report automatic scans\..*You can still turn automatic scans off\./)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("switch", { name: "Notify about new findings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
+  expect(calls("PUT")).toHaveLength(0);
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
+  await waitFor(() => expect(calls("PUT")[0]).toEqual(["PUT", settingsPath, { enabled: true, notify: true, automatic: false }]));
+  expect(await screen.findByText("Scanning settings saved")).toBeInTheDocument();
+});
+
+it("keeps the automatic draft and shows the server message when turning it on is refused", async () => {
+  serve({
+    settings: (method) => {
+      if (method === "PUT") throw new ApiError(409, "enable scanning on an upgraded ready worker before enabling automatic scans");
+      return settings({ enabled: true });
+    },
+  });
+  renderScans();
+  fireEvent.click(await automaticSwitch());
+  fireEvent.click(screen.getByRole("button", { name: "Save scanning settings" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Turn on automatic scans" }));
+  expect(await screen.findByText("enable scanning on an upgraded ready worker before enabling automatic scans")).toBeInTheDocument();
+  expect(screen.getByText("Your changes are kept.")).toBeInTheDocument();
+  expect(screen.queryByText("Scanning settings saved")).not.toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Automatic scans" })).toBeChecked();
+});
+
+it("pauses saving an automatic scan change while offline", async () => {
+  vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+  serve({ settings: () => settings({ enabled: true }) });
+  renderScans();
+  fireEvent.click(await automaticSwitch());
+  expect(screen.getByRole("button", { name: "Save scanning settings" })).toBeDisabled();
+});
+
+it("shows automatic scans read-only to operators, who can still queue a manual scan", async () => {
+  serve({ settings: () => settings({ enabled: true, automatic: true, can_manage: false }) });
+  renderScans(operator);
+  await waitFor(async () => expect(await scanButton()).toBeEnabled());
+  const [worker, setting] = screen.getAllByText("Automatic scans", { selector: "dt" });
+  expect(worker?.nextElementSibling).toHaveTextContent("Reported");
+  expect(setting?.nextElementSibling).toHaveTextContent("On");
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+});
+
+it("follows a background scan every 3 seconds without blocking manual scans or linking an operation", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    let current = settings({ enabled: true, automatic: true, automatic_running: true });
+    let latest: ImageScanResults = none;
+    serve({ settings: () => current, results: () => latest, queue: () => ({ id: "op-manual" }) });
+    renderScans();
+    expect(await screen.findByText(/An automatic scan is running in the background\./)).toBeInTheDocument();
+    await waitFor(async () => expect(await scanButton()).toBeEnabled());
+    expect(screen.queryByRole("link", { name: "View operation" })).not.toBeInTheDocument();
+    const reads = calls("GET", resultsPath).length;
+    await act(() => vi.advanceTimersByTimeAsync(3_100));
+    expect(calls("GET", resultsPath).length).toBeGreaterThan(reads);
+
+    current = settings({ enabled: true, automatic: true, next_automatic_check_at: hoursFromNow(1) });
+    latest = results({ origin: "post_deploy" });
+    await act(() => vi.advanceTimersByTimeAsync(3_100));
+    expect(await screen.findByText("Automatic, after a deploy or job run")).toBeInTheDocument();
+    expect(screen.queryByText(/running in the background/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Next automatic check/)).toBeInTheDocument();
+    const idle = calls("GET", settingsPath).length;
+    await act(() => vi.advanceTimersByTimeAsync(3_100));
+    expect(calls("GET", settingsPath)).toHaveLength(idle);
+
+    fireEvent.click(screen.getByRole("button", { name: "Scan for vulnerabilities" }));
+    await waitFor(() => expect(calls("POST", operationsPath)[0]).toEqual(["POST", operationsPath, { action: "image_scan" }]));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("shows a held automatic check as unknown, never as a completed scan", async () => {
+  serve({
+    settings: () => settings({ enabled: true, automatic: true, automatic_message: "Vulnerability database coverage is unknown. A bounded refresh may be pending or cooling down; no scan was queued." }),
+  });
+  renderScans();
+  expect(await screen.findByText(/A bounded refresh may be pending or cooling down; no scan was queued\./)).toBeInTheDocument();
+  expect(screen.getByText("No completed scan")).toBeInTheDocument();
+  expect(screen.queryByText(/clean|Scan completed/i)).not.toBeInTheDocument();
+});
+
+it.each([
+  ["manual", "Manual"],
+  ["post_deploy", "Automatic, after a deploy or job run"],
+  ["scheduled", "Automatic, after a vulnerability database update"],
+  ["", "Not recorded"],
+  [undefined, "Not recorded"],
+  ["webhook", "Not recorded"],
+])("labels the latest scan's origin %s", async (origin, label) => {
+  serve({ settings: () => settings({ enabled: true }), results: () => ({ ...results(), origin }) });
+  renderScans();
+  const term = await screen.findByText("Source", { selector: "dt" });
+  expect(term.nextElementSibling).toHaveTextContent(label);
+});
+
+it("explains which manual and automatic scan results notify", async () => {
+  serve({ settings: () => settings({ enabled: true }) });
+  renderScans();
+  await screen.findByRole("switch", { name: "Notify about new findings" });
+  expect(screen.getByText(/Manual scans notify every time they finish, whatever the result\./)).toBeInTheDocument();
+  expect(screen.getByText(/Automatic scans notify about vulnerabilities only when a scan stores findings that were not in the previous scan of the same image, even if coverage is unknown\./)).toBeInTheDocument();
+  expect(screen.getByText(/also notify on an image's first automatic result, and when its result changes to having no findings or to unknown coverage\./)).toBeInTheDocument();
+  expect(screen.getByText(/Repeating the previous automatic result does not notify, including a rescan after a vulnerability database update\./)).toBeInTheDocument();
+  expect(screen.queryByText(/unknown result do not notify/)).not.toBeInTheDocument();
+  expect(screen.getByText(/may not be able to tell that a finding is new/)).toBeInTheDocument();
+  expect(screen.queryByText(/image\.scan_completed|image\.scan_unknown/)).not.toBeInTheDocument();
 });

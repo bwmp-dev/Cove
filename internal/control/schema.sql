@@ -295,6 +295,23 @@ CREATE TABLE IF NOT EXISTS image_scanning_settings (
  enabled boolean NOT NULL DEFAULT false, notify boolean NOT NULL DEFAULT false,
  PRIMARY KEY(team_id,node_id)
 );
+ALTER TABLE image_scanning_settings ADD COLUMN IF NOT EXISTS automatic boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS image_scan_automation_state (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ next_check_at timestamptz NOT NULL DEFAULT now(),
+ attempt_key text NOT NULL DEFAULT '',
+ last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS automatic_image_scans (
+ node_id text PRIMARY KEY REFERENCES nodes(id),
+ id text NOT NULL UNIQUE,
+ workload_id text NOT NULL REFERENCES workloads(id),
+ deployment_id text NOT NULL,
+ payload bytea NOT NULL,
+ attempt_key text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ cancel_requested boolean NOT NULL DEFAULT false
+);
 CREATE OR REPLACE FUNCTION cove_notify_operation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  INSERT INTO notification_deliveries(operation_id,connection_id)
   SELECT NEW.id,c.id FROM infrastructure_connections c JOIN workloads w ON w.team_id=c.team_id
@@ -306,6 +323,9 @@ DROP TRIGGER IF EXISTS cove_operation_notification ON operations;
 CREATE TRIGGER cove_operation_notification AFTER UPDATE OF state ON operations FOR EACH ROW
  WHEN (OLD.state IS DISTINCT FROM NEW.state AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();
 
+DROP TRIGGER IF EXISTS cove_automatic_scan_notification ON operations;
+CREATE TRIGGER cove_automatic_scan_notification AFTER INSERT ON operations FOR EACH ROW
+ WHEN (NEW.action='image_scan' AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();
 CREATE INDEX IF NOT EXISTS notification_deliveries_due ON notification_deliveries(next_attempt) WHERE state='pending';
 
 CREATE TABLE IF NOT EXISTS cloudflare_zones (

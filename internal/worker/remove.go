@@ -15,6 +15,14 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) error {
 	}
 	e.mu.Lock()
 	busy := e.busy(id)
+	for operation, workload := range e.automaticScans {
+		if workload == id {
+			if cancel := e.cancels[operation]; cancel != nil {
+				cancel()
+			}
+			busy = true
+		}
+	}
 	for _, op := range e.pending {
 		if op.Workload == id {
 			busy = true

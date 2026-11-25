@@ -104,7 +104,7 @@ func TestImageScanningNotificationEventsAndOptOut(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(event["message"], "CVE-2026-12345") || !strings.Contains(event["message"], "HIGH: 1") {
+		if !strings.Contains(event["message"], "CVE-2026-") || !strings.Contains(event["message"], "HIGH: 1") {
 			t.Fatal("notification lost bounded CVE/severity summary", event)
 		}
 		events = append(events, event["event"])
@@ -114,6 +114,7 @@ func TestImageScanningNotificationEventsAndOptOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	report.Images[0].Coverage.JavaArchives = "not_scanned"
+	report.Images[0].Findings = append(report.Images[0].Findings, worker.ScanFinding{ID: "CVE-2026-45678", Package: "new-pkg", Installed: "1", Severity: "HIGH"})
 	finish("scan-partial-java", report)
 	if err := f.s.deliverNotification(ctx, "scan-partial-java", connection, 1); err != nil {
 		t.Fatal(err)

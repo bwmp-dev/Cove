@@ -120,7 +120,7 @@ const outcomeGroups = {
   certificates: { title: "Certificates", description: "Certificate requests and renewals by a resource's issuers that did not finish. Messages name the event only, without hostnames or keys. Open the resource's Domains page for details." },
   tunnels: { title: "Cloudflare Tunnel", description: "A node's Cloudflare Tunnel publishing or cleanup starting to report an error. Messages name the event only, without hostnames, tokens or error details. Only administrator teams' channels receive it. Open the node's Proxy configuration page for details." },
   images: { title: "Image updates", description: "Newer images found by a resource's image update policy, sent once per candidate. Ordinary image checks do not send this event." },
-  scans: { title: "Vulnerability scans", description: "One event when a manually queued vulnerability scan finishes, sent only while the team's scanning setting for the resource's node allows scans and has notifications on. Messages summarise the result; findings and coverage are on the resource's Registry page." },
+  scans: { title: "Vulnerability scans", description: "One event when a vulnerability scan finishes. Manual scans notify every result; automatic scans notify about newly appeared findings and when an image's result first becomes clean or unknown, not when they repeat the previous result. Sent only while the team's scanning setting for the resource's node allows scans and has notifications on. Messages summarise the result; findings and coverage are on the resource's Registry page." },
 } satisfies Record<string, { title: string; description: string }>;
 
 const outcomeEvents: Record<string, { group: keyof typeof outcomeGroups; label: string }> = {

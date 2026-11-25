@@ -30,7 +30,7 @@ import { holdReason } from "../lib/suspension";
 import { useIdleState } from "../components/IdleSleep";
 import { idleReason } from "../lib/idle";
 import { ScaleOutcome } from "../components/CpuAutoscale";
-import { ScanOutcome } from "../components/ImageScans";
+import { ScanOutcome, ScanSource } from "../components/ImageScans";
 
 const route = getRouteApi("/app/operations/$operationId");
 
@@ -178,9 +178,10 @@ function SuspensionOutcome({ suspension }: { suspension: SuspensionResult }) {
 }
 
 function imageScanRows(operation: Operation, worker: WorkerOperation | null, active: boolean, workloadId: string | undefined) {
-  if (worker?.image_scan) return [{ term: "Vulnerability scan", value: <ScanOutcome scan={worker.image_scan} workloadId={workloadId} /> }];
-  if (operation.action === "image_scan" && worker && !active) return [{ term: "Vulnerability scan", value: <span className="text-fg-muted">No report was recorded.</span> }];
-  return [];
+  const source = operation.action === "image_scan" && worker ? [{ term: "Scan source", value: <ScanSource origin={worker.scan_origin} /> }] : [];
+  if (worker?.image_scan) return [...source, { term: "Vulnerability scan", value: <ScanOutcome scan={worker.image_scan} workloadId={workloadId} /> }];
+  if (operation.action === "image_scan" && worker && !active) return [...source, { term: "Vulnerability scan", value: <span className="text-fg-muted">No report was recorded.</span> }];
+  return source;
 }
 
 const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;

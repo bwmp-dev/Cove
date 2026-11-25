@@ -27,6 +27,7 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	AutomaticScan          *AutomaticScan            `json:"automatic_scan,omitempty"`
 	BuildRecipe            *BuildRecipe              `json:"build_recipe,omitempty"`
 	BuildpacksAdmission    *BuildpacksAdmission      `json:"buildpacks_admission,omitempty"`
 	BuildPlatform          string                    `json:"build_platform,omitempty"`
@@ -84,6 +85,7 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
+	ScanOrigin              string                 `json:"scan_origin,omitempty"`
 	BuildRecipe             *BuildRecipeInfo       `json:"build_recipe,omitempty"`
 	RegistryRecoveryPending bool                   `json:"registry_recovery_pending,omitempty"`
 	ManagedRegistry         *ManagedRegistryResult `json:"managed_registry,omitempty"`
@@ -163,6 +165,7 @@ type Engine struct {
 	observationMu    sync.Mutex
 	tailSlots        chan struct{}
 	scanMu           sync.Mutex
+	automaticScans   map[string]string
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -261,11 +264,14 @@ func ValidateRequest(r Request) error {
 	if r.ManagedDatabase && (r.Scale != nil || r.Rollout != nil || r.Idle != nil || r.Build != nil || r.PullLatest || r.ComposeBundle != nil) {
 		return errors.New("managed databases require explicit single-instance deployments")
 	}
+	if err := r.AutomaticScan.validate(r); err != nil {
+		return err
+	}
 	if err := validateManagedRegistryOperation(r); err != nil {
 		return err
 	}
 	if r.Action == "image_scan" {
-		minimal := Request{ID: r.ID, Workload: r.Workload, Action: r.Action, Kind: r.Kind, JobService: r.JobService, OutboundProxy: r.OutboundProxy}
+		minimal := Request{ID: r.ID, Workload: r.Workload, Action: r.Action, Kind: r.Kind, JobService: r.JobService, OutboundProxy: r.OutboundProxy, AutomaticScan: r.AutomaticScan}
 		if !reflect.DeepEqual(r, minimal) {
 			return errors.New("image scanning accepts no deployment or credential inputs")
 		}
@@ -590,6 +596,12 @@ func (e *Engine) submitBuildpacksLocked(r Request, admission *BuildpacksAdmissio
 		return Operation{}, err
 	}
 	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC(), Scale: r.Scale}, Request: r, Digest: digest}
+	if r.Action == "image_scan" {
+		j.Operation.ScanOrigin = "manual"
+		if r.AutomaticScan != nil {
+			j.Operation.ScanOrigin = r.AutomaticScan.Origin
+		}
+	}
 	if r.Action == "build" {
 		j.Operation.BuildRecipe = BuildRecipeSummary(r.BuildRecipe)
 		if r.BuildRecipe != nil && r.BuildRecipe.Engine == "nixpacks" {
@@ -790,6 +802,9 @@ func (e *Engine) Serve(ctx context.Context) error {
 	if err := e.recoverTrafficOnStartup(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "Proxy traffic recovery needs repair; deployments remain paused:", err)
 	}
+	if err := e.recoverScanRefresh(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "Automatic vulnerability database refresh recovery is pending; foreground operations remain available.")
+	}
 	if err := e.recoverDrills(ctx); err != nil {
 		return err
 	}
@@ -831,7 +846,14 @@ func (e *Engine) Serve(ctx context.Context) error {
 	jobs.Go(func() { e.cloudflarePublishingLoop(ctx) })
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	nextScanDatabase := time.Time{}
 	for {
+		if !time.Now().Before(nextScanDatabase) {
+			if err := e.dispatchScanDatabase(ctx, &jobs); err != nil {
+				fmt.Fprintln(os.Stderr, "Automatic vulnerability database refresh is unavailable; foreground operations remain available.")
+				nextScanDatabase = time.Now().Add(time.Minute)
+			}
+		}
 		if err := e.dispatch(ctx, &jobs); err != nil {
 			return err
 		}
@@ -877,10 +899,6 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 	sort.Slice(e.pending, func(i, j int) bool { return e.pending[i].CreatedAt.Before(e.pending[j].CreatedAt) })
 	remaining := make([]Operation, 0, len(e.pending))
 	for _, op := range e.pending {
-		if e.busy(op.Workload) || len(e.active)+e.recoveringWorkloadCount() >= 4 {
-			remaining = append(remaining, op)
-			continue
-		}
 		j, err := e.read(op.ID)
 		if err != nil {
 			return err
@@ -888,10 +906,34 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 		if j.Operation.State != "queued" {
 			continue
 		}
-		e.active[j.Request.Workload] = true
+		if j.Request.AutomaticScan != nil {
+			if e.busy(op.Workload) || len(e.automaticScans) > 0 {
+				remaining = append(remaining, op)
+				continue
+			}
+			if e.automaticScans == nil {
+				e.automaticScans = map[string]string{}
+			}
+			e.automaticScans[op.ID] = op.Workload
+		} else {
+			for id, workload := range e.automaticScans {
+				if workload == op.Workload && e.cancels[id] != nil {
+					e.cancels[id]()
+				}
+			}
+			if e.busy(op.Workload) || len(e.active)+e.recoveringWorkloadCount() >= 4 {
+				remaining = append(remaining, op)
+				continue
+			}
+			e.active[j.Request.Workload] = true
+		}
 		j.Operation.State = "running"
 		if err = writeJSON(e.path(j.Request.ID), j); err != nil {
-			delete(e.active, j.Request.Workload)
+			if j.Request.AutomaticScan == nil {
+				delete(e.active, j.Request.Workload)
+			} else {
+				delete(e.automaticScans, op.ID)
+			}
 			return err
 		}
 		operationCtx, cancel := context.WithCancel(ctx)
@@ -1002,10 +1044,16 @@ func (e *Engine) execute(parent context.Context, j journal) {
 		}
 	}
 	// Containers may have been recreated; attach them to their private links again.
-	defer e.kickLinks()
+	if j.Request.AutomaticScan == nil {
+		defer e.kickLinks()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	defer delete(e.active, j.Request.Workload)
+	if j.Request.AutomaticScan == nil {
+		defer delete(e.active, j.Request.Workload)
+	} else {
+		defer delete(e.automaticScans, j.Request.ID)
+	}
 	defer delete(e.cancels, j.Request.ID)
 	committed := false
 	persisted, readErr := e.read(j.Request.ID)

@@ -126,7 +126,12 @@ func (e *Engine) performImageScan(ctx context.Context, r Request, out io.Writer)
 		return nil
 	}
 	fmt.Fprintln(out, "Checking or refreshing the bounded vulnerability database.")
-	database, err := e.scanDatabase(ctx, owner, r.ID, scannerImage, r.OutboundProxy)
+	var database scanDatabaseCache
+	if r.AutomaticScan != nil {
+		database, err = e.automaticScanDatabase(ctx, r)
+	} else {
+		database, err = e.scanDatabase(ctx, owner, r.ID, scannerImage, r.OutboundProxy)
+	}
 	report.Database = database.ScanDatabase
 	if err != nil {
 		report.Message = "The vulnerability database is missing, stale or could not be refreshed within its limits."
@@ -208,6 +213,12 @@ func (e *Engine) performImageScan(ctx context.Context, r Request, out io.Writer)
 	if !jobPresent {
 		report.Message = "The retained containers do not include the selected job service."
 		return nil
+	}
+	if r.AutomaticScan != nil {
+		if _, err := e.automaticScanDatabase(ctx, r); err != nil {
+			report.Message = "Automatic scan inputs or resource state changed; coverage is unknown."
+			return nil
+		}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()

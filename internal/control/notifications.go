@@ -157,9 +157,13 @@ func (s *Server) deliverNotification(ctx context.Context, operation, connection 
 	status := "sent"
 	message := ""
 	n := c.Notification
-	scanEvent, scanSummary, scanAllowed, err := s.scanNotification(ctx, operation, action)
-	if err != nil {
+	scanEvent, scanSummary, scanAllowed, scanErr := s.scanNotification(ctx, operation, action)
+	if errors.Is(scanErr, errScanBaselinePending) {
+		_, err := s.DB.Exec(ctx, `UPDATE notification_deliveries SET attempts=GREATEST(0,attempts-1),next_attempt=now()+interval '1 minute',last_error='Waiting for an earlier automatic scan result before comparing findings.' WHERE operation_id=$1 AND connection_id=$2`, operation, connection)
 		return err
+	}
+	if scanErr != nil {
+		return scanErr
 	}
 	eventName := operationEvent(action, state)
 	if action == "image_scan" {

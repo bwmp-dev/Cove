@@ -135,7 +135,7 @@ func TestImageScanDocker(t *testing.T) {
 			}
 			report := operation.ImageScan
 			encoded, _ := json.Marshal(report)
-			if strings.Contains(string(encoded), "fixture-only-do-not-store") || snapshot() != before || len(report.Images) != 1 || len(report.Images[0].Findings) == 0 {
+			if strings.Contains(string(encoded), "fixture-only-do-not-store") || snapshot() != before || len(report.Images) != 1 || len(report.Images[0].Findings) == 0 || !imageDigest.MatchString(report.Images[0].Identity) {
 				t.Fatal("scan changed the application, leaked metadata or lost findings", report.State, report.Message)
 			}
 			if java {
@@ -146,6 +146,65 @@ func TestImageScanDocker(t *testing.T) {
 				t.Fatal("plain fixture coverage unavailable", string(encoded))
 			}
 			t.Log("real offline scan", label, report.State, len(report.Images[0].Findings), "findings; application unchanged")
+			observation, err := e.observeScan(ctx, r)
+			if err != nil || !observation.Eligible {
+				t.Fatal("automatic retained image observation", observation, err)
+			}
+			r.ID += "-automatic"
+			r.AutomaticScan = &AutomaticScan{Origin: "post_deploy", Database: database.Digest, Images: observation.Images}
+			runAutomatic := func() {
+				t.Helper()
+				if _, err := e.Submit(r); err != nil {
+					t.Fatal(err)
+				}
+				journal, err := e.read(r.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.execute(ctx, journal)
+				op, err := e.Status(r.ID)
+				if err != nil || op.State != "succeeded" || op.ScanOrigin != r.AutomaticScan.Origin || op.ImageScan == nil || op.ImageScan.State != report.State || op.ImageScan.Database.Digest != r.AutomaticScan.Database || snapshot() != before {
+					if op.ImageScan != nil {
+						encoded, _ := json.Marshal(op.ImageScan)
+						t.Log("automatic normalized report", string(encoded))
+					}
+					t.Fatal("automatic scan altered runtime or lost coverage/origin", op, err)
+				}
+				t.Log("real offline automatic scan", label, op.ScanOrigin, op.ImageScan.State, "runtime unchanged")
+			}
+			runAutomatic()
+			if label == "plain" {
+				// A controlled bundle generation change keeps the actual advisory bytes and freshness dates.
+				metadata := filepath.Join(root, name, "db", "metadata.json")
+				contents, err := os.ReadFile(metadata)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(metadata, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(metadata, append(contents, '\n'), 0444); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(metadata, 0444); err != nil {
+					t.Fatal(err)
+				}
+				database, err = validateScanDatabase(filepath.Join(root, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				next := "db-" + strings.TrimPrefix(database.Digest, "sha256:")
+				if err := os.Rename(filepath.Join(root, name), filepath.Join(root, next)); err != nil {
+					t.Fatal(err)
+				}
+				name = next
+				if err := writeJSON(filepath.Join(root, "current.json"), scanDatabaseCache{ScanDatabase: database, Path: name}); err != nil {
+					t.Fatal(err)
+				}
+				r.ID += "-scheduled"
+				r.AutomaticScan.Origin, r.AutomaticScan.Database = "scheduled", database.Digest
+				runAutomatic()
+			}
 		})
 	}
 }

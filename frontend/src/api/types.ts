@@ -509,6 +509,8 @@ export interface WorkerOperation {
   revision?: string;
   image_check?: ImageCheck;
   image_scan?: ImageScan;
+  // How an image_scan started. Older workers omit it.
+  scan_origin?: string;
   build?: BuildResult;
   // The build engine this build used, recorded even when it fails. Builds from older control planes omit it.
   build_recipe?: OperationBuildRecipe;
@@ -646,6 +648,8 @@ export interface ImageCheck {
   checked_at: string;
   images: ImageStatus[];
 }
+
+export type ScanOrigin = "manual" | "post_deploy" | "scheduled";
 
 export type ScanSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
 

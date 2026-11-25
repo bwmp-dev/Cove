@@ -1,5 +1,6 @@
 import type { ImageScanResults, ImageScanningSettings } from "../api/image-scans";
-import type { ImageScan, ScannedImage, ScanSeverity } from "../api/types";
+import { scanOrigin } from "../api/image-scans";
+import type { ImageScan, ScannedImage, ScanOrigin, ScanSeverity } from "../api/types";
 import type { Tone } from "./nodes";
 
 export const severities: readonly ScanSeverity[] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
@@ -104,6 +105,22 @@ export function enableBlocker(settings: ImageScanningSettings, node: string): st
   if (!settings.worker_supported) return `The worker on ${node} does not report vulnerability scanning. The node operator must set COVE_IMAGE_SCANNING=1 in the worker daemon's environment, restart the daemon and verify the node first.`;
   if (!settings.node_ready) return `Scans can be allowed once ${node} is ready.`;
   return null;
+}
+
+// Turning automatic scans off never needs a capability; turning them on needs scans allowed and an upgraded ready worker.
+export function automaticBlocker(settings: ImageScanningSettings, enabled: boolean, node: string): string | null {
+  if (!enabled) return "Automatic scans need vulnerability scans to be allowed.";
+  if (!settings.worker_supported || !settings.automatic_supported) return `The worker on ${node} does not report automatic scans. The node operator must upgrade the worker and verify the node first. Manual scans are not affected.`;
+  if (!settings.node_ready) return `Automatic scans can be turned on once ${node} is ready.`;
+  return null;
+}
+
+const originLabels: Record<ScanOrigin, string> = { manual: "Manual", post_deploy: "Automatic, after a deploy or job run", scheduled: "Automatic, after a vulnerability database update" };
+
+// Never inferred: a missing or unrecognised origin says so.
+export function scanOriginLabel(value: unknown) {
+  const origin = scanOrigin(value);
+  return origin ? originLabels[origin] : "Not recorded";
 }
 
 interface ScanState {
