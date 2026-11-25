@@ -1,4 +1,4 @@
-import type { ImageStatus, ImageStatusValue, Operation, Workload } from "../api/types";
+import type { Capabilities, ImageStatus, ImageStatusValue, Operation, Workload, WorkloadKind } from "../api/types";
 import type { Tone } from "./nodes";
 import { isManagedPreview } from "./previews";
 
@@ -10,8 +10,17 @@ export const imageStatuses: Record<ImageStatusValue, { tone: Tone; label: string
   unknown: { tone: "neutral", label: "Unknown", description: "The registry could not be checked for this image." },
 };
 
-export function imageStatus(status: string) {
-  return imageStatuses[status as ImageStatusValue] ?? { tone: "neutral" as const, label: "Unknown", description: imageStatuses.unknown.description };
+// A job's containers are retained from its last run, and checking never pulls or runs it.
+const jobDescriptions: Partial<Record<ImageStatusValue, string>> = {
+  current: "The image of the job's last run matches the registry digest for its tag.",
+  update_available: "The registry has a different image for the same tag than the job's last run used. Checking does not pull it or run the job.",
+};
+
+export function imageStatus(status: string, kind: WorkloadKind = "service") {
+  const known = imageStatuses[status as ImageStatusValue];
+  if (!known) return { tone: "neutral" as const, label: "Unknown", description: imageStatuses.unknown.description };
+  const description = kind === "job" ? jobDescriptions[status as ImageStatusValue] : undefined;
+  return description ? { ...known, description } : known;
 }
 
 // "3 current, 1 update available". Unknown results are counted separately so a partial check never reads as all current.
@@ -43,15 +52,26 @@ export function releaseLink(url: string | undefined) {
   }
 }
 
-// Checks run on deployed services only; jobs and managed previews are not checked.
+// Services and jobs are checked; managed previews are not.
 export function supportsImageLifecycle(workload: Workload) {
-  return workload.kind !== "job" && !isManagedPreview(workload);
+  return !isManagedPreview(workload);
 }
 
-// The newest finished operation that can change the cached image result.
-export function imageRefreshKey(operations: Operation[] | undefined, workloadId: string) {
-  const operation = operations?.find(
-    (item) => item.workload_id === workloadId && item.state === "succeeded" && (item.action === "image_check" || item.action === "deploy" || item.action === "rollback"),
-  );
-  return operation?.id ?? null;
+// Job checks also need the worker to read a job's retained containers.
+export function imageChecksSupported(capabilities: Capabilities | null | undefined, kind: WorkloadKind) {
+  return Boolean(capabilities?.image_lifecycle && (kind !== "job" || capabilities.job_image_lifecycle));
+}
+
+const deployments = new Set(["deploy", "rollback"]);
+
+// The newest operation that can change the cached image result. A job's result turns stale after any newer run
+// attempt, including failed, cancelled and unfinished ones, so its key also follows that run's state.
+export function imageRefreshKey(operations: Operation[] | undefined, workloadId: string, kind: WorkloadKind = "service") {
+  const operation = operations?.find((item) => {
+    if (item.workload_id !== workloadId) return false;
+    if (item.action === "image_check") return item.state === "succeeded";
+    return deployments.has(item.action) && (kind === "job" || item.state === "succeeded");
+  });
+  if (!operation) return null;
+  return kind === "job" ? `${operation.id}:${operation.state}` : operation.id;
 }

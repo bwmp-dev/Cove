@@ -168,15 +168,17 @@ func (e *Engine) performImageCheck(ctx context.Context, r Request, env []string,
 		return err
 	}
 	if len(containers) == 0 || len(containers) > 64 {
-		return errors.New("image checks require between one and 64 deployed service containers")
+		return errors.New("image checks require between one and 64 retained deployed containers; run the job or deploy the service first")
 	}
 	result := ImageCheck{Images: []ImageStatus{}}
 	seen := map[string]bool{}
+	jobPresent := r.Kind != "job"
 	for _, container := range containers {
 		var deployed struct{ Reference, Image, Service string }
 		if err = e.imageJSON(ctx, env, &deployed, "docker", "inspect", "--format", `{"reference":{{json (or (index .Config.Labels "dev.cove.image-reference") .Config.Image)}},"image":{{json .Image}},"service":{{json (or (index .Config.Labels "dev.cove.service") (index .Config.Labels "com.docker.compose.service"))}}}`, container.ID); err != nil {
 			return err
 		}
+		jobPresent = jobPresent || deployed.Service == r.JobService
 		key := deployed.Service + "/" + deployed.Image + "/" + deployed.Reference
 		if seen[key] {
 			continue
@@ -190,6 +192,9 @@ func (e *Engine) performImageCheck(ctx context.Context, r Request, env []string,
 		}
 		result.Images = append(result.Images, status)
 		fmt.Fprintf(out, "Image check for service %s: %s\n", status.Service, status.Status)
+	}
+	if !jobPresent {
+		return fmt.Errorf("the retained containers do not include job service %q; run the job and check again", r.JobService)
 	}
 	sort.Slice(result.Images, func(i, j int) bool {
 		return result.Images[i].Service+result.Images[i].ImageID < result.Images[j].Service+result.Images[j].ImageID

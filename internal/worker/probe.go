@@ -79,6 +79,7 @@ type Probe struct {
 	LiveRoutes           bool         `json:"live_routes"`
 	RoutePolicies        bool         `json:"route_policies"`
 	ImageLifecycle       bool         `json:"image_lifecycle"`
+	JobImageLifecycle    bool         `json:"job_image_lifecycle"`
 	BuildPublish         bool         `json:"build_publish"`
 	Protocol             int          `json:"protocol"`
 	OS                   string       `json:"os"`
@@ -155,6 +156,7 @@ func Inspect(ctx context.Context) Probe {
 	if out, err := exec.CommandContext(ctx, "docker", "compose", "version", "--short").Output(); err == nil {
 		p.Compose = strings.TrimSpace(string(out))
 	}
+	p.JobImageLifecycle = p.ImageLifecycle
 	p.Metrics = inspectMetrics(ctx, "/var/lib/cove")
 	p.SharedHost = inspectSharedHost(ctx, RunCommand, "/")
 	p.Ready = p.OS == "linux" && p.Docker != "" && p.Compose != ""

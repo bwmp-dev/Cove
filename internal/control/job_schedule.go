@@ -206,7 +206,8 @@ func (s *Server) scheduleJobs(ctx context.Context) error {
 				return err
 			}
 			if activeID != "" {
-				if j.overlap != "skip" {
+				// Metadata work must not consume a scheduled execution, even under Skip.
+				if j.overlap != "skip" || action == "image_check" {
 					if pending == nil {
 						value := time.Now().UTC()
 						pending = &value

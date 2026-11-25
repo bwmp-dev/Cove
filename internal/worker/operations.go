@@ -404,8 +404,8 @@ func ValidateRequest(r Request) error {
 			return errors.New("rollout actions require a service outside managed previews")
 		}
 	case "image_check":
-		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
-			return errors.New("image checks require a service outside managed previews")
+		if r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("image checks require a resource outside managed previews")
 		}
 	case "routes":
 		if r.Kind == "job" {

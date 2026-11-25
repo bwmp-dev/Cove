@@ -38,6 +38,8 @@ export interface Capabilities {
   route_protocol?: number;
   // Docker Buildx is present, so the worker can check deployed images and pull before redeploying.
   image_lifecycle?: boolean;
+  // With image_lifecycle, the worker can check a job's retained containers from its last run without running the job.
+  job_image_lifecycle?: boolean;
   // Buildx, the Compose builder and pushing the local platform are available, so the worker can build and publish images.
   build_publish?: boolean;
   // The worker supports rolling, blue/green and canary replacements with promote and abort.
