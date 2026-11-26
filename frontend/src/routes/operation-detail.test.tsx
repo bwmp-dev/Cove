@@ -163,3 +163,45 @@ it("still reports a real execution failure as a worker error", async () => {
   expect(within(alert).getByText("compose up exited with status 1")).toBeInTheDocument();
   expect(screen.queryByText("Deployment held")).not.toBeInTheDocument();
 });
+
+const dnsWarning = "DNS publication for app.example.com could not be confirmed within two minutes. Deployment continued; Cove will keep reconciling DNS and retrying certificate issuance. Check the Cloudflare connection and hostname configuration.";
+
+it("keeps the DNS publication warning on a successful deployment without reporting an error", async () => {
+  mockApi(operation({ state: "succeeded", can_override: false, result: { id: "op-1", workload: "w1", action: "deploy", state: "succeeded", created_at: "2026-11-22T09:00:00Z", dns_warning: dnsWarning } }));
+  renderPage();
+  expect(await screen.findByText("DNS publication was not confirmed")).toBeInTheDocument();
+  expect(screen.getByText(dnsWarning)).toBeInTheDocument();
+  expect(screen.getByText("DNS propagation and certificate issuance may still be pending.")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText(/DNS (has )?propagated|certificate (was )?issued/i)).not.toBeInTheDocument();
+});
+
+it("shows the DNS publication warning beside a control-plane error", async () => {
+  mockApi(operation({ state: "failed", can_override: false, result: { error: "Deployment failed after the routes were exposed.", dns_warning: dnsWarning } }));
+  renderPage();
+  expect(await screen.findByText(dnsWarning)).toBeInTheDocument();
+  const alert = screen.getByRole("alert");
+  expect(within(alert).getByText("Operation error")).toBeInTheDocument();
+  expect(within(alert).queryByText(dnsWarning)).not.toBeInTheDocument();
+});
+
+it("keeps the DNS publication warning visible beside a deployment hold", async () => {
+  mockApi(operation({ can_override: false, result: { error: "Deployments are frozen until 18:00 UTC.", hold_reason: "Deployments are frozen until 18:00 UTC.", dns_warning: dnsWarning } }));
+  renderPage();
+  expect(await screen.findByText("Deployment held")).toBeInTheDocument();
+  expect(screen.getByText("Deployments are frozen until 18:00 UTC.")).toBeInTheDocument();
+  expect(screen.getByText("DNS publication was not confirmed")).toBeInTheDocument();
+  expect(screen.getByText(dnsWarning)).toBeInTheDocument();
+  expect(screen.queryByText("Operation error")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("ignores a DNS warning that is not text", async () => {
+  // Malformed server data the type cannot express.
+  const malformed: unknown = { error: "", dns_warning: { raw: "unexpected" } };
+  mockApi(operation({ state: "succeeded", can_override: false, result: malformed as Operation["result"] }));
+  renderPage();
+  expect(await screen.findByText("Summary")).toBeInTheDocument();
+  expect(screen.queryByText("DNS publication was not confirmed")).not.toBeInTheDocument();
+  expect(screen.queryByText(/unexpected/)).not.toBeInTheDocument();
+});

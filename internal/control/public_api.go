@@ -124,6 +124,7 @@ func (s *Server) publicRoutes() []publicRoute {
 		{"POST", "/workloads/{id}/certificates", "certificates:write", "Seal an immutable resource certificate version", routeCertificateInput{}, routeCertificateView{}, 201, s.routeCertificates},
 		{"DELETE", "/workloads/{id}/certificates/{certificate}", "certificates:write", "Delete an unused certificate version", nil, map[string]string{}, 200, s.routeCertificates},
 		{"GET", "/workloads/{id}/certificate-zones", "workloads:read", "List the resource team's shared certificate zones", nil, []certificateZone{}, 200, s.certificateZones},
+		{"GET", "/workloads/{id}/certificate-retries", "workloads:read", "Read pending public certificate retries without key material", nil, []worker.RouteCertificateRetry{}, 200, s.routeCertificateRetries},
 		{"GET", "/workloads/{id}/certificate-issuers", "workloads:read", "List certificate issuer metadata and reconciliation state", nil, []certificateIssuer{}, 200, s.certificateIssuers},
 		{"POST", "/workloads/{id}/certificate-issuers", "certificates:write", "Checkpoint a sealed Origin CA request for an authorised zone", certificateIssuerInput{}, certificateIssuerAccepted{}, 202, s.certificateIssuers},
 		{"PUT", "/workloads/{id}/certificate-issuers/{issuer}", "certificates:write", "Change renewal or retry a failed issuer", certificateIssuerUpdate{}, apiOK{}, 200, s.updateCertificateIssuer},

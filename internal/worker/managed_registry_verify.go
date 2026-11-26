@@ -10,8 +10,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
+
+var ErrRegistryDNSPending = errors.New("registry hostname does not resolve yet; cached negative DNS answers may remain until their TTL expires")
+var ErrRegistryHTTPSPending = errors.New("registry authenticated HTTPS verification failed")
 
 func VerifyManagedRegistry(ctx context.Context, registry *Registry, certificate string, selected ...*outbound.Config) error {
 	if registry == nil {
@@ -47,7 +51,11 @@ func VerifyManagedRegistry(ctx context.Context, registry *Registry, certificate 
 	request.SetBasicAuth(registry.Username, registry.Password)
 	response, err := client.Do(request)
 	if err != nil {
-		return errors.New("registry authenticated HTTPS verification failed")
+		var dns *net.DNSError
+		if errors.As(err, &dns) && strings.EqualFold(strings.TrimSuffix(dns.Name, "."), request.URL.Hostname()) {
+			return ErrRegistryDNSPending
+		}
+		return ErrRegistryHTTPSPending
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 || response.Header.Get("Docker-Distribution-Api-Version") != "registry/2.0" {

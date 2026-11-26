@@ -9,6 +9,7 @@ import { keys, nodesQuery, operationQuery, workloadOperationsQuery } from "../ap
 import type { Workload, WorkloadInput, DeploymentHooks, FileSecret, Route, RouteCertificate } from "../api/types";
 import { certificateChallengesQuery, certificateIssuersQuery, certificatesQuery, certificateZonesQuery } from "../api/certificates";
 import { CertificateChallenges } from "../components/CertificateChallenges";
+import { CertificateRetries } from "../components/CertificateRetries";
 import { CertificateIssuers } from "../components/CertificateIssuers";
 import { EnvironmentEditor } from "../components/EnvironmentEditor";
 import { ResourceVariables } from "../components/ResourceVariables";
@@ -771,14 +772,17 @@ function DomainsPanel({ workload }: { workload: Workload }) {
         title="Domains"
         description={`HTTPS hostnames and TCP and UDP listeners served by the managed Traefik proxy on ${nodeName}. For public HTTPS routes, point each hostname's DNS at that node and keep ports 80 and 443 reachable; certificates are issued automatically unless a route uses the proxy default or a stored certificate. Private routes are served only on the selected LAN or Tailscale listener, so point private DNS at that listener's address.`}
       >
-        {editable ? (
-          <DomainsForm workload={workload} certificates={choices} listeners={listeners} />
-        ) : (
-          <div className="space-y-4">
-            <ViewOnly />
-            <RouteList workload={workload} certificates={certificates.data} listeners={listeners.list} />
-          </div>
-        )}
+        <div className="space-y-4">
+          <CertificateRetries workloadId={workload.id} routes={workload.routes} />
+          {editable ? (
+            <DomainsForm workload={workload} certificates={choices} listeners={listeners} />
+          ) : (
+            <>
+              <ViewOnly />
+              <RouteList workload={workload} certificates={certificates.data} listeners={listeners.list} />
+            </>
+          )}
+        </div>
       </Section>
       {uploads && <RouteCertificates workloadId={workload.id} certificates={certificates} routes={workload.routes ?? []} issuers={issuers.data} editable={editable} busy={busy} />}
       {uploads && <CertificateIssuers workloadId={workload.id} issuers={issuers} zones={zones} certificates={certificates.data} routes={workload.routes ?? []} editable={editable} />}

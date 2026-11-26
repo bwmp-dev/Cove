@@ -325,7 +325,7 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,$3,$4)`, op, id, request.Action, payload)
 	}
 	if err == nil {
-		_, err = tx.Exec(r.Context(), `UPDATE managed_registries SET previous_state=state,state=$2,operation_id=$3,last_error='' WHERE id=$1`, id, state, op)
+		_, err = tx.Exec(r.Context(), `UPDATE managed_registries SET previous_state=state,state=$2,operation_id=$3,last_error='',verification_attempts=0,next_verification_at=NULL WHERE id=$1`, id, state, op)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -421,7 +421,7 @@ func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team,
 }
 
 func (s *Server) reconcileManagedRegistries(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `SELECT m.id,m.state,m.connection_id,m.credentials,o.state,o.result,w.node_id,o.id,o.payload FROM managed_registries m JOIN operations o ON o.id=m.operation_id JOIN workloads w ON w.id=m.id WHERE m.state IN ('provisioning','maintenance','removing') AND o.state NOT IN ('queued','running') ORDER BY m.created_at LIMIT 4`)
+	rows, err := s.DB.Query(ctx, `SELECT m.id,m.state,m.connection_id,m.credentials,o.state,o.result,w.node_id,o.id,o.payload FROM managed_registries m JOIN operations o ON o.id=m.operation_id JOIN workloads w ON w.id=m.id WHERE (m.state IN ('provisioning','maintenance','removing') OR m.state='failed' AND m.next_verification_at IS NOT NULL) AND o.state NOT IN ('queued','running') AND (m.next_verification_at IS NULL OR m.next_verification_at<=now()) ORDER BY m.created_at LIMIT 4`)
 	if err != nil {
 		return err
 	}
@@ -448,7 +448,7 @@ func (s *Server) reconcileManagedRegistries(ctx context.Context) error {
 		return err
 	}
 	for _, v := range list {
-		if v.state != "provisioning" {
+		if v.state != "provisioning" && v.state != "failed" {
 			var original worker.Request
 			if err = s.unsealJSON(v.payload, &original); err != nil {
 				return err
@@ -473,7 +473,7 @@ func (s *Server) reconcileManagedRegistries(ctx context.Context) error {
 			}
 			continue
 		}
-		if v.state == "provisioning" {
+		if v.state == "provisioning" || v.state == "failed" {
 			var credentials connectionConfig
 			if err = s.unsealJSON(v.credentials, &credentials); err != nil {
 				return err
@@ -505,7 +505,12 @@ func (s *Server) reconcileManagedRegistries(ctx context.Context) error {
 			_, err = s.nodeRPC(probe, node, worker.RPCRequest{Method: "managed_registry_verify", Registry: credentials.Registry, RegistryCertificate: selectedCertificate})
 			cancel()
 			if err != nil {
-				_, err = s.DB.Exec(ctx, `UPDATE managed_registries SET state='failed',last_error='Registry deployment finished, but authenticated TLS verification failed. Confirm DNS and the HTTPS certificate, then retry.' WHERE id=$1 AND state='provisioning'`, v.id)
+				message, retry := registryVerificationFailure(err)
+				if retry {
+					err = s.deferRegistryVerification(ctx, v.id, v.operation, message)
+				} else {
+					_, err = s.DB.Exec(ctx, `UPDATE managed_registries SET state='failed',last_error=$2,next_verification_at=NULL WHERE id=$1 AND operation_id=$3 AND state IN ('provisioning','failed')`, v.id, message, v.operation)
+				}
 				if err != nil {
 					return err
 				}
@@ -516,9 +521,9 @@ func (s *Server) reconcileManagedRegistries(ctx context.Context) error {
 				return err
 			}
 			connection := resourceID()
-			_, err = tx.Exec(ctx, `INSERT INTO infrastructure_connections(id,team_id,kind,name,configuration) SELECT $2,team_id,'registry',$3,credentials FROM managed_registries WHERE id=$1 AND state='provisioning'`, v.id, connection, credentials.Name)
+			_, err = tx.Exec(ctx, `INSERT INTO infrastructure_connections(id,team_id,kind,name,configuration) SELECT $2,team_id,'registry',$3,credentials FROM managed_registries WHERE id=$1 AND operation_id=$4 AND state IN ('provisioning','failed') FOR UPDATE`, v.id, connection, credentials.Name, v.operation)
 			if err == nil {
-				_, err = tx.Exec(ctx, `UPDATE managed_registries SET state='ready',connection_id=$2,last_error='' WHERE id=$1 AND state='provisioning'`, v.id, connection)
+				_, err = tx.Exec(ctx, `UPDATE managed_registries SET state='ready',connection_id=$2,last_error='',next_verification_at=NULL,verification_attempts=0 WHERE id=$1 AND operation_id=$3 AND state IN ('provisioning','failed')`, v.id, connection, v.operation)
 			}
 			if err == nil {
 				err = tx.Commit(ctx)

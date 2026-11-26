@@ -101,11 +101,24 @@ func retiringUDPIngress(previous, desired dynamicIngress) (dynamicIngress, bool,
 }
 
 func (e *Engine) publishIngress(ctx context.Context, config string, out io.Writer) error {
+	return e.publishIngressFile(ctx, config, true, out)
+}
+
+func (e *Engine) publishRunningIngress(ctx context.Context, config string, out io.Writer) error {
+	return e.publishIngressFile(ctx, config, false, out)
+}
+
+func (e *Engine) publishIngressFile(ctx context.Context, config string, start bool, out io.Writer) error {
 	path := filepath.Join(e.Root, "ingress.traefik.yaml")
 	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
 		return err
 	}
-	for _, args := range [][]string{{"docker", "cp", path, "cove-ingress:/data/routes.next"}, {"docker", "start", "cove-ingress"}, {"docker", "exec", "cove-ingress", "sh", "-ec", "mkdir -p /data/dynamic; mv /data/routes.next /data/dynamic/routes.yaml"}} {
+	commands := [][]string{{"docker", "cp", path, "cove-ingress:/data/routes.next"}}
+	if start {
+		commands = append(commands, []string{"docker", "start", "cove-ingress"})
+	}
+	commands = append(commands, []string{"docker", "exec", "cove-ingress", "sh", "-ec", "mkdir -p /data/dynamic; mv /data/routes.next /data/dynamic/routes.yaml"})
+	for _, args := range commands {
 		if err := e.Run(ctx, e.Root, args, nil, out); err != nil {
 			return err
 		}

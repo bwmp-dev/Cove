@@ -41,6 +41,7 @@ function renderPage({ routes, routeProtocol = 5, listed = () => Promise.resolve(
     if (path === "/api/workloads/w1/uptime") return Promise.resolve([]);
     if (path === "/api/workloads/w1/certificates" || path === "/api/workloads/w1/certificate-issuers" || path === "/api/workloads/w1/certificate-zones") return Promise.resolve([]);
     if (path.startsWith("/api/workloads/w1/certificate-challenges")) return Promise.resolve({ items: [], more: false });
+    if (path === "/api/workloads/w1/certificate-retries") return Promise.resolve([]);
     if (method === "PUT" && path === "/api/workloads/w1/routes") return Promise.resolve({ state: "unchanged" });
     return Promise.reject(new Error(`unexpected ${method} ${path}`));
   });

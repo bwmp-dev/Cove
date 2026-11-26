@@ -1960,3 +1960,9 @@ CREATE TABLE IF NOT EXISTS preview_ci_deliveries (
  PRIMARY KEY(project_id,delivery_id)
 );
 CREATE INDEX IF NOT EXISTS preview_ci_deliveries_age ON preview_ci_deliveries(project_id,received_at);
+
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS dns_prepared boolean NOT NULL DEFAULT false;
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS dns_warning text NOT NULL DEFAULT '';
+
+ALTER TABLE managed_registries ADD COLUMN IF NOT EXISTS verification_attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE managed_registries ADD COLUMN IF NOT EXISTS next_verification_at timestamptz;

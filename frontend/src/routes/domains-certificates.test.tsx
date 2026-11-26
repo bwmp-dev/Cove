@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { certificateRetriesKey } from "../api/certificates";
 import { ApiError, request } from "../api/client";
 import type { Node, Route, RouteCertificate, Workload } from "../api/types";
 import { ResourceDomains } from "./resource-config";
@@ -332,5 +333,67 @@ describe("certificate upload and deletion", () => {
   it("reports a failed list with Retry and no upload limit guesswork", async () => {
     renderPage({ certificates: () => Promise.reject(new ApiError(403, "Access denied.")) });
     expect(await screen.findByText("Could not load certificates")).toBeInTheDocument();
+  });
+});
+
+describe("pending public certificate retries", () => {
+  const retriesPath = "/api/workloads/w1/certificate-retries";
+  const message = "Certificate issuance is still pending. Cove retries automatically; check this hostname's DNS and public reachability on ports 80 and 443. Repeated failures slow retries to once every six hours.";
+  const retry = (hostname: string, attempts = 1) => ({ hostname, attempts, next_attempt_at: "2099-01-01T00:00:00Z", message });
+  const storedRoute: Route = { domain: "secure.example.com", service: "web", port: 8080, policy: { certificate_source: "uploaded", certificate_id: origin } };
+  const defaultRoute: Route = { domain: "default.example.com", service: "web", port: 8080, policy: { certificate_source: "default" } };
+  const wildcardRoute: Route = { domain: "*.example.com", service: "web", port: 8080 };
+
+  it("lists retries only beside current Let's Encrypt hostnames, without a manual retry", async () => {
+    renderPage({
+      routes: [plainRoute, storedRoute, defaultRoute, wildcardRoute],
+      handle: (method, path) => (method === "GET" && path === retriesPath ? Promise.resolve([retry("app.example.com"), retry("secure.example.com"), retry("default.example.com"), retry("gone.example.com", 3)]) : undefined),
+    });
+    const list = await screen.findByRole("list", { name: "Pending certificate retries" });
+    expect(screen.getByText("Certificate issuance pending")).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(list).getByText("app.example.com")).toBeInTheDocument();
+    expect(within(list).getByText(/^Next automatic retry due/)).toBeInTheDocument();
+    expect(within(list).queryByText(/configuration retr/)).not.toBeInTheDocument();
+    expect(within(list).getByText(message)).toBeInTheDocument();
+    expect(within(list).getByRole("time")).toHaveAttribute("dateTime", "2099-01-01T00:00:00Z");
+    expect(within(list).queryByText(/secure\.example\.com|default\.example\.com|gone\.example\.com/)).not.toBeInTheDocument();
+    expect(within(list).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("does not read retries when no route uses Let's Encrypt", async () => {
+    renderPage({ routes: [storedRoute, defaultRoute, wildcardRoute] });
+    expect(await screen.findByRole("list", { name: "Stored certificates" })).toBeInTheDocument();
+    expect(calls("GET", retriesPath)).toHaveLength(0);
+  });
+
+  it("shows no status for an empty list rather than claiming a certificate was issued", async () => {
+    const client = renderPage({ routes: [plainRoute], handle: (method, path) => (method === "GET" && path === retriesPath ? Promise.resolve([]) : undefined) });
+    await waitFor(() => expect(client.getQueryState(certificateRetriesKey("w1"))?.status).toBe("success"));
+    expect(screen.queryByText("Certificate issuance pending")).not.toBeInTheDocument();
+    expect(screen.queryByText("Could not load certificate retry status")).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Pending certificate retries" })).not.toBeInTheDocument();
+  });
+
+  it("shows the worker upgrade message when the worker cannot report retries", async () => {
+    renderPage({ routes: [plainRoute], handle: (method, path) => (method === "GET" && path === retriesPath ? Promise.reject(new ApiError(409, "Upgrade this worker to enable automatic public certificate retries.")) : undefined) });
+    const error = (await screen.findByText("Could not load certificate retry status")).closest("[role=alert]") as HTMLElement;
+    expect(within(error).getByText(/Upgrade this worker to enable automatic public certificate retries\./)).toBeInTheDocument();
+    expect(within(error).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText("Certificate issuance pending")).not.toBeInTheDocument();
+  });
+
+  it("replaces cached retries with an error and Retry when a read fails", async () => {
+    let reply: () => Promise<unknown> = () => Promise.resolve([retry("app.example.com", 0)]);
+    const client = renderPage({ routes: [plainRoute], handle: (method, path) => (method === "GET" && path === retriesPath ? reply() : undefined) });
+    expect(await screen.findByRole("list", { name: "Pending certificate retries" })).toBeInTheDocument();
+    reply = () => Promise.reject(new ApiError(503, "certificate retry status unavailable"));
+    await client.refetchQueries({ queryKey: certificateRetriesKey("w1") });
+    const error = (await screen.findByText("Could not load certificate retry status")).closest("[role=alert]") as HTMLElement;
+    expect(screen.queryByRole("list", { name: "Pending certificate retries" })).not.toBeInTheDocument();
+    reply = () => Promise.resolve([retry("app.example.com", 2)]);
+    await userEvent.click(within(error).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("list", { name: "Pending certificate retries" })).toHaveTextContent("app.example.com");
+    expect(screen.queryByText("Could not load certificate retry status")).not.toBeInTheDocument();
   });
 });

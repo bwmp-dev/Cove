@@ -453,6 +453,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/workloads/{id}/certificate-zones", s.admin(http.HandlerFunc(s.certificateZones)))
 	mux.Handle("GET /api/workloads/{id}/certificate-authority", s.admin(http.HandlerFunc(s.certificateAuthority)))
 	mux.Handle("GET /api/workloads/{id}/certificate-challenges", s.admin(http.HandlerFunc(s.certificateDNSChallenges)))
+	mux.Handle("GET /api/workloads/{id}/certificate-retries", s.admin(http.HandlerFunc(s.routeCertificateRetries)))
 	mux.Handle("GET /api/workloads/{id}/certificate-issuers", s.admin(http.HandlerFunc(s.certificateIssuers)))
 	mux.Handle("POST /api/workloads/{id}/certificate-issuers", s.admin(http.HandlerFunc(s.certificateIssuers)))
 	mux.Handle("PUT /api/workloads/{id}/certificate-issuers/{issuer}", s.admin(http.HandlerFunc(s.updateCertificateIssuer)))

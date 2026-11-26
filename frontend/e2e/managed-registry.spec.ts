@@ -17,7 +17,8 @@ test.use({ actionTimeout: 30_000, navigationTimeout: 60_000 });
 
 const docker = (...args: string[]) => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const sizes = [320, 390, 768, 1280, 1440, 1920];
-const tlsFailure = "Registry deployment finished, but authenticated TLS verification failed. Confirm DNS and the HTTPS certificate, then retry.";
+// The proxy's default certificate is a transport/TLS failure, which Cove keeps retrying while the registry shows as failed.
+const tlsFailure = "Registry deployment finished, but authenticated HTTPS verification is not ready. Cove will retry automatically (up to 15 minutes between attempts); check DNS, certificate issuance and the selected trust certificate if this persists.";
 const finished = /^(succeeded|failed|cancelled|interrupted)$/;
 const resourceId = /^[a-f0-9]{32}$/;
 

@@ -511,6 +511,28 @@ it("hides certificate repair from viewers of a failed registry", async () => {
   expect(calls("GET", "/api/workloads/m1/certificates")).toHaveLength(0);
 });
 
+it("keeps a verification failure that retries automatically visible with its repair actions until it becomes ready", async () => {
+  const retrying = "Registry deployment finished, but authenticated HTTPS verification is not ready. Cove will retry automatically (up to 15 minutes between attempts).";
+  let current = list([registry({ state: "failed", connection_id: "", operation_state: "succeeded", last_error: retrying })]);
+  listReply = () => current;
+  serve((method, path) => {
+    if (method === "GET" && path === "/api/workloads/m1") return { id: "m1", permissions: ["read"], routes: [{ domain: "registry.example.test", service: "registry", port: 5000 }] };
+    if (method === "GET" && path === "/api/workloads/m1/certificates") return [];
+    return undefined;
+  });
+  const client = renderPage();
+  expect(await screen.findByText(retrying)).toBeInTheDocument();
+  expect(screen.getByText("Provisioning failed")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Retry provisioning" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Remove registry" })).toBeEnabled();
+  expect(screen.queryByText("An operation is in progress")).not.toBeInTheDocument();
+  current = list([registry()]);
+  await act(() => client.refetchQueries({ queryKey: managedRegistriesKey }));
+  await waitFor(() => expect(screen.queryByText(retrying)).not.toBeInTheDocument());
+  expect(screen.queryByText("Provisioning failed")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Run garbage collection" })).toBeInTheDocument();
+});
+
 it("shows a failed first read with Retry", async () => {
   let fail = true;
   listReply = () => {

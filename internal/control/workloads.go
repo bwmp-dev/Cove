@@ -932,6 +932,11 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if !admitted {
 		return nil
 	}
+	if !cancelRequested {
+		if ready, err := s.prepareRouteDNS(ctx, node, request, time.Now()); err != nil || !ready {
+			return err
+		}
+	}
 	if !cancelRequested && request.Action == "build" && request.BuildRecipe != nil && request.BuildRecipe.Engine == "buildpacks" {
 		admitted, admission, err := s.admitBuildpacks(ctx, id, node)
 		if err != nil || !admitted {
@@ -1141,6 +1146,10 @@ func (s *Server) processOperation(ctx context.Context, id, node string, payload 
 	if err != nil {
 		return err
 	}
+	result, err = s.routeDNSWarning(ctx, id, result)
+	if err != nil {
+		return err
+	}
 	if request.Scale != nil && state == "succeeded" {
 		if !confirmedCPUScale(request.Scale, response.Operation) {
 			_, err = s.DB.Exec(ctx, `UPDATE operations SET result=$2,updated_at=now() WHERE id=$1`, id, []byte(`{"error":"Waiting for the worker to confirm the CPU scaling outcome; the resource remains locked."}`))
@@ -1198,6 +1207,10 @@ func (s *Server) failOperation(ctx context.Context, id, message string) error {
 	if err != nil {
 		return err
 	}
+	result, err = s.routeDNSWarning(ctx, id, result)
+	if err != nil {
+		return err
+	}
 	_, err = s.DB.Exec(ctx, `UPDATE operations SET state='failed',result=CASE WHEN action='build' AND result ? 'build_recipe' THEN $1::jsonb||jsonb_build_object('build_recipe',result->'build_recipe') ELSE $1::jsonb END,updated_at=now() WHERE id=$2`, result, id)
 	return err
 }
@@ -1206,6 +1219,10 @@ func (s *Server) failOperation(ctx context.Context, id, message string) error {
 // even when the worker reports a submit error after renaming it onto disk.
 func (s *Server) deferRouteResult(ctx context.Context, id string) error {
 	result, err := json.Marshal(map[string]string{"error": "Waiting for the worker to confirm the route outcome; hostnames remain reserved."})
+	if err != nil {
+		return err
+	}
+	result, err = s.routeDNSWarning(ctx, id, result)
 	if err != nil {
 		return err
 	}

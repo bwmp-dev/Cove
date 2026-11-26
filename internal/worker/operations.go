@@ -851,6 +851,7 @@ func (e *Engine) Serve(ctx context.Context) error {
 	jobs.Go(func() { e.linkLoop(ctx) })
 	jobs.Go(func() { e.idleLoop(ctx) })
 	jobs.Go(func() { e.cloudflarePublishingLoop(ctx) })
+	jobs.Go(func() { e.certificateRetryLoop(ctx) })
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	nextScanDatabase := time.Time{}

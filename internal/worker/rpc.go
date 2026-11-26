@@ -53,6 +53,7 @@ type RPCRequest struct {
 	Identity            *IdentityRequest           `json:"identity,omitempty"`
 }
 type RPCResponse struct {
+	CertificateRetries []RouteCertificateRetry     `json:"certificate_retries,omitempty"`
 	Removal            *WorkloadRemovalResult      `json:"removal,omitempty"`
 	ScanDatabase       *ScanDatabaseStatus         `json:"scan_database,omitempty"`
 	ScanObservation    *ScanObservation            `json:"scan_observation,omitempty"`
@@ -454,6 +455,12 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 			return RPCResponse{Error: "build cleanup has not settled"}
 		}
 		return RPCResponse{}
+	case "certificate_retries":
+		retries, err := e.CertificateRetries(r.ID)
+		if err != nil {
+			return RPCResponse{Error: err.Error()}
+		}
+		return RPCResponse{CertificateRetries: retries}
 	case "managed_registry_verify":
 		if err := VerifyManagedRegistry(ctx, r.Registry, r.RegistryCertificate, r.Proxy); err != nil {
 			return RPCResponse{Error: err.Error()}

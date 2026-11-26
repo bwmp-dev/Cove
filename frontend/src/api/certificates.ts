@@ -2,7 +2,7 @@ import { queryOptions, useMutation, useQueryClient, type QueryClient } from "@ta
 import { challengeWorking, issuerWorking } from "../lib/certificates";
 import { request } from "./client";
 import { keys } from "./queries";
-import type { CertificateAuthority, CertificateChallengeList, CertificateIssuer, CertificateIssuerInput, CertificateZone, RouteCertificate } from "./types";
+import type { CertificateAuthority, CertificateChallengeList, CertificateIssuer, CertificateIssuerInput, CertificateRetry, CertificateZone, RouteCertificate } from "./types";
 
 export interface CertificateUpload {
   name: string;
@@ -55,6 +55,7 @@ export const certificateIssuersKey = (workloadId: string) => [...keys.workload(w
 export const certificateAuthorityKey = (workloadId: string) => [...keys.workload(workloadId), "certificate-authority"] as const;
 export const certificateChallengesKey = (workloadId: string) => [...keys.workload(workloadId), "certificate-challenges"] as const;
 export const zoneCertificateChallengesKey = (zoneId: string) => ["cloudflare", zoneId, "certificate-challenges"] as const;
+export const certificateRetriesKey = (workloadId: string) => [...keys.workload(workloadId), "certificate-retries"] as const;
 
 const workloadPath = (workloadId: string) => `/api/workloads/${encodeURIComponent(workloadId)}`;
 const issuerPath = (workloadId: string, issuerId: string) => `${workloadPath(workloadId)}/certificate-issuers/${encodeURIComponent(issuerId)}`;
@@ -73,6 +74,16 @@ export function certificateIssuersQuery(workloadId: string) {
     queryKey: certificateIssuersKey(workloadId),
     queryFn: ({ signal }) => request<CertificateIssuer[]>("GET", `${workloadPath(workloadId)}/certificate-issuers`, undefined, signal),
     refetchInterval: (query) => (query.state.data?.some((issuer) => issuerWorking(issuer.phase)) ? 5_000 : 60_000),
+  });
+}
+
+// Pending public Let's Encrypt retries read from the worker. An empty list only means none is recorded, not that a
+// certificate was issued. Callers enable it while the resource has hostnames the worker issues certificates for.
+export function certificateRetriesQuery(workloadId: string) {
+  return queryOptions({
+    queryKey: certificateRetriesKey(workloadId),
+    queryFn: ({ signal }) => request<CertificateRetry[]>("GET", `${workloadPath(workloadId)}/certificate-retries`, undefined, signal),
+    refetchInterval: 30_000,
   });
 }
 

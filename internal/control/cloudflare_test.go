@@ -3,11 +3,13 @@ package control
 import (
 	"bytes"
 	"context"
+	"cove/internal/worker"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type dnsTransport func(*http.Request) (*http.Response, error)
@@ -155,7 +157,14 @@ func TestCloudflareTeamReconciliationAndCredentialMasking(t *testing.T) {
 		t.Fatal(err)
 	}
 	if writes != 1 {
-		t.Fatal("updated a changing route")
+		t.Fatal("background reconciliation updated a changing route")
+	}
+	request := worker.Request{ID: "active", Workload: "w", Action: "routes", Routes: []worker.Route{{Domain: "app.example.com", Service: "app", Port: 80}}}
+	if ready, err := f.s.prepareRouteDNS(context.Background(), "n", request, time.Now()); err != nil || !ready {
+		t.Fatal("admitted route change did not publish DNS before submission", ready, err)
+	}
+	if writes != 2 {
+		t.Fatal("active route publication was not performed", writes)
 	}
 	f.sql("UPDATE operations SET state='cancelled' WHERE id='active'")
 	zone.Token = ""
@@ -164,7 +173,7 @@ func TestCloudflareTeamReconciliationAndCredentialMasking(t *testing.T) {
 	if err = f.s.reconcileDNS(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if writes != 1 {
+	if writes != 2 {
 		t.Fatal("updated disabled zone")
 	}
 	zone.Token = strings.Repeat("other", 8)

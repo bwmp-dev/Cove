@@ -426,6 +426,16 @@ export interface CertificateIssuer {
   created_at: string;
 }
 
+// A public Let's Encrypt hostname the worker is still retrying. attempts counts configuration retries for the node's whole
+// batch of missing certificates, which a newly added hostname can join, so it is not a per-hostname count and not certificate
+// authority validation failures. message is fixed server copy.
+export interface CertificateRetry {
+  hostname: string;
+  attempts: number;
+  next_attempt_at: string;
+  message: string;
+}
+
 interface CertificateIssuerRequest {
   name: string;
   zone_id: string;
@@ -506,6 +516,8 @@ export interface WorkerOperation {
   created_at: string;
   finished_at?: string;
   error?: string;
+  // Control-plane note added when DNS publication was not confirmed before the routes were exposed.
+  dns_warning?: string;
   revision?: string;
   image_check?: ImageCheck;
   image_scan?: ImageScan;
@@ -719,6 +731,7 @@ export interface OperationRequest {
 export interface ControlPlaneResult {
   error: string;
   hold_reason?: string;
+  dns_warning?: string;
 }
 
 export interface Operation {

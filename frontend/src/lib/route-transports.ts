@@ -31,6 +31,13 @@ export function isPublicHTTPRoute(route: Pick<Route, "protocol" | "policy">): bo
   return !isTransportRoute(route) && !isPrivateVisibility(route.policy?.visibility);
 }
 
+// Public hostnames whose certificate the worker requests from Let's Encrypt over HTTP-01. Wildcards, stored certificates
+// and the proxy default are excluded, matching the worker's automatic certificate retries.
+export function isPublicACMERoute(route: Pick<Route, "protocol" | "domain" | "policy">): boolean {
+  const source = route.policy?.certificate_source;
+  return isPublicHTTPRoute(route) && !isWildcardHostname(route.domain) && !route.policy?.certificate_id && (!source || source === "acme");
+}
+
 // A wildcard is a pattern, not a URL.
 export function isLinkableRoute(route: Pick<Route, "protocol" | "domain" | "policy">): boolean {
   return isPublicHTTPRoute(route) && !isWildcardHostname(route.domain);
