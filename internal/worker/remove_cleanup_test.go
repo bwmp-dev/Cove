@@ -45,6 +45,7 @@ func deletionFixtureRoot(t *testing.T, root string, userNamed, shared bool) (*En
 	if userNamed {
 		own = "user-chosen:fixture"
 	}
+	tags := []string{own, "cove-release/app:deployed-fixture"}
 	e.Run = func(_ context.Context, _ string, args, _ []string, out io.Writer) error {
 		command := strings.Join(args, " ")
 		calls = append(calls, command)
@@ -58,7 +59,16 @@ func deletionFixtureRoot(t *testing.T, root string, userNamed, shared bool) (*En
 			_, err := fmt.Fprintln(out, "sha256:"+strings.Repeat("a", 64))
 			return err
 		case strings.HasPrefix(command, "docker image inspect"):
-			return json.NewEncoder(out).Encode(map[string]any{"Id": "sha256:" + strings.Repeat("a", 64), "RepoTags": []string{own, "cove-release/app:deployed-fixture"}, "Config": map[string]any{"Labels": map[string]string{"dev.cove.build-owner": owner, "com.docker.compose.project": "cove-app", "com.docker.compose.service": "app"}}})
+			return json.NewEncoder(out).Encode(map[string]any{"Id": "sha256:" + strings.Repeat("a", 64), "RepoTags": tags, "Config": map[string]any{"Labels": map[string]string{"dev.cove.build-owner": owner, "com.docker.compose.project": "cove-app", "com.docker.compose.service": "app"}}})
+		case strings.HasPrefix(command, "docker image rm "):
+			remaining := tags[:0]
+			for _, tag := range tags {
+				if tag != args[len(args)-1] {
+					remaining = append(remaining, tag)
+				}
+			}
+			tags = remaining
+			return nil
 		case strings.HasPrefix(command, "docker ps -aq"):
 			if shared {
 				_, err := io.WriteString(out, "other-running-container")
@@ -141,8 +151,11 @@ func TestDeletionKeepsUserNamedAndSharedImages(t *testing.T) {
 			if strings.Contains(commands, "docker image rm user-chosen:fixture") {
 				t.Fatal("user image tag removed", commands)
 			}
-			if scenario == "shared" && strings.Contains(commands, "docker image rm ") {
-				t.Fatal("shared image changed", commands)
+			if scenario == "shared" && strings.Contains(commands, "docker image rm cove-app-app:latest") {
+				t.Fatal("last tag of a shared image removed", commands)
+			}
+			if !strings.Contains(commands, "docker image rm cove-release/app:deployed-fixture") {
+				t.Fatal("deleted resource's release tag was not retired", commands)
 			}
 		})
 	}

@@ -41,7 +41,8 @@ func (s *Server) deleteManagedRegistryRecord(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "wait for registry operations and dependent deployments before deleting its record", 409)
 		return
 	}
-	if _, err = s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: "remove_workload", ID: id}); err != nil {
+	removed, err := s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: "remove_workload", ID: id})
+	if err != nil {
 		http.Error(w, "worker cleanup must finish before deleting the registry record", 409)
 		return
 	}
@@ -55,5 +56,5 @@ func (s *Server) deleteManagedRegistryRecord(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "could not delete registry record", 503)
 		return
 	}
-	respond(w, 200, map[string]bool{"ok": true})
+	respond(w, 200, map[string]any{"ok": true, "cleanup": removed.Removal})
 }

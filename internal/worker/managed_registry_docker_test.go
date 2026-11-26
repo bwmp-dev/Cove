@@ -295,6 +295,18 @@ func TestManagedRegistryDocker(t *testing.T) {
 	if command("docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+app) != consumerID || command("docker", "inspect", "--format", "{{.State.StartedAt}}", consumerID) != consumerStarted {
 		t.Fatal("registry recovery restarted the consumer")
 	}
+	sharedImage := command("docker", "create", "--name", "registry-shared-image", ManagedRegistryImage)
+	var named struct{ RepoTags, RepoDigests []string }
+	if err := e.imageJSON(ctx, nil, &named, "docker", "image", "inspect", "--format", "{{json .}}", ManagedRegistryImage); err != nil || len(named.RepoDigests) == 0 {
+		t.Fatal("fixture must retain the immutable registry reference", named, err)
+	}
+	var releaseTag bool
+	for _, tag := range named.RepoTags {
+		releaseTag = releaseTag || strings.HasPrefix(tag, "cove-release/"+registryID+":")
+	}
+	if !releaseTag {
+		t.Fatal("fixture did not create a registry release tag", named)
+	}
 	remove := run(Request{ID: "registry-remove", Workload: registryID, Action: "registry_maintenance", Kind: "service", ManagedRegistry: &ManagedRegistryOperation{Mode: "remove", Policy: ManagedRegistryRetention{KeepPerRepository: 1, MinimumAgeDays: 7}, Protected: refs}})
 	if remove.ManagedRegistry == nil || !remove.ManagedRegistry.Removed || !remove.ManagedRegistry.DataRetained {
 		t.Fatal(remove)
@@ -305,10 +317,62 @@ func TestManagedRegistryDocker(t *testing.T) {
 	if err = e.ownedRegistryVolume(ctx, registryID); err != nil {
 		t.Fatal("retained registry data lost", err)
 	}
+	assertCleaned := func() {
+		t.Helper()
+		for _, path := range []string{filepath.Join(e.Root, "workloads", registryID), filepath.Join(e.Root, "file-secrets", registryID)} {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatal("registry private files remain after removal", path, err)
+			}
+		}
+		if command("docker", "image", "ls", "-q", "--filter", "reference=cove-release/"+registryID+":*") != "" {
+			t.Fatal("registry release tags remain after removal")
+		}
+		command("docker", "image", "inspect", ManagedRegistryImage)
+	}
+	if remove.ManagedRegistry.Cleanup == nil || remove.ManagedRegistry.Cleanup.WorkerFilesRetained || remove.ManagedRegistry.Cleanup.CleanupWarning != "" {
+		t.Fatal("registry cleanup did not confirm private state removal", remove.ManagedRegistry)
+	}
+	assertCleaned()
+	if command("docker", "inspect", "--format", "{{.State.Status}}", sharedImage) != "created" {
+		t.Fatal("shared registry image container changed")
+	}
+	command("docker", "rm", sharedImage)
 	run(Request{ID: "registry-purge", Workload: registryID, Action: "registry_maintenance", Kind: "service", ManagedRegistry: &ManagedRegistryOperation{Mode: "remove", Policy: ManagedRegistryRetention{KeepPerRepository: 1, MinimumAgeDays: 7}, DeleteData: true}})
 	if command("docker", "volume", "ls", "-q", "--filter", "name=^cove-"+registryID+"_data$") != "" {
 		t.Fatal("explicitly purged registry volume left behind")
 	}
+	assertCleaned()
+	request.ID = "registry-recreated"
+	run(request)
+	base := e.Run
+	injected := false
+	e.Run = func(ctx context.Context, dir string, args, env []string, out io.Writer) error {
+		err := base(ctx, dir, args, env, out)
+		if err == nil && !injected && len(args) > 2 && args[1] == "volume" && args[2] == "rm" {
+			injected = true
+			return errors.New("fixture lost acknowledgement after registry volume deletion")
+		}
+		return err
+	}
+	purge := Request{ID: "registry-direct-purge", Workload: registryID, Action: "registry_maintenance", Kind: "service", ManagedRegistry: &ManagedRegistryOperation{Mode: "remove", Policy: ManagedRegistryRetention{KeepPerRepository: 1, MinimumAgeDays: 7}, DeleteData: true}}
+	if _, err = e.Submit(purge); err != nil {
+		t.Fatal(err)
+	}
+	var jobs sync.WaitGroup
+	if err = e.dispatch(ctx, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	jobs.Wait()
+	e.Run = base
+	status, err := e.Status(purge.ID)
+	if err != nil || !injected || status.State != "failed" || status.RegistryRecoveryPending || status.ManagedRegistry == nil || status.ManagedRegistry.Cleanup == nil || status.ManagedRegistry.Cleanup.WorkerFilesRetained {
+		t.Fatal("lost purge acknowledgement did not recover private state cleanup", status, err)
+	}
+	assertCleaned()
+	if _, err := e.RemoveWorkload(ctx, registryID); err != nil {
+		t.Fatal("registry record cleanup failed after purge", err)
+	}
+	assertCleaned()
 }
 
 func registryFixtureImageArchive(t *testing.T, rootfs []byte, tag, marker string, age int) []byte {

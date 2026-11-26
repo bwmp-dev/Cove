@@ -686,7 +686,7 @@ func (e *Engine) Recover() error {
 		if j.RegistryCleanup != nil {
 			cleanup, stop := context.WithTimeout(context.Background(), 2*time.Minute)
 			e.mu.Unlock()
-			err := e.recoverManagedRegistry(cleanup, j)
+			err := e.recoverManagedRegistry(context.WithValue(cleanup, registryStartupRecoveryKey{}, true), j)
 			e.mu.Lock()
 			stop()
 			if err != nil {
@@ -1172,8 +1172,10 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		ctx = prepare
 	}
 	dir := filepath.Join(e.Root, "workloads", r.Workload)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+	if r.Action != "registry_maintenance" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
 	}
 	file, err := os.OpenFile(filepath.Join(e.Root, "operations", r.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {

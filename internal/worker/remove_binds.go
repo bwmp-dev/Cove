@@ -89,6 +89,14 @@ func (e *Engine) removalBindSources(ctx context.Context, config map[string]any, 
 			Options map[string]string
 		}
 		if err := e.imageJSON(ctx, nil, &inspected, "docker", "volume", "inspect", "--format", "{{json .}}", name); err != nil || inspected.Driver != "local" {
+			// A prior removal may have deleted this volume before losing its acknowledgement.
+			// Prove absence separately; an inspection failure alone is not evidence of absence.
+			if err != nil {
+				found, listErr := e.output(ctx, "docker", "volume", "ls", "-q", "--filter", "name=^"+name+"$")
+				if listErr == nil && found == "" {
+					continue
+				}
+			}
 			return errors.New("volume backing storage is unavailable")
 		}
 		if device := inspected.Options["device"]; device != "" {

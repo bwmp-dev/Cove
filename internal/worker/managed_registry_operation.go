@@ -21,6 +21,7 @@ type ManagedRegistryOperation struct {
 }
 
 type ManagedRegistryResult struct {
+	Cleanup      *WorkloadRemovalResult `json:"cleanup,omitempty"`
 	Storage      ManagedRegistryStorage `json:"storage"`
 	Manifests    int                    `json:"manifests"`
 	Deleted      int                    `json:"deleted"`
@@ -35,6 +36,8 @@ type managedRegistryCleanup struct {
 	Running   bool   `json:"running"`
 	Removing  bool   `json:"removing"`
 }
+
+type registryStartupRecoveryKey struct{}
 
 func validateManagedRegistryOperation(r Request) error {
 	if r.Action != "registry_maintenance" {
@@ -322,6 +325,38 @@ func (e *Engine) recoverManagedRegistry(ctx context.Context, j journal) error {
 }
 
 func (e *Engine) finishManagedRegistryRemoval(ctx context.Context, j journal) error {
+	completed, err := e.Status(j.Request.ID)
+	if err != nil {
+		return err
+	}
+	if completed.ManagedRegistry != nil && completed.ManagedRegistry.Removed && completed.ManagedRegistry.Cleanup != nil {
+		return nil
+	}
+	containers, err := e.Containers(ctx, j.Request.Workload)
+	if err != nil {
+		return err
+	}
+	state, err := e.planWorkloadRemoval(ctx, j.Request.Workload, containers)
+	if err != nil {
+		return err
+	}
+	defer state.root.Close()
+	// Startup is still assembling recovery references; optional cache pruning must wait.
+	deferredImages := ctx.Value(registryStartupRecoveryKey{}) == true
+	var images []removalImage
+	if !deferredImages {
+		images, err = e.removalImages(ctx, j.Request.Workload, state)
+		if err != nil {
+			return err
+		}
+		if len(images) > 0 {
+			unlock, lockErr := e.lockRemovalImages(j.Request.Workload)
+			if lockErr != nil {
+				return lockErr
+			}
+			defer unlock()
+		}
+	}
 	if err := e.applyIngress(ctx, j.Request.Workload, nil, io.Discard); err != nil {
 		return err
 	}
@@ -370,12 +405,24 @@ func (e *Engine) finishManagedRegistryRemoval(ctx context.Context, j journal) er
 	if err = os.RemoveAll(filepath.Join(e.Root, "file-secrets", j.Request.Workload)); err != nil {
 		return err
 	}
+	if err = e.removeGeneratedImageTags(ctx, images); err != nil {
+		return err
+	}
+	if err = state.apply(ctx); err != nil {
+		return err
+	}
+	if deferredImages {
+		if state.result.CleanupWarning != "" {
+			state.result.CleanupWarning += " "
+		}
+		state.result.CleanupWarning += "Image retirement was deferred during worker startup to preserve pending recovery references. Retry image cleanup after startup and other operations have settled."
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	current, err := e.read(j.Request.ID)
 	if err != nil {
 		return err
 	}
-	current.Operation.ManagedRegistry = &ManagedRegistryResult{Storage: ManagedRegistryStorageSupport(), Removed: true, DataRetained: !j.Request.ManagedRegistry.DeleteData && strings.TrimSpace(volumes) != ""}
+	current.Operation.ManagedRegistry = &ManagedRegistryResult{Storage: ManagedRegistryStorageSupport(), Removed: true, DataRetained: !j.Request.ManagedRegistry.DeleteData && strings.TrimSpace(volumes) != "", Cleanup: &state.result}
 	return writeJSON(e.path(j.Request.ID), current)
 }

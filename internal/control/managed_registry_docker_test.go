@@ -221,6 +221,18 @@ func TestManagedRegistryRealConnectionDocker(t *testing.T) {
 	if docker("volume", "ls", "-q", "--filter", "label=dev.cove.managed-registry="+id) == "" {
 		t.Fatal("keep-data removal lost the registry volume")
 	}
+	assertPrivateStateRemoved := func() {
+		t.Helper()
+		for _, path := range []string{filepath.Join("/var/lib/cove", "workloads", id), filepath.Join("/var/lib/cove", "file-secrets", id)} {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatal("registry worker files remain", path, err)
+			}
+		}
+		if docker("image", "ls", "-q", "--filter", "reference=cove-release/"+id+":*") != "" {
+			t.Fatal("registry release tags remain")
+		}
+	}
+	assertPrivateStateRemoved()
 	preview := f.call("root", "default", "GET", "/api/managed-registries/"+id+"/removal-inventory", nil, 200)
 	if !strings.Contains(preview.Body.String(), "Offline runner") {
 		t.Fatal("destructive preflight omitted unavailable node name")
@@ -238,6 +250,7 @@ func TestManagedRegistryRealConnectionDocker(t *testing.T) {
 		t.Fatal("generated connection retained after removal", err)
 	}
 	f.call("root", "default", "DELETE", "/api/managed-registries/"+id+"/record", nil, 200)
+	assertPrivateStateRemoved()
 	var exists bool
 	if err = f.s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workloads WHERE id=$1) OR EXISTS(SELECT 1 FROM managed_registries WHERE id=$1)`, id).Scan(&exists); err != nil || exists {
 		t.Fatal("purged registry record retained node/project references", exists, err)

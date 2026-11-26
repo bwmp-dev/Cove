@@ -71,14 +71,11 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) (*WorkloadRemova
 		return nil, err
 	}
 	if len(images) > 0 {
-		e.mu.Lock()
-		if e.draining || e.hasMoveFence() || e.hostChanging || e.proxyRunning || e.customRunning || e.customUnsettled || len(e.active) > 1 || len(e.pending) > 0 || len(e.recovering) > 0 {
-			e.mu.Unlock()
-			return nil, errors.New("wait for worker operations and recovery before removing generated images")
+		unlock, err := e.lockRemovalImages(id)
+		if err != nil {
+			return nil, err
 		}
-		e.active[housekeepingWorkload] = true
-		e.mu.Unlock()
-		defer func() { e.mu.Lock(); delete(e.active, housekeepingWorkload); e.mu.Unlock() }()
+		defer unlock()
 	}
 	if err = e.applyIngress(ctx, id, nil, io.Discard); err != nil {
 		return nil, err
@@ -147,4 +144,18 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) (*WorkloadRemova
 		return nil, err
 	}
 	return &state.result, nil
+}
+
+func (e *Engine) lockRemovalImages(workload string) (func(), error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	busy := e.draining || e.hasMoveFence() || e.hostChanging || e.proxyRunning || e.customRunning || e.customUnsettled || len(e.pending) > 0 || len(e.recovering) > 0
+	for id := range e.active {
+		busy = busy || id != workload
+	}
+	if busy {
+		return nil, errors.New("wait for worker operations and recovery before removing generated images")
+	}
+	e.active[housekeepingWorkload] = true
+	return func() { e.mu.Lock(); delete(e.active, housekeepingWorkload); e.mu.Unlock() }, nil
 }

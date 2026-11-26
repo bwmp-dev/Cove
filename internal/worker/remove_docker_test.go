@@ -16,7 +16,7 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 	if os.Getenv("COVE_TEST_DELETION_DOCKER") != "1" {
 		t.Skip("set COVE_TEST_DELETION_DOCKER=1 in an owned Docker fixture with cached busybox and Restic images")
 	}
-	for _, scenario := range []string{"generated", "user-named", "shared", "backup", "bind", "no-container-bind", "pulled-only", "pulled-user-named"} {
+	for _, scenario := range []string{"generated", "user-named", "shared", "backup", "bind", "no-container-bind", "pulled-only", "pulled-user-named", "pulled-shared-running", "pulled-shared-exited"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 			defer cancel()
@@ -160,8 +160,11 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 			if scenario == "no-container-bind" {
 				docker("rm", container)
 			}
-			if scenario == "shared" {
+			if scenario == "shared" || scenario == "pulled-shared-running" {
 				docker("run", "-d", "--pull", "never", "--name", "cove-removal-shared-"+owner, "--label", "cove.removal.fixture="+owner, "--label", "com.docker.compose.project=cove-other-"+owner, tag, "sleep", "600")
+			}
+			if scenario == "pulled-shared-exited" {
+				docker("run", "--pull", "never", "--name", "cove-removal-shared-"+owner, "--label", "cove.removal.fixture="+owner, "--label", "com.docker.compose.project=cove-other-"+owner, tag, "true")
 			}
 			if strings.HasPrefix(scenario, "pulled-") {
 				if err := os.Remove(filepath.Join(e.Root, "build-owner.json")); err != nil {
@@ -176,6 +179,9 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 			}
 			result, err := e.RemoveWorkload(ctx, id)
 			if err != nil || result.CleanupWarning != "" {
+				metadata, _ := e.output(ctx, "docker", "image", "inspect", "--format", `{"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}}}`, image)
+				users, _ := e.output(ctx, "docker", "ps", "-aq", "--filter", "ancestor="+image)
+				t.Log("failure-only image names and container references", metadata, users)
 				t.Fatal("deletion", result, err)
 			}
 			if _, err := os.Stat(filepath.Join(dir, "disposable.log")); !os.IsNotExist(err) {
@@ -194,16 +200,19 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 			} else if !strings.Contains(remaining, image) {
 				t.Fatal("named, shared or backup-referenced image was removed")
 			}
-			if (scenario == "user-named" || scenario == "pulled-user-named") && docker("image", "inspect", "--format", "{{.Id}}", tag) != image {
+			if (scenario == "user-named" || scenario == "pulled-user-named" || strings.HasPrefix(scenario, "pulled-shared-")) && docker("image", "inspect", "--format", "{{.Id}}", tag) != image {
 				t.Fatal("user-chosen tag changed")
 			}
-			if strings.HasPrefix(scenario, "pulled-") {
+			if strings.HasPrefix(scenario, "pulled-") || scenario == "shared" {
 				if tags := docker("image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-release/"+id+":*"); tags != "" {
 					t.Fatal("pulled resource left its own release tags", tags)
 				}
 			}
-			if scenario == "shared" && docker("inspect", "--format", "{{.State.Running}}", "cove-removal-shared-"+owner) != "true" {
+			if (scenario == "shared" || scenario == "pulled-shared-running") && docker("inspect", "--format", "{{.State.Running}}", "cove-removal-shared-"+owner) != "true" {
 				t.Fatal("other workload container changed")
+			}
+			if scenario == "pulled-shared-exited" && docker("inspect", "--format", "{{.State.Status}}", "cove-removal-shared-"+owner) != "exited" {
+				t.Fatal("other workload's exited container changed")
 			}
 			if scenario == "bind" || scenario == "no-container-bind" {
 				if !strings.Contains(result.WorkerFilesRetainedReason, "Bind-mounted data") {

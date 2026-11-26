@@ -12,7 +12,7 @@ import (
 )
 
 func TestDeletionRetiresPulledReleaseTagsWithoutBuildOwnership(t *testing.T) {
-	for _, scenario := range []string{"generated-only", "user-tagged", "shared", "backup"} {
+	for _, scenario := range []string{"generated-only", "user-tagged", "shared", "shared-user-tagged", "shared-digest", "shared-own-digest", "backup"} {
 		t.Run(scenario, func(t *testing.T) {
 			e, dir, calls := deletionFixture(t, false, false)
 			if err := os.Remove(filepath.Join(e.Root, "build-owner.json")); err != nil {
@@ -42,12 +42,19 @@ func TestDeletionRetiresPulledReleaseTagsWithoutBuildOwnership(t *testing.T) {
 				if strings.HasPrefix(command, "docker image inspect") {
 					*calls = append(*calls, command)
 					tags := []string{tag}
-					if scenario == "user-tagged" {
+					if scenario == "user-tagged" || scenario == "shared-user-tagged" {
 						tags = append(tags, "user/pulled:latest", "cove-release/other:retained")
 					}
-					return json.NewEncoder(out).Encode(map[string]any{"Id": image, "RepoTags": tags, "Config": map[string]any{"Labels": map[string]string{}}})
+					digests := []string{}
+					if scenario == "shared-digest" {
+						digests = append(digests, "registry.example.test/app@"+image)
+					}
+					if scenario == "shared-own-digest" {
+						digests = append(digests, "cove-release/app@"+image)
+					}
+					return json.NewEncoder(out).Encode(map[string]any{"Id": image, "RepoTags": tags, "RepoDigests": digests, "Config": map[string]any{"Labels": map[string]string{}}})
 				}
-				if scenario == "shared" && strings.HasPrefix(command, "docker ps -aq") {
+				if strings.HasPrefix(scenario, "shared") && strings.HasPrefix(command, "docker ps -aq") {
 					*calls = append(*calls, command)
 					_, err := io.WriteString(out, "another-resource-container")
 					return err
@@ -59,7 +66,7 @@ func TestDeletionRetiresPulledReleaseTagsWithoutBuildOwnership(t *testing.T) {
 			}
 			commands := strings.Join(*calls, "\n")
 			retired := strings.Contains(commands, "docker image rm "+tag)
-			if retired != (scenario == "generated-only" || scenario == "user-tagged") {
+			if retired != (scenario == "generated-only" || scenario == "user-tagged" || scenario == "shared-user-tagged" || scenario == "shared-digest") {
 				t.Fatal("pulled-release retirement ignored ownership or references", scenario, commands)
 			}
 			for _, forbidden := range []string{"image rm --force", "image rm user/pulled:latest", "image rm cove-release/other:", "volume rm"} {

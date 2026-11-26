@@ -539,7 +539,7 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
     const recordDeleted = await recordReply;
     const recordText = await recordDeleted.text();
     expect(recordDeleted.status(), recordText).toBe(200);
-    expect(JSON.parse(recordText)).toEqual({ ok: true });
+    expect(JSON.parse(recordText)).toEqual({ ok: true, cleanup: { worker_files_retained: false } });
     expectNoBody(recordDeleted);
     await expect(item).toHaveCount(0, { timeout: 30_000 });
     expect((await registries()).map((entry) => entry.id)).not.toContain(registryId);

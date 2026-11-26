@@ -114,7 +114,14 @@ func (e *Engine) removalImages(ctx context.Context, workload string, state *work
 			}
 		}
 		if len(generated) > 0 {
-			sort.Strings(generated)
+			// Retire release pins before a shared image's last generated project tag.
+			sort.Slice(generated, func(i, j int) bool {
+				a, b := strings.HasPrefix(generated[i], "cove-release/"), strings.HasPrefix(generated[j], "cove-release/")
+				if a != b {
+					return a
+				}
+				return generated[i] < generated[j]
+			})
 			result = append(result, removalImage{id: id, tags: generated})
 		}
 	}
@@ -127,19 +134,30 @@ func (e *Engine) removeGeneratedImageTags(ctx context.Context, images []removalI
 		if err != nil {
 			return err
 		}
-		if users != "" {
-			continue
-		}
 		for _, tag := range image.tags {
 			// Retags outside Cove are never removed, even if they share this image ID.
 			var inspected struct {
-				ID string `json:"Id"`
+				ID          string `json:"Id"`
+				RepoTags    []string
+				RepoDigests []string
 			}
 			if err := e.imageJSON(ctx, nil, &inspected, "docker", "image", "inspect", "--format", "{{json .}}", tag); err != nil {
 				return err
 			}
 			if inspected.ID != image.id {
 				return errors.New("generated image tag changed; retry resource deletion")
+			}
+			// A repository's final tag can also retire its digest alias. That alias is not another name.
+			otherName := len(inspected.RepoTags) > 1
+			repository, _, _ := strings.Cut(tag, ":")
+			for _, reference := range inspected.RepoDigests {
+				named, _, digest := strings.Cut(reference, "@")
+				named = strings.TrimPrefix(strings.TrimPrefix(named, "docker.io/"), "index.docker.io/")
+				named = strings.TrimPrefix(named, "library/")
+				otherName = otherName || digest && named != "" && named != repository
+			}
+			if users != "" && !otherName {
+				continue
 			}
 			if _, err := e.output(ctx, "docker", "image", "rm", tag); err != nil {
 				return err
