@@ -201,7 +201,7 @@ func TestAutomaticImageScanRefreshRecoveryAndRemoval(t *testing.T) {
 	e.automaticScans = map[string]string{"active-auto": "app"}
 	cancelled := false
 	e.cancels["active-auto"] = func() { cancelled = true }
-	if err := e.RemoveWorkload(context.Background(), "app"); err == nil || !cancelled {
+	if _, err := e.RemoveWorkload(context.Background(), "app"); err == nil || !cancelled {
 		t.Fatal("removal raced active background input", err, cancelled)
 	}
 }

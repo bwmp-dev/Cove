@@ -89,7 +89,7 @@ func testRegistryUpdateDocker(t *testing.T, updates bool) {
 				t.Error(err, string(out))
 			}
 		}
-		if err := engine.RemoveWorkload(cleanup, f.id); err != nil {
+		if _, err := engine.RemoveWorkload(cleanup, f.id); err != nil {
 			t.Error(err)
 		}
 		if registryCreated {

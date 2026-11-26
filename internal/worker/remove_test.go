@@ -30,7 +30,7 @@ func TestRemovalPreservesRunningWorkloadsAndStorage(t *testing.T) {
 					return nil
 				}
 			}
-			err = e.RemoveWorkload(context.Background(), "app")
+			_, err = e.RemoveWorkload(context.Background(), "app")
 			if state != "exited" {
 				if err == nil || len(mutations) != 0 {
 					t.Fatalf("running workload changed: %v %v", err, mutations)

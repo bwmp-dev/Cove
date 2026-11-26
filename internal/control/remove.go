@@ -96,7 +96,8 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "remove variable bindings that reference this resource before deleting", 409)
 		return
 	}
-	if _, err = s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: "remove_workload", ID: r.PathValue("id")}); err != nil {
+	removed, err := s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: "remove_workload", ID: r.PathValue("id")})
+	if err != nil {
 		var remote *RemoteError
 		if errors.As(err, &remote) {
 			http.Error(w, "stop the workload and resolve worker errors before deleting", 409)
@@ -121,7 +122,7 @@ func (s *Server) deleteWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not delete workload", 500)
 		return
 	}
-	respond(w, 200, map[string]bool{"ok": true})
+	respond(w, 200, map[string]any{"ok": true, "cleanup": removed.Removal})
 }
 
 func deleteWorkloadRecords(ctx context.Context, tx pgx.Tx, id string) error {

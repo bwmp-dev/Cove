@@ -53,6 +53,7 @@ type RPCRequest struct {
 	Identity            *IdentityRequest           `json:"identity,omitempty"`
 }
 type RPCResponse struct {
+	Removal            *WorkloadRemovalResult      `json:"removal,omitempty"`
 	ScanDatabase       *ScanDatabaseStatus         `json:"scan_database,omitempty"`
 	ScanObservation    *ScanObservation            `json:"scan_observation,omitempty"`
 	BuildCache         *BuildCacheStatus           `json:"build_cache,omitempty"`
@@ -656,10 +657,11 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		}
 		return RPCResponse{Terminal: result}
 	case "remove_workload":
-		if err := e.RemoveWorkload(ctx, r.ID); err != nil {
+		result, err := e.RemoveWorkload(ctx, r.ID)
+		if err != nil {
 			return RPCResponse{Error: err.Error()}
 		}
-		return RPCResponse{}
+		return RPCResponse{Removal: result}
 	case "releases":
 		releases, err := e.Releases(r.ID)
 		if err != nil {

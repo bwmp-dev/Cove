@@ -156,7 +156,7 @@ func (e *Engine) DiscardDatabaseCopy(ctx context.Context, id string) error {
 	if err = e.perform(ctx, stop); err != nil {
 		return errors.New("failed copy shutdown requires retry")
 	}
-	if err = e.RemoveWorkload(ctx, change.Request.Workload); err != nil {
+	if _, err = e.RemoveWorkload(ctx, change.Request.Workload); err != nil {
 		return err
 	}
 	volumes, err := e.output(ctx, "docker", "volume", "ls", "-q", "--filter", "label=com.docker.compose.project=cove-"+change.Request.Workload)
