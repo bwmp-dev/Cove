@@ -184,6 +184,9 @@ func TestManagedRegistryRealConnectionDocker(t *testing.T) {
 	if err = worker.RunCommand(ctx, "/tmp", []string{"docker", "--config", auth, "push", host + "/team/app:fixture"}, nil, io.Discard); err != nil {
 		t.Fatal("fixture publisher using generated sealed connection failed", err)
 	}
+	t.Run("legacy-release-reference-inventory", func(t *testing.T) {
+		testManagedRegistryLegacyWorkerInventory(t, f, id, host)
+	})
 	consumer := jsonString(t, f.call("root", "default", "POST", "/api/workloads", workloadInput{Name: "Managed registry consumer", NodeID: "registry-node", ProjectID: "registry-project", Kind: "service", Compose: "services:\n  app:\n    image: " + host + "/team/app:fixture\n    pull_policy: always\n    command: [sleep, '86400']\n"}, 201), "id")
 	f.call("root", "default", "PUT", "/api/workloads/"+consumer+"/registry", map[string]string{"registry_id": connectionID}, 200)
 	op := f.call("root", "default", "POST", "/api/workloads/"+consumer+"/operations", map[string]string{"action": "deploy"}, 202)

@@ -627,6 +627,154 @@ it("closes the confirmation and shows other refusals of a data deletion on the r
   expect(calls("DELETE")).toHaveLength(1);
 });
 
+const legacyFailure = {
+  error: "registry_inventory_incomplete",
+  resource: { id: "consumer", name: "Legacy service" },
+  node: { id: "runner", name: "Ready runner" },
+  reason: "Retained Compose snapshot is unreadable and its release cannot be proven older than this registry.",
+};
+const inventoryIncomplete = (details: unknown = legacyFailure) => new ApiError(409, "The request conflicts with the current state.", null, details);
+
+function expectNamedFailure(container: HTMLElement) {
+  expect(container).toHaveTextContent("Legacy service");
+  expect(container).toHaveTextContent("Ready runner");
+  expect(container).toHaveTextContent(legacyFailure.reason);
+  expect(container).not.toHaveTextContent("consumer");
+  expect(container).not.toHaveTextContent("registry_inventory_incomplete");
+}
+
+function expectBefore(first: HTMLElement, later: HTMLElement) {
+  expect(first.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+}
+
+it("keeps garbage collection open with the resource, node and reason a ready node could not check, and retries only on request", async () => {
+  let refuse = true;
+  listReply = () => list([registry()]);
+  serve((method, path) => {
+    if (method !== "POST" || path !== `${listPath}/m1/gc`) return undefined;
+    if (refuse) throw inventoryIncomplete();
+    return { operation_id: "op-gc" };
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Run garbage collection" }));
+  const dialog = screen.getByRole("dialog", { name: "Run garbage collection on Team registry?" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Run garbage collection" }));
+  const notice = await within(dialog).findByRole("alert");
+  expect(notice).toHaveTextContent("Cove could not check every reference to this registry");
+  expect(notice).toHaveTextContent("Garbage collection was not requested and nothing was queued.");
+  expectNamedFailure(notice);
+  expectBefore(notice, within(dialog).getByText(/^The registry is stopped while this runs/));
+  expect(within(notice).queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByText("The registry operation was not requested")).not.toBeInTheDocument();
+  expect(screen.queryByText("The request conflicts with the current state.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Garbage collection requested")).not.toBeInTheDocument();
+  expect(calls("POST", `${listPath}/m1/gc`)).toHaveLength(1);
+  refuse = false;
+  fireEvent.click(within(dialog).getByRole("button", { name: "Run garbage collection" }));
+  await waitFor(() => expect(calls("POST", `${listPath}/m1/gc`)).toHaveLength(2));
+  expect(await screen.findByText("Garbage collection requested")).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("shows a named inventory failure in the data deletion confirmation, keeps the hostname and still allows keeping the data", async () => {
+  listReply = () => list([registry()]);
+  serve((method, _path, body) => {
+    if (method !== "DELETE") return undefined;
+    if ((body as { delete_data?: boolean }).delete_data) throw inventoryIncomplete();
+    return { operation_id: "op-rm" };
+  });
+  renderPage();
+  const dialog = await openRemoveWithData();
+  typeHostname(dialog);
+  const confirm = within(dialog).getByRole("button", { name: "Remove and delete data" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
+  const failureTitle = await within(dialog).findByText("Cove could not check every reference to this registry");
+  const failure = failureTitle.closest<HTMLElement>("[role=alert]");
+  if (!failure) throw new Error("the refusal is not an alert");
+  expectBefore(failure, within(dialog).getByText(/^This removes the registry service/));
+  expect(dialog).toHaveTextContent("Data deletion was not requested and nothing was queued.");
+  expect(dialog).toHaveTextContent("You can still remove the registry and keep its data.");
+  expectNamedFailure(dialog);
+  expect(within(dialog).queryByRole("checkbox", { name: /Delete the data even if/ })).not.toBeInTheDocument();
+  expect(within(dialog).getByLabelText("Type registry.example.test to confirm")).toHaveValue("registry.example.test");
+  expect(within(dialog).getByRole("button", { name: "Remove and delete data" })).toBeEnabled();
+  expect(screen.queryByText("The registry operation was not requested")).not.toBeInTheDocument();
+  expect(calls("DELETE")).toHaveLength(1);
+  fireEvent.click(within(dialog).getByRole("checkbox", { name: "Also delete the registry data permanently" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove registry" }));
+  await waitFor(() => expect(calls("DELETE")).toHaveLength(2));
+  expect(calls("DELETE")[1]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: false }]);
+  expect(await screen.findByText("Removal requested")).toBeInTheDocument();
+});
+
+it("names the inventory failure on the registry when it arrives after the confirmation was cancelled, once", async () => {
+  let refuse: (error: unknown) => void = () => undefined;
+  listReply = () => list([registry()]);
+  serve((method, path) =>
+    method === "POST" && path === `${listPath}/m1/gc`
+      ? new Promise((_, reject) => {
+          refuse = reject;
+        })
+      : undefined,
+  );
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Run garbage collection" }));
+  const dialog = screen.getByRole("dialog", { name: "Run garbage collection on Team registry?" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Run garbage collection" }));
+  await waitFor(() => expect(calls("POST", `${listPath}/m1/gc`)).toHaveLength(1));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  act(() => refuse(inventoryIncomplete()));
+  const title = await screen.findByText("The registry operation was not requested");
+  const notice = title.closest<HTMLElement>("[role=alert]");
+  if (!notice) throw new Error("the refusal is not an alert");
+  expect(notice).toHaveTextContent("so nothing was queued");
+  expectNamedFailure(notice);
+  expect(screen.queryByText("The request conflicts with the current state.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Garbage collection requested")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Run garbage collection" }));
+  const again = screen.getByRole("dialog", { name: "Run garbage collection on Team registry?" });
+  expect(screen.queryByText("The registry operation was not requested")).not.toBeInTheDocument();
+  expect(within(again).queryByText("Cove could not check every reference to this registry")).not.toBeInTheDocument();
+  expect(screen.queryByText("Legacy service")).not.toBeInTheDocument();
+  expect(calls("POST", `${listPath}/m1/gc`)).toHaveLength(1);
+});
+
+it("treats malformed inventory failure details as a generic refusal", async () => {
+  const malformed: unknown[] = [
+    { ...legacyFailure, resource: undefined },
+    { ...legacyFailure, resource: { id: "consumer", name: "  " } },
+    { ...legacyFailure, resource: { id: "consumer", name: "n".repeat(257) } },
+    { ...legacyFailure, node: { id: "", name: "Ready runner" } },
+    { ...legacyFailure, node: { id: "r".repeat(129), name: "Ready runner" } },
+    { ...legacyFailure, node: "Ready runner" },
+    { ...legacyFailure, reason: "" },
+    { ...legacyFailure, reason: "x".repeat(301) },
+    { ...legacyFailure, reason: 7 },
+  ];
+  let details: unknown = malformed[0];
+  listReply = () => list([registry()]);
+  serve((method, path) => {
+    if (method === "POST" && path === `${listPath}/m1/gc`) throw inventoryIncomplete(details);
+    return undefined;
+  });
+  renderPage();
+  for (const next of malformed) {
+    details = next;
+    fireEvent.click(await screen.findByRole("button", { name: "Run garbage collection" }));
+    const dialog = screen.getByRole("dialog", { name: "Run garbage collection on Team registry?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Run garbage collection" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByText("The registry operation was not requested")).toBeInTheDocument();
+    expect(screen.getByText("The request conflicts with the current state.")).toBeInTheDocument();
+    expect(screen.queryByText("Cove could not check every reference to this registry")).not.toBeInTheDocument();
+    expect(screen.queryByText(/nothing was queued/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Garbage collection requested")).not.toBeInTheDocument();
+  }
+  expect(calls("POST", `${listPath}/m1/gc`)).toHaveLength(malformed.length);
+});
+
 it("offers deleting the record only to managers of a purged removed registry without an active operation", async () => {
   const purged = registry({ state: "removed", connection_id: "", data_retained: false });
   let current = list([purged], false);

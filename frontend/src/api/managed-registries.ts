@@ -165,6 +165,36 @@ export function inventoryRefusal(error: unknown): ManagedRegistryNode[] | null {
   return unavailableNodes(details.unavailable_nodes);
 }
 
+export interface ManagedRegistryInventoryFailure {
+  resource: { id: string; name: string };
+  node: { id: string; name: string };
+  reason: string;
+}
+
+const maxNameLength = 256;
+const maxReasonLength = 300;
+
+function namedEntity(value: unknown): { id: string; name: string } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { id, name } = value as { id?: unknown; name?: unknown };
+  if (typeof id !== "string" || id === "" || id.length > maxNodeIdLength) return null;
+  if (typeof name !== "string" || name.trim() === "" || name.length > maxNameLength) return null;
+  return { id, name };
+}
+
+// The refusal of an operation because a ready node could not list its references to the registry. Malformed details
+// return null, so they are shown as a generic refusal and never read as a complete inventory.
+export function inventoryFailure(error: unknown): ManagedRegistryInventoryFailure | null {
+  if (!(error instanceof ApiError) || error.status !== 409 || typeof error.details !== "object" || error.details === null) return null;
+  const details = error.details as { error?: unknown; resource?: unknown; node?: unknown; reason?: unknown };
+  if (details.error !== "registry_inventory_incomplete") return null;
+  const resource = namedEntity(details.resource);
+  const node = namedEntity(details.node);
+  const { reason } = details;
+  if (!resource || !node || typeof reason !== "string" || reason.trim() === "" || reason.length > maxReasonLength) return null;
+  return { resource, node, reason };
+}
+
 function removalBody(operation: { deleteData: boolean; acknowledgeUnavailableNodes?: string[] }) {
   const acknowledged = operation.deleteData ? (operation.acknowledgeUnavailableNodes ?? []) : [];
   return acknowledged.length > 0 ? { delete_data: true, acknowledge_unavailable_nodes: acknowledged } : { delete_data: operation.deleteData };

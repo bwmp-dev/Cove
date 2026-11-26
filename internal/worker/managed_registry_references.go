@@ -4,15 +4,49 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-func (e *Engine) ManagedRegistryReferences(ctx context.Context, workload, server string) ([]string, error) {
+const (
+	registrySnapshotUnreadable = "Retained Compose snapshot is unreadable and its release cannot be proven older than this registry."
+	registryImageUnresolved    = "Retained Compose image reference is missing or unresolved and its release cannot be proven older than this registry."
+	registryImageUnavailable   = "Retained image is unavailable and its release cannot be proven older than this registry."
+	registryDigestUnavailable  = "Retained registry image has no immutable digest; restore its local image metadata before retrying."
+	registryInventoryInvalid   = "Retained release inventory is invalid or exceeds its safety limit."
+)
+
+// RPC errors can contain transport details. Only these fixed reasons are safe
+// to combine with resource names in an operator-facing inventory refusal.
+func ManagedRegistryInventoryReason(message string) string {
+	switch message {
+	case registrySnapshotUnreadable, registryImageUnresolved, registryImageUnavailable, registryDigestUnavailable, registryInventoryInvalid:
+		return message
+	case "resource is busy; registry reference inventory is incomplete":
+		return "Resource is busy; wait for its operation to finish."
+	case "retained release has no image identity":
+		return "Retained release has no image identity; upgrade this worker to inspect legacy releases."
+	default:
+		return "Worker reference inventory is unavailable; retry when the worker is ready."
+	}
+}
+
+func (e *Engine) ManagedRegistryReferences(ctx context.Context, workload, server string, previous []string) ([]string, error) {
 	if !workloadIdentifier.MatchString(workload) || ValidateRegistry(&Registry{Server: server, Username: "inventory", Password: "inventory"}) != nil {
 		return nil, errors.New("invalid registry reference inventory scope")
+	}
+	if len(previous) > 2048 {
+		return nil, errors.New(registryInventoryInvalid)
+	}
+	predates := map[string]bool{}
+	for _, id := range previous {
+		if !identifier.MatchString(id) || predates[id] {
+			return nil, errors.New(registryInventoryInvalid)
+		}
+		predates[id] = true
 	}
 	e.mu.Lock()
 	busy := e.busy(workload)
@@ -26,69 +60,102 @@ func (e *Engine) ManagedRegistryReferences(ctx context.Context, workload, server
 		return []string{}, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.New(registrySnapshotUnreadable)
 	}
 	if len(entries) > 2048 {
-		return nil, errors.New("retained registry inventory exceeds limit")
+		return nil, errors.New(registryInventoryInvalid)
 	}
+	workloadRoot := filepath.Dir(root)
+	files, err := os.OpenRoot(workloadRoot)
+	if err != nil {
+		return nil, errors.New(registrySnapshotUnreadable)
+	}
+	defer files.Close()
 	refs := map[string]bool{}
-	images := map[string]bool{}
+	inspected := map[string]error{}
+	snapshots := map[string]bool{}
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".compose.json") {
+		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return nil, errors.New("invalid retained Compose file")
+		id := strings.TrimSuffix(strings.TrimSuffix(entry.Name(), ".json"), ".compose")
+		if !identifier.MatchString(id) || entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
+			return nil, errors.New(registryInventoryInvalid)
 		}
-		info, err := entry.Info()
-		if err != nil || info.Size() > 2<<20 {
-			return nil, errors.New("retained Compose inventory is unavailable")
+		path := filepath.Join("release-states", entry.Name())
+		if strings.HasSuffix(entry.Name(), ".compose.json") {
+			snapshots[path] = snapshots[path] || predates[id]
+			continue
 		}
-		data, err := os.ReadFile(filepath.Join(root, entry.Name()))
-		if err != nil {
+		data, err := registryReleaseData(files, path)
+		var state struct {
+			ComposePath string `json:"compose_path"`
+		}
+		if err != nil || json.Unmarshal(data, &state) != nil || state.ComposePath == "" {
+			if predates[id] && (err == nil || err.Error() == registrySnapshotUnreadable) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New(registrySnapshotUnreadable)
+		}
+		relative, err := filepath.Rel(workloadRoot, state.ComposePath)
+		if err != nil || !filepath.IsAbs(state.ComposePath) || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return nil, errors.New(registryInventoryInvalid)
+		}
+		older := predates[id]
+		if filepath.Dir(relative) == "release-states" && strings.HasSuffix(relative, ".compose.json") {
+			original := strings.TrimSuffix(filepath.Base(relative), ".compose.json")
+			older = older || predates[original]
+		}
+		snapshots[relative] = snapshots[relative] || older
+	}
+	for path, older := range snapshots {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		var config struct {
-			Services map[string]struct {
-				Image string `json:"image"`
-			} `json:"services"`
-		}
-		if json.Unmarshal(data, &config) != nil || len(config.Services) == 0 {
-			return nil, errors.New("retained Compose inventory is invalid")
-		}
-		for _, service := range config.Services {
-			if service.Image == "" {
-				return nil, errors.New("retained release has no image identity")
+		images, err := registryReleaseImages(files, path)
+		if err != nil {
+			if older && err.Error() == registrySnapshotUnreadable {
+				continue
 			}
-			images[service.Image] = true
+			return nil, err
 		}
-	}
-	for image := range images {
-		var metadata struct {
-			RepoDigests []string `json:"RepoDigests"`
-			RepoTags    []string `json:"RepoTags"`
-		}
-		if err = e.imageJSON(ctx, nil, &metadata, "docker", "image", "inspect", "--format", "{{json .}}", image); err != nil {
-			return nil, errors.New("retained image unavailable; registry cleanup refused")
-		}
-		matched := false
-		for _, ref := range metadata.RepoDigests {
-			if strings.HasPrefix(ref, server+"/") {
-				repo, digest, ok := strings.Cut(strings.TrimPrefix(ref, server+"/"), "@")
-				if !ok || ValidateRegistryRepository(repo) != nil || !managedManifestDigest.MatchString(digest) {
-					return nil, errors.New("invalid retained registry digest")
+		for _, image := range images {
+			if image == "" || len(image) > 512 || strings.ContainsAny(image, "$ \t\r\n\x00") {
+				if older {
+					continue
 				}
-				refs[repo+"@"+digest] = true
-				matched = true
+				return nil, errors.New(registryImageUnresolved)
 			}
-		}
-		for _, tag := range metadata.RepoTags {
-			if strings.HasPrefix(tag, server+"/") && !matched {
-				return nil, errors.New("retained registry image has no immutable digest; cleanup refused")
+			if !imageDigest.MatchString(image) {
+				repository := imageRepository(image)
+				if !strings.HasPrefix(repository, server+"/") {
+					continue
+				}
+				repo := strings.TrimPrefix(repository, server+"/")
+				if _, digest, ok := strings.Cut(image, "@"); ok && ValidateRegistryRepository(repo) == nil && managedManifestDigest.MatchString(digest) {
+					refs[repo+"@"+digest] = true
+					continue
+				}
+			}
+			err, seen := inspected[image]
+			if !seen {
+				err = e.retainedRegistryImage(ctx, image, server, refs)
+				inspected[image] = err
+			}
+			if err != nil {
+				// An explicit reference to this registry is evidence even when
+				// its local metadata is lost; age must never override it.
+				if older && imageDigest.MatchString(image) && err.Error() == registryImageUnavailable {
+					continue
+				}
+				return nil, err
 			}
 		}
 		if len(refs) > MaxManagedRegistryReferences {
-			return nil, errors.New("retained registry reference inventory exceeds its bound")
+			return nil, errors.New(registryInventoryInvalid)
 		}
 	}
 	result := make([]string, 0, len(refs))
@@ -97,4 +164,74 @@ func (e *Engine) ManagedRegistryReferences(ctx context.Context, workload, server
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+func registryReleaseData(root *os.Root, path string) ([]byte, error) {
+	info, err := root.Lstat(path)
+	if err != nil {
+		return nil, errors.New(registrySnapshotUnreadable)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 2<<20 {
+		return nil, errors.New(registryInventoryInvalid)
+	}
+	file, err := root.Open(path)
+	if err != nil {
+		return nil, errors.New(registrySnapshotUnreadable)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 2<<20+1))
+	if err != nil || len(data) > 2<<20 {
+		return nil, errors.New(registrySnapshotUnreadable)
+	}
+	return data, nil
+}
+
+func registryReleaseImages(root *os.Root, path string) ([]string, error) {
+	data, err := registryReleaseData(root, path)
+	if err != nil {
+		return nil, err
+	}
+	var config struct {
+		Services map[string]struct {
+			Image string `json:"image"`
+		} `json:"services"`
+	}
+	if json.Unmarshal(data, &config) != nil || len(config.Services) == 0 || len(config.Services) > 64 {
+		return nil, errors.New(registrySnapshotUnreadable)
+	}
+	images := make([]string, 0, len(config.Services))
+	for _, service := range config.Services {
+		images = append(images, service.Image)
+	}
+	return images, nil
+}
+
+func (e *Engine) retainedRegistryImage(ctx context.Context, image, server string, refs map[string]bool) error {
+	var metadata struct {
+		RepoDigests []string `json:"RepoDigests"`
+		RepoTags    []string `json:"RepoTags"`
+	}
+	if err := e.imageJSON(ctx, nil, &metadata, "docker", "image", "inspect", "--format", "{{json .}}", image); err != nil {
+		return errors.New(registryImageUnavailable)
+	}
+	matched := false
+	for _, ref := range metadata.RepoDigests {
+		if strings.HasPrefix(ref, server+"/") {
+			repo, digest, ok := strings.Cut(strings.TrimPrefix(ref, server+"/"), "@")
+			if !ok || ValidateRegistryRepository(repo) != nil || !managedManifestDigest.MatchString(digest) {
+				return errors.New(registryInventoryInvalid)
+			}
+			refs[repo+"@"+digest] = true
+			matched = true
+		}
+	}
+	for _, tag := range metadata.RepoTags {
+		if strings.HasPrefix(tag, server+"/") && !matched {
+			return errors.New(registryDigestUnavailable)
+		}
+	}
+	if strings.HasPrefix(imageRepository(image), server+"/") && !matched {
+		return errors.New(registryDigestUnavailable)
+	}
+	return nil
 }

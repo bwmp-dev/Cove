@@ -2,13 +2,14 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { expect, test, type Locator, type Page, type Response, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Response, type Route, type TestInfo } from "@playwright/test";
 import { cleanupBrowserResources, expectNoHorizontalScroll, verified } from "./route-tls";
 
 // Runs only with scripts/test-browser.py --managed-registry on the caller's owned nested daemon. The fixture trusts a
 // disposable CA for one exact .example.test hostname inside that daemon only. Provisioning starts on ACME against a
-// closed local authority, so authenticated TLS verification really fails until the fixture leaf is uploaded. No request
-// in this spec is mocked, and TLS verification is never skipped.
+// closed local authority, so authenticated TLS verification really fails until the fixture leaf is uploaded. Apart from
+// the one UI-only garbage collection refusal marked below, no request in this spec is mocked, and TLS verification is
+// never skipped.
 const password = process.env.COVE_BROWSER_PASSWORD ?? "";
 const enabled = process.env.COVE_BROWSER_MANAGED_REGISTRY === "1";
 const base = process.env.COVE_BROWSER_BASE_PATH ?? "";
@@ -28,6 +29,23 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
     await page.setViewportSize({ width, height: 900 });
     await expectNoHorizontalScroll(page);
     await page.screenshot({ path: testInfo.outputPath(`${name}-${width}.png`), fullPage: true });
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+}
+
+// The refusal's named resource, node and reason must be fully visible inside the modal, not only present in the DOM.
+async function expectRefusalVisible(refusal: Locator, reason: string) {
+  for (const text of ["Legacy service", "Ready runner", reason]) await expect(refusal.getByText(text, { exact: true })).toBeInViewport({ ratio: 1 });
+}
+
+// Each width is checked as if the dialog had just been opened there, so the modal is returned to its top first.
+async function captureRefusal(page: Page, testInfo: TestInfo, dialog: Locator, refusal: Locator, reason: string) {
+  for (const width of sizes) {
+    await page.setViewportSize({ width, height: 900 });
+    await dialog.evaluate((element) => element.scrollTo({ top: 0, behavior: "instant" }));
+    await expectRefusalVisible(refusal, reason);
+    await expectNoHorizontalScroll(page);
+    await page.screenshot({ path: testInfo.outputPath(`managed-registry-gc-inventory-incomplete-${width}.png`), fullPage: true });
   }
   await page.setViewportSize({ width: 1280, height: 900 });
 }
@@ -306,6 +324,50 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
     await settled(((await deployReply.json()) as { id: string }).id);
     await teamQuiet();
     const consumerBefore = consumerContainer();
+
+    // UI-ONLY MOCKED FAILURE, not part of the real lifecycle: the browser answers the next garbage collection POST itself
+    // with the documented refusal for a ready node that could not list its references. It never reaches the panel, so
+    // nothing is queued; the real run below then goes to the panel unchanged.
+    const gcPath = panelPath(`/api/managed-registries/${registryId}/gc`);
+    const isGc = (url: URL) => url.pathname === gcPath;
+    const legacyFailure = {
+      error: "registry_inventory_incomplete",
+      resource: { id: "consumer", name: "Legacy service" },
+      node: { id: "runner", name: "Ready runner" },
+      reason: "Retained Compose snapshot is unreadable and its release cannot be proven older than this registry.",
+    };
+    let mockedRefusals = 0;
+    const refuseOnce = async (route: Route) => {
+      if (route.request().method() !== "POST" || mockedRefusals > 0) return route.fallback();
+      mockedRefusals++;
+      return route.fulfill({ status: 409, json: legacyFailure });
+    };
+    const beforeMock = await current();
+    await page.route(isGc, refuseOnce);
+    // Opened and confirmed at the narrowest width, so the first visibility check is the real mobile flow.
+    await page.setViewportSize({ width: 320, height: 900 });
+    await item.getByRole("button", { name: "Run garbage collection" }).click();
+    const mockedDialog = page.getByRole("dialog", { name: `Run garbage collection on ${registryName}?` });
+    await mockedDialog.getByRole("button", { name: "Run garbage collection" }).click();
+    const refusal = mockedDialog.getByRole("alert");
+    await expect(refusal).toContainText("Cove could not check every reference to this registry");
+    await expect(refusal).toContainText("Garbage collection was not requested and nothing was queued.");
+    await expect(refusal).toContainText("Legacy service");
+    await expect(refusal).toContainText("Ready runner");
+    await expect(refusal).toContainText(legacyFailure.reason);
+    await expect(refusal).not.toContainText("registry_inventory_incomplete");
+    await expectRefusalVisible(refusal, legacyFailure.reason);
+    await expect(item.getByText("Garbage collection requested", { exact: true })).toHaveCount(0);
+    await captureRefusal(page, testInfo, mockedDialog, refusal, legacyFailure.reason);
+    await mockedDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(mockedDialog).toHaveCount(0);
+    await page.unroute(isGc, refuseOnce);
+    expect(mockedRefusals).toBe(1);
+    await expect(item.getByText("The registry operation was not requested", { exact: true })).toHaveCount(0);
+    const afterMock = await current();
+    expect(afterMock.state).toBe("ready");
+    expect(afterMock.operation_id).toBe(beforeMock.operation_id);
+    await teamQuiet();
 
     // Manual garbage collection from the dashboard.
     await item.getByRole("button", { name: "Run garbage collection" }).click();

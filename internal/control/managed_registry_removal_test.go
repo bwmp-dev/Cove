@@ -124,7 +124,10 @@ func TestManagedRegistryAcknowledgementCannotBypassCompleteInventoryRules(t *tes
 			status := 409
 			switch scenario {
 			case "gc":
-				f.call("root", "default", "POST", "/api/managed-registries/"+id+"/gc", nil, 409)
+				refused := f.call("root", "default", "POST", "/api/managed-registries/"+id+"/gc", nil, 409)
+				if strings.Contains(refused.Body.String(), "registry_inventory_changed") || !strings.Contains(refused.Body.String(), "inventory is incomplete") {
+					t.Fatal("GC incorrectly offered a data-deletion acknowledgement", refused.Body.String())
+				}
 				return
 			case "ready-worker-error":
 				f.sql(`UPDATE nodes SET state='ready',capabilities='{}' WHERE id='offline-node'`)
@@ -192,7 +195,7 @@ func TestManagedRegistryInventoryDoesNotLockPublisherWorkload(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if _, _, err = f.s.managedRegistryReferences(ctx, inventory, "default", "registry.example.test"); err != nil {
+	if _, _, err = f.s.managedRegistryReferences(ctx, inventory, "default", "registry.example.test", time.Now()); err != nil {
 		t.Fatal("read-only registry inventory waited for a publisher workload row", err)
 	}
 }

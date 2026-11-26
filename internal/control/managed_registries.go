@@ -195,8 +195,9 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	id := r.PathValue("id")
 	var state, host, node, connection string
+	var created time.Time
 	var enc, policyJSON, workloadConfig []byte
-	err = tx.QueryRow(r.Context(), `SELECT m.state,m.hostname,w.node_id,COALESCE(m.connection_id,''),m.credentials,m.retention,w.configuration FROM managed_registries m JOIN workloads w ON w.id=m.id WHERE m.id=$1 AND m.team_id=$2 FOR UPDATE OF m,w`, id, actor(r).Team).Scan(&state, &host, &node, &connection, &enc, &policyJSON, &workloadConfig)
+	err = tx.QueryRow(r.Context(), `SELECT m.state,m.hostname,w.node_id,COALESCE(m.connection_id,''),m.credentials,m.retention,w.configuration,m.created_at FROM managed_registries m JOIN workloads w ON w.id=m.id WHERE m.id=$1 AND m.team_id=$2 FOR UPDATE OF m,w`, id, actor(r).Team).Scan(&state, &host, &node, &connection, &enc, &policyJSON, &workloadConfig, &created)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -310,9 +311,9 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 			}
 			if deleteData {
 				var unavailable []managedRegistryUnavailableNode
-				protected, unavailable, err = s.managedRegistryReferences(r.Context(), tx, actor(r).Team, host)
+				protected, unavailable, err = s.managedRegistryReferences(r.Context(), tx, actor(r).Team, host, created)
 				if err != nil {
-					http.Error(w, "registry reference inventory is incomplete; maintenance refused", 409)
+					registryInventoryIncomplete(w, err)
 					return
 				}
 				if !registryInventoryAcknowledged(unavailable, in.AcknowledgeUnavailableNodes) {
@@ -328,8 +329,12 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 			state = "removing"
 		} else {
 			var unavailable []managedRegistryUnavailableNode
-			protected, unavailable, err = s.managedRegistryReferences(r.Context(), tx, actor(r).Team, host)
-			if err != nil || len(unavailable) > 0 {
+			protected, unavailable, err = s.managedRegistryReferences(r.Context(), tx, actor(r).Team, host, created)
+			if err != nil {
+				registryInventoryIncomplete(w, err)
+				return
+			}
+			if len(unavailable) > 0 {
 				http.Error(w, "registry reference inventory is incomplete; maintenance refused", 409)
 				return
 			}
@@ -361,7 +366,7 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 	respond(w, 202, map[string]string{"operation_id": op})
 }
 
-func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team, server string) ([]string, []managedRegistryUnavailableNode, error) {
+func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team, server string, created time.Time) ([]string, []managedRegistryUnavailableNode, error) {
 	scopes, err := managedRegistryReferenceScopes(ctx, tx, team)
 	if err != nil {
 		return nil, nil, err
@@ -372,9 +377,16 @@ func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team,
 		if v.never || !v.ready {
 			continue
 		}
-		result, err := s.nodeRPC(ctx, v.node, worker.RPCRequest{Method: "managed_registry_references", ID: v.id, Registry: &worker.Registry{Server: server}})
+		previous, err := registryPreviousReleases(ctx, tx, v.id, created)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, registryWorkerInventoryFailure(v, err)
+		}
+		result, err := s.nodeRPC(ctx, v.node, worker.RPCRequest{Method: "managed_registry_references", ID: v.id, Registry: &worker.Registry{Server: server}, RegistryPrevious: previous})
+		if err != nil {
+			return nil, nil, registryWorkerInventoryFailure(v, err)
+		}
+		if result.Error != "" {
+			return nil, nil, registryWorkerInventoryFailure(v, errors.New(result.Error))
 		}
 		for _, ref := range result.RegistryReferences {
 			refs[ref] = true

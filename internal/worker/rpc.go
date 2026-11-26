@@ -19,6 +19,7 @@ import (
 const rpcMessageLimit = 2 * 1024 * 1024
 
 type RPCRequest struct {
+	RegistryPrevious    []string                   `json:"registry_previous_releases,omitempty"`
 	RefreshScanDatabase bool                       `json:"refresh_scan_database,omitempty"`
 	BuildCache          *BuildCacheSettings        `json:"build_cache,omitempty"`
 	RegistryCertificate string                     `json:"registry_certificate,omitempty"`
@@ -497,7 +498,7 @@ func (e *Engine) RPC(ctx context.Context, r RPCRequest) RPCResponse {
 		if r.Registry == nil {
 			return RPCResponse{Error: "registry scope required"}
 		}
-		refs, err := e.ManagedRegistryReferences(ctx, r.ID, r.Registry.Server)
+		refs, err := e.ManagedRegistryReferences(ctx, r.ID, r.Registry.Server, r.RegistryPrevious)
 		if err != nil {
 			return RPCResponse{Error: err.Error()}
 		}

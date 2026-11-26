@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
-import { inventoryRefusal, removalInventoryQuery, type ManagedRegistry, type ManagedRegistryNode, type ManagedRegistryOperation } from "../api/managed-registries";
+import { inventoryFailure, inventoryRefusal, removalInventoryQuery, type ManagedRegistry, type ManagedRegistryInventoryFailure, type ManagedRegistryNode, type ManagedRegistryOperation } from "../api/managed-registries";
 import { retentionSummary } from "../lib/managed-registries";
 import { choiceClass, inputClass } from "../lib/styles";
 import { Checkbox } from "./Checkbox";
 import { ConfirmDialog, Dialog } from "./ConfirmDialog";
-import { Button, Field, Notice, QueryError, Spinner } from "./ui";
+import { Button, DefinitionList, Field, Notice, QueryError, Spinner } from "./ui";
 
 interface Props {
   registry: ManagedRegistry;
@@ -13,8 +13,9 @@ interface Props {
   onCancel: () => void;
 }
 
-// Destructive confirmations stay open while the request runs, so a refusal can be shown with the draft kept.
-interface DestructiveProps extends Props {
+// Confirmations that stay open while the request runs, so a refusal can be shown with the draft kept. Cancel stays
+// available; a refusal that arrives afterwards is shown on the registry.
+interface PendingProps extends Props {
   pending: boolean;
   error: Error | null;
 }
@@ -24,10 +25,25 @@ function keptByRetention(registry: ManagedRegistry) {
   return summary ? `the ${summary}` : "the manifests the saved retention settings keep";
 }
 
-export function GarbageCollectionDialog({ registry, onConfirm, onCancel }: Props) {
+export function GarbageCollectionDialog({ registry, pending, error, onConfirm, onCancel }: PendingProps) {
   return (
-    <ConfirmDialog open title={`Run garbage collection on ${registry.name}?`} confirmLabel="Run garbage collection" onCancel={onCancel} onConfirm={() => onConfirm({ kind: "gc" })}>
+    <Dialog
+      open
+      title={`Run garbage collection on ${registry.name}?`}
+      onClose={onCancel}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => onConfirm({ kind: "gc" })} pending={pending}>
+            Run garbage collection
+          </Button>
+        </>
+      }
+    >
       <div className="space-y-2">
+        <InventoryFailureNotice error={error} action="Garbage collection" />
         <p>The registry is stopped while this runs, and Cove builds and deploys that use it are refused until it finishes. Running application containers are not stopped or deleted.</p>
         <p>
           <span className="font-medium text-fg">Kept:</span> images referenced by retained releases, previews and latest builds; tags that Cove builds did not create; and {keptByRetention(registry)}.
@@ -38,7 +54,35 @@ export function GarbageCollectionDialog({ registry, onConfirm, onCancel }: Props
         <p>If it is interrupted or cancelled, manifests already deleted are not restored and cleanup can stay incomplete until the worker recovers the registry. Cove refuses to start while any team operation is queued or running, or when it cannot list every reference, including while a node that may hold references is unavailable. Nodes that never enrolled hold none. This is manual maintenance; Cove never runs it on a schedule.</p>
         <p>The project&apos;s approval, freeze and deployment window rules apply, so the operation can wait in the queue before it runs.</p>
       </div>
-    </ConfirmDialog>
+    </Dialog>
+  );
+}
+
+export function InventoryFailureDetails({ failure }: { failure: ManagedRegistryInventoryFailure }) {
+  return (
+    <div className="mt-1 space-y-2">
+      <DefinitionList
+        compact
+        items={[
+          { term: "Resource", value: failure.resource.name },
+          { term: "Node", value: failure.node.name },
+        ]}
+      />
+      <p className="break-words">{failure.reason}</p>
+    </div>
+  );
+}
+
+// Shown in the open confirmation. Nothing was queued and Cove does not retry, so confirming again is a new request.
+function InventoryFailureNotice({ error, action, keepDataHint = false }: { error: Error | null; action: string; keepDataHint?: boolean }) {
+  const failure = inventoryFailure(error);
+  if (!failure) return null;
+  return (
+    <Notice tone="error" title="Cove could not check every reference to this registry">
+      <p>{action} was not requested and nothing was queued. A ready node could not list what it keeps that uses this registry.</p>
+      <InventoryFailureDetails failure={failure} />
+      <p className="mt-2">Confirm again once the node can be checked, or cancel.{keepDataHint ? " You can still remove the registry and keep its data." : ""}</p>
+    </Notice>
   );
 }
 
@@ -85,7 +129,7 @@ function TypedConfirmation({ registry, title, confirmLabel, children, onSubmit, 
   );
 }
 
-export function RemoveDialog({ registry, pending, error, onConfirm, onCancel }: DestructiveProps) {
+export function RemoveDialog({ registry, pending, error, onConfirm, onCancel }: PendingProps) {
   const id = useId();
   const [deleteData, setDeleteData] = useState(false);
   const inventory = useUnavailableNodes(registry.id, deleteData);
@@ -98,6 +142,7 @@ export function RemoveDialog({ registry, pending, error, onConfirm, onCancel }: 
   }
   return (
     <TypedConfirmation registry={registry} title={`Remove ${registry.name}?`} confirmLabel={deleteData ? "Remove and delete data" : "Remove registry"} requireTyping={deleteData} blocked={deleteData && !inventory.ready} pending={pending} onCancel={onCancel} onSubmit={submit}>
+      {deleteData && <InventoryFailureNotice error={error} action="Data deletion" keepDataHint />}
       <div className="space-y-2">
         <p>This removes the registry service, its HTTPS route and the generated registry connection. Disconnect resources and registry webhooks that use it first; Cove refuses otherwise. Certificates are not revoked and nothing outside the node is cleaned up.</p>
         <p>By default the registry&apos;s data volume is kept on the node, where it can be deleted later.</p>
@@ -128,7 +173,7 @@ export function DeleteRecordDialog({ registry, pending, onConfirm, onCancel }: {
   );
 }
 
-export function DeleteDataDialog({ registry, pending, error, onConfirm, onCancel }: DestructiveProps) {
+export function DeleteDataDialog({ registry, pending, error, onConfirm, onCancel }: PendingProps) {
   const inventory = useUnavailableNodes(registry.id, true);
   return (
     <TypedConfirmation
@@ -141,6 +186,7 @@ export function DeleteDataDialog({ registry, pending, error, onConfirm, onCancel
       onCancel={onCancel}
       onSubmit={() => onConfirm({ kind: "remove", deleteData: true, acknowledgeUnavailableNodes: inventory.acknowledged })}
     >
+      <InventoryFailureNotice error={error} action="Data deletion" />
       <p>This permanently deletes the registry&apos;s data volume on the node, including every image in it. It cannot be undone. Cove refuses while retained releases, latest builds or previews still reference the registry.</p>
       <p>The project&apos;s approval, freeze and deployment window rules apply, so the operation can wait in the queue before it runs.</p>
       <UnavailableNodes inventory={inventory} error={error} />

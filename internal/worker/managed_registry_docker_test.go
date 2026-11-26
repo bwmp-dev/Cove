@@ -189,7 +189,7 @@ func TestManagedRegistryDocker(t *testing.T) {
 	run(Request{ID: "registry-consumer", Workload: app, Action: "deploy", Kind: "service", Compose: compose, Registry: registry})
 	consumerID := command("docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+app)
 	consumerStarted := command("docker", "inspect", "--format", "{{.State.StartedAt}}", consumerID)
-	refs, err := e.ManagedRegistryReferences(ctx, app, host)
+	refs, err := e.ManagedRegistryReferences(ctx, app, host, nil)
 	if err != nil || len(refs) != 1 || host+"/"+refs[0] != protected {
 		t.Fatal("retained deployment inventory missing", refs, err)
 	}

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"time"
 
+	"cove/internal/worker"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -22,14 +24,14 @@ type managedRegistryRemovalInventory struct {
 }
 
 type managedRegistryReferenceScope struct {
-	id, node, name string
-	ready, never   bool
+	id, node, name, resource string
+	ready, never             bool
 }
 
 func managedRegistryReferenceScopes(ctx context.Context, tx pgx.Tx, team string) ([]managedRegistryReferenceScope, error) {
 	// SSH enrollment pins a host identity before worker RPC is possible, and
 	// normal node updates never clear that pin. Reachability alone proves nothing.
-	rows, err := tx.Query(ctx, `SELECT w.id,n.id,n.name,n.state='ready',n.mode='ssh' AND n.host_key IS NULL AND COALESCE(n.capabilities,'null'::jsonb)='null'::jsonb FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.team_id=$1 AND w.id NOT IN (SELECT id FROM managed_registries) ORDER BY w.id LIMIT 1025 FOR SHARE OF n`, team)
+	rows, err := tx.Query(ctx, `SELECT w.id,n.id,n.name,w.name,n.state='ready',n.mode='ssh' AND n.host_key IS NULL AND COALESCE(n.capabilities,'null'::jsonb)='null'::jsonb FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.team_id=$1 AND w.id NOT IN (SELECT id FROM managed_registries) ORDER BY w.id LIMIT 1025 FOR SHARE OF n`, team)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +39,7 @@ func managedRegistryReferenceScopes(ctx context.Context, tx pgx.Tx, team string)
 	scopes := []managedRegistryReferenceScope{}
 	for rows.Next() {
 		var scope managedRegistryReferenceScope
-		if err = rows.Scan(&scope.id, &scope.node, &scope.name, &scope.ready, &scope.never); err != nil {
+		if err = rows.Scan(&scope.id, &scope.node, &scope.name, &scope.resource, &scope.ready, &scope.never); err != nil {
 			return nil, err
 		}
 		scopes = append(scopes, scope)
@@ -49,6 +51,50 @@ func managedRegistryReferenceScopes(ctx context.Context, tx pgx.Tx, team string)
 		return nil, errors.New("registry resource inventory exceeds bound")
 	}
 	return scopes, nil
+}
+
+type registryInventoryFailure struct {
+	scope  managedRegistryReferenceScope
+	reason string
+}
+
+func (e *registryInventoryFailure) Error() string { return e.reason }
+
+func registryInventoryIncomplete(w http.ResponseWriter, err error) {
+	var failure *registryInventoryFailure
+	if !errors.As(err, &failure) {
+		http.Error(w, "registry reference inventory is incomplete; maintenance refused", 409)
+		return
+	}
+	respond(w, 409, map[string]any{
+		"error":    "registry_inventory_incomplete",
+		"resource": managedRegistryUnavailableNode{ID: failure.scope.id, Name: failure.scope.resource},
+		"node":     managedRegistryUnavailableNode{ID: failure.scope.node, Name: failure.scope.name},
+		"reason":   failure.reason,
+	})
+}
+
+func registryPreviousReleases(ctx context.Context, tx pgx.Tx, workload string, created time.Time) ([]string, error) {
+	// Both timestamps come from the panel database. Worker clocks and file
+	// mtimes cannot establish that a snapshot predates this registry.
+	rows, err := tx.Query(ctx, `SELECT id FROM operations WHERE workload_id=$1 AND state='succeeded' AND updated_at<$2 ORDER BY updated_at DESC,id LIMIT 2048`, workload, created)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func registryWorkerInventoryFailure(scope managedRegistryReferenceScope, err error) error {
+	return &registryInventoryFailure{scope: scope, reason: worker.ManagedRegistryInventoryReason(err.Error())}
 }
 
 func unavailableRegistryNodes(scopes []managedRegistryReferenceScope) []managedRegistryUnavailableNode {

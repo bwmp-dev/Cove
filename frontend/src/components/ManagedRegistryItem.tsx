@@ -1,13 +1,13 @@
 import { Link } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
-import { inventoryRefusal, useDeleteManagedRegistryRecord, useManagedRegistryOperation, useSaveManagedRegistry, type ManagedRegistry, type ManagedRegistryOperation } from "../api/managed-registries";
+import { inventoryFailure, inventoryRefusal, useDeleteManagedRegistryRecord, useManagedRegistryOperation, useSaveManagedRegistry, type ManagedRegistry, type ManagedRegistryOperation } from "../api/managed-registries";
 import type { OperationState } from "../api/types";
 import { editable, operationActive, recordDeletable, registryState, registryWorking, retentionSummary } from "../lib/managed-registries";
 import { operationTones } from "../lib/operations";
 import { linkClass } from "../lib/styles";
 import { ManagedRegistryCertificate } from "./ManagedRegistryCertificate";
-import { DeleteDataDialog, DeleteRecordDialog, GarbageCollectionDialog, RemoveDialog } from "./ManagedRegistryDialogs";
+import { DeleteDataDialog, DeleteRecordDialog, GarbageCollectionDialog, InventoryFailureDetails, RemoveDialog } from "./ManagedRegistryDialogs";
 import { RetentionForm } from "./ManagedRegistryRetention";
 import { OperationStateLabel, StatusLabel } from "./status";
 import { Button, DefinitionList, Notice, Subsection } from "./ui";
@@ -28,6 +28,14 @@ const outcomes: Record<ManagedRegistryOperation["kind"], string> = {
   remove: "Removal requested",
 };
 
+// Garbage collection and data deletion keep their confirmation open until the API answers. These are the refusals
+// that confirmation explains itself, with the typed hostname kept.
+function explainedInDialog(operation: ManagedRegistryOperation | undefined, error: unknown) {
+  if (operation?.kind === "gc") return inventoryFailure(error) !== null;
+  if (operation?.kind === "remove" && operation.deleteData) return inventoryRefusal(error) !== null || inventoryFailure(error) !== null;
+  return false;
+}
+
 // Keyed by registry id in the list, so its mutations and outcome survive refetches that replace the forms below.
 export function ManagedRegistryItem({ registry, canManage, blocked, nodeName, projectName }: Props) {
   const operation = useManagedRegistryOperation(registry.id);
@@ -39,33 +47,34 @@ export function ManagedRegistryItem({ registry, canManage, blocked, nodeName, pr
   const state = registryState(registry.state);
   const actionBlocked = blocked ?? (operationActive(registry) ? "An operation is in progress." : undefined);
 
-  // A data deletion keeps its confirmation open until the API answers, so a refusal because the unavailable nodes
-  // changed is shown there with the typed hostname kept. Other refusals are shown on the registry as before.
+  // Other refusals close the confirmation and are shown on the registry as before.
   function run(next: ManagedRegistryOperation) {
-    const deletesData = next.kind === "remove" && next.deleteData;
-    if (!deletesData) setDialog(null);
+    const keepsOpen = next.kind === "gc" || (next.kind === "remove" && next.deleteData);
+    if (!keepsOpen) setDialog(null);
     setOutcome(null);
     operation.mutate(next, {
       onSuccess: () => {
-        if (deletesData) setDialog(null);
+        if (keepsOpen) setDialog(null);
         setOutcome(outcomes[next.kind]);
       },
       onError: (error) => {
-        if (deletesData && !inventoryRefusal(error)) setDialog(null);
+        if (keepsOpen && !explainedInDialog(next, error)) setDialog(null);
       },
     });
   }
 
+  const explained = explainedInDialog(operation.variables, operation.error);
+
   // A refusal that only the confirmation explains is not repeated on the registry once that confirmation is closed.
-  // One that arrives after the confirmation was closed is shown on the registry with the nodes it names.
+  // One that arrives after the confirmation was closed is shown on the registry with what it names.
   function cancelDialog() {
     setDialog(null);
-    if (inventoryRefusal(operation.error)) operation.reset();
+    if (explained) operation.reset();
   }
 
   // A new confirmation reads the nodes afresh, so an earlier refusal no longer applies to it.
   function openDialog(next: DialogKind) {
-    if (inventoryRefusal(operation.error)) operation.reset();
+    if (explained) operation.reset();
     setDialog(next);
   }
 
@@ -81,7 +90,7 @@ export function ManagedRegistryItem({ registry, canManage, blocked, nodeName, pr
         <RegistryDetails registry={registry} nodeName={nodeName} projectName={projectName} />
         <div className="space-y-2 empty:hidden" aria-live="polite">
           {outcome && <Notice tone="success" title={outcome} />}
-          <RefusalNotice title="The registry operation was not requested" error={dialog && inventoryRefusal(operation.error) ? null : operation.error} />
+          <RefusalNotice title="The registry operation was not requested" error={dialog && explained ? null : operation.error} />
           <RefusalNotice title="The registry record was not deleted" error={record.error} />
           <RegistryNotices registry={registry} canManage={canManage} />
         </div>
@@ -108,7 +117,7 @@ interface DialogProps {
 function RegistryDialog({ dialog, registry, recordPending, operationPending, operationError, onRun, onDeleteRecord, onCancel }: DialogProps) {
   switch (dialog) {
     case "gc":
-      return <GarbageCollectionDialog registry={registry} onConfirm={onRun} onCancel={onCancel} />;
+      return <GarbageCollectionDialog registry={registry} pending={operationPending} error={operationError} onConfirm={onRun} onCancel={onCancel} />;
     case "remove":
       return <RemoveDialog registry={registry} pending={operationPending} error={operationError} onConfirm={onRun} onCancel={onCancel} />;
     case "delete-data":
@@ -138,6 +147,15 @@ function RefusalNotice({ title, error }: { title: string; error: Error | null })
             ))}
           </ul>
         )}
+      </Notice>
+    );
+  }
+  const failure = inventoryFailure(error);
+  if (failure) {
+    return (
+      <Notice tone="error" title={title}>
+        <p>Cove could not check every reference to this registry, so nothing was queued. A ready node could not list what it keeps that uses this registry.</p>
+        <InventoryFailureDetails failure={failure} />
       </Notice>
     );
   }
