@@ -242,16 +242,38 @@ func (e *Engine) planWorkloadRemoval(ctx context.Context, id string, containers 
 		return s, nil
 	}
 	if err := s.backupMetadata(ctx); err != nil {
+		if os.IsPermission(err) {
+			s.uncertain("backup recovery metadata is not accessible to the worker")
+			return s, nil
+		}
 		root.Close()
 		return nil, errors.New("backup recovery metadata could not be preserved; resource removal refused")
+	}
+	if err := s.preflightCleanup(ctx); err != nil {
+		if os.IsPermission(err) {
+			s.uncertain("the worker lacks permission to clean up its state directory")
+			return s, nil
+		}
+		root.Close()
+		return nil, err
 	}
 	s.result.WorkerFilesRetained = len(s.keep) > 0
 	return s, nil
 }
 
-func (s *workloadRemovalState) apply(ctx context.Context) error {
+func (s *workloadRemovalState) apply(ctx context.Context) (result error) {
+	defer func() {
+		if os.IsPermission(result) {
+			s.result.WorkerFilesRetained = true
+			s.result.CleanupWarning = "Some worker files were kept because the worker could not remove them with its current permissions."
+			result = nil
+		}
+	}()
 	if s.result.CleanupWarning != "" {
 		return nil
+	}
+	if err := s.preflightCleanup(ctx); err != nil {
+		return err
 	}
 	if len(s.keep) == 0 {
 		return s.root.RemoveAll(s.path)

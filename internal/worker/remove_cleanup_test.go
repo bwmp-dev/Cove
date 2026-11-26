@@ -13,7 +13,12 @@ import (
 
 func deletionFixture(t *testing.T, userNamed, shared bool) (*Engine, string, *[]string) {
 	t.Helper()
-	e, err := NewEngine(t.TempDir())
+	return deletionFixtureRoot(t, t.TempDir(), userNamed, shared)
+}
+
+func deletionFixtureRoot(t *testing.T, root string, userNamed, shared bool) (*Engine, string, *[]string) {
+	t.Helper()
+	e, err := NewEngine(root)
 	if err != nil {
 		t.Fatal(err)
 	}
