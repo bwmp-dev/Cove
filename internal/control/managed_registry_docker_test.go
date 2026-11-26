@@ -68,7 +68,10 @@ func TestManagedRegistryRealConnectionDocker(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	f := newAccountFixture(t)
-	f.s.workerRPC = func(ctx context.Context, _ string, r worker.RPCRequest) (worker.RPCResponse, error) {
+	f.s.workerRPC = func(ctx context.Context, node string, r worker.RPCRequest) (worker.RPCResponse, error) {
+		if node != "registry-node" {
+			return worker.RPCResponse{}, errors.New("fixture node is unavailable")
+		}
 		data, err := json.Marshal(r)
 		if err != nil {
 			return worker.RPCResponse{}, err
@@ -197,9 +200,13 @@ func TestManagedRegistryRealConnectionDocker(t *testing.T) {
 	if docker("ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+consumer) != containers {
 		t.Fatal("registry GC changed consumer")
 	}
+	f.sql(`INSERT INTO nodes(id,name,address,port,public_key,private_key,host_key,state) VALUES('offline-node','Offline runner','localhost',22,'',$1,'pinned-fixture-identity','unreachable')`, []byte{})
+	addRegistryRemovalWorkload(t, f, "offline-consumer", "offline-node")
+	f.call("root", "default", "POST", "/api/managed-registries/"+id+"/gc", nil, 409)
 	f.call("root", "default", "DELETE", "/api/managed-registries/"+id, map[string]bool{"delete_data": false}, 409)
 	f.call("root", "default", "PUT", "/api/workloads/"+consumer+"/registry", map[string]string{"registry_id": ""}, 200)
 	f.call("root", "default", "DELETE", "/api/managed-registries/"+id, map[string]bool{"delete_data": true}, 409)
+	f.call("root", "default", "DELETE", "/api/managed-registries/"+id, map[string]any{"delete_data": true, "acknowledge_unavailable_nodes": []string{"offline-node"}}, 409)
 	remove := f.call("root", "default", "DELETE", "/api/managed-registries/"+id, map[string]bool{"delete_data": false}, 202)
 	settled(jsonString(t, remove, "operation_id"))
 	if err = f.s.reconcileManagedRegistries(ctx); err != nil {
@@ -208,7 +215,15 @@ func TestManagedRegistryRealConnectionDocker(t *testing.T) {
 	stop := f.call("root", "default", "POST", "/api/workloads/"+consumer+"/operations", map[string]string{"action": "stop"}, 202)
 	settled(jsonString(t, stop, "id"))
 	f.call("root", "default", "DELETE", "/api/workloads/"+consumer, nil, 200)
-	purge := f.call("root", "default", "DELETE", "/api/managed-registries/"+id, map[string]bool{"delete_data": true}, 202)
+	if docker("volume", "ls", "-q", "--filter", "label=dev.cove.managed-registry="+id) == "" {
+		t.Fatal("keep-data removal lost the registry volume")
+	}
+	preview := f.call("root", "default", "GET", "/api/managed-registries/"+id+"/removal-inventory", nil, 200)
+	if !strings.Contains(preview.Body.String(), "Offline runner") {
+		t.Fatal("destructive preflight omitted unavailable node name")
+	}
+	f.call("root", "default", "DELETE", "/api/managed-registries/"+id, map[string]bool{"delete_data": true}, 409)
+	purge := f.call("root", "default", "DELETE", "/api/managed-registries/"+id, map[string]any{"delete_data": true, "acknowledge_unavailable_nodes": []string{"offline-node"}}, 202)
 	settled(jsonString(t, purge, "operation_id"))
 	if err = f.s.reconcileManagedRegistries(ctx); err != nil {
 		t.Fatal(err)

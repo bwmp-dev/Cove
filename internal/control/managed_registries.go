@@ -27,7 +27,8 @@ type managedRegistryChangeInput struct {
 	CertificateID *string                         `json:"certificate_id,omitempty"`
 }
 type managedRegistryRemoveInput struct {
-	DeleteData bool `json:"delete_data"`
+	DeleteData                  bool     `json:"delete_data"`
+	AcknowledgeUnavailableNodes []string `json:"acknowledge_unavailable_nodes,omitempty"`
 }
 
 type managedRegistryView struct {
@@ -267,6 +268,7 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 	}
 	op := resourceID()
 	request := worker.Request{ID: op, Workload: id, Action: "registry_maintenance", Kind: "service"}
+	var acknowledged []managedRegistryUnavailableNode
 	if strings.HasSuffix(r.URL.Path, "/retry") {
 		if state != "failed" {
 			http.Error(w, "only failed provisioning can be retried", 409)
@@ -288,17 +290,17 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "wait for team operations before taking a complete registry reference inventory", 409)
 			return
 		}
-		protected, inventoryErr := s.managedRegistryReferences(r.Context(), tx, actor(r).Team, host)
-		if inventoryErr != nil {
-			http.Error(w, "registry reference inventory is incomplete; maintenance refused", 409)
-			return
-		}
 		mode := "gc"
 		deleteData := false
+		var protected []string
 		if r.Method == "DELETE" {
 			mode = "remove"
 			var in managedRegistryRemoveInput
 			if !decode(w, r, &in) {
+				return
+			}
+			if !validRegistryInventoryAcknowledgement(in.AcknowledgeUnavailableNodes) || !in.DeleteData && len(in.AcknowledgeUnavailableNodes) > 0 {
+				http.Error(w, "invalid unavailable-node acknowledgement", 400)
 				return
 			}
 			deleteData = in.DeleteData
@@ -306,12 +308,31 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "disconnect resources and registry webhooks before removing this registry", 409)
 				return
 			}
-			if deleteData && len(protected) > 0 {
-				http.Error(w, "retained releases or builds still reference registry data", 409)
-				return
+			if deleteData {
+				var unavailable []managedRegistryUnavailableNode
+				protected, unavailable, err = s.managedRegistryReferences(r.Context(), tx, actor(r).Team, host)
+				if err != nil {
+					http.Error(w, "registry reference inventory is incomplete; maintenance refused", 409)
+					return
+				}
+				if !registryInventoryAcknowledged(unavailable, in.AcknowledgeUnavailableNodes) {
+					registryInventoryChanged(w, unavailable)
+					return
+				}
+				if len(protected) > 0 {
+					http.Error(w, "retained releases or builds still reference registry data", 409)
+					return
+				}
+				acknowledged = unavailable
 			}
 			state = "removing"
 		} else {
+			var unavailable []managedRegistryUnavailableNode
+			protected, unavailable, err = s.managedRegistryReferences(r.Context(), tx, actor(r).Team, host)
+			if err != nil || len(unavailable) > 0 {
+				http.Error(w, "registry reference inventory is incomplete; maintenance refused", 409)
+				return
+			}
 			state = "maintenance"
 		}
 		request.ManagedRegistry = &worker.ManagedRegistryOperation{Mode: mode, Policy: policy, Protected: protected, DeleteData: deleteData}
@@ -323,6 +344,9 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 	payload, err := s.sealJSON(request)
 	if err == nil {
 		_, err = tx.Exec(r.Context(), `INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,$3,$4)`, op, id, request.Action, payload)
+	}
+	if err == nil {
+		err = recordRegistryInventoryAcknowledgement(r.Context(), tx, id, op, actor(r).ID, actor(r).Team, acknowledged)
 	}
 	if err == nil {
 		_, err = tx.Exec(r.Context(), `UPDATE managed_registries SET previous_state=state,state=$2,operation_id=$3,last_error='',verification_attempts=0,next_verification_at=NULL WHERE id=$1`, id, state, op)
@@ -337,57 +361,46 @@ func (s *Server) changeManagedRegistry(w http.ResponseWriter, r *http.Request) {
 	respond(w, 202, map[string]string{"operation_id": op})
 }
 
-func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team, server string) ([]string, error) {
-	rows, err := tx.Query(ctx, `SELECT id,node_id FROM workloads WHERE team_id=$1 AND id NOT IN (SELECT id FROM managed_registries) ORDER BY id LIMIT 1025`, team)
+func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team, server string) ([]string, []managedRegistryUnavailableNode, error) {
+	scopes, err := managedRegistryReferenceScopes(ctx, tx, team)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	type scope struct{ id, node string }
-	var scopes []scope
-	for rows.Next() {
-		var v scope
-		if err = rows.Scan(&v.id, &v.node); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		scopes = append(scopes, v)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil || len(scopes) > 1024 {
-		return nil, errors.New("registry resource inventory exceeds bound")
-	}
+	unavailable := unavailableRegistryNodes(scopes)
 	refs := map[string]bool{}
 	for _, v := range scopes {
+		if v.never || !v.ready {
+			continue
+		}
 		result, err := s.nodeRPC(ctx, v.node, worker.RPCRequest{Method: "managed_registry_references", ID: v.id, Registry: &worker.Registry{Server: server}})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, ref := range result.RegistryReferences {
 			refs[ref] = true
 		}
 		if len(refs) > worker.MaxManagedRegistryReferences {
-			return nil, errors.New("registry reference inventory exceeds bound")
+			return nil, nil, errors.New("registry reference inventory exceeds bound")
 		}
 	}
-	rows, err = tx.Query(ctx, `SELECT DISTINCT ON (o.workload_id) o.result FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.action='build' AND o.state='succeeded' ORDER BY o.workload_id,o.created_at DESC LIMIT 1025`, team)
+	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (o.workload_id) o.result FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=$1 AND o.action='build' AND o.state='succeeded' ORDER BY o.workload_id,o.created_at DESC LIMIT 1025`, team)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	count := 0
 	for rows.Next() {
 		count++
 		if count > 1024 {
-			return nil, errors.New("build inventory exceeds bound")
+			return nil, nil, errors.New("build inventory exceeds bound")
 		}
 		var raw []byte
 		if rows.Scan(&raw) != nil {
-			return nil, errors.New("build inventory unavailable")
+			return nil, nil, errors.New("build inventory unavailable")
 		}
 		var op worker.Operation
 		if json.Unmarshal(raw, &op) != nil || op.Build == nil {
-			return nil, errors.New("build inventory incomplete")
+			return nil, nil, errors.New("build inventory incomplete")
 		}
 		for _, image := range op.Build.Images {
 			if strings.HasPrefix(image.Reference, server+"/") {
@@ -395,29 +408,29 @@ func (s *Server) managedRegistryReferences(ctx context.Context, tx pgx.Tx, team,
 			}
 		}
 		if len(refs) > worker.MaxManagedRegistryReferences {
-			return nil, errors.New("registry reference inventory exceeds bound")
+			return nil, nil, errors.New("registry reference inventory exceeds bound")
 		}
 	}
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rows.Close()
 	ciReferences, err := s.previewCIRegistryReferences(ctx, tx, team, server)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, ref := range ciReferences {
 		refs[ref] = true
 	}
 	if len(refs) > worker.MaxManagedRegistryReferences {
-		return nil, errors.New("registry reference inventory exceeds bound")
+		return nil, nil, errors.New("registry reference inventory exceeds bound")
 	}
 	result := make([]string, 0, len(refs))
 	for ref := range refs {
 		result = append(result, ref)
 	}
 	sort.Strings(result)
-	return result, nil
+	return result, unavailable, nil
 }
 
 func (s *Server) reconcileManagedRegistries(ctx context.Context) error {

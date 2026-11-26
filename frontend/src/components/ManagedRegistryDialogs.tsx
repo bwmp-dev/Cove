@@ -1,15 +1,22 @@
+import { useQuery } from "@tanstack/react-query";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
-import type { ManagedRegistry, ManagedRegistryOperation } from "../api/managed-registries";
+import { inventoryRefusal, removalInventoryQuery, type ManagedRegistry, type ManagedRegistryNode, type ManagedRegistryOperation } from "../api/managed-registries";
 import { retentionSummary } from "../lib/managed-registries";
 import { choiceClass, inputClass } from "../lib/styles";
 import { Checkbox } from "./Checkbox";
 import { ConfirmDialog, Dialog } from "./ConfirmDialog";
-import { Button, Field, Notice } from "./ui";
+import { Button, Field, Notice, QueryError, Spinner } from "./ui";
 
 interface Props {
   registry: ManagedRegistry;
   onConfirm: (operation: ManagedRegistryOperation) => void;
   onCancel: () => void;
+}
+
+// Destructive confirmations stay open while the request runs, so a refusal can be shown with the draft kept.
+interface DestructiveProps extends Props {
+  pending: boolean;
+  error: Error | null;
 }
 
 function keptByRetention(registry: ManagedRegistry) {
@@ -28,19 +35,33 @@ export function GarbageCollectionDialog({ registry, onConfirm, onCancel }: Props
         <p>
           <span className="font-medium text-fg">Deleted:</span> every other Cove build manifest. Storage that no kept manifest references is then reclaimed. Cove does not measure how much space this frees.
         </p>
-        <p>If it is interrupted or cancelled, manifests already deleted are not restored and cleanup can stay incomplete until the worker recovers the registry. Cove refuses to start while any team operation is queued or running, or when it cannot list every reference. This is manual maintenance; Cove never runs it on a schedule.</p>
+        <p>If it is interrupted or cancelled, manifests already deleted are not restored and cleanup can stay incomplete until the worker recovers the registry. Cove refuses to start while any team operation is queued or running, or when it cannot list every reference, including while a node that may hold references is unavailable. Nodes that never enrolled hold none. This is manual maintenance; Cove never runs it on a schedule.</p>
         <p>The project&apos;s approval, freeze and deployment window rules apply, so the operation can wait in the queue before it runs.</p>
       </div>
     </ConfirmDialog>
   );
 }
 
-function TypedConfirmation({ registry, title, confirmLabel, children, onSubmit, onCancel, requireTyping }: { registry: ManagedRegistry; title: string; confirmLabel: string; children: ReactNode; onSubmit: () => void; onCancel: () => void; requireTyping: boolean }) {
+interface TypedConfirmationProps {
+  registry: ManagedRegistry;
+  title: string;
+  confirmLabel: string;
+  children: ReactNode;
+  onSubmit: () => void;
+  onCancel: () => void;
+  requireTyping: boolean;
+  // Set while something else must happen first, such as acknowledging unavailable nodes.
+  blocked?: boolean;
+  pending?: boolean;
+}
+
+function TypedConfirmation({ registry, title, confirmLabel, children, onSubmit, onCancel, requireTyping, blocked = false, pending = false }: TypedConfirmationProps) {
   const id = useId();
   const [typed, setTyped] = useState("");
+  const ready = !blocked && !pending && (!requireTyping || typed === registry.hostname);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!requireTyping || typed === registry.hostname) onSubmit();
+    if (ready) onSubmit();
   }
   return (
     <Dialog open title={title} onClose={onCancel}>
@@ -55,7 +76,7 @@ function TypedConfirmation({ registry, title, confirmLabel, children, onSubmit, 
           <Button variant="ghost" onClick={onCancel}>
             Cancel
           </Button>
-          <Button type="submit" variant="danger" disabled={requireTyping && typed !== registry.hostname}>
+          <Button type="submit" variant="danger" disabled={!ready} pending={pending}>
             {confirmLabel}
           </Button>
         </div>
@@ -64,18 +85,26 @@ function TypedConfirmation({ registry, title, confirmLabel, children, onSubmit, 
   );
 }
 
-export function RemoveDialog({ registry, onConfirm, onCancel }: Props) {
+export function RemoveDialog({ registry, pending, error, onConfirm, onCancel }: DestructiveProps) {
   const id = useId();
   const [deleteData, setDeleteData] = useState(false);
+  const inventory = useUnavailableNodes(registry.id, deleteData);
+  function submit() {
+    onConfirm(deleteData ? { kind: "remove", deleteData, acknowledgeUnavailableNodes: inventory.acknowledged } : { kind: "remove", deleteData });
+  }
+  function toggleDeleteData(checked: boolean) {
+    setDeleteData(checked);
+    if (!checked) inventory.clear();
+  }
   return (
-    <TypedConfirmation registry={registry} title={`Remove ${registry.name}?`} confirmLabel={deleteData ? "Remove and delete data" : "Remove registry"} requireTyping={deleteData} onCancel={onCancel} onSubmit={() => onConfirm({ kind: "remove", deleteData })}>
+    <TypedConfirmation registry={registry} title={`Remove ${registry.name}?`} confirmLabel={deleteData ? "Remove and delete data" : "Remove registry"} requireTyping={deleteData} blocked={deleteData && !inventory.ready} pending={pending} onCancel={onCancel} onSubmit={submit}>
       <div className="space-y-2">
         <p>This removes the registry service, its HTTPS route and the generated registry connection. Disconnect resources and registry webhooks that use it first; Cove refuses otherwise. Certificates are not revoked and nothing outside the node is cleaned up.</p>
         <p>By default the registry&apos;s data volume is kept on the node, where it can be deleted later.</p>
         <p>The project&apos;s approval, freeze and deployment window rules apply, so the operation can wait in the queue before it runs.</p>
       </div>
       <label htmlFor={`${id}-delete`} className={choiceClass}>
-        <Checkbox id={`${id}-delete`} checked={deleteData} onChange={(event) => setDeleteData(event.target.checked)} />
+        <Checkbox id={`${id}-delete`} checked={deleteData} onChange={(event) => toggleDeleteData(event.target.checked)} />
         Also delete the registry data permanently
       </label>
       {deleteData && (
@@ -83,6 +112,7 @@ export function RemoveDialog({ registry, onConfirm, onCancel }: Props) {
           This cannot be undone. Cove refuses while retained releases, latest builds or previews still reference the registry.
         </Notice>
       )}
+      {deleteData && <UnavailableNodes inventory={inventory} error={error} keepDataHint />}
     </TypedConfirmation>
   );
 }
@@ -98,11 +128,108 @@ export function DeleteRecordDialog({ registry, pending, onConfirm, onCancel }: {
   );
 }
 
-export function DeleteDataDialog({ registry, onConfirm, onCancel }: Props) {
+export function DeleteDataDialog({ registry, pending, error, onConfirm, onCancel }: DestructiveProps) {
+  const inventory = useUnavailableNodes(registry.id, true);
   return (
-    <TypedConfirmation registry={registry} title={`Delete the retained data of ${registry.name}?`} confirmLabel="Delete data permanently" requireTyping onCancel={onCancel} onSubmit={() => onConfirm({ kind: "remove", deleteData: true })}>
+    <TypedConfirmation
+      registry={registry}
+      title={`Delete the retained data of ${registry.name}?`}
+      confirmLabel="Delete data permanently"
+      requireTyping
+      blocked={!inventory.ready}
+      pending={pending}
+      onCancel={onCancel}
+      onSubmit={() => onConfirm({ kind: "remove", deleteData: true, acknowledgeUnavailableNodes: inventory.acknowledged })}
+    >
       <p>This permanently deletes the registry&apos;s data volume on the node, including every image in it. It cannot be undone. Cove refuses while retained releases, latest builds or previews still reference the registry.</p>
       <p>The project&apos;s approval, freeze and deployment window rules apply, so the operation can wait in the queue before it runs.</p>
+      <UnavailableNodes inventory={inventory} error={error} />
     </TypedConfirmation>
+  );
+}
+
+const nodeSignature = (nodes: ManagedRegistryNode[] | undefined) => (nodes ? nodes.map((node) => node.id).sort().join("\n") : null);
+
+// The acknowledgement holds the exact node IDs listed when it was checked. Any change to the listed set clears it.
+function useUnavailableNodes(registryId: string, enabled: boolean) {
+  const query = useQuery({ ...removalInventoryQuery(registryId), enabled });
+  const nodes = query.data?.unavailable_nodes;
+  const signature = nodeSignature(nodes);
+  const [acknowledged, setAcknowledged] = useState<string[] | undefined>();
+  const [seen, setSeen] = useState(signature);
+  if (seen !== signature) {
+    setSeen(signature);
+    setAcknowledged(undefined);
+  }
+  // A failed refresh keeps the last list in the cache, but it must not unlock deletion.
+  const loaded = enabled && query.status === "success" && nodes !== undefined;
+  return {
+    query,
+    nodes,
+    acknowledged,
+    ready: loaded && (nodes.length === 0 || acknowledged !== undefined),
+    acknowledge: (checked: boolean) => setAcknowledged(checked && nodes ? nodes.map((node) => node.id) : undefined),
+    clear: () => setAcknowledged(undefined),
+  };
+}
+
+type Inventory = ReturnType<typeof useUnavailableNodes>;
+
+function UnavailableNodes({ inventory, error, keepDataHint = false }: { inventory: Inventory; error: Error | null; keepDataHint?: boolean }) {
+  const { query, nodes } = inventory;
+  const refusal = inventoryRefusal(error) !== null && (
+    <Notice tone="error" title="The unavailable nodes changed">
+      Data deletion was not requested. Review the nodes listed now and confirm again.
+    </Notice>
+  );
+  if (query.status === "error") {
+    return (
+      <div className="space-y-2">
+        {refusal}
+        <QueryError what="the nodes Cove could not check" error={query.error} onRetry={() => void query.refetch()} retrying={query.isFetching} />
+        <p className="text-xs">Data cannot be deleted until this list loads.{keepDataHint ? " You can still remove the registry and keep its data." : ""}</p>
+      </div>
+    );
+  }
+  if (!nodes) {
+    return (
+      <div role="status" className="flex items-start gap-2">
+        <Spinner className="mt-0.5 size-3.5 shrink-0" />
+        <span>Checking which nodes may hold references to this registry.</span>
+      </div>
+    );
+  }
+  if (nodes.length === 0) return refusal || null;
+  return (
+    <div className="space-y-2">
+      {refusal}
+      <UnavailableNodeList nodes={nodes} />
+      <UnavailableAcknowledgement inventory={inventory} />
+    </div>
+  );
+}
+
+function UnavailableNodeList({ nodes }: { nodes: ManagedRegistryNode[] }) {
+  return (
+    <Notice tone="warn" title={nodes.length === 1 ? "A node that may hold references is unavailable" : `${nodes.length} nodes that may hold references are unavailable`}>
+      <p>Cove could not check these nodes for retained releases or builds that use this registry. Deleting the data may make them unrecoverable. References Cove can see still block deletion.</p>
+      <ul aria-label="Unavailable nodes" className="mt-1 list-disc pl-5">
+        {nodes.map((node) => (
+          <li key={node.id} className="break-words text-fg">
+            {node.name}
+          </li>
+        ))}
+      </ul>
+    </Notice>
+  );
+}
+
+function UnavailableAcknowledgement({ inventory }: { inventory: Inventory }) {
+  const id = useId();
+  return (
+    <label htmlFor={id} className={choiceClass}>
+      <Checkbox id={id} checked={inventory.acknowledged !== undefined} onChange={(event) => inventory.acknowledge(event.target.checked)} />
+      Delete the data even if releases or builds on these nodes become unrecoverable
+    </label>
   );
 }

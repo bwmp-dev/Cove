@@ -72,6 +72,7 @@ func (s *Server) publicRoutes() []publicRoute {
 		{"PUT", "/managed-registries/{id}", "configuration:write", "Team administrators save retention or repair a failed certificate selection", managedRegistryChangeInput{}, apiOK{}, 200, s.managedRegistries},
 		{"POST", "/managed-registries/{id}/retry", "workloads:operate", "Team administrators retry failed provisioning through normal deployment admission", nil, map[string]string{}, 202, s.managedRegistries},
 		{"POST", "/managed-registries/{id}/gc", "workloads:operate", "Team administrators queue offline retention under approval, freeze and deployment windows", nil, map[string]string{}, 202, s.managedRegistries},
+		{"GET", "/managed-registries/{id}/removal-inventory", "workloads:write", "Team administrators review named unavailable nodes before destructive registry removal", nil, managedRegistryRemovalInventory{}, 200, s.managedRegistryRemovalInventory},
 		{"DELETE", "/managed-registries/{id}", "workloads:write", "Team administrators remove a registry, retaining data unless explicitly requested and unreferenced", managedRegistryRemoveInput{}, map[string]string{}, 202, s.managedRegistries},
 		{"DELETE", "/managed-registries/{id}/record", "workloads:write", "Team administrators forget only a removed registry whose data has been purged", nil, apiOK{}, 200, s.deleteManagedRegistryRecord},
 		{"GET", "/workloads/{id}/image-scanning", "workloads:read", "Read team/node scanner opt-in metadata", nil, map[string]any{}, 200, s.imageScanning},

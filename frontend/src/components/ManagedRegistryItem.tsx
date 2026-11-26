@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
-import { useDeleteManagedRegistryRecord, useManagedRegistryOperation, useSaveManagedRegistry, type ManagedRegistry, type ManagedRegistryOperation } from "../api/managed-registries";
+import { inventoryRefusal, useDeleteManagedRegistryRecord, useManagedRegistryOperation, useSaveManagedRegistry, type ManagedRegistry, type ManagedRegistryOperation } from "../api/managed-registries";
 import type { OperationState } from "../api/types";
 import { editable, operationActive, recordDeletable, registryState, registryWorking, retentionSummary } from "../lib/managed-registries";
 import { operationTones } from "../lib/operations";
@@ -39,10 +39,34 @@ export function ManagedRegistryItem({ registry, canManage, blocked, nodeName, pr
   const state = registryState(registry.state);
   const actionBlocked = blocked ?? (operationActive(registry) ? "An operation is in progress." : undefined);
 
+  // A data deletion keeps its confirmation open until the API answers, so a refusal because the unavailable nodes
+  // changed is shown there with the typed hostname kept. Other refusals are shown on the registry as before.
   function run(next: ManagedRegistryOperation) {
-    setDialog(null);
+    const deletesData = next.kind === "remove" && next.deleteData;
+    if (!deletesData) setDialog(null);
     setOutcome(null);
-    operation.mutate(next, { onSuccess: () => setOutcome(outcomes[next.kind]) });
+    operation.mutate(next, {
+      onSuccess: () => {
+        if (deletesData) setDialog(null);
+        setOutcome(outcomes[next.kind]);
+      },
+      onError: (error) => {
+        if (deletesData && !inventoryRefusal(error)) setDialog(null);
+      },
+    });
+  }
+
+  // A refusal that only the confirmation explains is not repeated on the registry once that confirmation is closed.
+  // One that arrives after the confirmation was closed is shown on the registry with the nodes it names.
+  function cancelDialog() {
+    setDialog(null);
+    if (inventoryRefusal(operation.error)) operation.reset();
+  }
+
+  // A new confirmation reads the nodes afresh, so an earlier refusal no longer applies to it.
+  function openDialog(next: DialogKind) {
+    if (inventoryRefusal(operation.error)) operation.reset();
+    setDialog(next);
   }
 
   // On success the registry leaves the list and this item unmounts, so only a refusal needs to be shown.
@@ -57,15 +81,15 @@ export function ManagedRegistryItem({ registry, canManage, blocked, nodeName, pr
         <RegistryDetails registry={registry} nodeName={nodeName} projectName={projectName} />
         <div className="space-y-2 empty:hidden" aria-live="polite">
           {outcome && <Notice tone="success" title={outcome} />}
-          <RefusalNotice title="The registry operation was not requested" error={operation.error} />
+          <RefusalNotice title="The registry operation was not requested" error={dialog && inventoryRefusal(operation.error) ? null : operation.error} />
           <RefusalNotice title="The registry record was not deleted" error={record.error} />
           <RegistryNotices registry={registry} canManage={canManage} />
         </div>
       </Subsection>
       {canManage && registry.state === "failed" && <ManagedRegistryCertificate registry={registry} save={certificate} blocked={actionBlocked} onOutcome={setOutcome} />}
       {canManage && editable(registry) && <RetentionForm key={JSON.stringify(registry.retention)} registryId={registry.id} retention={registry.retention} save={retention} blocked={actionBlocked} onOutcome={setOutcome} />}
-      {canManage && <RegistryActions registry={registry} blocked={actionBlocked} pending={operation.isPending ? operation.variables.kind : record.isPending ? "delete-record" : null} onRetry={() => run({ kind: "retry" })} onOpen={setDialog} />}
-      <RegistryDialog dialog={dialog} registry={registry} recordPending={record.isPending} onRun={run} onDeleteRecord={deleteRecord} onCancel={() => setDialog(null)} />
+      {canManage && <RegistryActions registry={registry} blocked={actionBlocked} pending={operation.isPending ? operation.variables.kind : record.isPending ? "delete-record" : null} onRetry={() => run({ kind: "retry" })} onOpen={openDialog} />}
+      <RegistryDialog dialog={dialog} registry={registry} recordPending={record.isPending} operationPending={operation.isPending} operationError={operation.error} onRun={run} onDeleteRecord={deleteRecord} onCancel={cancelDialog} />
     </div>
   );
 }
@@ -74,19 +98,21 @@ interface DialogProps {
   dialog: DialogKind | null;
   registry: ManagedRegistry;
   recordPending: boolean;
+  operationPending: boolean;
+  operationError: Error | null;
   onRun: (operation: ManagedRegistryOperation) => void;
   onDeleteRecord: () => void;
   onCancel: () => void;
 }
 
-function RegistryDialog({ dialog, registry, recordPending, onRun, onDeleteRecord, onCancel }: DialogProps) {
+function RegistryDialog({ dialog, registry, recordPending, operationPending, operationError, onRun, onDeleteRecord, onCancel }: DialogProps) {
   switch (dialog) {
     case "gc":
       return <GarbageCollectionDialog registry={registry} onConfirm={onRun} onCancel={onCancel} />;
     case "remove":
-      return <RemoveDialog registry={registry} onConfirm={onRun} onCancel={onCancel} />;
+      return <RemoveDialog registry={registry} pending={operationPending} error={operationError} onConfirm={onRun} onCancel={onCancel} />;
     case "delete-data":
-      return <DeleteDataDialog registry={registry} onConfirm={onRun} onCancel={onCancel} />;
+      return <DeleteDataDialog registry={registry} pending={operationPending} error={operationError} onConfirm={onRun} onCancel={onCancel} />;
     case "delete-record":
       return <DeleteRecordDialog registry={registry} pending={recordPending} onConfirm={onDeleteRecord} onCancel={onCancel} />;
     case null:
@@ -96,6 +122,25 @@ function RegistryDialog({ dialog, registry, recordPending, onRun, onDeleteRecord
 
 function RefusalNotice({ title, error }: { title: string; error: Error | null }) {
   if (!error) return null;
+  const nodes = inventoryRefusal(error);
+  if (nodes) {
+    return (
+      <Notice tone="error" title="Data deletion was not requested">
+        <p>The unavailable nodes changed before Cove accepted the request, so nothing was changed. Deleting the data needs a new confirmation that reviews the nodes listed now.</p>
+        {nodes.length === 0 ? (
+          <p>No nodes are unavailable now.</p>
+        ) : (
+          <ul aria-label="Nodes unavailable now" className="mt-1 list-disc pl-5">
+            {nodes.map((node) => (
+              <li key={node.id} className="break-words text-fg">
+                {node.name}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Notice>
+    );
+  }
   return (
     <Notice tone="error" title={title}>
       <p className="break-words">{errorMessage(error)}</p>

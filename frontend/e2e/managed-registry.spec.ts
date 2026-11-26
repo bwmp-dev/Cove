@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { expect, test, type Locator, type Page, type Response, type TestInfo } from "@playwright/test";
@@ -97,7 +98,7 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
   test.skip(!enabled, "Needs scripts/test-browser.py --managed-registry");
   test.setTimeout(600_000);
   const { database, hostname, certificate, key, root } = fixture();
-  const sql = (query: string) => docker("exec", database, "psql", "-U", "postgres", "-d", "cove", "-Atc", query);
+  const sql = (query: string) => docker("exec", database, "psql", "-U", "postgres", "-d", "cove", "-qAtc", query);
   // Background image checks start due. Deferring them keeps every operation in this team one the spec started, because
   // garbage collection and removal are refused while any team operation is queued or running.
   const deferImageChecks = (id: string) => {
@@ -111,6 +112,10 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
 
   let registryId = "";
   let consumerId = "";
+  let readyNodeId = "";
+  // Fixture rows for nodes that are not ready, and the never-deployed resources placed on them by SQL.
+  const unavailableNodes: string[] = [];
+  const unavailableResources: string[] = [];
   let primary: Error | null = null;
   try {
     await page.goto(panelPath("/projects"));
@@ -126,6 +131,7 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
     expect(node.state).toBe("ready");
     expect(node.capabilities?.managed_registry).toBe(true);
     expect(node.capabilities?.file_secrets).toBe(true);
+    readyNodeId = node.id;
     const projectName = `Managed registry ${Date.now()}`;
     const projectReply = await page.request.post(panelPath("/api/projects"), { headers, data: { name: projectName } });
     expect(projectReply.ok(), await projectReply.text()).toBe(true);
@@ -367,17 +373,84 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
     await settled(((await stopReply.json()) as { id: string }).id);
     const deleted = await page.request.delete(panelPath(`/api/workloads/${consumerId}`), { headers });
     expect(deleted.status(), await deleted.text()).toBe(200);
+
+    // An enrolled node (pinned host key) that is not ready holds a resource of this team, so Cove cannot list its
+    // references. The node is a database row on an unresolvable address; its resource never deployed and is created on
+    // the ready worker, then moved there.
+    const addUnavailableNode = async (label: string) => {
+      const id = randomBytes(16).toString("hex");
+      const name = `unavailable-${label}-${id.slice(0, 6)}`;
+      expect(sql(`INSERT INTO nodes(id,name,address,port,public_key,private_key,host_key,state,mode) VALUES('${id}','${name}','${name}.example.test',22,'fixture','\\x00','fixture-host-key','unreachable','ssh') RETURNING id`)).toBe(id);
+      unavailableNodes.push(id);
+      const reply = await page.request.post(panelPath("/api/workloads"), { headers, data: { name, node_id: node.id, kind: "service", compose: consumerCompose, project_id: project.id } });
+      expect(reply.status(), await reply.text()).toBe(201);
+      const resource = ((await reply.json()) as { id: string }).id;
+      unavailableResources.push(resource);
+      deferImageChecks(resource);
+      expect(sql(`UPDATE workloads SET node_id='${id}' WHERE id='${resource}' RETURNING node_id`)).toBe(id);
+      return { id, name };
+    };
+    type UnavailableNode = { id: string; name: string };
+    const byId = (nodes: UnavailableNode[]) => [...nodes].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const inventoryPath = panelPath(`/api/managed-registries/${registryId}/removal-inventory`);
+    const baselineReply = await page.request.get(inventoryPath);
+    const baselineText = await baselineReply.text();
+    expect(baselineReply.status(), baselineText).toBe(200);
+    const baseline = (JSON.parse(baselineText) as { unavailable_nodes: UnavailableNode[] }).unavailable_nodes;
+    const first = await addUnavailableNode("a");
+    const once = byId([...baseline, first]);
     await teamQuiet();
+    const inventoryReply = respondedTo(inventoryPath, "GET");
     await item.getByRole("button", { name: "Delete retained data" }).click();
     const purgeDialog = page.getByRole("dialog", { name: `Delete the retained data of ${registryName}?` });
     const purgeButton = purgeDialog.getByRole("button", { name: "Delete data permanently" });
+    const inventory = await inventoryReply;
+    const inventoryText = await inventory.text();
+    expect(inventory.status(), inventoryText).toBe(200);
+    expect(JSON.parse(inventoryText)).toEqual({ unavailable_nodes: once });
+    const unavailableList = purgeDialog.getByRole("list", { name: "Unavailable nodes" });
+    await expect(unavailableList.getByRole("listitem")).toHaveText(once.map((entry) => entry.name));
+    const acknowledge = purgeDialog.getByRole("checkbox", { name: "Delete the data even if releases or builds on these nodes become unrecoverable" });
+    await expect(acknowledge).not.toBeChecked();
     await expect(purgeButton).toBeDisabled();
     await purgeDialog.getByLabel(`Type ${hostname} to confirm`, { exact: true }).fill(hostname);
+    await expect(purgeButton).toBeDisabled();
+    await acknowledge.check();
+    await expect(purgeButton).toBeEnabled();
+    await capture(page, testInfo, "managed-registry-unavailable-nodes");
+
+    // A second unavailable node appears after the acknowledgement: Cove refuses, names it and needs a new acknowledgement.
+    const second = await addUnavailableNode("b");
+    let deletes = 0;
+    const countDeletes = (request: { url: () => string; method: () => string }) => {
+      if (request.method() === "DELETE" && new URL(request.url()).pathname === panelPath(`/api/managed-registries/${registryId}`)) deletes++;
+    };
+    page.on("request", countDeletes);
+    const changedReply = respondedTo(panelPath(`/api/managed-registries/${registryId}`), "DELETE");
+    await purgeButton.click();
+    const changed = await changedReply;
+    const changedText = await changed.text();
+    expect(changed.status(), changedText).toBe(409);
+    expect(changed.request().postDataJSON()).toEqual({ delete_data: true, acknowledge_unavailable_nodes: once.map((entry) => entry.id) });
+    const both = byId([...once, second]);
+    expect(JSON.parse(changedText)).toEqual({ error: "registry_inventory_changed", message: "Review and acknowledge the unavailable nodes before deleting registry data.", unavailable_nodes: both });
+    await expect(purgeDialog.getByText("The unavailable nodes changed", { exact: true })).toBeVisible();
+    await expect(unavailableList.getByRole("listitem")).toHaveText(both.map((entry) => entry.name));
+    await expect(purgeDialog.getByLabel(`Type ${hostname} to confirm`, { exact: true })).toHaveValue(hostname);
+    await expect(acknowledge).not.toBeChecked();
+    await expect(purgeButton).toBeDisabled();
+    expect((await current()).data_retained).toBe(true);
+    await capture(page, testInfo, "managed-registry-inventory-changed");
+    expect(deletes).toBe(1);
+    page.off("request", countDeletes);
+
+    await acknowledge.check();
     const purgeReply = respondedTo(panelPath(`/api/managed-registries/${registryId}`), "DELETE");
     await purgeButton.click();
     const purged = await purgeReply;
     expect(purged.status(), await purged.text()).toBe(202);
-    expect(purged.request().postDataJSON()).toEqual({ delete_data: true });
+    expect(purged.request().postDataJSON()).toEqual({ delete_data: true, acknowledge_unavailable_nodes: both.map((entry) => entry.id) });
+    await expect(purgeDialog).toHaveCount(0);
     const gone = await registryReaches("removed");
     expect(gone.data_retained).toBe(false);
     expect(docker("ps", "-aq", "--filter", `label=com.docker.compose.project=cove-${registryId}`)).toBe("");
@@ -385,6 +458,14 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
     await expect(item.getByText("No retained data reported", { exact: true })).toBeVisible({ timeout: 30_000 });
     await expect(item.getByRole("button", { name: "Delete retained data" })).toHaveCount(0);
     await capture(page, testInfo, "managed-registry-purged");
+
+    // Return the never-deployed resources to the ready worker, delete them and drop the fixture node rows.
+    for (const resource of unavailableResources.splice(0)) {
+      expect(sql(`UPDATE workloads SET node_id='${node.id}' WHERE id='${resource}' RETURNING id`)).toBe(resource);
+      const removed = await page.request.delete(panelPath(`/api/workloads/${resource}`), { headers });
+      expect(removed.status(), await removed.text()).toBe(200);
+    }
+    for (const id of unavailableNodes.splice(0)) expect(sql(`DELETE FROM nodes WHERE id='${id}' RETURNING id`)).toBe(id);
 
     // Delete the empty record from the dashboard; the generated resource and its operation history go with it.
     await teamQuiet();
@@ -411,6 +492,8 @@ test("managed registry: real TLS failure, certificate repair, activation, garbag
   let cleanupFailure: Error | null = null;
   try {
     cleanupBrowserResources();
+    if (readyNodeId) for (const resource of unavailableResources) sql(`UPDATE workloads SET node_id='${readyNodeId}' WHERE id='${resource}'`);
+    for (const id of unavailableNodes) sql(`DELETE FROM nodes WHERE id='${id}' AND NOT EXISTS(SELECT 1 FROM workloads WHERE node_id='${id}')`);
     if (registryId) {
       const volumes = docker("volume", "ls", "-q", "--filter", `label=dev.cove.managed-registry=${registryId}`).split(/\s+/).filter(Boolean);
       for (const volume of volumes) if (volume === `cove-${registryId}_data`) docker("volume", "rm", volume);

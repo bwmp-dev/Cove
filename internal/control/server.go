@@ -578,6 +578,7 @@ func (s *Server) Handler() http.Handler {
 	for _, pattern := range []string{"GET /api/managed-registries", "POST /api/managed-registries", "PUT /api/managed-registries/{id}", "POST /api/managed-registries/{id}/retry", "POST /api/managed-registries/{id}/gc", "DELETE /api/managed-registries/{id}"} {
 		mux.Handle(pattern, s.admin(http.HandlerFunc(s.managedRegistries)))
 	}
+	mux.Handle("GET /api/managed-registries/{id}/removal-inventory", s.admin(http.HandlerFunc(s.managedRegistryRemovalInventory)))
 	mux.Handle("DELETE /api/managed-registries/{id}/record", s.admin(http.HandlerFunc(s.deleteManagedRegistryRecord)))
 	mux.Handle("GET /api/notifications/history", s.admin(http.HandlerFunc(s.notificationHistory)))
 	mux.Handle("GET /api/notifications/events", s.admin(http.HandlerFunc(s.notificationCatalogue)))

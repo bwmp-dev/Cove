@@ -1,6 +1,6 @@
 import { queryOptions, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { registryPollInterval } from "../lib/managed-registries";
-import { request } from "./client";
+import { ApiError, request } from "./client";
 import { connectionsQuery } from "./connections";
 import { keys } from "./queries";
 
@@ -46,7 +46,18 @@ export interface ManagedRegistryInput {
   retention: ManagedRegistryRetention;
 }
 
-export type ManagedRegistryOperation = { kind: "gc" } | { kind: "retry" } | { kind: "remove"; deleteData: boolean };
+// acknowledgeUnavailableNodes is only sent with deleteData: the exact unavailable node IDs the person acknowledged.
+export type ManagedRegistryOperation = { kind: "gc" } | { kind: "retry" } | { kind: "remove"; deleteData: boolean; acknowledgeUnavailableNodes?: string[] };
+
+export interface ManagedRegistryNode {
+  id: string;
+  name: string;
+}
+
+export interface ManagedRegistryRemovalInventory {
+  // Nodes that are not ready and may hold references to the registry, so their references could not be listed.
+  unavailable_nodes: ManagedRegistryNode[];
+}
 
 export const managedRegistriesKey = ["managed-registries"] as const;
 
@@ -75,6 +86,26 @@ function registry(value: Partial<ManagedRegistry>): ManagedRegistry {
     image: text(value.image),
     data_retained: value.data_retained === true,
   };
+}
+
+// Matches the server's bounds on the node list and on each acknowledged node ID.
+const maxUnavailableNodes = 1024;
+const maxNodeIdLength = 128;
+
+// Null unless every entry is a distinct node with an ID and a name, so a malformed list is never read as "no unavailable nodes".
+function unavailableNodes(value: unknown): ManagedRegistryNode[] | null {
+  if (!Array.isArray(value) || value.length > maxUnavailableNodes) return null;
+  const nodes: ManagedRegistryNode[] = [];
+  const seen = new Set<string>();
+  for (const entry of value as unknown[]) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const { id, name } = entry as Partial<Record<keyof ManagedRegistryNode, unknown>>;
+    if (typeof id !== "string" || id === "" || id.length > maxNodeIdLength || seen.has(id)) return null;
+    if (typeof name !== "string" || name.trim() === "") return null;
+    seen.add(id);
+    nodes.push({ id, name });
+  }
+  return nodes;
 }
 
 function registryList(value: Partial<ManagedRegistryList>): ManagedRegistryList {
@@ -107,6 +138,36 @@ export function managedRegistriesQuery(client: QueryClient) {
     refetchInterval: (query) => (query.state.status === "error" ? false : registryPollInterval(query.state.data?.registries)),
     retry: false,
   });
+}
+
+export const removalInventoryKey = (id: string) => [...managedRegistriesKey, id, "removal-inventory"] as const;
+
+// Read fresh each time a destructive confirmation needs it, never from an earlier dialog.
+export function removalInventoryQuery(id: string) {
+  return queryOptions({
+    queryKey: removalInventoryKey(id),
+    queryFn: async ({ signal }): Promise<ManagedRegistryRemovalInventory> => {
+      const body = await request<{ unavailable_nodes?: unknown }>("GET", `${path(id)}/removal-inventory`, undefined, signal);
+      const nodes = unavailableNodes(body.unavailable_nodes);
+      if (nodes === null) throw new ApiError(200, "The server returned an unreadable response.");
+      return { unavailable_nodes: nodes };
+    },
+    gcTime: 0,
+    retry: false,
+  });
+}
+
+// The refusal of a data deletion whose acknowledged unavailable nodes no longer match, with the current nodes.
+export function inventoryRefusal(error: unknown): ManagedRegistryNode[] | null {
+  if (!(error instanceof ApiError) || error.status !== 409 || typeof error.details !== "object" || error.details === null) return null;
+  const details = error.details as { error?: unknown; unavailable_nodes?: unknown };
+  if (details.error !== "registry_inventory_changed") return null;
+  return unavailableNodes(details.unavailable_nodes);
+}
+
+function removalBody(operation: { deleteData: boolean; acknowledgeUnavailableNodes?: string[] }) {
+  const acknowledged = operation.deleteData ? (operation.acknowledgeUnavailableNodes ?? []) : [];
+  return acknowledged.length > 0 ? { delete_data: true, acknowledge_unavailable_nodes: acknowledged } : { delete_data: operation.deleteData };
 }
 
 function updateRegistry(client: QueryClient, id: string, patch: Partial<ManagedRegistry>) {
@@ -163,10 +224,15 @@ export function useManagedRegistryOperation(id: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (operation: ManagedRegistryOperation) =>
-      operation.kind === "remove" ? request<{ operation_id: string }>("DELETE", path(id), { delete_data: operation.deleteData }) : request<{ operation_id: string }>("POST", `${path(id)}/${operation.kind}`),
+      operation.kind === "remove" ? request<{ operation_id: string }>("DELETE", path(id), removalBody(operation)) : request<{ operation_id: string }>("POST", `${path(id)}/${operation.kind}`),
     onSuccess: async ({ operation_id }, operation) => {
       await client.cancelQueries({ queryKey: managedRegistriesKey, exact: true });
       updateRegistry(client, id, { state: operationStates[operation.kind], operation_id: text(operation_id), operation_state: "queued", last_error: "" });
+    },
+    // The open confirmation shows the nodes from the refusal and asks for a new acknowledgement.
+    onError: (error) => {
+      const nodes = inventoryRefusal(error);
+      if (nodes) client.setQueryData<ManagedRegistryRemovalInventory>(removalInventoryKey(id), { unavailable_nodes: nodes });
     },
     onSettled: () => {
       void client.invalidateQueries({ queryKey: managedRegistriesKey, exact: true });

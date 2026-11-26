@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, request } from "../api/client";
-import { managedRegistriesKey, type ManagedRegistry, type ManagedRegistryList } from "../api/managed-registries";
+import { managedRegistriesKey, removalInventoryKey, type ManagedRegistry, type ManagedRegistryList } from "../api/managed-registries";
 import type { Project } from "../api/projects";
 import type { Node, RouteCertificate } from "../api/types";
 import { ManagedRegistries } from "./ManagedRegistries";
@@ -67,6 +67,11 @@ type Reply = unknown;
 type Handler = (method: string, path: string, body: unknown) => Reply;
 
 let listReply: () => Reply;
+const inventoryPath = `${listPath}/m1/removal-inventory`;
+let inventoryReply: () => Reply;
+beforeEach(() => {
+  inventoryReply = () => ({ unavailable_nodes: [] });
+});
 
 function serve(handler: Handler = () => undefined) {
   vi.mocked(request).mockImplementation((method: string, path: string, body?: unknown) => {
@@ -74,6 +79,7 @@ function serve(handler: Handler = () => undefined) {
       const handled = handler(method, path, body);
       if (handled !== undefined) return Promise.resolve(handled);
       if (method === "GET" && path === listPath) return Promise.resolve(listReply());
+      if (method === "GET" && path === inventoryPath) return Promise.resolve(inventoryReply());
       if (method === "GET" && path === "/api/nodes") return Promise.resolve(nodes);
       if (method === "GET" && path === "/api/projects") return Promise.resolve(projects);
       return Promise.reject(new Error(`unexpected request ${method} ${path}`));
@@ -134,6 +140,7 @@ it("shows metadata to viewers without any create or maintenance controls and cac
   expect(screen.queryByRole("button", { name: "Save retention" })).not.toBeInTheDocument();
   const cached = client.getQueryData<ManagedRegistryList>(managedRegistriesKey);
   expect(JSON.stringify(cached)).not.toContain("never-cached");
+  expect(calls("GET", inventoryPath)).toHaveLength(0);
 });
 
 it("creates with the exact body, keeps the notice and follows provisioning to ready", async () => {
@@ -355,6 +362,7 @@ it("removes with delete_data false by default and requires the hostname to delet
   await waitFor(() => expect(calls("DELETE")).toHaveLength(1));
   expect(calls("DELETE")[0]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: false }]);
   expect(await screen.findByText("Removal requested")).toBeInTheDocument();
+  expect(calls("GET", inventoryPath)).toHaveLength(0);
 });
 
 it("asks for the hostname before removing with data deletion", async () => {
@@ -368,6 +376,7 @@ it("asks for the hostname before removing with data deletion", async () => {
   const confirm = within(dialog).getByRole("button", { name: "Remove and delete data" });
   expect(confirm).toBeDisabled();
   fireEvent.change(within(dialog).getByLabelText("Type registry.example.test to confirm"), { target: { value: "registry.example.test" } });
+  await waitFor(() => expect(confirm).toBeEnabled());
   fireEvent.click(confirm);
   await waitFor(() => expect(calls("DELETE")).toHaveLength(1));
   expect(calls("DELETE")[0]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: true }]);
@@ -384,9 +393,238 @@ it("lists removed registries with retained data honestly and deletes that data o
   fireEvent.click(screen.getByRole("button", { name: "Delete retained data" }));
   const dialog = screen.getByRole("dialog", { name: "Delete the retained data of Team registry?" });
   fireEvent.change(within(dialog).getByLabelText("Type registry.example.test to confirm"), { target: { value: "registry.example.test" } });
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete data permanently" })).toBeEnabled());
   fireEvent.click(within(dialog).getByRole("button", { name: "Delete data permanently" }));
   await waitFor(() => expect(calls("DELETE")).toHaveLength(1));
   expect(calls("DELETE")[0]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: true }]);
+});
+
+const offline = { id: "n4", name: "offline" };
+const edge = { id: "n9", name: "edge-worker" };
+const typeHostname = (dialog: HTMLElement) => fireEvent.change(within(dialog).getByLabelText("Type registry.example.test to confirm"), { target: { value: "registry.example.test" } });
+const acknowledgement = (dialog: HTMLElement) => within(dialog).getByRole("checkbox", { name: "Delete the data even if releases or builds on these nodes become unrecoverable" });
+const inventoryChanged = (nodes: { id: string; name: string }[]) =>
+  new ApiError(409, "The request conflicts with the current state.", null, { error: "registry_inventory_changed", message: "Review and acknowledge the unavailable nodes before deleting registry data.", unavailable_nodes: nodes });
+
+async function openRemoveWithData() {
+  fireEvent.click(await screen.findByRole("button", { name: "Remove registry" }));
+  const dialog = screen.getByRole("dialog", { name: "Remove Team registry?" });
+  fireEvent.click(within(dialog).getByRole("checkbox", { name: "Also delete the registry data permanently" }));
+  return dialog;
+}
+
+it("names unavailable nodes and sends exactly the node IDs that were acknowledged", async () => {
+  listReply = () => list([registry()]);
+  inventoryReply = () => ({ unavailable_nodes: [{ ...offline, address: "never-cached" }, edge] });
+  serve((method) => (method === "DELETE" ? { operation_id: "op-rm" } : undefined));
+  const client = renderPage();
+  const dialog = await openRemoveWithData();
+  const listed = await within(dialog).findByRole("list", { name: "Unavailable nodes" });
+  expect(within(listed).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["offline", "edge-worker"]);
+  expect(dialog).toHaveTextContent("Deleting the data may make them unrecoverable");
+  expect(JSON.stringify(client.getQueryData(removalInventoryKey("m1")))).not.toContain("never-cached");
+  typeHostname(dialog);
+  const confirm = within(dialog).getByRole("button", { name: "Remove and delete data" });
+  expect(acknowledgement(dialog)).not.toBeChecked();
+  expect(confirm).toBeDisabled();
+  fireEvent.click(acknowledgement(dialog));
+  expect(confirm).toBeEnabled();
+  fireEvent.click(confirm);
+  await waitFor(() => expect(calls("DELETE")).toHaveLength(1));
+  expect(calls("DELETE")[0]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: true, acknowledge_unavailable_nodes: ["n4", "n9"] }]);
+  expect(await screen.findByText("Removal requested")).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("blocks data deletion but not keeping the data when the unavailable nodes cannot be read", async () => {
+  let fail = true;
+  listReply = () => list([registry()]);
+  inventoryReply = () => {
+    if (fail) throw new ApiError(503, "Node inventory unavailable");
+    return { unavailable_nodes: "none" };
+  };
+  serve((method) => (method === "DELETE" ? { operation_id: "op-rm" } : undefined));
+  renderPage();
+  const dialog = await openRemoveWithData();
+  expect(await within(dialog).findByText("Could not load the nodes Cove could not check")).toBeInTheDocument();
+  expect(dialog).toHaveTextContent("Node inventory unavailable");
+  expect(dialog).toHaveTextContent("You can still remove the registry and keep its data.");
+  typeHostname(dialog);
+  expect(within(dialog).getByRole("button", { name: "Remove and delete data" })).toBeDisabled();
+  // A malformed list is a failed read too, never an empty one.
+  fail = false;
+  fireEvent.click(within(dialog).getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(calls("GET", inventoryPath)).toHaveLength(2));
+  expect(await within(dialog).findByText("The server returned an unreadable response.")).toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "Remove and delete data" })).toBeDisabled();
+  fireEvent.click(within(dialog).getByRole("checkbox", { name: "Also delete the registry data permanently" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove registry" }));
+  await waitFor(() => expect(calls("DELETE")).toHaveLength(1));
+  expect(calls("DELETE")[0]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: false }]);
+});
+
+it("refuses an unavailable node list without names, with repeated or invalid IDs or over the server's bound", async () => {
+  const malformed: unknown[][] = [
+    [{ id: "n4" }],
+    [{ id: "n4", name: "" }],
+    [{ id: "n4", name: "   " }],
+    [{ id: "n4", name: 7 }],
+    [offline, { id: "n4", name: "offline-again" }],
+    [{ id: "", name: "offline" }],
+    [{ id: "n".repeat(129), name: "offline" }],
+    Array.from({ length: 1025 }, (_, index) => ({ id: `n${index}`, name: `node-${index}` })),
+  ];
+  let nodes = malformed[0];
+  listReply = () => list([registry()]);
+  inventoryReply = () => ({ unavailable_nodes: nodes });
+  serve();
+  const client = renderPage();
+  const dialog = await openRemoveWithData();
+  typeHostname(dialog);
+  for (const next of malformed) {
+    nodes = next;
+    await act(() => client.refetchQueries({ queryKey: removalInventoryKey("m1") }));
+    expect(await within(dialog).findByText("The server returned an unreadable response.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("list", { name: "Unavailable nodes" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("checkbox", { name: /Delete the data even if/ })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Remove and delete data" })).toBeDisabled();
+  }
+  expect(calls("DELETE")).toHaveLength(0);
+});
+
+it("does not take nodes from an inventory refusal whose node list is malformed", async () => {
+  listReply = () => list([registry({ state: "removed", connection_id: "", data_retained: true })]);
+  inventoryReply = () => ({ unavailable_nodes: [offline] });
+  serve((method) => {
+    if (method !== "DELETE") return undefined;
+    throw new ApiError(409, "The request conflicts with the current state.", null, { error: "registry_inventory_changed", message: "Review and acknowledge the unavailable nodes before deleting registry data.", unavailable_nodes: [offline, { id: "n9" }] });
+  });
+  const client = renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Delete retained data" }));
+  const dialog = screen.getByRole("dialog", { name: "Delete the retained data of Team registry?" });
+  await within(dialog).findByRole("list", { name: "Unavailable nodes" });
+  typeHostname(dialog);
+  fireEvent.click(acknowledgement(dialog));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete data permanently" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(screen.getByText("The registry operation was not requested")).toBeInTheDocument();
+  expect(JSON.stringify(client.getQueryData(removalInventoryKey("m1")) ?? null)).not.toContain("n9");
+  expect(calls("DELETE")).toHaveLength(1);
+});
+
+it("clears the acknowledgement when the listed unavailable nodes change", async () => {
+  let nodes = [offline];
+  listReply = () => list([registry()]);
+  inventoryReply = () => ({ unavailable_nodes: nodes });
+  serve();
+  const client = renderPage();
+  const dialog = await openRemoveWithData();
+  await within(dialog).findByRole("list", { name: "Unavailable nodes" });
+  typeHostname(dialog);
+  fireEvent.click(acknowledgement(dialog));
+  expect(within(dialog).getByRole("button", { name: "Remove and delete data" })).toBeEnabled();
+  nodes = [offline, edge];
+  await act(() => client.refetchQueries({ queryKey: removalInventoryKey("m1") }));
+  expect(await within(dialog).findByText("edge-worker")).toBeInTheDocument();
+  expect(acknowledgement(dialog)).not.toBeChecked();
+  expect(within(dialog).getByRole("button", { name: "Remove and delete data" })).toBeDisabled();
+  expect(calls("DELETE")).toHaveLength(0);
+});
+
+it("shows the nodes from an inventory refusal, keeps the draft and needs a new acknowledgement", async () => {
+  let refuse = true;
+  listReply = () => list([registry({ state: "removed", connection_id: "", data_retained: true })]);
+  inventoryReply = () => ({ unavailable_nodes: [offline] });
+  serve((method) => {
+    if (method !== "DELETE") return undefined;
+    if (refuse) throw inventoryChanged([offline, edge]);
+    return { operation_id: "op-purge" };
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Delete retained data" }));
+  const dialog = screen.getByRole("dialog", { name: "Delete the retained data of Team registry?" });
+  await within(dialog).findByRole("list", { name: "Unavailable nodes" });
+  typeHostname(dialog);
+  fireEvent.click(acknowledgement(dialog));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete data permanently" }));
+  expect(await within(dialog).findByText("The unavailable nodes changed")).toBeInTheDocument();
+  expect(calls("DELETE")[0]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: true, acknowledge_unavailable_nodes: ["n4"] }]);
+  const listed = within(dialog).getByRole("list", { name: "Unavailable nodes" });
+  expect(within(listed).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["offline", "edge-worker"]);
+  expect(within(dialog).getByLabelText("Type registry.example.test to confirm")).toHaveValue("registry.example.test");
+  expect(acknowledgement(dialog)).not.toBeChecked();
+  expect(within(dialog).getByRole("button", { name: "Delete data permanently" })).toBeDisabled();
+  expect(calls("GET", inventoryPath)).toHaveLength(1);
+  expect(calls("DELETE")).toHaveLength(1);
+  refuse = false;
+  fireEvent.click(acknowledgement(dialog));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete data permanently" }));
+  await waitFor(() => expect(calls("DELETE")).toHaveLength(2));
+  expect(calls("DELETE")[1]).toEqual(["DELETE", `${listPath}/m1`, { delete_data: true, acknowledge_unavailable_nodes: ["n4", "n9"] }]);
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(screen.getByText("Removal requested")).toBeInTheDocument();
+});
+
+it("names the current nodes on the registry when an inventory refusal arrives after the confirmation was closed", async () => {
+  let refuse: (error: unknown) => void = () => undefined;
+  listReply = () => list([registry({ state: "removed", connection_id: "", data_retained: true })]);
+  inventoryReply = () => ({ unavailable_nodes: [offline] });
+  serve((method) =>
+    method === "DELETE"
+      ? new Promise((_, reject) => {
+          refuse = reject;
+        })
+      : undefined,
+  );
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Delete retained data" }));
+  const dialog = screen.getByRole("dialog", { name: "Delete the retained data of Team registry?" });
+  await within(dialog).findByRole("list", { name: "Unavailable nodes" });
+  typeHostname(dialog);
+  fireEvent.click(acknowledgement(dialog));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete data permanently" }));
+  await waitFor(() => expect(calls("DELETE")).toHaveLength(1));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  act(() => refuse(inventoryChanged([offline, edge])));
+  expect(await screen.findByText("Data deletion was not requested")).toBeInTheDocument();
+  const listed = screen.getByRole("list", { name: "Nodes unavailable now" });
+  expect(within(listed).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["offline", "edge-worker"]);
+  expect(screen.getByText(/needs a new confirmation that reviews the nodes listed now/)).toBeInTheDocument();
+  expect(screen.queryByText("The request conflicts with the current state.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Removal requested")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(calls("DELETE")).toHaveLength(1);
+  // Continuing takes a new confirmation with a fresh read and a new acknowledgement.
+  fireEvent.click(screen.getByRole("button", { name: "Delete retained data" }));
+  const again = screen.getByRole("dialog", { name: "Delete the retained data of Team registry?" });
+  expect(screen.queryByText("Data deletion was not requested")).not.toBeInTheDocument();
+  expect(within(again).queryByText("The unavailable nodes changed")).not.toBeInTheDocument();
+  await waitFor(() => expect(calls("GET", inventoryPath)).toHaveLength(2));
+  await within(again).findByRole("list", { name: "Unavailable nodes" });
+  expect(acknowledgement(again)).not.toBeChecked();
+  expect(within(again).getByLabelText("Type registry.example.test to confirm")).toHaveValue("");
+  expect(within(again).getByRole("button", { name: "Delete data permanently" })).toBeDisabled();
+  expect(calls("DELETE")).toHaveLength(1);
+});
+
+it("closes the confirmation and shows other refusals of a data deletion on the registry", async () => {
+  listReply = () => list([registry({ state: "removed", connection_id: "", data_retained: true })]);
+  serve((method) => {
+    if (method === "DELETE") throw new ApiError(409, "Retained releases still reference this registry");
+    return undefined;
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Delete retained data" }));
+  const dialog = screen.getByRole("dialog", { name: "Delete the retained data of Team registry?" });
+  const confirm = within(dialog).getByRole("button", { name: "Delete data permanently" });
+  typeHostname(dialog);
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(screen.getByText("The registry operation was not requested")).toBeInTheDocument();
+  expect(screen.getByText("Retained releases still reference this registry")).toBeInTheDocument();
+  expect(calls("DELETE")).toHaveLength(1);
 });
 
 it("offers deleting the record only to managers of a purged removed registry without an active operation", async () => {
