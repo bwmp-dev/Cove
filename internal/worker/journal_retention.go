@@ -41,24 +41,40 @@ func (e *Engine) PruneJournals(ctx context.Context, in JournalPruneRequest) (*Jo
 	e.active[housekeepingWorkload] = true
 	e.mu.Unlock()
 	defer func() { e.mu.Lock(); delete(e.active, housekeepingWorkload); e.mu.Unlock() }()
+	ownedSnapshots := map[string]string{}
+	snapshotNames := map[string]string{}
+	for _, candidate := range in.Candidates {
+		for _, name := range operationComposeSnapshotNames(candidate.ID) {
+			ownedSnapshots[filepath.Join(candidate.Workload, name)] = candidate.ID
+			snapshotNames[name] = candidate.ID
+		}
+	}
 	protected := map[string]bool{}
-	var inspectValue func(any)
-	inspectValue = func(value any) {
+	var inspectValue func(any, string)
+	inspectValue = func(value any, ownOperation string) {
 		switch value := value.(type) {
 		case string:
+			for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+				if candidates[part] && part != ownOperation {
+					protected[part] = true
+				}
+			}
 			base := filepath.Base(value)
+			if id := snapshotNames[base]; id != "" && id != ownOperation {
+				protected[id] = true
+			}
 			for id := range candidates {
-				if value == id || base == id || strings.HasPrefix(base, id+".") {
+				if id != ownOperation && (value == id || base == id || strings.HasPrefix(base, id+".") || base == id+"-links.yaml" || base == id+"-private.yaml") {
 					protected[id] = true
 				}
 			}
 		case map[string]any:
 			for _, v := range value {
-				inspectValue(v)
+				inspectValue(v, ownOperation)
 			}
 		case []any:
 			for _, v := range value {
-				inspectValue(v)
+				inspectValue(v, ownOperation)
 			}
 		}
 	}
@@ -112,9 +128,11 @@ func (e *Engine) PruneJournals(ctx context.Context, in JournalPruneRequest) (*Jo
 			return errors.New("invalid worker reference metadata prevents pruning")
 		}
 		if len(parts) > 2 && (parts[1] == "release-states" || parts[1] == "backups") {
-			inspectValue(strings.TrimSuffix(entry.Name(), ".json"))
+			inspectValue(strings.TrimSuffix(entry.Name(), ".json"), "")
 		}
-		inspectValue(value)
+		// Operation-owned snapshots can contain their own asset paths without being live references.
+		ownOperation := ownedSnapshots[relative]
+		inspectValue(value, ownOperation)
 		return nil
 	})
 	if err != nil && !os.IsNotExist(err) {
@@ -142,7 +160,7 @@ func (e *Engine) PruneJournals(ctx context.Context, in JournalPruneRequest) (*Jo
 			if json.Unmarshal(data, &value) != nil {
 				return nil, errors.New("invalid recovery journal")
 			}
-			inspectValue(value)
+			inspectValue(value, "")
 		}
 	}
 	result := &JournalPruneResult{Pruned: []string{}}
@@ -161,6 +179,9 @@ func (e *Engine) PruneJournals(ctx context.Context, in JournalPruneRequest) (*Jo
 				continue
 			}
 		} else if !os.IsNotExist(err) {
+			return result, err
+		}
+		if err = e.pruneOperationComposeBundle(ctx, c); err != nil {
 			return result, err
 		}
 		if err = os.Remove(e.path(c.ID)); err != nil && !os.IsNotExist(err) {

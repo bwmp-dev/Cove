@@ -254,6 +254,10 @@ func testRegistryUpdateDocker(t *testing.T, updates bool) {
 	}
 	if updates {
 		applied := docker("inspect", "--format", "{{.Image}}", container)
+		status := readImagePolicyStatusFixture(t, f)
+		if status.Stale || status.Updates == nil || status.Updates.State != "current" || status.Updates.Message != "The retained automatic image versions are applied." || len(status.Updates.Candidates) != 0 {
+			t.Fatal("confirmed automatic target is not fresh current", status)
+		}
 		if !strings.Contains(request.ImagePins["app"], "/team/app:v1.12.0@sha256:") {
 			t.Fatal("automatic version was not the verified v1.12.0 candidate", request.ImagePins)
 		}
@@ -288,7 +292,21 @@ func testRegistryUpdateDocker(t *testing.T, updates bool) {
 		if err := json.Unmarshal(f.call("root", "default", "GET", f.path, nil, 200).Body.Bytes(), &saved); err != nil || !strings.Contains(saved.Compose, "/team/app:v1.10.0") {
 			t.Fatal("automatic retention rewrote the saved base version", saved.Compose, err)
 		}
-		t.Log("Verified automatic v1.12.0 exact image survives ordinary deploy, restart and explicit snapshot force-recreate while saved Compose stays v1.10.0")
+		f.call("root", "default", "PUT", f.path, workloadInput{Name: "Current image", NodeID: "node", Kind: "service", Compose: strings.ReplaceAll(saved.Compose, "/team/app:v1.10.0", "/team/app:v1.12.0")}, 200)
+		f.sql(`UPDATE image_update_policies SET next_dispatch_at=now()+interval '1 minute' WHERE workload_id=$1`, f.id)
+		check := jsonString(t, f.call("root", "default", "POST", f.path+"/operations", map[string]any{"action": "image_check"}, 202), "id")
+		settled(check)
+		if err := f.s.dispatchImageUpdates(ctx); err != nil {
+			t.Fatal(err)
+		}
+		status = readImagePolicyStatusFixture(t, f)
+		if status.Check == nil || *status.Check != check || status.Stale || status.Error != "" || status.Updates == nil || status.Updates.State != "current" {
+			t.Fatal("manual check did not refresh current policy", status)
+		}
+		if docker("inspect", "--format", "{{.Image}}", container) != applied {
+			t.Fatal("manual check changed running image")
+		}
+		t.Log("Verified fresh current after automatic v1.12.0 apply and one manual check after a tag change; retained image survives deploy, restart and snapshot reconstruction")
 	}
 	f.call("root", "default", "DELETE", f.path+"/registry-webhook", nil, 200)
 }

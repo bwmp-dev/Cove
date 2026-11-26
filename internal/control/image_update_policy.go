@@ -271,8 +271,8 @@ func (s *Server) imageUpdatePolicyMetadata(ctx context.Context, id string, statu
 	stale := true
 	if check, ok := status["last_check_id"].(*string); ok && check != nil {
 		var payload []byte
-		var newer bool
-		err = s.DB.QueryRow(ctx, `SELECT payload,EXISTS(SELECT 1 FROM operations newer WHERE newer.workload_id=o.workload_id AND newer.action IN ('deploy','rollback','start','restart','stop','resume') AND newer.updated_at>o.updated_at) FROM operations o WHERE id=$1`, *check).Scan(&payload, &newer)
+		var newer, unconfirmed bool
+		err = s.DB.QueryRow(ctx, `SELECT payload,EXISTS(SELECT 1 FROM operations newer WHERE newer.workload_id=o.workload_id AND newer.action IN ('deploy','rollback','start','restart','stop','resume','image_check') AND newer.updated_at>o.updated_at),EXISTS(SELECT 1 FROM operations newer WHERE newer.workload_id=o.workload_id AND newer.action IN ('deploy','rollback','start','restart','stop','resume','image_check') AND newer.updated_at>o.updated_at AND (newer.action='image_check' OR newer.state<>'succeeded' OR COALESCE(newer.result->'rollout'->>'phase','') IN ('waiting','aborted'))) FROM operations o WHERE id=$1`, *check).Scan(&payload, &newer, &unconfirmed)
 		if err != nil {
 			return err
 		}
@@ -284,7 +284,11 @@ func (s *Server) imageUpdatePolicyMetadata(ctx context.Context, id string, statu
 		if err = json.Unmarshal(plain, &request); err != nil {
 			return err
 		}
-		stale = newer || request.ImageUpdates == nil || request.ImageUpdates.Configuration != imageUpdateConfigurationHash(encrypted)
+		configurationCurrent := request.ImageUpdates != nil && request.ImageUpdates.Configuration == imageUpdateConfigurationHash(encrypted)
+		stale = newer || !configurationCurrent
+		if configurationCurrent && !unconfirmed && markRetainedImageUpdatesApplied(status, request.ImageUpdates.Images) {
+			stale = false
+		}
 	}
 	status["stale"] = stale
 	status["services"] = services

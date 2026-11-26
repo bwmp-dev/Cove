@@ -287,6 +287,56 @@ it("treats a missing stale flag as stale", async () => {
   expect(await screen.findByText("Current (previous result)")).toBeInTheDocument();
 });
 
+const applied = "The retained automatic image versions are applied.";
+const retainedApp = { app: { configured: "registry.example.test/team/app:v1.10.0", image: "registry.example.test/team/app:v1.12.0@sha256:abc" } };
+
+it("explains a fresh current result with the server's applied message beside the retained images", async () => {
+  serve(() => saved({ mode: "auto" }, { last_check_id: "op-check", checked_at: "2026-11-23T09:00:00Z", updates: { state: "current", message: applied, candidates: [] }, retained_images: retainedApp }));
+  renderPolicy();
+  expect(await screen.findByText("Current")).not.toHaveClass("text-fg-muted");
+  expect(screen.getByText(applied)).toBeInTheDocument();
+  expect(within(screen.getByRole("list", { name: "Retained images" })).getByText("registry.example.test/team/app:v1.12.0@sha256:abc")).toBeInTheDocument();
+  expect(screen.queryByText("Update available")).not.toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Update candidates" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Result is from before the latest change")).not.toBeInTheDocument();
+  expect(screen.queryByText("Update status unknown")).not.toBeInTheDocument();
+});
+
+it("keeps a stale or unreadable applied result neutral instead of promoting it to current", async () => {
+  serve(() => saved({ mode: "auto" }, { stale: true, last_check_id: "op-check", checked_at: "2026-11-23T09:00:00Z", updates: { state: "current", message: applied, candidates: [] }, retained_images: retainedApp }));
+  renderPolicy();
+  expect(await screen.findByText("Current (previous result)")).toHaveClass("text-fg-muted");
+  expect(screen.getByText("Result is from before the latest change")).toBeInTheDocument();
+  expect(screen.queryByText("Current")).not.toBeInTheDocument();
+  cleanup();
+
+  let fail = false;
+  serve(() => {
+    if (fail) throw new ApiError(503, "image update policy unavailable");
+    return saved({ mode: "auto" }, { last_check_id: "op-check", checked_at: "2026-11-23T09:00:00Z", updates: { state: "current", message: applied, candidates: [] }, retained_images: retainedApp });
+  });
+  const client = renderPolicy();
+  expect(await screen.findByText("Current")).not.toHaveClass("text-fg-muted");
+  fail = true;
+  await client.refetchQueries({ queryKey: imageUpdatePolicyKey("w1") });
+  expect(await screen.findByText("Could not refresh the image update policy")).toBeInTheDocument();
+  expect(screen.getByText("Current")).toHaveClass("text-fg-muted");
+});
+
+it("does not read retained images as current when the result is unknown or missing", async () => {
+  serve(() => saved({ mode: "auto" }, { last_check_id: "op-check", checked_at: "2026-11-23T09:00:00Z", updates: { state: "unknown", candidates: [] }, retained_images: retainedApp }));
+  renderPolicy();
+  expect(await screen.findByText("Update status unknown")).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Retained images" })).toBeInTheDocument();
+  expect(screen.queryByText("Current")).not.toBeInTheDocument();
+  cleanup();
+
+  serve(() => saved({ mode: "auto" }, { retained_images: retainedApp }));
+  renderPolicy();
+  expect(await screen.findByText("No result yet")).toBeInTheDocument();
+  expect(screen.queryByText("Current")).not.toBeInTheDocument();
+});
+
 it("shows a recorded hold such as the maintenance window as a policy message", async () => {
   serve(() => saved({ mode: "auto", window_start: "10:00", window_end: "11:00" }, { last_error: "Waiting for the image update UTC maintenance window." }));
   renderPolicy();

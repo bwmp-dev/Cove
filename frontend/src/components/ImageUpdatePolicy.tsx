@@ -246,7 +246,7 @@ function UpdateResult({ state, message, candidates, mode, previous }: { state: s
           <p className={message ? "mt-1" : undefined}>Nothing is notified or deployed from an unknown result.</p>
         </Notice>
       )}
-      {state === "available" && message && <p className="text-xs break-words text-fg-muted">{message}</p>}
+      {(state === "available" || state === "current") && message && <p className="text-xs break-words text-fg-muted">{message}</p>}
       {candidates.length > 0 && <CandidateList candidates={candidates} label={previous ? "Previous update candidates" : "Update candidates"} />}
       {available && (
         <p className="text-xs text-fg-muted">

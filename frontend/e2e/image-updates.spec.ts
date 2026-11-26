@@ -123,7 +123,8 @@ const compose = (image: string) =>
 const utc = (date: Date) => date.toISOString().slice(11, 16);
 const terminal = /^(succeeded|failed|cancelled|interrupted)$/;
 
-const rollbackPause = "Automatic image updates were turned off by a rollback request. Turn the policy on and save to resume automatic updates.";
+const appliedMessage = "The retained automatic image versions are applied.";
+const rollbackPause ="Automatic image updates were turned off by a rollback request. Turn the policy on and save to resume automatic updates.";
 
 test("image updates: a notify policy finds an in-range tag and an approved automatic policy deploys and retains its exact digest", async ({ page }, testInfo) => {
   test.skip(!enabled, "Needs scripts/test-browser.py --registry-webhooks");
@@ -369,13 +370,20 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
   const resource = (await (await page.request.get(panelPath(`/api/workloads/${id}`))).json()) as { compose: string };
   expect(resource.compose).toContain(`image: ${initialImage}`);
 
-  // 5. A later check finds nothing newer in range and queues no second deploy.
-  await discover((status) => status.updates?.state === "current");
+  // 5. A later check finds nothing newer in range and queues no second deploy. The fresh result says the applied
+  // target is current and no longer offers it as a candidate.
+  const appliedResult = await discover((status) => status.updates?.state === "current");
+  expect(appliedResult.stale).toBe(false);
+  expect(appliedResult.updates).toMatchObject({ state: "current", message: appliedMessage });
+  expect(appliedResult.updates?.candidates.map((item) => item.target)).not.toContain(target);
   await page.waitForTimeout(20_000);
   expect((await deploys()).length).toBe(deployCount + 1);
   expect(container()).toEqual(updated);
   await page.goto(panelPath(`/resources/${id}/registry`));
   await expect(policy.getByText("Current", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(policy.getByText(appliedMessage, { exact: true })).toBeVisible();
+  await expect(policy.getByText("Update available", { exact: true })).toHaveCount(0);
+  await expect(policy.getByRole("list", { name: "Update candidates", exact: true })).toHaveCount(0);
   await capture(page, testInfo, "image-updates-updated");
 
   // 6. The applied digest is retained for app while the policy stays on and automatic.
@@ -470,6 +478,48 @@ test("image updates: a notify policy finds an in-range tag and an approved autom
   await settled();
   await approveAndFinish(await queue({ action: "deploy" }));
   expect(container()).toMatchObject({ image: savedTag, version: "second" });
+
+  // One explicit Check images after the saved tag changed, with no further policy save: its own fresh result is bound
+  // to the current configuration and no longer offers the applied target as available.
+  await settled();
+  const checkBeforeManual = (await policyStatus()).last_check_id;
+  const deploysBeforeManual = (await deploys()).length;
+  await page.goto(panelPath(`/resources/${id}/registry`));
+  const manualCheck = images.getByRole("button", { name: "Check images", exact: true });
+  await expect(manualCheck).toBeEnabled({ timeout: 30_000 });
+  const policyPath = panelPath(`/api/workloads/${id}/image-update-policy`);
+  const operationsPath = panelPath(`/api/workloads/${id}/operations`);
+  const sent: string[] = [];
+  const record = (request: { method: () => string; url: () => string }) => {
+    const pathname = new URL(request.url()).pathname;
+    if ((pathname === operationsPath && request.method() === "POST") || (pathname === policyPath && request.method() !== "GET")) sent.push(`${request.method()} ${pathname}`);
+  };
+  page.on("request", record);
+  const manualQueued = page.waitForResponse((response) => new URL(response.url()).pathname === operationsPath && response.request().method() === "POST");
+  await manualCheck.click();
+  const manualResponse = await manualQueued;
+  expect([201, 202], await manualResponse.text()).toContain(manualResponse.status());
+  expect(manualResponse.request().postDataJSON()).toEqual({ action: "image_check" });
+  const manualId = ((await manualResponse.json()) as { id: string }).id;
+  const manualResult = await finished(manualId);
+  expect(manualResult.state, manualResult.result?.error).toBe("succeeded");
+  await expect.poll(async () => {
+    const status = await policyStatus();
+    return status.active_operation_id === null && status.last_check_id === manualId && !status.stale;
+  }, { timeout: 120_000, intervals: [3_000] }).toBe(true);
+  page.off("request", record);
+  expect(sent).toEqual([`POST ${operationsPath}`]);
+  const afterManual = await policyStatus();
+  expect(afterManual.last_check_id).not.toBe(checkBeforeManual);
+  expect(afterManual.configuration).toEqual({ enabled: true, mode: "auto", rules: [{ service: "app", range: "^1.10.0" }], window_start: "", window_end: "" });
+  expect(afterManual.updates?.state).toBe("current");
+  expect(afterManual.updates?.candidates.map((item) => item.target)).not.toContain(target);
+  expect((await deploys()).length).toBe(deploysBeforeManual);
+  expect(container()).toMatchObject({ image: savedTag, version: "second" });
+  await page.goto(panelPath(`/resources/${id}/registry`));
+  await expect(policy.getByText("Current", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(policy.getByText("Result is from before the latest change", { exact: true })).toHaveCount(0);
+  await expect(policy.getByText("Update available", { exact: true })).toHaveCount(0);
 
   // 11. Requesting a rollback turns the policy off at once, before approval, and says how to resume.
   await page.goto(panelPath(`/operations/${automatic.id}`));
