@@ -1385,23 +1385,6 @@ func (s *Server) removePreviewStage(ctx context.Context, p *previewRow) error {
 		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 seconds' WHERE id=$1`, p.ID)
 		return err
 	}
-	for _, resource := range resources {
-		for _, route := range resource.Routes {
-			if resource.RoutesOperation == "" {
-				continue
-			}
-			zone, address, err := s.previewDNSZone(ctx, p.Team, resource.Node, route.Domain)
-			if err != nil {
-				return err
-			}
-			if zone != nil {
-				if err = s.removeDNSRecord(ctx, *zone, route.Domain, address); err != nil {
-					_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET detail=$2,next_attempt_at=now()+interval '1 minute' WHERE id=$1`, p.ID, "Could not remove the DNS record for "+route.Domain+"; retrying.")
-					return err
-				}
-			}
-		}
-	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err

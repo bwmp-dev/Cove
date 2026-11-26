@@ -100,11 +100,15 @@ func (s *Server) cloudflareRequest(ctx context.Context, c cloudflareZone, method
 }
 
 type cloudflareRecord struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
-	Proxied bool   `json:"proxied"`
+	ID       string                     `json:"id,omitempty"`
+	Type     string                     `json:"type"`
+	Name     string                     `json:"name"`
+	Content  string                     `json:"content"`
+	Proxied  bool                       `json:"proxied"`
+	TTL      int                        `json:"ttl,omitempty"`
+	Comment  string                     `json:"comment,omitempty"`
+	Tags     []string                   `json:"tags,omitempty"`
+	Settings map[string]json.RawMessage `json:"settings,omitempty"`
 }
 
 func (s *Server) reconcileDNSRecord(ctx context.Context, c cloudflareZone, domain, address string) error {
@@ -139,7 +143,7 @@ func (s *Server) reconcileDNSRecord(ctx context.Context, c cloudflareZone, domai
 	}
 	body := map[string]any{"type": kind, "name": domain, "content": ip.String(), "ttl": 1, "proxied": c.Proxied}
 	if matching == nil {
-		return s.cloudflareRequest(ctx, c, "POST", "/dns_records", body, nil)
+		return s.createDNSRecord(ctx, c, cloudflareRecord{Type: kind, Name: domain, Content: ip.String(), Proxied: c.Proxied, TTL: 1})
 	}
 	proxied := c.Proxied
 	if c.PreserveProxy {
@@ -152,39 +156,14 @@ func (s *Server) reconcileDNSRecord(ctx context.Context, c cloudflareZone, domai
 	if !cloudflareID.MatchString(matching.ID) {
 		return errors.New("invalid Cloudflare record ID")
 	}
+	if s.ownsDNSRecord(c, *matching) {
+		body["comment"] = s.dnsOwnershipComment(c, cloudflareRecord{Type: kind, Name: domain, Content: ip.String(), Proxied: proxied, TTL: 1})
+	}
 	return s.cloudflareRequest(ctx, c, "PATCH", "/dns_records/"+matching.ID, body, nil)
 }
 
-// removeDNSRecord deletes the address record Cove created for a hostname. Records of other types,
-// or pointing elsewhere, are left alone because Cove did not create them.
-func (s *Server) removeDNSRecord(ctx context.Context, c cloudflareZone, domain, address string) error {
-	if domain != c.Domain && !strings.HasSuffix(domain, "."+c.Domain) {
-		return errors.New("hostname is outside configured zone")
-	}
-	ip, err := netip.ParseAddr(address)
-	if err != nil {
-		return errors.New("invalid node address")
-	}
-	var records []cloudflareRecord
-	if err = s.cloudflareRequest(ctx, c, "GET", "/dns_records?name="+url.QueryEscape(domain)+"&per_page=100", nil, &records); err != nil {
-		return err
-	}
-	for _, record := range records {
-		if record.Name != domain || (record.Type != "A" && record.Type != "AAAA") || record.Content != ip.String() {
-			continue
-		}
-		if !cloudflareID.MatchString(record.ID) {
-			return errors.New("invalid Cloudflare record ID")
-		}
-		if err = s.cloudflareRequest(ctx, c, "DELETE", "/dns_records/"+record.ID, nil, nil); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Server) reconcileDNS(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, "SELECT z.zone_id,t.team_id,z.configuration FROM (SELECT * FROM cloudflare_zones z WHERE (checked_at IS NULL OR checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM cloudflare_zone_teams t WHERE t.zone_id=z.zone_id) ORDER BY checked_at NULLS FIRST,zone_id LIMIT 8) z JOIN cloudflare_zone_teams t ON t.zone_id=z.zone_id")
+	rows, err := s.DB.Query(ctx, "SELECT z.zone_id,COALESCE(t.team_id,''),z.configuration FROM (SELECT * FROM cloudflare_zones z WHERE (checked_at IS NULL OR checked_at<now()-interval '1 minute') ORDER BY checked_at NULLS FIRST,zone_id LIMIT 8) z LEFT JOIN cloudflare_zone_teams t ON t.zone_id=z.zone_id")
 	if err != nil {
 		return err
 	}
@@ -207,6 +186,7 @@ func (s *Server) reconcileDNS(ctx context.Context) error {
 		return err
 	}
 	messages := map[string]string{}
+	cleaned := map[string]bool{}
 	for _, e := range entries {
 		data, err := unseal(s.Key, e.raw)
 		var c cloudflareZone
@@ -214,7 +194,7 @@ func (s *Server) reconcileDNS(ctx context.Context) error {
 			return errors.New("DNS configuration unavailable")
 		}
 		message := ""
-		if c.Enabled {
+		if c.Enabled && e.team != "" {
 			resources, err := s.DB.Query(ctx, `SELECT w.id,w.node_id,w.configuration FROM workloads w WHERE w.team_id=$1 AND EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','routes','rollback','adopt') AND o.state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running'))`, e.team)
 			if err != nil {
 				return err
@@ -248,6 +228,12 @@ func (s *Server) reconcileDNS(ctx context.Context) error {
 				if message != "" {
 					break
 				}
+			}
+		}
+		if c.Enabled && !cleaned[e.id] {
+			cleaned[e.id] = true
+			if cleanupErr := s.reconcileDNSCleanup(ctx, e.id, e.raw); cleanupErr != nil && message == "" {
+				message = cleanupErr.Error()
 			}
 		}
 		if message != "" {
