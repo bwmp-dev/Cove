@@ -51,6 +51,7 @@ func (s *Server) nodeFirewall(w http.ResponseWriter, r *http.Request) {
 	control := worker.FirewallControl{Action: "inspect"}
 	if r.Method != http.MethodGet {
 		var in struct {
+			Remove   bool                  `json:"remove"`
 			Rules    []worker.FirewallRule `json:"rules"`
 			Revision string                `json:"revision"`
 			Confirm  bool                  `json:"confirm"`
@@ -59,6 +60,11 @@ func (s *Server) nodeFirewall(w http.ResponseWriter, r *http.Request) {
 		if !decode(w, r, &in) {
 			return
 		}
+		if in.Remove && (len(in.Rules) != 0 || in.Revert) {
+			http.Error(w, "stop managing the firewall separately from rules or a revert", 400)
+			return
+		}
+		control.Remove = in.Remove
 		if len(in.Rules) > 32 {
 			http.Error(w, "at most 32 application-port rules are allowed", 400)
 			return
@@ -78,8 +84,8 @@ func (s *Server) nodeFirewall(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	var ready, capable, busy bool
-	err := s.DB.QueryRow(r.Context(), `SELECT state='ready',COALESCE((capabilities->>'firewall')::boolean,false),EXISTS(SELECT 1 FROM workloads w JOIN operations o ON o.workload_id=w.id WHERE w.node_id=n.id AND o.state IN ('queued','running')) OR EXISTS(SELECT 1 FROM node_identity_rotations i WHERE i.node_id=n.id AND i.phase NOT IN ('succeeded','cancelled')) FROM nodes n WHERE id=$1`, r.PathValue("id")).Scan(&ready, &capable, &busy)
+	var ready, capable, removalCapable, busy bool
+	err := s.DB.QueryRow(r.Context(), `SELECT state='ready',COALESCE((capabilities->>'firewall')::boolean,false),COALESCE((capabilities->>'firewall_remove')::boolean,false),EXISTS(SELECT 1 FROM workloads w JOIN operations o ON o.workload_id=w.id WHERE w.node_id=n.id AND o.state IN ('queued','running')) OR EXISTS(SELECT 1 FROM node_identity_rotations i WHERE i.node_id=n.id AND i.phase NOT IN ('succeeded','cancelled')) FROM nodes n WHERE id=$1`, r.PathValue("id")).Scan(&ready, &capable, &removalCapable, &busy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -90,6 +96,10 @@ func (s *Server) nodeFirewall(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ready || !capable || busy {
 		http.Error(w, "verify an upgraded Linux worker and wait for operations and SSH identity changes", 409)
+		return
+	}
+	if control.Remove && !removalCapable {
+		http.Error(w, "upgrade this worker before stopping firewall management", 409)
 		return
 	}
 	control.Reserved, err = s.firewallManagementPorts(r.Context())

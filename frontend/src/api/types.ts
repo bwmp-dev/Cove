@@ -9,6 +9,7 @@ export interface Capabilities {
   // Protocol support for per-service GPU selections; it does not mean the host has a GPU.
   gpu_assignments?: boolean;
   firewall?: boolean;
+  firewall_remove?: boolean;
   host_maintenance?: boolean;
   metrics?: NodeMetrics;
   shared_host?: { coolify_detected: boolean; cleanup_verified: boolean };

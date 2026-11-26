@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, request } from "../api/client";
-import type { FirewallResult } from "../api/firewall";
+import { firewallQuery, type FirewallResult } from "../api/firewall";
 import type { Node } from "../api/types";
 import { NodeFirewall } from "./NodeFirewall";
 
@@ -291,4 +291,200 @@ it("clears an earlier outcome when the host is inspected again manually", async 
   fireEvent.click(screen.getByRole("button", { name: "Inspect again" }));
   await waitFor(() => expect(screen.queryByText("Firewall change confirmed")).not.toBeInTheDocument());
   await waitFor(() => expect(calls("GET", path)).toHaveLength(3));
+});
+
+const removalNode: Node = { ...node, capabilities: { ...capabilities, firewall_remove: true } };
+// An empty managed policy whose table is already gone: only boot restoration and recovery files remain.
+const residue: FirewallResult = { ...inspected, active: false, managed: true, remove_supported: true, rules: [] };
+const removed: FirewallResult = { ...inspected, active: false, managed: false, remove_supported: true, rules: [] };
+
+async function previewRemoval() {
+  fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Stop managing firewall" }));
+  return screen.findByRole("dialog", { name: "Stop managing this host's firewall?" });
+}
+
+function confirmRemoval(dialog: HTMLElement) {
+  fireEvent.change(within(dialog).getByLabelText("Type edge-worker to confirm"), { target: { value: "edge-worker" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop managing firewall" }));
+}
+
+it("stops managing an empty residual policy with a fresh removal preview and its exact revision", async () => {
+  let gets = 0;
+  const preview = vi.fn().mockResolvedValue({ ...residue, revision });
+  const apply = vi.fn().mockResolvedValue(removed);
+  mockApi({ get: () => Promise.resolve(gets++ === 0 ? residue : removed), preview, apply });
+  renderSection(removalNode);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
+  expect(await screen.findByText(/Cove has no rules on this host, but its table, boot restoration or recovery files remain/)).toBeInTheDocument();
+  expect(screen.getByText(/An empty policy keeps them/)).toBeInTheDocument();
+  expect(preview).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Stop managing firewall" }));
+  const dialog = await screen.findByRole("dialog", { name: "Stop managing this host's firewall?" });
+  expect(preview).toHaveBeenCalledTimes(1);
+  expect(preview).toHaveBeenCalledWith({ remove: true });
+  expect(dialog).toHaveTextContent("Cove's empty table, boot restoration and recovery files are still removed");
+  expect(dialog).toHaveTextContent("UFW, other nftables tables and default policies are not changed and still apply");
+  expect(dialog).toHaveTextContent("independent two-minute revert");
+  const submit = within(dialog).getByRole("button", { name: "Stop managing firewall" });
+  expect(submit).toBeDisabled();
+  fireEvent.submit(submit.closest("form") as HTMLFormElement);
+  expect(apply).not.toHaveBeenCalled();
+
+  confirmRemoval(dialog);
+  await waitFor(() => expect(apply).toHaveBeenCalledWith({ remove: true, revision, confirm: true }));
+  expect(await screen.findByText("Cove stopped managing this host's firewall")).toBeInTheDocument();
+  await waitFor(() => expect(calls("GET", path)).toHaveLength(2));
+  expect(screen.queryByRole("button", { name: "Stop managing firewall" })).not.toBeInTheDocument();
+  expect(apply).toHaveBeenCalledTimes(1);
+});
+
+it("lists the active rules removal drops and offers it even with no selectable ports", async () => {
+  const active = { ...inspected, managed: true, remove_supported: true, available: [{ protocol: "tcp" as const, port: 2222 }] };
+  mockApi({ get: () => Promise.resolve(active), preview: () => Promise.resolve({ ...active, revision }) });
+  renderSection(removalNode);
+  const dialog = await previewRemoval();
+  expect(within(dialog).getByRole("list", { name: "Cove rules to remove" })).toHaveTextContent("192.0.2.0/24");
+});
+
+it("does not offer removal to old workers or unprobed capabilities and hides it when nothing is managed", async () => {
+  mockApi({ get: () => Promise.resolve({ ...inspected, managed: true }) });
+  const old = renderSection(removalNode);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
+  expect(await screen.findByText(/needs an upgraded worker/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stop managing firewall" })).not.toBeInTheDocument();
+  old.unmount();
+
+  mockApi({ get: () => Promise.resolve(residue) });
+  const unprobed = renderSection(node);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
+  expect(await screen.findByText(/has not reported support for stopping firewall management/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stop managing firewall" })).not.toBeInTheDocument();
+  unprobed.unmount();
+
+  mockApi({ get: () => Promise.resolve(removed) });
+  renderSection(removalNode);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
+  expect(await screen.findByText(/No Cove rules\. Cove does not restrict/)).toBeInTheDocument();
+  expect(screen.queryByText("Stop managing the firewall")).not.toBeInTheDocument();
+  expect(calls("POST", `${path}/preview`)).toHaveLength(0);
+});
+
+it("sends nothing when the removal dialog is cancelled and previews again for the next attempt", async () => {
+  const preview = vi
+    .fn()
+    .mockResolvedValueOnce({ ...residue, revision })
+    .mockResolvedValueOnce({ ...residue, revision: "d".repeat(64) });
+  const apply = vi.fn().mockResolvedValue(removed);
+  mockApi({ get: () => Promise.resolve(residue), preview, apply });
+  renderSection(removalNode);
+  let dialog = await previewRemoval();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(apply).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Stop managing firewall" }));
+  dialog = await screen.findByRole("dialog", { name: "Stop managing this host's firewall?" });
+  expect(preview).toHaveBeenCalledTimes(2);
+  confirmRemoval(dialog);
+  await waitFor(() => expect(apply).toHaveBeenCalledWith({ remove: true, revision: "d".repeat(64), confirm: true }));
+  expect(apply).toHaveBeenCalledTimes(1);
+});
+
+it("reports an ambiguous removal without retrying and describes the pending removal truthfully", async () => {
+  let gets = 0;
+  const pendingRemoval: FirewallResult = { ...residue, pending: { id: "c".repeat(32), deadline: "2099-01-01T00:02:00Z", remove: true } };
+  const apply = vi.fn().mockRejectedValue(new ApiError(502, "firewall confirmation could not be verified; refresh before retrying and inspect the recovery deadline"));
+  mockApi({ get: () => Promise.resolve(gets++ === 0 ? residue : pendingRemoval), preview: () => Promise.resolve({ ...residue, revision }), apply });
+  renderSection(removalNode);
+  confirmRemoval(await previewRemoval());
+  expect(await screen.findByText("The request to stop managing the firewall could not be confirmed")).toBeInTheDocument();
+  expect(screen.getByText(/may or may not have been applied/)).toBeInTheDocument();
+  expect(await screen.findByText("Unconfirmed stop of firewall management")).toBeInTheDocument();
+  expect(screen.getByText(/restores the previous policy by/)).toBeInTheDocument();
+  expect(screen.queryByText("Cove stopped managing this host's firewall")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Stop managing firewall" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Revert change" })).toBeEnabled();
+  expect(calls("GET", path)).toHaveLength(2);
+  expect(apply).toHaveBeenCalledTimes(1);
+});
+
+it("treats a refused removal as definite and keeps an unreadable status from offering removal", async () => {
+  let fail = false;
+  const apply = vi.fn().mockRejectedValue(new ApiError(400, "preview stopping firewall management first"));
+  mockApi({ get: () => (fail ? Promise.reject(new ApiError(503, "worker unavailable")) : Promise.resolve(residue)), preview: () => Promise.resolve({ ...residue, revision }), apply });
+  renderSection(removalNode);
+  confirmRemoval(await previewRemoval());
+  expect(await screen.findByText("The request to stop managing the firewall was refused")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Stop managing firewall" })).toBeEnabled());
+
+  fail = true;
+  fireEvent.click(screen.getByRole("button", { name: "Inspect again" }));
+  expect(await screen.findByText("Could not load the latest firewall status")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Stop managing firewall" })).toBeDisabled();
+});
+
+it("blocks an open removal confirmation when the node loses eligibility or the status is read again or fails", async () => {
+  let held = false;
+  let failRead: ((error: unknown) => void) | undefined;
+  const apply = vi.fn().mockResolvedValue(removed);
+  mockApi({
+    get: () =>
+      held
+        ? new Promise((_, reject) => {
+            failRead = reject;
+          })
+        : Promise.resolve(residue),
+    preview: () => Promise.resolve({ ...residue, revision }),
+    apply,
+  });
+  const client = new QueryClient();
+  const view = (target: Node) => (
+    <QueryClientProvider client={client}>
+      <NodeFirewall node={target} />
+    </QueryClientProvider>
+  );
+  const { rerender } = render(view(removalNode));
+  const dialog = await previewRemoval();
+  fireEvent.change(within(dialog).getByLabelText("Type edge-worker to confirm"), { target: { value: "edge-worker" } });
+  const submit = within(dialog).getByRole("button", { name: "Stop managing firewall" });
+  expect(submit).toBeEnabled();
+
+  rerender(view({ ...removalNode, state: "unreachable" }));
+  expect(submit).toBeDisabled();
+  expect(dialog).toHaveTextContent("this preview cannot be confirmed");
+  fireEvent.submit(submit.closest("form") as HTMLFormElement);
+  rerender(view(removalNode));
+  expect(submit).toBeEnabled();
+
+  held = true;
+  let reading: Promise<FirewallResult> | undefined;
+  act(() => {
+    reading = client.fetchQuery(firewallQuery(removalNode.id));
+  });
+  await waitFor(() => expect(submit).toBeDisabled());
+  fireEvent.submit(submit.closest("form") as HTMLFormElement);
+  await act(async () => {
+    failRead?.(new ApiError(503, "worker unavailable"));
+    await expect(reading).rejects.toThrow("worker unavailable");
+  });
+  expect(await screen.findByText("Could not load the latest firewall status")).toBeInTheDocument();
+  expect(submit).toBeDisabled();
+  fireEvent.click(submit);
+  fireEvent.submit(submit.closest("form") as HTMLFormElement);
+  expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+  expect(apply).not.toHaveBeenCalled();
+  expect(calls("POST", path)).toHaveLength(0);
+});
+
+it("shows a removal preview refusal without opening the confirmation", async () => {
+  mockApi({ get: () => Promise.resolve(residue), preview: () => Promise.reject(new ApiError(409, "upgrade this worker before stopping firewall management")) });
+  renderSection(removalNode);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Stop managing firewall" }));
+  expect(await screen.findByText("Could not preview stopping firewall management")).toBeInTheDocument();
+  expect(screen.getByText(/upgrade this worker/)).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(calls("POST", path)).toHaveLength(0);
 });

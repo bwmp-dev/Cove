@@ -59,6 +59,7 @@ function policyStatus(enabled: boolean | null): ImageUpdatePolicyStatus {
     last_error: "",
     checked_at: null,
     stale: true,
+    freshness_message: "",
     updates: null,
     ownership_required: false,
     retained_images: {},

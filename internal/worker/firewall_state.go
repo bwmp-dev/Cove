@@ -16,6 +16,7 @@ import (
 )
 
 type firewallIntent struct {
+	Remove          bool           `json:"remove,omitempty"`
 	ID              string         `json:"id"`
 	AttemptBound    bool           `json:"attempt_bound,omitempty"`
 	Previous        []FirewallRule `json:"previous"`
@@ -27,6 +28,7 @@ type firewallIntent struct {
 }
 
 type firewallJournal struct {
+	Removed    bool            `json:"removed,omitempty"`
 	Owner      string          `json:"owner"`
 	Rules      []FirewallRule  `json:"rules"`
 	Generation string          `json:"generation"`
@@ -43,7 +45,7 @@ func readFirewallJournal(scope, owner string) (firewallJournal, error) {
 	} else if err != nil {
 		return state, err
 	}
-	if state.Owner != owner || state.Generation != "" && !snapshotOwnerID.MatchString(state.Generation) || state.Digest != "" && !snapshotIdentifier.MatchString(state.Digest) || len(state.LastError) > 1024 || len(state.Reserved) > 65535 {
+	if state.Removed && (state.Pending != nil || state.Generation != "" || state.Digest != "" || len(state.Rules) != 0) || state.Owner != owner || state.Generation != "" && !snapshotOwnerID.MatchString(state.Generation) || state.Digest != "" && !snapshotIdentifier.MatchString(state.Digest) || len(state.LastError) > 1024 || len(state.Reserved) > 65535 {
 		return state, errors.New("invalid host firewall ownership state")
 	}
 	if _, err := renderFirewallRules(owner, state.Rules, false); err != nil {
@@ -118,13 +120,25 @@ func writeFirewallBatch(scope, owner, generation string, rules []FirewallRule, p
 		return "", err
 	}
 	text = strings.Replace(text, "Cove owner "+owner, firewallGenerationComment(owner, generation), 1)
+	return writeFirewallChangeFile(scope, text)
+}
+
+func writeFirewallRemovalBatch(scope, owner string, present bool) (string, error) {
+	text := "# Cove firewall removal\n"
+	if present {
+		text += "delete table inet " + firewallTable(owner) + "\n"
+	}
+	return writeFirewallChangeFile(scope, text)
+}
+
+func writeFirewallChangeFile(scope, text string) (string, error) {
 	filename := filepath.Join(scope, "firewall.nft")
 	if info, err := os.Lstat(filename); err == nil && (!info.Mode().IsRegular() || info.Size() > 256<<10) {
 		return "", errors.New("host firewall staging path is unsafe")
 	} else if err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
-	if err = os.WriteFile(filename, []byte(text), 0600); err != nil {
+	if err := os.WriteFile(filename, []byte(text), 0600); err != nil {
 		return "", err
 	}
 	return filename, nil
@@ -187,6 +201,10 @@ func revertFirewall(ctx context.Context, root, owner, attempt string, run snapsh
 		return err
 	}
 	defer unlock()
+	return revertFirewallLocked(ctx, scope, owner, attempt, run)
+}
+
+func revertFirewallLocked(ctx context.Context, scope, owner, attempt string, run snapshotCommand) error {
 	if _, err := os.Lstat(filepath.Join(scope, "firewall-arming.json")); err == nil {
 		fmt.Fprintln(os.Stderr, "Cove firewall recovery: arming was not committed; cleanup is pending, no firewall policy was applied")
 		return nil
@@ -196,6 +214,9 @@ func revertFirewall(ctx context.Context, root, owner, attempt string, run snapsh
 	state, err := readFirewallJournal(scope, owner)
 	if err != nil {
 		return err
+	}
+	if state.Removed {
+		return cleanupFirewallManagement(ctx, scope, owner, run)
 	}
 	if state.Pending == nil || attempt != "" && (attempt == "legacy" && state.Pending.AttemptBound || attempt != "legacy" && attempt != state.Pending.ID) {
 		fmt.Fprintln(os.Stderr, "Cove firewall recovery: stale attempt ignored; no matching pending revision")
@@ -232,6 +253,9 @@ func revertFirewall(ctx context.Context, root, owner, attempt string, run snapsh
 	_, _, state.Digest, err = inspectFirewallTable(ctx, owner, run)
 	if err != nil {
 		return err
+	}
+	if !pending.PreviousPresent && state.Generation == "" {
+		return commitFirewallRemoval(ctx, scope, owner, run)
 	}
 	state.Rules, state.Reserved, state.Pending, state.LastError = rules, reserved, nil, "The unconfirmed firewall change was reverted."
 	if removed {

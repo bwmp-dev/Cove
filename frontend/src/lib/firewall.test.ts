@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { definiteRefusal, removedPorts, selectablePorts, validPrefix, validateDrafts } from "./firewall";
+import type { FirewallResult } from "../api/firewall";
+import type { Node } from "../api/types";
+import { definiteRefusal, firewallManaged, removalUnavailable, removedPorts, selectablePorts, validPrefix, validateDrafts } from "./firewall";
 
 const ports = [
   { protocol: "tcp" as const, port: 8080 },
@@ -41,6 +43,18 @@ describe("firewall helpers", () => {
       { protocol: "udp" as const, port: 8080, sources: [] },
     ];
     expect(removedPorts(current, [{ protocol: "tcp", port: 8080, sources: ["10.0.0.0/8"] }])).toEqual([current[1]]);
+  });
+
+  it("offers removal for residue and active tables regardless of rule count, only to capable workers", () => {
+    const result: FirewallResult = { supported: true, active: false, managed: true, remove_supported: true, rules: [], available: [], reserved: [], revision: "", ufw: "", nftables: "", limited: false, notice: "", last_error: "" };
+    const node = { name: "edge", capabilities: { firewall: true, firewall_remove: true } } as Node;
+    expect(firewallManaged(result)).toBe(true);
+    expect(firewallManaged({ ...result, managed: undefined, active: true })).toBe(true);
+    expect(firewallManaged({ ...result, managed: false })).toBe(false);
+    expect(removalUnavailable(node, result)).toBeUndefined();
+    expect(removalUnavailable(node, { ...result, remove_supported: undefined })).toMatch(/upgraded worker/);
+    expect(removalUnavailable(node, { ...result, remove_supported: false })).toMatch(/unavailable on this host/);
+    expect(removalUnavailable({ name: "edge", capabilities: { firewall: true } } as Node, result)).toMatch(/has not reported support/);
   });
 
   it("treats only pre-worker rejections as definite", () => {

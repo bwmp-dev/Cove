@@ -12,8 +12,9 @@ import (
 )
 
 type WorkloadRemovalResult struct {
-	WorkerFilesRetained bool   `json:"worker_files_retained"`
-	CleanupWarning      string `json:"cleanup_warning,omitempty"`
+	WorkerFilesRetainedReason string `json:"worker_files_retained_reason,omitempty"`
+	WorkerFilesRetained       bool   `json:"worker_files_retained"`
+	CleanupWarning            string `json:"cleanup_warning,omitempty"`
 }
 
 type workloadRemovalState struct {
@@ -227,12 +228,16 @@ func (e *Engine) planWorkloadRemoval(ctx context.Context, id string, containers 
 		s.uncertain("the last deployed snapshot could not be read")
 		return s, nil
 	}
+	bindRetained := false
 	bind := func(source string) error {
 		if strings.Contains(strings.ReplaceAll(source, "$$", ""), "$") || !filepath.IsAbs(source) {
 			return errors.New("a bind source is unresolved")
 		}
 		if path, own := s.relative(strings.ReplaceAll(source, "$$", "$")); own {
-			return s.retain(ctx, path)
+			if err := s.retain(ctx, path); err != nil {
+				return err
+			}
+			bindRetained = bindRetained || s.retainedRoots[path]
 		}
 		return nil
 	}
@@ -258,6 +263,9 @@ func (e *Engine) planWorkloadRemoval(ctx context.Context, id string, containers 
 		return nil, err
 	}
 	s.result.WorkerFilesRetained = len(s.keep) > 0
+	if bindRetained {
+		s.result.WorkerFilesRetainedReason = "Bind-mounted data inside this resource's state directory was kept."
+	}
 	return s, nil
 }
 

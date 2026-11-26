@@ -58,7 +58,7 @@ func testFirewallArmingRefusals(t *testing.T, ctx context.Context, root, owner, 
 				t.Fatal(err)
 			}
 			control := FirewallControl{Action: "apply", Rules: rules, Revision: preview.Revision,
-				Available: []FirewallPort{{Protocol: "tcp", Port: application}, {Protocol: "tcp", Port: management}}, Reserved: []uint16{22, management}}
+				Available: preview.Available, Reserved: preview.Reserved}
 			stop := probe()
 			defer stop()
 			var refused firewallIntent

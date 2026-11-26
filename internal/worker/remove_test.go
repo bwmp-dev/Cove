@@ -22,6 +22,8 @@ func TestRemovalPreservesRunningWorkloadsAndStorage(t *testing.T) {
 				case args[1] == "ps":
 					_, err := fmt.Fprintf(out, `{"ID":"owned-container","State":%q}`, state)
 					return err
+				case command == "docker image ls --all --quiet --no-trunc --filter reference=cove-release/app:*":
+					return nil
 				case strings.HasPrefix(command, "docker network ls"):
 					_, err := io.WriteString(out, "owned-network")
 					return err

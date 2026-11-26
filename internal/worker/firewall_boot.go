@@ -61,6 +61,13 @@ func RunFirewallRestore(ctx context.Context, root, owner string) error {
 		return err
 	}
 	err = cleanupFirewallArming(ctx, scope, owner, snapshotHostCommand)
+	if err == nil {
+		state, stateErr := readFirewallJournal(scope, owner)
+		err = stateErr
+		if err == nil && state.Removed {
+			err = cleanupFirewallManagement(ctx, scope, owner, snapshotHostCommand)
+		}
+	}
 	cleanupUnlock()
 	if err != nil {
 		return err

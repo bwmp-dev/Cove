@@ -219,9 +219,13 @@ function PolicyStatus({ status, unreadable }: { status: ImageUpdatePolicyStatus;
         ]}
       />
       {!updates && !status.last_check_id && configuration.enabled && <p className="text-xs text-fg-muted">The next Check images or hourly image check looks for updates with these rules.</p>}
+      {!updates && status.freshness_message && <p className="text-xs break-words text-fg-muted">{status.freshness_message}</p>}
       {previous && (
         <Notice tone="warn" title="Result is from before the latest change">
-          The policy, the saved configuration or the running release changed after this check, so it may not describe what is deployed now. The next Check images or hourly image check replaces it.
+          <p>
+            The policy, the saved configuration or the running release changed after this check, so it may not describe what is deployed now. The next Check images or hourly image check replaces it.
+          </p>
+          {status.freshness_message && <p className="mt-1 break-words">{status.freshness_message}</p>}
         </Notice>
       )}
       {updates && <UpdateResult state={updates.state} message={updates.message} candidates={updates.candidates} mode={configuration.mode} previous={previous} />}

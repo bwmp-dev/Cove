@@ -269,6 +269,10 @@ func (s *Server) imageUpdatePolicyMetadata(ctx context.Context, id string, statu
 	}
 	sort.Slice(services, func(i, j int) bool { return services[i].Service < services[j].Service })
 	stale := true
+	freshness := ""
+	if policy, ok := status["configuration"].(worker.ImageUpdatePolicy); ok && policy.Enabled && eligible && supported && status["ownership_required"] != true {
+		freshness = "Run an image check for the current policy and configuration."
+	}
 	if check, ok := status["last_check_id"].(*string); ok && check != nil {
 		var payload []byte
 		var newer, unconfirmed bool
@@ -285,12 +289,16 @@ func (s *Server) imageUpdatePolicyMetadata(ctx context.Context, id string, statu
 			return err
 		}
 		configurationCurrent := request.ImageUpdates != nil && request.ImageUpdates.Configuration == imageUpdateConfigurationHash(encrypted)
+		if configurationCurrent {
+			freshness = ""
+		}
 		stale = newer || !configurationCurrent
 		if configurationCurrent && !unconfirmed && markRetainedImageUpdatesApplied(status, request.ImageUpdates.Images) {
 			stale = false
 		}
 	}
 	status["stale"] = stale
+	status["freshness_message"] = freshness
 	status["services"] = services
 	status["eligible"] = eligible
 	status["unavailable_reason"] = reason

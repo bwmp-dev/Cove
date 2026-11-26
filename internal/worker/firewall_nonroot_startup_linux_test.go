@@ -112,10 +112,13 @@ func TestHostFirewallNonRootStartupOnOwnedLinuxVM(t *testing.T) {
 		denied          bool
 		snapshots       bool
 		pendingSnapshot bool
+		removal         bool
 	}{
 		{name: "directory-absent"},
 		{name: "root-only-directory", scope: true},
 		{name: "root-only-marker", scope: true, marker: true},
+		{name: "root-only-removal-checkpoint", scope: true, removal: true},
+		{name: "helper-failure-with-removal-checkpoint", scope: true, removal: true, denied: true},
 		{name: "helper-failure-without-marker", scope: true, denied: true},
 		{name: "helper-failure-with-marker", scope: true, marker: true, denied: true},
 		{name: "root-only-snapshot-directory", snapshots: true},
@@ -163,6 +166,17 @@ func TestHostFirewallNonRootStartupOnOwnedLinuxVM(t *testing.T) {
 				}
 			}
 			checkpoint := filepath.Join(scope, "firewall-arming.json")
+			removalCheckpoint := filepath.Join(scope, "firewall.json")
+			if scenario.removal {
+				if err := writeJSON(removalCheckpoint, firewallJournal{Owner: owner, Removed: true, Rules: []FirewallRule{}}); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"firewall.nft", "firewall-reverter"} {
+					if err := os.WriteFile(filepath.Join(scope, name), []byte("owned removal residue"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			if scenario.snapshots {
 				if err := os.Mkdir(snapshotScope(root), 0700); err != nil {
 					t.Fatal(err)
@@ -241,6 +255,7 @@ func TestHostFirewallNonRootStartupOnOwnedLinuxVM(t *testing.T) {
 				}
 				args = append(args, testBinary, "-test.run=^TestHostFirewallNonRootStartupOnOwnedLinuxVM$", "-test.v", "-test.timeout=90s")
 				before, _ := os.ReadFile(checkpoint)
+				removalBefore, _ := os.ReadFile(removalCheckpoint)
 				if _, err := snapshotHostCommand(ctx, args...); err != nil {
 					t.Fatal("start non-root process", err)
 				}
@@ -272,6 +287,13 @@ func TestHostFirewallNonRootStartupOnOwnedLinuxVM(t *testing.T) {
 						if _, err := os.Lstat(checkpoint); !os.IsNotExist(err) {
 							t.Fatal("RPC opened before arming recovery completed", err)
 						}
+						if scenario.removal {
+							for _, name := range []string{"firewall.json", "firewall.nft", "firewall-reverter"} {
+								if _, err := os.Lstat(filepath.Join(scope, name)); !os.IsNotExist(err) {
+									t.Fatal("RPC opened before firewall removal cleanup", name, err)
+								}
+							}
+						}
 						if scenario.snapshots {
 							index, err := snapshotIndex(root, owner)
 							if err != nil || len(index.Workloads) != 0 {
@@ -294,6 +316,12 @@ func TestHostFirewallNonRootStartupOnOwnedLinuxVM(t *testing.T) {
 							t.Fatal("unexpected non-root startup failure", err, state, log)
 						}
 						after, _ := os.ReadFile(checkpoint)
+						if scenario.removal {
+							removalAfter, err := os.ReadFile(removalCheckpoint)
+							if err != nil || !bytes.Equal(removalBefore, removalAfter) {
+								t.Fatal("failed helper lost the committed removal checkpoint", err)
+							}
+						}
 						if !bytes.Equal(before, after) {
 							t.Fatal("failed helper lost its arming checkpoint")
 						}

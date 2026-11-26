@@ -16,7 +16,7 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 	if os.Getenv("COVE_TEST_DELETION_DOCKER") != "1" {
 		t.Skip("set COVE_TEST_DELETION_DOCKER=1 in an owned Docker fixture with cached busybox and Restic images")
 	}
-	for _, scenario := range []string{"generated", "user-named", "shared", "backup", "bind", "no-container-bind"} {
+	for _, scenario := range []string{"generated", "user-named", "shared", "backup", "bind", "no-container-bind", "pulled-only", "pulled-user-named"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 			defer cancel()
@@ -101,7 +101,11 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 			if scenario == "user-named" {
 				tag = "cove-removal-user-" + owner + ":chosen"
 			}
-			docker("commit", "--change", "LABEL dev.cove.build-owner="+owner, "--change", "LABEL com.docker.compose.project=cove-"+id, "--change", "LABEL com.docker.compose.service=app", seed, tag)
+			if strings.HasPrefix(scenario, "pulled-") {
+				docker("commit", seed, tag)
+			} else {
+				docker("commit", "--change", "LABEL dev.cove.build-owner="+owner, "--change", "LABEL com.docker.compose.project=cove-"+id, "--change", "LABEL com.docker.compose.service=app", seed, tag)
+			}
 			image := docker("image", "inspect", "--format", "{{.Id}}", tag)
 			docker("rm", seed)
 			dir := filepath.Join(e.Root, "workloads", id)
@@ -159,6 +163,14 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 			if scenario == "shared" {
 				docker("run", "-d", "--pull", "never", "--name", "cove-removal-shared-"+owner, "--label", "cove.removal.fixture="+owner, "--label", "com.docker.compose.project=cove-other-"+owner, tag, "sleep", "600")
 			}
+			if strings.HasPrefix(scenario, "pulled-") {
+				if err := os.Remove(filepath.Join(e.Root, "build-owner.json")); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "pulled-only" {
+					docker("image", "rm", tag)
+				}
+			}
 			if err := os.WriteFile(filepath.Join(dir, "disposable.log"), []byte("discard"), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -169,26 +181,34 @@ func TestWorkloadDeletionDocker(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dir, "disposable.log")); !os.IsNotExist(err) {
 				t.Fatal("disposable state remains", err)
 			}
-			if scenario == "generated" || scenario == "user-named" || scenario == "shared" {
+			if scenario == "generated" || scenario == "user-named" || scenario == "shared" || strings.HasPrefix(scenario, "pulled-") {
 				if _, err := os.Stat(dir); !os.IsNotExist(err) || result.WorkerFilesRetained {
 					t.Fatal("unused state tree remains", result, err)
 				}
 			}
 			remaining := docker("image", "ls", "--all", "--quiet", "--no-trunc")
-			if scenario == "generated" || scenario == "bind" || scenario == "no-container-bind" {
+			if scenario == "generated" || scenario == "bind" || scenario == "no-container-bind" || scenario == "pulled-only" {
 				if strings.Contains(remaining, image) {
 					t.Fatal("generated-only image remains")
 				}
 			} else if !strings.Contains(remaining, image) {
 				t.Fatal("named, shared or backup-referenced image was removed")
 			}
-			if scenario == "user-named" && docker("image", "inspect", "--format", "{{.Id}}", tag) != image {
+			if (scenario == "user-named" || scenario == "pulled-user-named") && docker("image", "inspect", "--format", "{{.Id}}", tag) != image {
 				t.Fatal("user-chosen tag changed")
+			}
+			if strings.HasPrefix(scenario, "pulled-") {
+				if tags := docker("image", "ls", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=cove-release/"+id+":*"); tags != "" {
+					t.Fatal("pulled resource left its own release tags", tags)
+				}
 			}
 			if scenario == "shared" && docker("inspect", "--format", "{{.State.Running}}", "cove-removal-shared-"+owner) != "true" {
 				t.Fatal("other workload container changed")
 			}
 			if scenario == "bind" || scenario == "no-container-bind" {
+				if !strings.Contains(result.WorkerFilesRetainedReason, "Bind-mounted data") {
+					t.Fatal("retained bind data lacks an explanation", result)
+				}
 				if raw, err := os.ReadFile(filepath.Join(bindPath, "value")); err != nil || strings.TrimSpace(string(raw)) != "deletion-value" {
 					t.Fatal("bind data changed", err)
 				}

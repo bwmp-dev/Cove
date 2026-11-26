@@ -17,13 +17,17 @@ export interface FirewallResult {
   supported: boolean;
   // Cove's own table exists on the host; it says nothing about the health of the rest of the firewall.
   active: boolean;
+  // Cove's protected firewall state exists on the host, including an empty policy or leftover boot and recovery files.
+  managed?: boolean;
+  // Missing from workers that predate stopping firewall management.
+  remove_supported?: boolean;
   rules: FirewallRule[] | null;
   available: FirewallPort[] | null;
   reserved: number[] | null;
   // Set only by preview: binds the exact current table, ports and desired rules.
   revision: string;
   // An applied change that the panel has not confirmed yet; the host reverts it independently.
-  pending?: { id: string; deadline: string };
+  pending?: { id: string; deadline: string; remove?: boolean };
   ufw: string;
   nftables: string;
   limited: boolean;
@@ -61,6 +65,15 @@ export function usePreviewFirewall(nodeId: string) {
   });
 }
 
+// Removal has its own preview so its revision can never be confused with a policy preview's.
+export function usePreviewFirewallRemoval(nodeId: string) {
+  return useMutation({
+    mutationKey: firewallMutationKey(nodeId),
+    mutationFn: () => request<FirewallResult>("POST", `${firewallPath(nodeId)}/preview`, { remove: true }),
+    gcTime: 0,
+  });
+}
+
 // A successful response is the host's read-back state. The caller still re-inspects after every outcome, because an error can follow an applied change.
 export function useApplyFirewall(nodeId: string) {
   const client = useQueryClient();
@@ -77,6 +90,16 @@ export function useRevertFirewall(nodeId: string) {
   return useMutation({
     mutationKey: firewallMutationKey(nodeId),
     mutationFn: () => request<FirewallResult>("POST", firewallPath(nodeId), { revert: true, confirm: true }),
+    onSuccess: (result) => client.setQueryData(firewallKey(nodeId), result),
+    gcTime: 0,
+  });
+}
+
+export function useRemoveFirewall(nodeId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: firewallMutationKey(nodeId),
+    mutationFn: (revision: string) => request<FirewallResult>("POST", firewallPath(nodeId), { remove: true, revision, confirm: true }),
     onSuccess: (result) => client.setQueryData(firewallKey(nodeId), result),
     gcTime: 0,
   });

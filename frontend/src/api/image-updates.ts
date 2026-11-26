@@ -59,6 +59,8 @@ export interface ImageUpdatePolicyStatus {
   checked_at: string | null;
   // The result predates the saved configuration or a newer lifecycle attempt, or no usable check exists.
   stale: boolean;
+  // What to do about a stale result, such as running a check after the configuration changed. Empty when not reported.
+  freshness_message: string;
   updates: ImageUpdateResult | null;
   // Whoever last saved the policy no longer holds Edit configuration and Operate access, whether or not it is on.
   // Version discovery, notifications and automatic deploys wait until that access returns or someone saves it again.
@@ -103,6 +105,7 @@ function metadata(status: ImageUpdatePolicyStatus): ImageUpdatePolicyStatus {
     last_error: status.last_error ?? "",
     checked_at: status.checked_at ?? null,
     stale: status.stale !== false,
+    freshness_message: status.freshness_message ?? "",
     updates: updates ? { state: updates.state, message: updates.message, candidates: updates.candidates ?? [] } : null,
     ownership_required: status.ownership_required === true,
     retained_images: retainedImages(status.retained_images),

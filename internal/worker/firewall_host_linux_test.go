@@ -20,7 +20,7 @@ import (
 )
 
 func TestHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T) {
-	testHostFirewallTimedRevertOnOwnedLinuxVM(t, nil, false)
+	testHostFirewallTimedRevertOnOwnedLinuxVM(t, nil, false, false)
 }
 
 func TestHostFirewallRevertSurvivesManagerChangesOnOwnedLinuxVM(t *testing.T) {
@@ -33,16 +33,16 @@ func TestHostFirewallRevertSurvivesManagerChangesOnOwnedLinuxVM(t *testing.T) {
 		{"both", []string{"daemon-reload", "daemon-reexec"}},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			testHostFirewallTimedRevertOnOwnedLinuxVM(t, fixture.commands, false)
+			testHostFirewallTimedRevertOnOwnedLinuxVM(t, fixture.commands, false, false)
 		})
 	}
 }
 
 func TestHostFirewallArmingRefusalOnOwnedLinuxVM(t *testing.T) {
-	testHostFirewallTimedRevertOnOwnedLinuxVM(t, nil, true)
+	testHostFirewallTimedRevertOnOwnedLinuxVM(t, nil, true, false)
 }
 
-func testHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T, managerChanges []string, armingRefusals bool) {
+func testHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T, managerChanges []string, armingRefusals, removal bool) {
 	binary := os.Getenv("COVE_TEST_FIREWALL_BINARY")
 	if os.Getenv("COVE_TEST_OWNED_HOST_INSPECTION") != "1" || os.Geteuid() != 0 || binary == "" {
 		t.Skip("explicit disposable root Linux VM and worker binary required")
@@ -50,6 +50,9 @@ func testHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T, managerChanges []st
 	timeout := 4 * time.Minute
 	if armingRefusals {
 		timeout = 10 * time.Minute
+	}
+	if removal {
+		timeout = 12 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
@@ -155,6 +158,11 @@ func testHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T, managerChanges []st
 	_, management := serve()
 	var applyProbes sync.WaitGroup
 	t.Cleanup(applyProbes.Wait)
+	t.Cleanup(func() {
+		if t.Failed() {
+			logFirewallTestDiagnostics(t, ctx, root, owner, namespace, hostLink, management)
+		}
+	})
 	request := func(requestContext context.Context, port uint16) error {
 		detail, err := firewallTestRequest(requestContext, namespace, port)
 		if err != nil && port == management {
@@ -216,8 +224,8 @@ func testHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T, managerChanges []st
 	}
 	call := func(control FirewallControl) FirewallResult {
 		t.Helper()
-		control.Available = []FirewallPort{{Protocol: "tcp", Port: application}, {Protocol: "tcp", Port: management}}
-		control.Reserved = []uint16{22, management}
+		control.Available = []FirewallPort{{Protocol: "tcp", Port: application}, {Protocol: "tcp", Port: management}, {Protocol: "tcp", Port: 80}, {Protocol: "tcp", Port: 443}}
+		control.Reserved = []uint16{22, management, 80, 443}
 		input, err := json.Marshal(firewallHostRequest{Root: root, Owner: owner, Control: control})
 		if err != nil {
 			t.Fatal(err)
@@ -246,10 +254,19 @@ func testHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T, managerChanges []st
 		if json.Unmarshal(output, &response) != nil || response.Error != "" || !response.State.Supported {
 			t.Fatal("native firewall change refused", response.Error, response.State.Notice)
 		}
+		for _, port := range response.State.Available {
+			if port.Port == 80 || port.Port == 443 || port.Port == management {
+				t.Fatal("reserved port offered as openable", port)
+			}
+		}
 		if control.Action == "apply" {
 			t.Logf("firewall apply=%d active=%v pending=%v", applyNumber, response.State.Active, response.State.Pending != nil)
 		}
 		return response.State
+	}
+	if removal {
+		testFirewallRemoval(t, ctx, root, owner, binary, application, management, call, request)
+		return
 	}
 	if armingRefusals {
 		testFirewallArmingRefusals(t, ctx, root, owner, binary, application, management, namespace, call, probeApply)
@@ -320,6 +337,7 @@ func testHostFirewallTimedRevertOnOwnedLinuxVM(t *testing.T, managerChanges []st
 	if err = request(ctx, application); err != nil {
 		t.Fatal("independent systemd recovery did not restore the application", err)
 	}
+	waitFirewallRecoveryComplete(t, ctx, owner)
 	inspected := call(FirewallControl{Action: "inspect"})
 	if inspected.Pending != nil || inspected.Active {
 		t.Fatal("timed recovery left its temporary policy pending", inspected)
@@ -396,7 +414,13 @@ func logFirewallTestDiagnostics(t *testing.T, ctx context.Context, root, owner, 
 	diagnostic, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	port := fmt.Sprint(management)
+	if state, err := readFirewallJournal(filepath.Join(root, "host-maintenance"), owner); err != nil {
+		t.Log("firewall diagnostic journal read", err)
+	} else {
+		t.Logf("firewall diagnostic protected state removed=%v generation=%s pending=%+v", state.Removed, state.Generation, state.Pending)
+	}
 	for _, args := range [][]string{
+		{"/usr/bin/journalctl", "--no-pager", "-u", firewallUnit(owner) + ".service", "-u", firewallBootUnit(owner), "-n", "80"},
 		{"/usr/sbin/nft", "--handle", "list", "table", "inet", firewallTable(owner)},
 		{"/usr/sbin/nft", "--json", "list", "tables"},
 		{"/usr/sbin/ip", "-json", "route", "list"},

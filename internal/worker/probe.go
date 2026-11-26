@@ -41,6 +41,7 @@ type Probe struct {
 	WorkloadMoves        bool                `json:"workload_moves"`
 	GPUAssignments       bool                `json:"gpu_assignments"`
 	ResourceDefaults     bool                `json:"resource_defaults"`
+	FirewallRemove       bool                `json:"firewall_remove"`
 	Firewall             bool                `json:"firewall"`
 	HostMaintenance      bool                `json:"host_maintenance"`
 	SSHIdentity          bool                `json:"ssh_identity"`
@@ -130,6 +131,7 @@ func Inspect(ctx context.Context) Probe {
 	p.SSHIdentity = runtime.GOOS == "linux"
 	p.HostMaintenance = runtime.GOOS == "linux"
 	p.Firewall = runtime.GOOS == "linux"
+	p.FirewallRemove = runtime.GOOS == "linux"
 	p.CapacityAdvice = true
 	p.ResourceDefaults = true
 	p.GPUAssignments = runtime.GOOS == "linux"

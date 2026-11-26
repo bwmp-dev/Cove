@@ -808,15 +808,18 @@ func (e *Engine) Listen(ctx context.Context, socket string) error {
 	}
 	defer unlock()
 	// The helper owns this root-only scope; an unprivileged daemon cannot rule out a pending checkpoint.
-	if _, err := os.Lstat(filepath.Join(e.Root, "host-maintenance", "firewall-arming.json")); err == nil || os.IsPermission(err) {
-		cleanup, cancelCleanup := context.WithTimeout(ctx, time.Minute)
-		_, err := e.runFirewallHost(cleanup, FirewallControl{Action: "recover"})
-		cancelCleanup()
-		if err != nil {
-			return fmt.Errorf("firewall arming recovery: %w", err)
+	for _, name := range []string{"firewall-arming.json", "firewall.json"} {
+		if _, err := os.Lstat(filepath.Join(e.Root, "host-maintenance", name)); err == nil || os.IsPermission(err) {
+			cleanup, cancelCleanup := context.WithTimeout(ctx, time.Minute)
+			_, err := e.runFirewallHost(cleanup, FirewallControl{Action: "recover"})
+			cancelCleanup()
+			if err != nil {
+				return fmt.Errorf("firewall arming recovery: %w", err)
+			}
+			break
+		} else if !os.IsNotExist(err) {
+			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return err
 	}
 	recovery, cancelRecovery := context.WithTimeout(ctx, time.Minute)
 	err = e.recoverBackupTransfersOnStartup(recovery)

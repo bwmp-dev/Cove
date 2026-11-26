@@ -188,7 +188,7 @@ func TestDeletionPreservesBindDataIncludingServicesWithoutContainers(t *testing.
 				return original(ctx, cwd, args, env, out)
 			}
 			result, err := e.RemoveWorkload(t.Context(), "app")
-			if err != nil || !result.WorkerFilesRetained || result.CleanupWarning != "" {
+			if err != nil || !result.WorkerFilesRetained || result.CleanupWarning != "" || !strings.Contains(result.WorkerFilesRetainedReason, "Bind-mounted data") {
 				t.Fatal(result, err)
 			}
 			if raw, err := os.ReadFile(sentinel); err != nil || string(raw) != "untouched" {

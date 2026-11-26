@@ -17,6 +17,7 @@ import (
 )
 
 type FirewallControl struct {
+	Remove    bool           `json:"remove,omitempty"`
 	Action    string         `json:"action"`
 	Rules     []FirewallRule `json:"rules"`
 	Reserved  []uint16       `json:"reserved"`
@@ -26,23 +27,26 @@ type FirewallControl struct {
 }
 
 type FirewallPending struct {
+	Remove   bool      `json:"remove,omitempty"`
 	ID       string    `json:"id"`
 	Deadline time.Time `json:"deadline"`
 }
 
 type FirewallResult struct {
-	Supported bool             `json:"supported"`
-	Active    bool             `json:"active"`
-	Rules     []FirewallRule   `json:"rules"`
-	Available []FirewallPort   `json:"available"`
-	Reserved  []uint16         `json:"reserved"`
-	Revision  string           `json:"revision"`
-	Pending   *FirewallPending `json:"pending,omitempty"`
-	UFW       string           `json:"ufw"`
-	NFTables  string           `json:"nftables"`
-	Limited   bool             `json:"limited"`
-	Notice    string           `json:"notice"`
-	LastError string           `json:"last_error"`
+	Managed         bool             `json:"managed"`
+	RemoveSupported bool             `json:"remove_supported"`
+	Supported       bool             `json:"supported"`
+	Active          bool             `json:"active"`
+	Rules           []FirewallRule   `json:"rules"`
+	Available       []FirewallPort   `json:"available"`
+	Reserved        []uint16         `json:"reserved"`
+	Revision        string           `json:"revision"`
+	Pending         *FirewallPending `json:"pending,omitempty"`
+	UFW             string           `json:"ufw"`
+	NFTables        string           `json:"nftables"`
+	Limited         bool             `json:"limited"`
+	Notice          string           `json:"notice"`
+	LastError       string           `json:"last_error"`
 }
 
 func firewallUnit(owner string) string { return "cove-firewall-revert-" + firewallTable(owner) }
@@ -94,10 +98,11 @@ func inspectHostSSHPorts(ctx context.Context, run snapshotCommand) ([]uint16, er
 func firewallRevision(owner, digest string, control FirewallControl) string {
 	data, _ := json.Marshal(struct {
 		Owner, Digest string
+		Remove        bool
 		Rules         []FirewallRule
 		Available     []FirewallPort
 		Reserved      []uint16
-	}{owner, digest, control.Rules, control.Available, control.Reserved})
+	}{owner, digest, control.Remove, control.Rules, control.Available, control.Reserved})
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
@@ -117,17 +122,13 @@ func stopFirewallTimer(ctx context.Context, owner string, run snapshotCommand) e
 }
 
 func runHostFirewall(ctx context.Context, root, owner string, control FirewallControl, run snapshotCommand) (FirewallResult, error) {
-	result := FirewallResult{Rules: []FirewallRule{}, Available: control.Available, Reserved: control.Reserved}
+	available := slices.DeleteFunc(slices.Clone(control.Available), func(port FirewallPort) bool { return slices.Contains(control.Reserved, port.Port) })
+	result := FirewallResult{RemoveSupported: true, Rules: []FirewallRule{}, Available: available, Reserved: control.Reserved}
+	if control.Remove && (len(control.Rules) != 0 || control.Action != "preview" && control.Action != "apply" && control.Action != "confirm" && control.Action != "revert") {
+		return result, errors.New("firewall removal cannot include rules or another action")
+	}
 	if control.Action != "recover" && control.Action != "inspect" && control.Action != "preview" && control.Action != "apply" && control.Action != "confirm" && control.Action != "revert" {
 		return result, errors.New("invalid firewall action")
-	}
-	if control.Action == "revert" {
-		if err := revertFirewall(ctx, root, owner, "", run); err != nil {
-			return result, err
-		}
-		if err := stopFirewallTimer(ctx, owner, run); err != nil {
-			return result, err
-		}
 	}
 	scope, err := hostPolicyScope(root, owner)
 	if err != nil {
@@ -141,12 +142,40 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 	if err := cleanupFirewallArming(ctx, scope, owner, run); err != nil {
 		return result, errors.New("firewall arming cleanup is pending; inspect host recovery before changing the firewall")
 	}
+	state, err := readFirewallJournal(scope, owner)
+	if err != nil {
+		return result, err
+	}
+	if control.Action == "revert" {
+		if control.Intent != "" && (state.Pending == nil || control.Intent != state.Pending.ID) {
+			return result, errors.New("firewall rollback is stale; the current policy and recovery were left unchanged")
+		}
+		if state.Pending != nil {
+			if err := revertFirewallLocked(ctx, scope, owner, control.Intent, run); err != nil {
+				return result, err
+			}
+			if err := stopFirewallTimer(ctx, owner, run); err != nil {
+				return result, err
+			}
+			state, err = readFirewallJournal(scope, owner)
+			if err != nil {
+				return result, err
+			}
+		}
+	}
+	if state.Removed {
+		if err := cleanupFirewallManagement(ctx, scope, owner, run); err != nil {
+			return result, err
+		}
+		state = firewallJournal{Owner: owner, Rules: []FirewallRule{}}
+	}
 	if control.Action == "recover" {
 		result.Supported = true
 		return result, nil
 	}
-	state, err := readFirewallJournal(scope, owner)
-	if err != nil {
+	if _, err := os.Lstat(filepath.Join(scope, "firewall.json")); err == nil {
+		result.Managed = true
+	} else if !os.IsNotExist(err) {
 		return result, err
 	}
 	result.Rules, result.LastError = state.Rules, state.LastError
@@ -156,6 +185,7 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 		return result, nil
 	}
 	result.Active = present
+	result.Managed = result.Managed || present
 	if present && comment != firewallGenerationComment(owner, state.Generation) && (state.Pending == nil || comment != firewallGenerationComment(owner, state.Pending.ID)) {
 		return result, errors.New("Cove firewall table ownership differs from its protected journal")
 	}
@@ -185,14 +215,18 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 	slices.Sort(control.Reserved)
 	control.Reserved = slices.Compact(control.Reserved)
 	result.Reserved = control.Reserved
+	control.Available = slices.DeleteFunc(slices.Clone(control.Available), func(port FirewallPort) bool { return slices.Contains(control.Reserved, port.Port) })
+	result.Available = control.Available
 	if _, err = os.Stat("/run/systemd/system"); err != nil {
 		result.Notice = "A running host systemd manager is required for independent timed firewall recovery."
 		return result, nil
 	}
 	result.Supported = true
 	if pending := state.Pending; pending != nil {
-		result.Pending = &FirewallPending{ID: pending.ID, Deadline: pending.Deadline}
-		if present && comment == firewallGenerationComment(owner, pending.ID) {
+		result.Pending = &FirewallPending{ID: pending.ID, Deadline: pending.Deadline, Remove: pending.Remove}
+		if pending.Remove && !present {
+			result.Rules = []FirewallRule{}
+		} else if present && comment == firewallGenerationComment(owner, pending.ID) {
 			result.Rules = pending.Desired
 		}
 		if control.Action != "confirm" && control.Action != "inspect" {
@@ -200,8 +234,15 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 		}
 	}
 	if control.Action == "confirm" {
-		if state.Pending == nil || control.Intent != state.Pending.ID || !time.Now().Before(state.Pending.Deadline) || !present || comment != firewallGenerationComment(owner, control.Intent) || state.Pending.Digest == "" || state.Pending.Digest != digest {
+		if state.Pending == nil || control.Intent != state.Pending.ID || control.Remove != state.Pending.Remove || !time.Now().Before(state.Pending.Deadline) || state.Pending.Remove && present || !state.Pending.Remove && (!present || comment != firewallGenerationComment(owner, control.Intent) || state.Pending.Digest == "" || state.Pending.Digest != digest) {
 			return result, errors.New("firewall confirmation is stale or its owned table changed; inspect recovery status")
+		}
+		if state.Pending.Remove {
+			if err := commitFirewallRemoval(ctx, scope, owner, run); err != nil {
+				return result, err
+			}
+			result.Active, result.Managed, result.Pending, result.Rules, result.LastError = false, false, nil, []FirewallRule{}, ""
+			return result, nil
 		}
 		state.Reserved = state.Pending.Reserved
 		state.Rules, state.Generation, state.Digest, state.Pending, state.LastError = state.Pending.Desired, state.Pending.ID, digest, nil, ""
@@ -235,7 +276,12 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 	if err != nil {
 		return result, err
 	}
-	filename, err := writeFirewallBatch(scope, owner, id, control.Rules, present)
+	var filename string
+	if control.Remove {
+		filename, err = writeFirewallRemovalBatch(scope, owner, present)
+	} else {
+		filename, err = writeFirewallBatch(scope, owner, id, control.Rules, present)
+	}
 	if err != nil {
 		return result, err
 	}
@@ -244,27 +290,30 @@ func runHostFirewall(ctx context.Context, root, owner string, control FirewallCo
 	}
 	result.Rules = control.Rules
 	if control.Action == "preview" {
+		if control.Remove {
+			result.Rules = state.Rules
+		}
 		return result, nil
 	}
 	binary, err := prepareFirewallReverter(scope)
 	if err != nil {
 		return result, err
 	}
-	state.Pending = &firewallIntent{ID: id, Previous: state.Rules, PreviousPresent: present, Desired: control.Rules, Reserved: control.Reserved, AttemptBound: true}
+	state.Pending = &firewallIntent{ID: id, Previous: state.Rules, PreviousPresent: present, Desired: control.Rules, Reserved: control.Reserved, AttemptBound: true, Remove: control.Remove}
 	if err = armFirewallRecovery(ctx, root, owner, scope, binary, state, run); err != nil {
 		return result, err
 	}
 	if _, err = run(ctx, "/usr/sbin/nft", "--file", filename); err != nil {
 		return result, errors.New("firewall apply could not be confirmed; independent recovery remains armed")
 	}
-	_, appliedComment, appliedDigest, err := inspectFirewallTable(ctx, owner, run)
-	if err != nil || appliedComment != firewallGenerationComment(owner, id) {
+	appliedPresent, appliedComment, appliedDigest, err := inspectFirewallTable(ctx, owner, run)
+	if err != nil || control.Remove && appliedPresent || !control.Remove && (!appliedPresent || appliedComment != firewallGenerationComment(owner, id)) {
 		return result, errors.New("firewall apply receipt could not be verified; independent recovery remains armed")
 	}
 	state.Pending.Digest = appliedDigest
 	if err = writeJSON(filepath.Join(scope, "firewall.json"), state); err != nil {
 		return result, err
 	}
-	result.Active, result.Pending = true, &FirewallPending{ID: id, Deadline: state.Pending.Deadline}
+	result.Active, result.Managed, result.Pending = !control.Remove, true, &FirewallPending{ID: id, Deadline: state.Pending.Deadline, Remove: control.Remove}
 	return result, nil
 }

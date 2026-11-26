@@ -1,10 +1,35 @@
 import { useIsMutating, useQuery } from "@tanstack/react-query";
-import { Eye, Pencil, Plus, RotateCcw, RotateCw, Search, Trash2 } from "lucide-react";
-import { useId, useRef, useState, type FormEvent } from "react";
+import { Eye, Pencil, Plus, RotateCcw, RotateCw, Search, ShieldOff, Trash2 } from "lucide-react";
+import { useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
-import { firewallMutationKey, firewallQuery, useApplyFirewall, usePreviewFirewall, useRevertFirewall, type FirewallPort, type FirewallResult, type FirewallRuleInput } from "../api/firewall";
+import {
+  firewallMutationKey,
+  firewallQuery,
+  useApplyFirewall,
+  usePreviewFirewall,
+  usePreviewFirewallRemoval,
+  useRemoveFirewall,
+  useRevertFirewall,
+  type FirewallPort,
+  type FirewallResult,
+  type FirewallRuleInput,
+} from "../api/firewall";
 import type { Node } from "../api/types";
-import { definiteRefusal, draftsFromRules, firewallBlocker, firewallState, maxFirewallRules, portKey, portLabel, removedPorts, selectablePorts, validateDrafts, type RuleDraft } from "../lib/firewall";
+import {
+  definiteRefusal,
+  draftsFromRules,
+  firewallBlocker,
+  firewallManaged,
+  firewallState,
+  maxFirewallRules,
+  portKey,
+  portLabel,
+  removalUnavailable,
+  removedPorts,
+  selectablePorts,
+  validateDrafts,
+  type RuleDraft,
+} from "../lib/firewall";
 import { formatAbsolute } from "../lib/format";
 import { useNow, useOnline } from "../lib/hooks";
 import { describedBy, inputClass } from "../lib/styles";
@@ -26,7 +51,9 @@ type PreviewSnapshot = {
   revision: string;
   notice: string;
 };
-type Outcome = { kind: "apply" | "revert"; error?: unknown };
+type Outcome = { kind: "apply" | "revert" | "remove"; error?: unknown };
+
+const outcomeActions: Record<Outcome["kind"], string> = { apply: "firewall change", revert: "revert", remove: "request to stop managing the firewall" };
 
 function Sources({ rule }: { rule: FirewallRuleInput }) {
   if (rule.sources.length === 0) return <span className="text-warn">Denies all new connections</span>;
@@ -78,13 +105,13 @@ function HostOutput({ label, text }: { label: string; text: string }) {
   );
 }
 
-function PendingChange({ deadline, disabled, onRevert }: { deadline: string; disabled: boolean; onRevert: () => void }) {
+function PendingChange({ deadline, remove, disabled, onRevert }: { deadline: string; remove: boolean; disabled: boolean; onRevert: () => void }) {
   const now = useNow(15_000);
   const passed = Date.parse(deadline) <= now;
   return (
     <Notice
       tone="warn"
-      title="Unconfirmed firewall change"
+      title={remove ? "Unconfirmed stop of firewall management" : "Unconfirmed firewall change"}
       action={
         <Button size="sm" variant="danger" disabled={disabled} onClick={onRevert}>
           <RotateCcw aria-hidden className="size-3.5" />
@@ -93,8 +120,10 @@ function PendingChange({ deadline, disabled, onRevert }: { deadline: string; dis
       }
     >
       <p>
-        The host applied a change that the panel has not confirmed. Cove's independent timer on the host reverts it by {formatAbsolute(deadline)} unless it is confirmed. This page does not count down;
-        inspect again to see the current state.
+        {remove
+          ? "The host stopped Cove's firewall management, but the panel has not confirmed it. Cove's independent timer on the host restores the previous policy"
+          : "The host applied a change that the panel has not confirmed. Cove's independent timer on the host reverts it"}{" "}
+        by {formatAbsolute(deadline)} unless it is confirmed. This page does not count down; inspect again to see the current state.
       </p>
       {passed && <p className="mt-1">That deadline has passed. Inspect again to check that the host reverted the change.</p>}
       <p className="mt-1">Editing is unavailable until the change is confirmed or reverted.</p>
@@ -103,12 +132,20 @@ function PendingChange({ deadline, disabled, onRevert }: { deadline: string; dis
 }
 
 function OutcomeNotice({ outcome }: { outcome: Outcome }) {
-  const action = outcome.kind === "apply" ? "firewall change" : "revert";
+  const action = outcomeActions[outcome.kind];
   if (outcome.error === undefined) {
     if (outcome.kind === "revert") {
       return (
         <Notice tone="success" title="Unconfirmed change reverted">
           The previous Cove policy was restored. The status above was inspected again.
+        </Notice>
+      );
+    }
+    if (outcome.kind === "remove") {
+      return (
+        <Notice tone="success" title="Cove stopped managing this host's firewall">
+          <p>The panel reached the worker over a fresh connection, so the host kept the change. Cove's table, boot restoration and recovery files were removed, and Cove no longer restricts any port on this host.</p>
+          <p className="mt-1">UFW, other nftables tables and default policies were not changed and still apply. The status above was inspected again.</p>
         </Notice>
       );
     }
@@ -196,6 +233,55 @@ function RuleRow({
   );
 }
 
+// Firewall changes are confirmed by typing the node's name; submitting with Enter cannot bypass the disabled button.
+function NameConfirmation({
+  node,
+  online,
+  label,
+  danger,
+  blocked,
+  onCancel,
+  onConfirm,
+  children,
+}: {
+  node: Node;
+  online: boolean;
+  label: string;
+  danger?: boolean;
+  // Explains why the open preview can no longer be confirmed.
+  blocked?: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+  children: ReactNode;
+}) {
+  const id = useId();
+  const [typed, setTyped] = useState("");
+  const confirmed = typed === node.name;
+  const allowed = confirmed && online && !blocked;
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!allowed) return;
+    onConfirm();
+  }
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      {children}
+      <Field id={id} label={`Type ${node.name} to confirm`}>
+        <input id={id} className={`${inputClass} font-mono`} value={typed} onChange={(event) => setTyped(event.target.value)} autoComplete="off" spellCheck={false} required />
+      </Field>
+      {!online ? <Notice tone="warn">You are offline. Reconnect to apply the change.</Notice> : blocked && <Notice tone="warn">{blocked}</Notice>}
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" variant={danger ? "danger" : "primary"} disabled={!allowed}>
+          {label}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 function ApplyDialog({
   node,
   current,
@@ -211,22 +297,14 @@ function ApplyDialog({
   onCancel: () => void;
   onApply: (preview: PreviewSnapshot) => void;
 }) {
-  const id = useId();
-  const [typed, setTyped] = useState("");
   const removed = removedPorts(current, preview.rules);
-  const confirmed = typed === node.name;
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!confirmed || !online) return;
-    onApply(preview);
-  }
   return (
     <Dialog open title="Apply this firewall policy?" onClose={onCancel}>
-      <form onSubmit={submit} className="space-y-4">
+      <NameConfirmation node={node} online={online} label="Apply firewall change" onCancel={onCancel} onConfirm={() => onApply(preview)}>
         <div className="space-y-2">
           <p className="font-medium text-fg">Policy after the change</p>
           {preview.rules.length === 0 ? (
-            <p>No Cove rules. Cove will not restrict any published application port.</p>
+            <p>No Cove rules. Cove will not restrict any published application port, and it keeps managing this host's firewall with the empty policy.</p>
           ) : (
             <div className="max-h-64 overflow-auto">
               <RuleList rules={preview.rules} label="Previewed Cove rules" />
@@ -246,19 +324,49 @@ function ApplyDialog({
           The host arms an independent two-minute revert before applying. The panel then checks a fresh connection to the worker and keeps the change only if that succeeds. Existing connections stay
           open; UFW, other tables, default policies and management ports are not changed.
         </p>
-        <Field id={id} label={`Type ${node.name} to confirm`}>
-          <input id={id} className={`${inputClass} font-mono`} value={typed} onChange={(event) => setTyped(event.target.value)} autoComplete="off" spellCheck={false} required />
-        </Field>
-        {!online && <Notice tone="warn">You are offline. Reconnect to apply the change.</Notice>}
-        <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button type="submit" variant="primary" disabled={!confirmed || !online}>
-            Apply firewall change
-          </Button>
+      </NameConfirmation>
+    </Dialog>
+  );
+}
+
+function RemoveDialog({
+  node,
+  preview,
+  online,
+  blocked,
+  onCancel,
+  onRemove,
+}: {
+  node: Node;
+  preview: PreviewSnapshot;
+  online: boolean;
+  blocked: string | undefined;
+  onCancel: () => void;
+  onRemove: (revision: string) => void;
+}) {
+  return (
+    <Dialog open title="Stop managing this host's firewall?" onClose={onCancel}>
+      <NameConfirmation node={node} online={online} label="Stop managing firewall" danger blocked={blocked} onCancel={onCancel} onConfirm={() => onRemove(preview.revision)}>
+        <div className="space-y-2">
+          <p className="font-medium text-fg">Cove rules removed</p>
+          {preview.rules.length === 0 ? (
+            <p>No Cove rules. Cove's empty table, boot restoration and recovery files are still removed.</p>
+          ) : (
+            <div className="max-h-64 overflow-auto">
+              <RuleList rules={preview.rules} label="Cove rules to remove" />
+            </div>
+          )}
         </div>
-      </form>
+        <p>
+          Cove removes its own nftables table, boot restoration and recovery files. It then restricts no port on this host and restores nothing when the host restarts. UFW, other nftables tables and
+          default policies are not changed and still apply.
+        </p>
+        {preview.notice && <Notice tone="warn">{preview.notice}</Notice>}
+        <p>
+          The host arms an independent two-minute revert before removing anything. The panel then checks a fresh connection to the worker and keeps the change only if that succeeds; otherwise the host
+          restores the previous policy.
+        </p>
+      </NameConfirmation>
     </Dialog>
   );
 }
@@ -379,20 +487,18 @@ function RuleEditor({
 
 function StatusNotices({
   result,
-  apply,
-  revert,
+  running,
   outcome,
   revertDisabled,
   onRevert,
 }: {
   result: FirewallResult;
-  apply: boolean;
-  revert: boolean;
+  running: Outcome["kind"] | null;
   outcome: Outcome | null;
   revertDisabled: boolean;
   onRevert: () => void;
 }) {
-  const busy = apply || revert;
+  const busy = running !== null;
   return (
     // Always mounted so changes are announced; it collapses when it has nothing to show.
     <div className="space-y-2 p-4 empty:hidden" aria-live="polite">
@@ -401,13 +507,19 @@ function StatusNotices({
           {result.notice || "The host does not meet the prerequisites for Cove's firewall management."} Current rules and host output are shown read-only.
         </Notice>
       )}
-      {result.pending && !busy && <PendingChange deadline={result.pending.deadline} disabled={revertDisabled} onRevert={onRevert} />}
-      {apply && (
+      {result.pending && !busy && <PendingChange deadline={result.pending.deadline} remove={result.pending.remove === true} disabled={revertDisabled} onRevert={onRevert} />}
+      {running === "apply" && (
         <Notice title="Applying the firewall change">
           The host is applying the change and the panel is checking a fresh connection to the worker. If the panel cannot confirm it, the host reverts the change by itself within two minutes.
         </Notice>
       )}
-      {revert && <Notice title="Reverting the unconfirmed change">Waiting for the host to restore the previous policy.</Notice>}
+      {running === "remove" && (
+        <Notice title="Stopping firewall management">
+          The host is removing Cove's table with its independent recovery still armed, and the panel is checking a fresh connection to the worker. Boot restoration and recovery files are removed only
+          after the panel confirms that connection. If the panel cannot confirm it, the host restores the previous policy by itself within two minutes.
+        </Notice>
+      )}
+      {running === "revert" && <Notice title="Reverting the unconfirmed change">Waiting for the host to restore the previous policy.</Notice>}
       {outcome && !busy && <OutcomeNotice outcome={outcome} />}
       {result.last_error && !result.pending && (
         <Notice tone="warn" title="Last recovery note">
@@ -460,17 +572,105 @@ function CurrentRules({ rules, pending, nothingToRestrict }: { rules: FirewallRu
   );
 }
 
-function Inspection({ node, result, blocker, online, refresh }: { node: Node; result: FirewallResult; blocker: string | undefined; online: boolean; refresh: () => void }) {
+// Owns its own removal preview, so a removal revision is never confused with a policy preview's.
+function StopManaging({ node, result, blocked, online, onStart, onRemove }: { node: Node; result: FirewallResult; blocked: boolean; online: boolean; onStart: () => void; onRemove: (revision: string) => void }) {
+  const preview = usePreviewFirewallRemoval(node.id);
+  const [removing, setRemoving] = useState<PreviewSnapshot | null>(null);
+  const unavailable = removalUnavailable(node, result);
+  // The dialog can already be open when the status goes stale or the node stops being eligible.
+  const halted = unavailable ?? (blocked ? "The firewall status is not current or the node cannot change its firewall right now, so this preview cannot be confirmed. Cancel and start again once the status is current." : undefined);
+
+  // Each attempt previews again, so only a revision bound to the current host state is ever submitted.
+  function start() {
+    onStart();
+    preview.mutate(undefined, {
+      onSuccess: (snapshot: FirewallResult) => setRemoving({ rules: firewallState(snapshot).rules, revision: snapshot.revision, notice: snapshot.notice }),
+    });
+  }
+
+  function cancel() {
+    setRemoving(null);
+    preview.reset();
+  }
+
+  return (
+    <Subsection
+      layout="row"
+      title="Stop managing the firewall"
+      description="Removes Cove's nftables table, boot restoration and recovery files from the host. An empty policy keeps them. UFW, other nftables tables and default policies stay as they are and still apply."
+      actions={
+        !unavailable && (
+          <Button disabled={blocked} pending={preview.isPending} onClick={start}>
+            {!preview.isPending && <ShieldOff aria-hidden className="size-3.5" />}
+            Stop managing firewall
+          </Button>
+        )
+      }
+    >
+      {!result.rules?.length && !result.pending && <p className="text-xs text-fg-muted">Cove has no rules on this host, but its table, boot restoration or recovery files remain.</p>}
+      {unavailable && <p className="text-xs text-fg-muted">{unavailable}</p>}
+      {preview.isError && (
+        <Notice tone="error" title="Could not preview stopping firewall management">
+          {errorMessage(preview.error)}
+        </Notice>
+      )}
+      {removing && (
+        <RemoveDialog
+          node={node}
+          preview={removing}
+          online={online}
+          blocked={halted}
+          onCancel={cancel}
+          onRemove={(revision) => {
+            if (halted) return;
+            cancel();
+            onRemove(revision);
+          }}
+        />
+      )}
+    </Subsection>
+  );
+}
+
+// At most one runs at a time: the worker serializes firewall requests and every change control is disabled while one is in flight.
+function runningChange(pending: Record<Outcome["kind"], boolean>): Outcome["kind"] | null {
+  if (pending.apply) return "apply";
+  if (pending.revert) return "revert";
+  if (pending.remove) return "remove";
+  return null;
+}
+
+function Inspection({
+  node,
+  result,
+  blocker,
+  current,
+  changing,
+  online,
+  refresh,
+}: {
+  node: Node;
+  result: FirewallResult;
+  blocker: string | undefined;
+  // False while the status is read again or after the latest read failed.
+  current: boolean;
+  // Any firewall request for this node is in flight, including a removal preview.
+  changing: boolean;
+  online: boolean;
+  refresh: () => void;
+}) {
   const apply = useApplyFirewall(node.id);
   const revert = useRevertFirewall(node.id);
+  const remove = useRemoveFirewall(node.id);
   const [editing, setEditing] = useState(false);
   const [reverting, setReverting] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const { rules, available, reserved } = firewallState(result);
   const ports = selectablePorts(available, reserved);
-  const busy = apply.isPending || revert.isPending;
+  const running = runningChange({ apply: apply.isPending, revert: revert.isPending, remove: remove.isPending });
+  const busy = running !== null;
   const pending = result.pending;
-  const editBlocked = blocker !== undefined || !result.supported || pending !== undefined || busy || (ports.length === 0 && rules.length === 0);
+  const changeBlocked = blocker !== undefined || !result.supported || pending !== undefined || busy;
 
   function settle(kind: Outcome["kind"]) {
     return {
@@ -482,14 +682,14 @@ function Inspection({ node, result, blocker, online, refresh }: { node: Node; re
 
   return (
     <div className="divide-y divide-line">
-      <StatusNotices result={result} apply={apply.isPending} revert={revert.isPending} outcome={outcome} revertDisabled={blocker !== undefined} onRevert={() => setReverting(true)} />
+      <StatusNotices result={result} running={running} outcome={outcome} revertDisabled={blocker !== undefined} onRevert={() => setReverting(true)} />
       <Subsection
         title="Cove application-port rules"
         description="Each rule restricts new connections to one published port to the listed sources. Ports without a rule are not restricted by Cove."
         actions={
           !editing && (
             <Button
-              disabled={editBlocked}
+              disabled={changeBlocked || changing || (ports.length === 0 && rules.length === 0)}
               onClick={() => {
                 setOutcome(null);
                 setEditing(true);
@@ -519,6 +719,16 @@ function Inspection({ node, result, blocker, online, refresh }: { node: Node; re
           <CurrentRules rules={rules} pending={pending !== undefined} nothingToRestrict={result.supported && ports.length === 0} />
         )}
       </Subsection>
+      {firewallManaged(result) && !editing && (
+        <StopManaging
+          node={node}
+          result={result}
+          blocked={changeBlocked || !current}
+          online={online}
+          onStart={() => setOutcome(null)}
+          onRemove={(revision) => remove.mutate(revision, settle("remove"))}
+        />
+      )}
       <HostInventory result={result} />
       <ConfirmDialog
         open={reverting}
@@ -565,7 +775,7 @@ export function NodeFirewall({ node }: { node: Node }) {
             <QueryError what="the latest firewall status" error={status.error} onRetry={refresh} retrying={status.isFetching} />
           </div>
         )}
-        <Inspection key={inspection} node={node} result={status.data} blocker={blocker} online={online} refresh={refresh} />
+        <Inspection key={inspection} node={node} result={status.data} blocker={blocker} current={!status.isError && !status.isFetching} changing={changing} online={online} refresh={refresh} />
       </>
     );
   } else if (status.isError) {

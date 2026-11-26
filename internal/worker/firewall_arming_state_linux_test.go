@@ -91,9 +91,36 @@ func TestFirewallStaleRevertCannotTouchLaterAttempt(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		if _, err := runHostFirewall(t.Context(), root, owner, FirewallControl{Action: "revert", Intent: attempt}, run); err == nil {
+			t.Fatal("stale rollback RPC accepted a different pending attempt")
+		}
 		after, err := os.ReadFile(filename)
 		if err != nil || !bytes.Equal(before, after) {
 			t.Fatal("stale revert changed the journal", err)
 		}
+	}
+}
+
+func TestFirewallInventoryExcludesReservedPortsBeforeEarlyReturn(t *testing.T) {
+	if os.Getenv("COVE_TEST_OWNED_HOST_INSPECTION") != "1" || os.Geteuid() != 0 {
+		t.Skip("explicit disposable root Linux fixture required for protected state")
+	}
+	for _, action := range []string{"recover", "inspect"} {
+		t.Run(action, func(t *testing.T) {
+			control := FirewallControl{Action: action, Reserved: []uint16{22, 80, 443}, Available: []FirewallPort{{Protocol: "tcp", Port: 80}, {Protocol: "tcp", Port: 443}, {Protocol: "tcp", Port: 8080}}}
+			run := func(_ context.Context, args ...string) (string, error) {
+				if action != "inspect" || len(args) == 0 || args[0] != "/usr/sbin/nft" {
+					t.Fatal("unexpected host command", args)
+				}
+				return "", errors.New("injected nft inspection unavailable")
+			}
+			result, err := runHostFirewall(t.Context(), t.TempDir(), strings.Repeat("a", 32), control, run)
+			if err != nil || len(result.Available) != 1 || result.Available[0] != (FirewallPort{Protocol: "tcp", Port: 8080}) {
+				t.Fatal("reserved port exposed by early response", action, result.Available, err)
+			}
+			if result.Supported != (action == "recover") {
+				t.Fatal("injected inspection failure was not exercised", result)
+			}
+		})
 	}
 }

@@ -39,6 +39,18 @@ export function firewallBlocker(node: Node, online: boolean) {
   return undefined;
 }
 
+// Removal is offered for any Cove-managed state, including an empty policy or only leftover boot and recovery files.
+export function firewallManaged(result: FirewallResult) {
+  return result.managed === true || result.active;
+}
+
+export function removalUnavailable(node: Node, result: FirewallResult) {
+  if (result.remove_supported === undefined) return "Stopping Cove's firewall management needs an upgraded worker. Upgrade the worker, verify the node and inspect again.";
+  if (!result.remove_supported) return "Stopping Cove's firewall management is unavailable on this host.";
+  if (!node.capabilities?.firewall_remove) return `${node.name} has not reported support for stopping firewall management. Verify the node and inspect again.`;
+  return undefined;
+}
+
 // 400, 403 and 404 are refused before the worker is contacted. Anything else, including 409, can follow a change the host already applied or reverted.
 export function definiteRefusal(error: unknown) {
   return error instanceof ApiError && (error.status === 400 || error.status === 403 || error.status === 404);

@@ -74,7 +74,7 @@ func (e *Engine) RemoveWorkload(ctx context.Context, id string) (*WorkloadRemova
 		e.mu.Lock()
 		if e.draining || e.hasMoveFence() || e.hostChanging || e.proxyRunning || e.customRunning || e.customUnsettled || len(e.active) > 1 || len(e.pending) > 0 || len(e.recovering) > 0 {
 			e.mu.Unlock()
-			return nil, errors.New("wait for worker operations and recovery before removing generated build images")
+			return nil, errors.New("wait for worker operations and recovery before removing generated images")
 		}
 		e.active[housekeepingWorkload] = true
 		e.mu.Unlock()

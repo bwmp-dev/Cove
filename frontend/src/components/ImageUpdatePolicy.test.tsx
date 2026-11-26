@@ -48,6 +48,7 @@ function status(extra: Partial<ImageUpdatePolicyStatus> = {}): ImageUpdatePolicy
     last_error: "",
     checked_at: null,
     stale: false,
+    freshness_message: "",
     updates: null,
     ownership_required: false,
     retained_images: {},
@@ -279,6 +280,55 @@ it("shows a stale result as a previous result, not as confirmed availability", a
   expect(screen.getByRole("list", { name: "Previous update candidates" })).toHaveTextContent("app:1.3.0@sha256:abc");
   expect(screen.queryByRole("list", { name: "Update candidates" })).not.toBeInTheDocument();
   expect(screen.queryByText(/Each candidate is/)).not.toBeInTheDocument();
+});
+
+const freshness = "Run an image check for the current policy and configuration.";
+
+it("keeps a candidate from before a Compose tag change as a previous result with the server's check guidance", async () => {
+  serve(() =>
+    saved(
+      {},
+      {
+        stale: true,
+        freshness_message: freshness,
+        last_check_id: "op-check",
+        checked_at: "2026-11-23T09:00:00Z",
+        last_error: "Waiting for the maintenance window.",
+        updates: { state: "available", candidates: [{ service: "app", current: "registry.example.test/team/app:1.2.0", target: "registry.example.test/team/app:1.3.0@sha256:abc" }] },
+      },
+    ),
+  );
+  renderPolicy();
+  const notice = (await screen.findByText("Result is from before the latest change")).parentElement as HTMLElement;
+  expect(notice).toHaveTextContent(freshness);
+  expect(screen.getByText("Update available (previous result)")).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Previous update candidates" })).toHaveTextContent("app:1.3.0@sha256:abc");
+  expect(screen.queryByRole("list", { name: "Update candidates" })).not.toBeInTheDocument();
+  expect(screen.getByText("Waiting for the maintenance window.")).toBeInTheDocument();
+  expect(screen.getAllByText(freshness)).toHaveLength(1);
+});
+
+it("shows check guidance without a result and never reads an unknown or missing result as current", async () => {
+  serve(() => saved({}, { stale: true, freshness_message: freshness }));
+  renderPolicy();
+  expect(await screen.findByText(freshness)).toBeInTheDocument();
+  expect(screen.getByText("No result yet")).toBeInTheDocument();
+  expect(screen.queryByText("Current")).not.toBeInTheDocument();
+  cleanup();
+
+  serve(() => saved({}, { stale: true, freshness_message: freshness, last_check_id: "op-check", checked_at: "2026-11-23T09:00:00Z", updates: { state: "unknown", candidates: [] } }));
+  renderPolicy();
+  expect(await screen.findByText("Update status unknown")).toBeInTheDocument();
+  expect(screen.getByText("Result is from before the latest change").parentElement).toHaveTextContent(freshness);
+  expect(screen.getByText("Unknown (previous result)")).toBeInTheDocument();
+  expect(screen.queryByText("Current")).not.toBeInTheDocument();
+  cleanup();
+
+  // Guidance is only shown for a stale result; a fresh one is not contradicted.
+  serve(() => saved({}, { stale: false, freshness_message: freshness, last_check_id: "op-check", checked_at: "2026-11-23T09:00:00Z", updates: { state: "current", candidates: [] } }));
+  renderPolicy();
+  expect(await screen.findByText("Current")).toBeInTheDocument();
+  expect(screen.queryByText(freshness)).not.toBeInTheDocument();
 });
 
 it("treats a missing stale flag as stale", async () => {
