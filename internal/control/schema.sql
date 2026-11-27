@@ -316,7 +316,7 @@ CREATE OR REPLACE FUNCTION cove_notify_operation() RETURNS trigger LANGUAGE plpg
  INSERT INTO notification_deliveries(operation_id,connection_id)
   SELECT NEW.id,c.id FROM infrastructure_connections c JOIN workloads w ON w.team_id=c.team_id
   WHERE w.id=NEW.workload_id AND c.kind='notification' AND c.created_at<=NEW.created_at
-  AND (NEW.action<>'image_scan' OR EXISTS(SELECT 1 FROM image_scanning_settings ss WHERE ss.team_id=w.team_id AND ss.node_id=w.node_id AND ss.notify)) ON CONFLICT DO NOTHING;
+  AND (NEW.action<>'image_scan' OR EXISTS(SELECT 1 FROM image_scanning_settings ss WHERE ss.team_id=w.team_id AND ss.node_id=w.node_id AND ss.notify)) FOR KEY SHARE OF c ON CONFLICT DO NOTHING;
  RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS cove_operation_notification ON operations;
@@ -1311,7 +1311,7 @@ CREATE OR REPLACE FUNCTION cove_queue_channel_event(event_name text, event_messa
  ((source_team IS NOT NULL AND c.team_id=source_team) OR
  (source_team IS NULL AND affected_user<>'' AND EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=c.team_id AND m.user_id=affected_user)) OR
  (source_team IS NULL AND affected_user='' AND EXISTS(SELECT 1 FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=c.team_id AND u.is_admin AND NOT u.disabled)))
- ON CONFLICT(id) DO NOTHING;
+ FOR KEY SHARE OF c ON CONFLICT(id) DO NOTHING;
 $$;
 CREATE OR REPLACE FUNCTION cove_notify_audit_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE event_name text; event_message text; affected text:=''; resource text:=''; source_team text:=NEW.team_id;

@@ -100,7 +100,7 @@ func (s *Server) collectTraffic(ctx context.Context) error {
 	for _, n := range nodes {
 		response, rpcErr := s.nodeRPC(ctx, n.id, worker.RPCRequest{Method: "traffic", Telemetry: &worker.TelemetryRequest{Since: n.since.Add(-time.Second)}})
 		if rpcErr != nil || response.Error != "" || response.Traffic == nil {
-			if _, err = s.DB.Exec(ctx, `INSERT INTO traffic_collection(node_id,checked_at,last_error) VALUES($1,now(),'Traffic collection unavailable; verify proxy settings and worker connectivity.') ON CONFLICT(node_id) DO UPDATE SET checked_at=now(),last_error=EXCLUDED.last_error`, n.id); err != nil {
+			if _, err = s.DB.Exec(ctx, `INSERT INTO traffic_collection(node_id,checked_at,last_error) SELECT id,now(),'Traffic collection unavailable; verify proxy settings and worker connectivity.' FROM nodes WHERE id=$1 FOR KEY SHARE ON CONFLICT(node_id) DO UPDATE SET checked_at=now(),last_error=EXCLUDED.last_error`, n.id); err != nil {
 				return err
 			}
 			continue
@@ -117,7 +117,7 @@ func (s *Server) runTrafficCollection(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if err := s.collectTraffic(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "collectTraffic", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -136,6 +136,10 @@ func (s *Server) storeTraffic(ctx context.Context, node string, report *worker.T
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if present, err := lockObservationScope(ctx, tx, node, ""); err != nil || !present {
+		return err
+	}
+
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(1129272912)`); err != nil {
 		return err
 	}
@@ -143,7 +147,7 @@ func (s *Server) storeTraffic(ctx context.Context, node string, report *worker.T
 		if len(e.ID) != 64 || len(e.Domain) > 253 || len(e.ClientIP) > 45 || len(e.Workload) > 128 || e.Status < 100 || e.Status > 599 || e.Bytes < 0 || e.DurationMS < 0 || math.IsNaN(e.DurationMS) || math.IsInf(e.DurationMS, 0) || e.Timestamp.After(report.SampledAt.Add(time.Minute)) || e.Timestamp.Before(time.Now().Add(-24*time.Hour)) {
 			return errors.New("invalid traffic entry")
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO route_traffic(id,workload_id,node_id,domain,timestamp,status,bytes,duration_ms,client_ip) SELECT $1,w.id,$3,$4,$5,$6,$7,$8,$9 FROM workloads w WHERE w.id=$2 AND w.node_id=$3 ON CONFLICT DO NOTHING`, e.ID, e.Workload, node, e.Domain, e.Timestamp, e.Status, e.Bytes, e.DurationMS, e.ClientIP)
+		_, err = tx.Exec(ctx, `INSERT INTO route_traffic(id,workload_id,node_id,domain,timestamp,status,bytes,duration_ms,client_ip) SELECT $1,w.id,$3,$4,$5,$6,$7,$8,$9 FROM workloads w WHERE w.id=$2 AND w.node_id=$3 FOR KEY SHARE OF w ON CONFLICT DO NOTHING`, e.ID, e.Workload, node, e.Domain, e.Timestamp, e.Status, e.Bytes, e.DurationMS, e.ClientIP)
 		if err != nil {
 			return err
 		}

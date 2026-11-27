@@ -24,7 +24,7 @@ func (s *Server) observePorts(ctx context.Context, id string, containers []worke
 			exposed = true
 		}
 	}
-	_, err := s.DB.Exec(ctx, `INSERT INTO workload_security_observations(workload_id,exposed,attempted_at) VALUES($1,$2,now()) ON CONFLICT(workload_id) DO UPDATE SET exposed=$2,observed_at=now(),attempted_at=now()`, id, exposed)
+	_, err := s.DB.Exec(ctx, `WITH live AS (SELECT id FROM workloads WHERE id=$1 FOR KEY SHARE) INSERT INTO workload_security_observations(workload_id,exposed,attempted_at) SELECT id,$2,now() FROM live ON CONFLICT(workload_id) DO UPDATE SET exposed=$2,observed_at=now(),attempted_at=now()`, id, exposed)
 	return err
 }
 
@@ -62,7 +62,7 @@ func (s *Server) refreshPortExposure(ctx context.Context) error {
 			for i := range jobs {
 				response, e := s.nodeRPC(scanCtx, i.node, worker.RPCRequest{Method: "containers", ID: i.id})
 				if e != nil {
-					_, e = s.DB.Exec(ctx, `INSERT INTO workload_security_observations(workload_id,exposed,observed_at,attempted_at) VALUES($1,false,NULL,now()) ON CONFLICT(workload_id) DO UPDATE SET attempted_at=now()`, i.id)
+					_, e = s.DB.Exec(ctx, `WITH live AS (SELECT id FROM workloads WHERE id=$1 FOR KEY SHARE) INSERT INTO workload_security_observations(workload_id,exposed,observed_at,attempted_at) SELECT id,false,NULL,now() FROM live ON CONFLICT(workload_id) DO UPDATE SET attempted_at=now()`, i.id)
 				} else {
 					e = s.observePorts(ctx, i.id, response.Containers)
 				}

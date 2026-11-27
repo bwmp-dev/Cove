@@ -361,7 +361,7 @@ func (s *Server) runUptimeChecks(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if err := s.collectUptime(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "collectUptime", err)
 		}
 		select {
 		case <-ctx.Done():

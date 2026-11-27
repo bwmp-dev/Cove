@@ -33,7 +33,7 @@ func (s *Server) pruneOperationHistory(ctx context.Context, days, records int) e
 	}
 	for _, n := range nodes {
 		if !n.supported {
-			if _, err = s.DB.Exec(ctx, `INSERT INTO operation_retention_runs(node_id,checked_at,error) VALUES($1,now(),'Upgrade and verify the worker to prune operation journals.') ON CONFLICT(node_id) DO UPDATE SET checked_at=now(),error=EXCLUDED.error`, n.id); err != nil {
+			if _, err = s.DB.Exec(ctx, `INSERT INTO operation_retention_runs(node_id,checked_at,error) SELECT id,now(),'Upgrade and verify the worker to prune operation journals.' FROM nodes WHERE id=$1 FOR KEY SHARE ON CONFLICT(node_id) DO UPDATE SET checked_at=now(),error=EXCLUDED.error`, n.id); err != nil {
 				return err
 			}
 			continue
@@ -104,7 +104,7 @@ func (s *Server) pruneNodeOperationHistory(ctx context.Context, node string, day
 			pruned = int(result.RowsAffected())
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO operation_retention_runs(node_id,checked_at,error,pruned,protected) VALUES($1,now(),$2,$3,$4) ON CONFLICT(node_id) DO UPDATE SET checked_at=now(),error=EXCLUDED.error,pruned=EXCLUDED.pruned,protected=EXCLUDED.protected`, node, message, pruned, protected)
+	_, err = tx.Exec(ctx, `INSERT INTO operation_retention_runs(node_id,checked_at,error,pruned,protected) SELECT id,now(),$2,$3,$4 FROM nodes WHERE id=$1 FOR KEY SHARE ON CONFLICT(node_id) DO UPDATE SET checked_at=now(),error=EXCLUDED.error,pruned=EXCLUDED.pruned,protected=EXCLUDED.protected`, node, message, pruned, protected)
 	if err != nil {
 		return err
 	}

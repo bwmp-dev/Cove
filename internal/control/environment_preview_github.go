@@ -157,12 +157,12 @@ func (s *Server) scanPreviewRecipes(ctx context.Context) error {
 				if !strings.HasPrefix(branch, prefix) || len(branch) == len(prefix) || !validPreviewBranch(branch) {
 					continue
 				}
-				if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, e.project, repository, branch); err != nil {
+				if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) SELECT id,$2,$3 FROM projects WHERE id=$1 FOR KEY SHARE ON CONFLICT DO NOTHING`, e.project, repository, branch); err != nil {
 					return err
 				}
 			}
 		}
-		if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) SELECT p.project_id,b.repository_id,b.branch FROM environment_preview_branches b JOIN environment_previews p ON p.id=b.preview_id WHERE p.project_id=$1 AND p.state<>'deleting' ON CONFLICT DO NOTHING`, e.project); err != nil {
+		if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) SELECT p.project_id,b.repository_id,b.branch FROM environment_preview_branches b JOIN environment_previews p ON p.id=b.preview_id WHERE p.project_id=$1 AND p.state<>'deleting' FOR KEY SHARE OF p ON CONFLICT DO NOTHING`, e.project); err != nil {
 			return err
 		}
 	}

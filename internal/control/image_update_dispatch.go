@@ -46,7 +46,9 @@ func (s *Server) dispatchImageUpdate(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 	var configuration []byte
 	var active, held bool
-	if err = tx.QueryRow(ctx, `SELECT configuration,EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running')),EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.result->'rollout'->>'phase'='waiting') FROM workloads w WHERE id=$1 FOR UPDATE`, id).Scan(&configuration, &active, &held); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT configuration,EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.state IN ('queued','running')),EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.result->'rollout'->>'phase'='waiting') FROM workloads w WHERE id=$1 FOR UPDATE`, id).Scan(&configuration, &active, &held); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	if active || held {
@@ -60,7 +62,9 @@ func (s *Server) dispatchImageUpdate(ctx context.Context, id string) error {
 	var retainedData []byte
 	var lastCheck *string
 	var updated time.Time
-	if err = tx.QueryRow(ctx, `SELECT policy,generation,consumed_candidate,processed_check_id,updated_at,retained_images FROM image_update_policies WHERE workload_id=$1 FOR UPDATE`, id).Scan(&policyData, &generation, &consumed, &lastCheck, &updated, &retainedData); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT policy,generation,consumed_candidate,processed_check_id,updated_at,retained_images FROM image_update_policies WHERE workload_id=$1 FOR UPDATE`, id).Scan(&policyData, &generation, &consumed, &lastCheck, &updated, &retainedData); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	var policy worker.ImageUpdatePolicy
@@ -99,7 +103,7 @@ func (s *Server) dispatchImageUpdate(ctx context.Context, id string) error {
 	var check string
 	var payload, result []byte
 	var checked time.Time
-	err = tx.QueryRow(ctx, `SELECT id,payload,result,updated_at FROM operations WHERE workload_id=$1 AND action='image_check' AND state='succeeded' AND updated_at>$2 ORDER BY updated_at DESC LIMIT 1`, id, updated).Scan(&check, &payload, &result, &checked)
+	err = tx.QueryRow(ctx, `SELECT id,payload,result,updated_at FROM operations WHERE workload_id=$1 AND action='image_check' AND state='succeeded' AND updated_at>$2 ORDER BY updated_at DESC LIMIT 1 FOR KEY SHARE`, id, updated).Scan(&check, &payload, &result, &checked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return finish("")
 	}

@@ -52,7 +52,7 @@ type automaticScanCandidate struct {
 func (s *Server) scheduleAutomaticScans(ctx context.Context) error {
 	if _, err := s.DB.Exec(ctx, `INSERT INTO image_scan_automation_state(workload_id)
  SELECT w.id FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE `+automaticScanEligible+`
- AND EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','rollback') AND o.state='succeeded') ON CONFLICT DO NOTHING`); err != nil {
+ AND EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action IN ('deploy','rollback') AND o.state='succeeded') FOR KEY SHARE OF w ON CONFLICT DO NOTHING`); err != nil {
 		return err
 	}
 	rows, err := s.DB.Query(ctx, `UPDATE image_scan_automation_state a SET next_check_at=now()+interval '1 minute'
@@ -240,6 +240,9 @@ func (s *Server) reconcileAutomaticScans(ctx context.Context) error {
 		}
 		var eligible bool
 		err = s.DB.QueryRow(ctx, `SELECT `+automaticScanEligible+` AND w.node_id=$2 AND (SELECT id FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback') AND (w.kind='job' OR state='succeeded') ORDER BY created_at DESC,id DESC LIMIT 1)=$3 FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1`, item.workload, item.node, item.deployment).Scan(&eligible)
+		if errors.Is(err, pgx.ErrNoRows) {
+			eligible, err = false, nil
+		}
 		if err != nil {
 			return err
 		}
@@ -267,6 +270,22 @@ func (s *Server) reconcileAutomaticScans(ctx context.Context) error {
 		tx, err := s.DB.Begin(ctx)
 		if err != nil {
 			return err
+		}
+		if present, lockErr := lockObservationScope(ctx, tx, item.node, item.workload); lockErr != nil || !present {
+			_ = tx.Rollback(ctx)
+			if lockErr != nil {
+				return lockErr
+			}
+			continue
+		}
+		var liveLease string
+		leaseErr := tx.QueryRow(ctx, `SELECT id FROM automatic_image_scans WHERE id=$1 AND workload_id=$2 FOR UPDATE`, item.id, item.workload).Scan(&liveLease)
+		if leaseErr != nil {
+			_ = tx.Rollback(ctx)
+			if errors.Is(leaseErr, pgx.ErrNoRows) {
+				continue
+			}
+			return leaseErr
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO operations(id,workload_id,action,state,payload,result,created_at,execution_node_id) VALUES($1,$2,'image_scan',$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`, item.id, item.workload, op.State, item.payload, result, item.created, item.node)
 		if err == nil {

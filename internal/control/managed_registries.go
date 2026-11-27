@@ -504,11 +504,15 @@ func (s *Server) reconcileManagedRegistries(ctx context.Context) error {
 				return err
 			}
 			var node string
-			if err = s.DB.QueryRow(ctx, `SELECT node_id FROM workloads WHERE id=$1`, v.id).Scan(&node); err != nil {
+			if err = s.DB.QueryRow(ctx, `SELECT node_id FROM workloads WHERE id=$1`, v.id).Scan(&node); errors.Is(err, pgx.ErrNoRows) {
+				continue
+			} else if err != nil {
 				return err
 			}
 			var configData []byte
-			if err = s.DB.QueryRow(ctx, `SELECT configuration FROM workloads WHERE id=$1`, v.id).Scan(&configData); err != nil {
+			if err = s.DB.QueryRow(ctx, `SELECT configuration FROM workloads WHERE id=$1`, v.id).Scan(&configData); errors.Is(err, pgx.ErrNoRows) {
+				continue
+			} else if err != nil {
 				return err
 			}
 			var config workloadInput
@@ -573,6 +577,10 @@ func (s *Server) reconcileManagedRegistries(ctx context.Context) error {
 			}
 			var encrypted []byte
 			err = tx.QueryRow(ctx, `SELECT configuration FROM workloads WHERE id=$1 FOR UPDATE`, v.id).Scan(&encrypted)
+			if errors.Is(err, pgx.ErrNoRows) {
+				_ = tx.Rollback(ctx)
+				continue
+			}
 			var config workloadInput
 			if err == nil {
 				err = s.unsealJSON(encrypted, &config)

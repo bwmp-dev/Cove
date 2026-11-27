@@ -356,7 +356,9 @@ func (s *Server) refreshTemplateRepositories(ctx context.Context) error {
 	for _, id := range ids {
 		if err = s.refreshTemplateRepository(ctx, id, "system"); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			var checked bool
-			if e := s.DB.QueryRow(ctx, "SELECT checked_at IS NOT NULL AND last_error<>'' FROM template_repositories WHERE id=$1", id).Scan(&checked); e != nil {
+			if e := s.DB.QueryRow(ctx, "SELECT checked_at IS NOT NULL AND last_error<>'' FROM template_repositories WHERE id=$1", id).Scan(&checked); errors.Is(e, pgx.ErrNoRows) {
+				continue
+			} else if e != nil {
 				return e
 			}
 			if !checked {

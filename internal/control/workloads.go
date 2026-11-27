@@ -665,7 +665,12 @@ func (s *Server) operationLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, 200, map[string]string{"logs": result.Logs})
 }
-func (s *Server) Dispatch(ctx context.Context) error {
+func (s *Server) Dispatch(ctx context.Context) (result error) {
+	defer func() {
+		if ctx.Err() != nil {
+			result = nil
+		}
+	}()
 	owner, err := s.DB.Acquire(ctx)
 	if err != nil {
 		return err
@@ -690,8 +695,14 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	telemetryContext, stopTelemetry := context.WithCancel(ctx)
 	telemetryDone := make(chan error, 4)
 	var telemetryJobs sync.WaitGroup
-	for _, run := range []func(context.Context) error{s.runUptimeChecks, s.runLogForwards, s.runTrafficCollection, s.runNodeProvisions} {
-		telemetryJobs.Go(func() { telemetryDone <- run(telemetryContext) })
+	for _, task := range []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{"uptime checks", s.runUptimeChecks}, {"log forwarding", s.runLogForwards},
+		{"traffic collection", s.runTrafficCollection}, {"node provisioning", s.runNodeProvisions},
+	} {
+		telemetryJobs.Go(func() { telemetryDone <- retryBackgroundLoop(telemetryContext, task.name, task.run) })
 	}
 	defer func() { stopTelemetry(); telemetryJobs.Wait() }()
 	dnsContext, stopDNS := context.WithCancel(ctx)
@@ -702,7 +713,7 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	gitOpsDone := make(chan error, 1)
 	go func() {
 		defer close(gitOpsDone)
-		gitOpsDone <- s.runProjectGitOps(gitOpsContext)
+		gitOpsDone <- retryBackgroundLoop(gitOpsContext, "project GitOps", s.runProjectGitOps)
 	}()
 	defer func() { stopGitOps(); <-gitOpsDone }()
 	auditCtx, stopAudit := context.WithCancel(ctx)
@@ -729,9 +740,10 @@ func (s *Server) Dispatch(ctx context.Context) error {
 	for {
 		if time.Now().After(nextAuthCleanup) {
 			if _, err := s.DB.Exec(ctx, "DELETE FROM audit_events WHERE created_at<now()-make_interval(days=>COALESCE((SELECT retention_days FROM audit_export_settings WHERE id=1),365)) AND NOT EXISTS(SELECT 1 FROM audit_deliveries WHERE event_id=audit_events.id); DELETE FROM login_events WHERE created_at<now()-interval '90 days'; DELETE FROM account_devices WHERE last_seen<now()-interval '90 days'; DELETE FROM authentication_failures WHERE window_start<now()-interval '1 day' AND locked_until<now(); DELETE FROM account_totp WHERE NOT confirmed AND expires_at<now(); DELETE FROM webauthn_challenges WHERE expires_at<now(); DELETE FROM oidc_states WHERE expires_at<now(); DELETE FROM terminal_sessions WHERE expires_at<now(); DELETE FROM oauth_states WHERE expires_at<now(); DELETE FROM account_actions WHERE expires_at<now(); DELETE FROM sessions WHERE expires_at<now(); DELETE FROM login_attempts WHERE window_start<now()-interval '1 day'"); err != nil {
-				return err
+				logPeriodicError(ctx, "authentication retention", err)
+			} else {
+				nextAuthCleanup = time.Now().Add(time.Hour)
 			}
-			nextAuthCleanup = time.Now().Add(time.Hour)
 		}
 		if err := owner.Ping(ctx); err != nil {
 			return err
@@ -746,80 +758,80 @@ func (s *Server) Dispatch(ctx context.Context) error {
 			return err
 		}
 		if err := s.reconcileManagedRegistries(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "reconcileManagedRegistries", err)
 		}
 		if err := s.scheduleRestoreDrills(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "scheduleRestoreDrills", err)
 		}
 		// Registry admission rolls scheduling back; retain due work for the next pass.
 		if err := s.scheduleJobs(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
-			return err
+			logPeriodicError(ctx, "scheduleJobs", err)
 		}
 		if err := s.scheduleImageChecks(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "scheduleImageChecks", err)
 		}
 		if err := s.scheduleCPUScales(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
-			return err
+			logPeriodicError(ctx, "scheduleCPUScales", err)
 		}
 		if err := s.scheduleCertificateDNSIntents(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "scheduleCertificateDNSIntents", err)
 		}
 		if err := s.scheduleCertificateIssuers(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "scheduleCertificateIssuers", err)
 		}
 		if err := s.scheduleUnhealthyRestarts(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "scheduleUnhealthyRestarts", err)
 		}
 		if err := s.reconcilePreviews(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
-			return err
+			logPeriodicError(ctx, "reconcilePreviews", err)
 		}
 		if err := s.reconcileEnvironmentPreviews(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
-			return err
+			logPeriodicError(ctx, "reconcileEnvironmentPreviews", err)
 		}
 		if err := s.scheduleBackups(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "scheduleBackups", err)
 		}
 		if err := s.schedulePITR(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "schedulePITR", err)
 		}
 		if err := s.dispatchWebhooks(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
-			return err
+			logPeriodicError(ctx, "dispatchWebhooks", err)
 		}
 		if err := s.dispatchConnectedGitFeedback(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "dispatchConnectedGitFeedback", err)
 		}
 		if err := s.dispatchGithubFeedback(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "dispatchGithubFeedback", err)
 		}
 		if err := s.dispatchImageUpdates(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
-			return err
+			logPeriodicError(ctx, "dispatchImageUpdates", err)
 		}
 		if err := s.dispatchRegistryWebhooks(ctx); err != nil && ctx.Err() == nil && !managedRegistryBusy(err) {
-			return err
+			logPeriodicError(ctx, "dispatchRegistryWebhooks", err)
 		}
 		if err := s.dispatchNotifications(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "dispatchNotifications", err)
 		}
 		if time.Now().After(nextHealthCheck) {
 			if err := s.collectTelemetry(ctx); err != nil && ctx.Err() == nil {
-				return err
+				logPeriodicError(ctx, "collectTelemetry", err)
 			}
 			if err := s.checkBackupHealth(ctx); err != nil && ctx.Err() == nil {
-				return err
+				logPeriodicError(ctx, "checkBackupHealth", err)
 			}
 			if err := s.checkResourceHealth(ctx); err != nil && ctx.Err() == nil {
-				return err
+				logPeriodicError(ctx, "checkResourceHealth", err)
 			}
 			nextHealthCheck = time.Now().Add(time.Minute)
 		}
 		if err := s.dispatchHealthNotifications(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "dispatchHealthNotifications", err)
 		}
 		if err := s.refreshNodes(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "refreshNodes", err)
 		}
 		if err := s.reconcileLinks(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "reconcileLinks", err)
 		}
 		select {
 		case err := <-gitOpsDone:

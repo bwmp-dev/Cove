@@ -135,12 +135,12 @@ func (s *Server) dispatchConnectedGitFeedback(ctx context.Context) error {
 		}
 		if err != nil {
 			delay := time.Duration(1<<min(e.attempts, 8)) * time.Minute
-			if _, err = s.DB.Exec(ctx, `INSERT INTO git_provider_feedback(operation_id,attempts,next_attempt_at,error) VALUES($1,1,now()+$2*interval '1 second','Provider reporting failed; check connection permissions and availability') ON CONFLICT(operation_id) DO UPDATE SET attempts=git_provider_feedback.attempts+1,next_attempt_at=EXCLUDED.next_attempt_at,error=EXCLUDED.error`, e.operation, int(delay.Seconds())); err != nil {
+			if _, err = s.DB.Exec(ctx, `INSERT INTO git_provider_feedback(operation_id,attempts,next_attempt_at,error) SELECT id,1,now()+$2*interval '1 second','Provider reporting failed; check connection permissions and availability' FROM operations WHERE id=$1 FOR KEY SHARE ON CONFLICT(operation_id) DO UPDATE SET attempts=git_provider_feedback.attempts+1,next_attempt_at=EXCLUDED.next_attempt_at,error=EXCLUDED.error`, e.operation, int(delay.Seconds())); err != nil {
 				return err
 			}
 			continue
 		}
-		if _, err = s.DB.Exec(ctx, `INSERT INTO git_provider_feedback(operation_id,reported_state) VALUES($1,$2) ON CONFLICT(operation_id) DO UPDATE SET reported_state=EXCLUDED.reported_state,attempts=0,error='',next_attempt_at=now()`, e.operation, e.state); err != nil {
+		if _, err = s.DB.Exec(ctx, `INSERT INTO git_provider_feedback(operation_id,reported_state) SELECT id,$2 FROM operations WHERE id=$1 FOR KEY SHARE ON CONFLICT(operation_id) DO UPDATE SET reported_state=EXCLUDED.reported_state,attempts=0,error='',next_attempt_at=now()`, e.operation, e.state); err != nil {
 			return err
 		}
 	}

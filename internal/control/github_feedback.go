@@ -119,7 +119,7 @@ func (s *Server) dispatchGithubFeedback(ctx context.Context) error {
 		if !gitCommit.MatchString(f.revision) || f.revision == strings.Repeat("0", 40) {
 			continue
 		}
-		if _, err = s.DB.Exec(ctx, `INSERT INTO github_operation_feedback(operation_id,revision) VALUES($1,$2) ON CONFLICT DO NOTHING`, f.operation, f.revision); err != nil {
+		if _, err = s.DB.Exec(ctx, `INSERT INTO github_operation_feedback(operation_id,revision) SELECT id,$2 FROM operations WHERE id=$1 FOR KEY SHARE ON CONFLICT DO NOTHING`, f.operation, f.revision); err != nil {
 			return err
 		}
 		reportContext, cancel := context.WithTimeout(ctx, 5*time.Second)

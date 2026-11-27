@@ -302,7 +302,7 @@ func (s *Server) runProjectGitOps(ctx context.Context) error {
 	defer timer.Stop()
 	for {
 		if err := s.reconcileProjectGitOps(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "reconcileProjectGitOps", err)
 		}
 		select {
 		case <-ctx.Done():

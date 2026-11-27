@@ -194,7 +194,7 @@ func (s *Server) enqueueLogForwards(ctx context.Context, tx pgx.Tx, workload str
 	if len(entries) == 0 {
 		return nil
 	}
-	rows, err := tx.Query(ctx, `SELECT f.id FROM log_forwarders f JOIN workloads w ON w.team_id=f.team_id WHERE w.id=$1 AND f.enabled ORDER BY f.id`, workload)
+	rows, err := tx.Query(ctx, `SELECT f.id FROM log_forwarders f JOIN workloads w ON w.team_id=f.team_id WHERE w.id=$1 AND f.enabled ORDER BY f.id FOR KEY SHARE OF f`, workload)
 	if err != nil {
 		return err
 	}
@@ -357,7 +357,7 @@ func (s *Server) runLogForwards(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if err := s.dispatchLogForwards(ctx); err != nil && ctx.Err() == nil {
-			return err
+			logPeriodicError(ctx, "dispatchLogForwards", err)
 		}
 		select {
 		case <-ctx.Done():

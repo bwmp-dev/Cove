@@ -181,7 +181,7 @@ func (s *Server) createPreviewRecord(ctx context.Context, tx pgx.Tx, project str
 		return "", false, err
 	}
 	var team string
-	if err = tx.QueryRow(ctx, `SELECT team_id FROM projects WHERE id=$1`, project).Scan(&team); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT team_id FROM projects WHERE id=$1 FOR KEY SHARE`, project).Scan(&team); err != nil {
 		return "", false, err
 	}
 	taken := map[string]bool{}
@@ -299,7 +299,7 @@ func (s *Server) setPreviewState(ctx context.Context, q interface {
 func (s *Server) failPreview(ctx context.Context, id, stage, detail string) error {
 	_, err := s.DB.Exec(ctx, `UPDATE environment_previews SET state='failed',stage=$2,detail=$3,updated_at=now(),next_attempt_at=now()+interval '1 minute' WHERE id=$1`, id, stage, detail)
 	if err == nil {
-		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview failed at '||$2,id,500,team_id FROM environment_previews WHERE id=$1`, id, stage)
+		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview failed at '||$2,id,500,team_id FROM environment_previews WHERE id=$1 FOR KEY SHARE`, id, stage)
 	}
 	return err
 }
@@ -360,7 +360,7 @@ func (s *Server) requestPreviewDeletion(ctx context.Context, q interface {
 }, id, reason string) error {
 	tag, err := q.Exec(ctx, `UPDATE environment_previews SET state='deleting',stage='remove',delete_reason=$2,detail='',updated_at=now(),next_attempt_at=now() WHERE id=$1 AND state<>'deleting'`, id, reason)
 	if err == nil && tag.RowsAffected() > 0 {
-		_, err = q.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview deletion: '||$2,id,202,team_id FROM environment_previews WHERE id=$1`, id, reason)
+		_, err = q.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview deletion: '||$2,id,202,team_id FROM environment_previews WHERE id=$1 FOR KEY SHARE`, id, reason)
 	}
 	return err
 }
@@ -1242,7 +1242,7 @@ func (s *Server) publishPreviewStage(ctx context.Context, p *previewRow) error {
 	}
 	detail := ""
 	if p.State == "creating" {
-		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES('Cove','environment preview ready',$1,200,$2)`, p.ID, p.Team)
+		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview ready',id,200,team_id FROM environment_previews WHERE id=$1 AND team_id=$2 FOR KEY SHARE`, p.ID, p.Team)
 		if err != nil {
 			return err
 		}

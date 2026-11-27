@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (s *Server) providerInstance(ctx context.Context, provider nodeProvider, job nodeProvision) (*providerInstance, error) {
@@ -176,13 +178,18 @@ func (s *Server) processNodeProvision(ctx context.Context, id string) error {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	var before string
-	if err := s.DB.QueryRow(ctx, `SELECT phase FROM node_provisions WHERE id=$1`, id).Scan(&before); err != nil {
+	if err := s.DB.QueryRow(ctx, `SELECT phase FROM node_provisions WHERE id=$1`, id).Scan(&before); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
 		return err
 	}
 	if before == "uncertain" || before == "succeeded" || before == "cancelled" || before == "failed" {
 		return nil
 	}
 	job, config, err := s.prepareNodeProvision(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

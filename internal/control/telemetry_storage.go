@@ -64,6 +64,9 @@ func pruneTelemetry(ctx context.Context, tx pgx.Tx, c telemetryRetention) error 
 }
 
 func saveMetric(ctx context.Context, tx pgx.Tx, node, workload, series string, stamp time.Time, payload any) error {
+	if present, err := lockObservationScope(ctx, tx, node, workload); err != nil || !present {
+		return err
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -126,6 +129,10 @@ func (s *Server) storeWorkloadTelemetry(ctx context.Context, node, id string, re
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if present, err := lockObservationScope(ctx, tx, node, id); err != nil || !present {
+		return err
+	}
+
 	c, err := telemetryConfig(ctx, tx)
 	if err != nil {
 		return err
@@ -276,4 +283,23 @@ func (s *Server) telemetryStorageUsage(w http.ResponseWriter, r *http.Request) {
 		out[item.name] = value
 	}
 	respond(w, 200, out)
+}
+
+func lockObservationScope(ctx context.Context, tx pgx.Tx, node, workload string) (bool, error) {
+	var id string
+	err := tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR KEY SHARE`, node).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if workload == "" {
+		return true, nil
+	}
+	err = tx.QueryRow(ctx, `SELECT id FROM workloads WHERE id=$1 AND node_id=$2 FOR KEY SHARE`, workload, node).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }

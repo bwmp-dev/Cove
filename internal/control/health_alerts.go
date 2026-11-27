@@ -21,6 +21,12 @@ func (s *Server) recordHealthRouted(ctx context.Context, team, kind, subject, me
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var liveTeam string
+	if err = tx.QueryRow(ctx, `SELECT id FROM teams WHERE id=$1 FOR KEY SHARE`, team).Scan(&liveTeam); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
 	confirmation, repeat := 120, 86400
 	maxGap := 120
 	var channels []string
@@ -65,7 +71,7 @@ func (s *Server) recordHealthRouted(ctx context.Context, team, kind, subject, me
 				event = "threshold.recovered"
 			}
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO health_deliveries(id,team_id,connection_id,event,message,alert_key,subject_id) SELECT $1||':'||id,team_id,id,$3,$4,$5,$6 FROM infrastructure_connections WHERE team_id=$2 AND kind='notification' AND ($7::text[] IS NULL OR id=ANY($7))`, resourceID(), team, event, message, team+":"+kind+":"+subject, subject, channels)
+		_, err = tx.Exec(ctx, `INSERT INTO health_deliveries(id,team_id,connection_id,event,message,alert_key,subject_id) SELECT $1||':'||id,team_id,id,$3,$4,$5,$6 FROM infrastructure_connections WHERE team_id=$2 AND kind='notification' AND ($7::text[] IS NULL OR id=ANY($7)) FOR KEY SHARE`, resourceID(), team, event, message, team+":"+kind+":"+subject, subject, channels)
 		if err != nil {
 			return err
 		}

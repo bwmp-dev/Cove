@@ -46,7 +46,7 @@ func (s *Server) authenticated(next http.Handler, w http.ResponseWriter, r *http
 func (s *Server) recordAudit(r *http.Request, actor string, status int) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
-	if _, err := s.DB.Exec(ctx, "INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,$2,$3,$4,(SELECT id FROM teams WHERE id=$5))", actor, r.Pattern, r.PathValue("id"), status, auditTeam(r)); err != nil {
+	if _, err := s.DB.Exec(ctx, "INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,$2,$3,$4,(SELECT id FROM teams WHERE id=$5 FOR KEY SHARE))", actor, r.Pattern, r.PathValue("id"), status, auditTeam(r)); err != nil {
 		slog.Error("audit event could not be persisted", "action", r.Pattern, "status", status)
 	}
 }
