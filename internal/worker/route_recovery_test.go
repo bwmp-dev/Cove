@@ -284,6 +284,19 @@ func TestRouteWorkerRestartAtEachBoundary(t *testing.T) {
 					if err = os.CopyFS(disk, os.DirFS(e.Root)); err != nil {
 						t.Error(err)
 					}
+					// CopyFS widens permissions; a crash preserves the original private state modes.
+					if err = filepath.Walk(e.Root, func(path string, info os.FileInfo, walkErr error) error {
+						if walkErr != nil {
+							return walkErr
+						}
+						relative, err := filepath.Rel(e.Root, path)
+						if err != nil {
+							return err
+						}
+						return os.Chmod(filepath.Join(disk, relative), info.Mode().Perm())
+					}); err != nil {
+						t.Error(err)
+					}
 				}
 			}
 			runRoutes(t, e, "change", "app", []Route{newRoute})

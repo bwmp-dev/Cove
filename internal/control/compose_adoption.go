@@ -53,20 +53,6 @@ func (s *Server) composeAdoptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("adoption")
-	if id != "" && r.Method == "POST" {
-		release, err := s.requestGuard(ctx, "cove-adoption:"+id, false)
-		if err != nil {
-			if errors.Is(err, errRequestBusy) {
-				http.Error(w, errRequestBusy.Error(), 409)
-			} else if errors.Is(err, errGuardCapacity) {
-				http.Error(w, errGuardCapacity.Error(), 503)
-			} else {
-				http.Error(w, "adoption lock unavailable", 503)
-			}
-			return
-		}
-		defer release()
-	}
 	if strings.HasSuffix(r.URL.Path, "/discover") {
 		response, err := s.nodeRPC(ctx, node, worker.RPCRequest{Method: "compose_discover"})
 		if err != nil {

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 )
@@ -51,6 +52,12 @@ type Server struct {
 	secretCommand secretCommandFunc
 	workerStream  func(context.Context, string, worker.RPCRequest, io.Reader, func(worker.StreamResponse, io.Reader) error) error
 }
+
+// The dummy hash has no account identity; all servers in a process can share it
+// without changing the cost of failed password comparisons.
+var processDummyPasswordHash = sync.OnceValues(func() ([]byte, error) {
+	return bcrypt.GenerateFromPassword([]byte(randomToken()), 12)
+})
 
 func (s *Server) Init(ctx context.Context) error {
 	s.outboundState = &outboundProxyState{}
@@ -95,7 +102,7 @@ func (s *Server) Init(ctx context.Context) error {
 	if _, err = s.outboundConfig(ctx); err != nil {
 		return err
 	}
-	s.dummyPasswordHash, err = bcrypt.GenerateFromPassword([]byte(randomToken()), 12)
+	s.dummyPasswordHash, err = processDummyPasswordHash()
 	return err
 }
 func (s *Server) Handler() http.Handler {

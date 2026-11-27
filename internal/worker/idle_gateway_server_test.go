@@ -82,11 +82,13 @@ func TestIdleGatewayServerPersistsAndReloadsWakeTargets(t *testing.T) {
 	}
 	var cfgMu sync.Mutex
 	var wakes atomic.Int32
+	wakeFinished := make(chan struct{})
 	wakeListener, err := net.Listen("unix", wakePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wakeServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(wakeFinished)
 		if r.Method != "POST" || r.URL.Path != "/wake" || r.Header.Get("Authorization") != "Bearer "+strings.Repeat("a", 64) {
 			t.Error("wake identity changed")
 			w.WriteHeader(403)
@@ -217,6 +219,12 @@ func TestIdleGatewayServerPersistsAndReloadsWakeTargets(t *testing.T) {
 	}
 	if code, body := request(); code != 200 || body != "two" || wakes.Load() != 1 {
 		t.Fatal("first waking request used the old endpoint", code, body, wakes.Load())
+	}
+	// A file reload can release the request before the fake worker finishes its acknowledgement.
+	select {
+	case <-wakeFinished:
+	case <-ctx.Done():
+		t.Fatal("wake handler did not finish", ctx.Err())
 	}
 	data, err := os.ReadFile(statePath)
 	var saved idleGatewaySaved

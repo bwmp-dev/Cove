@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 	"strings"
 	"testing"
 
@@ -13,6 +16,18 @@ import (
 
 func TestComposeAdoptionBulkRecoveryAndPendingIsolation(t *testing.T) {
 	f := newAccountFixture(t)
+	limited, err := pgxpool.ParseConfig(os.Getenv("COVE_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited.MaxConns = 4
+	limited.ConnConfig.RuntimeParams = f.s.DB.Config().ConnConfig.RuntimeParams
+	pool, err := pgxpool.NewWithConfig(t.Context(), limited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	f.s.DB = pool
 	f.sql(`INSERT INTO nodes(id,name,address,port,public_key,private_key,state,capabilities) VALUES('adoption-node','Node','localhost',22,'',$1,'ready','{"adoption":true}')`, []byte{})
 	f.sql(`INSERT INTO projects(id,name,team_id) VALUES('adoption-project','Adopted','default')`)
 	base := "/api/nodes/adoption-node/adoptions"

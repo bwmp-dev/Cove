@@ -24,6 +24,10 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		io.WriteString(os.Stdout, "HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nprivate-admin-tool")
+		// Close the simulated SSH stream before the race runtime delays process exit.
+		if err := os.Stdout.Close(); err != nil {
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
