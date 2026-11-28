@@ -45,6 +45,7 @@ func (in *privateConnectionInput) normalize() error {
 }
 
 type connectionEndpoint struct {
+	idle    bool
 	ready   bool
 	kind    string
 	config  workloadInput
@@ -73,7 +74,7 @@ func composeServices(c workloadInput) []string {
 func (s *Server) lockConnectionEndpoint(ctx context.Context, tx pgx.Tx, team, id string) (connectionEndpoint, error) {
 	var e connectionEndpoint
 	var encrypted []byte
-	err := tx.QueryRow(ctx, `SELECT w.kind,w.configuration,COALESCE((n.capabilities->>'private_links')::boolean,false),(EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources r WHERE r.resource_id=w.id)),n.state='ready' FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1 AND w.team_id=$2 FOR UPDATE OF w`, id, team).Scan(&e.kind, &encrypted, &e.capable, &e.preview, &e.ready)
+	err := tx.QueryRow(ctx, `SELECT w.kind,w.configuration,COALESCE((n.capabilities->>'private_links')::boolean,false),(EXISTS(SELECT 1 FROM previews p WHERE p.workload_id=w.id) OR EXISTS(SELECT 1 FROM environment_preview_resources r WHERE r.resource_id=w.id)),n.state='ready',COALESCE((w.idle_policy->>'enabled')::boolean,false) OR EXISTS(SELECT 1 FROM operations o WHERE o.workload_id=w.id AND o.action='idle_policy' AND o.state IN ('queued','running')) FROM workloads w JOIN nodes n ON n.id=w.node_id WHERE w.id=$1 AND w.team_id=$2 FOR UPDATE OF w`, id, team).Scan(&e.kind, &encrypted, &e.capable, &e.preview, &e.ready, &e.idle)
 	if err != nil {
 		return e, err
 	}
@@ -86,9 +87,11 @@ func (s *Server) lockConnectionEndpoint(ctx context.Context, tx pgx.Tx, team, id
 
 func checkEndpoint(e connectionEndpoint, role, service string) (int, string) {
 	switch {
+	case e.idle:
+		return 409, "disable idle sleep and wait for its operation before adding private connections"
 	case e.preview:
 		return 409, "preview resources cannot have manually managed private connections; environment previews copy their production connections"
-	case role == "target" && e.kind != "service":
+	case role == "target" && e.kind != "service" && e.kind != "database":
 		return 409, "the target must be a service; jobs cannot accept connections"
 	// An unreachable worker reports no capabilities; changes for it stay pending until it returns.
 	case e.ready && !e.capable:
@@ -183,6 +186,10 @@ func (s *Server) createPrivateConnection(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	if !databaseConnectionAllowed(endpoints[in.TargetID].config.Database, in.TargetService, in.Port, in.Alias) {
+		http.Error(w, "use the database's service, native port and private hostname from its connection details", 400)
+		return
+	}
 	id := resourceID()
 	_, err = tx.Exec(r.Context(), `INSERT INTO resource_connections(id,team_id,source_id,source_service,target_id,target_service,port,alias,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, p.Team, in.SourceID, in.SourceService, in.TargetID, in.TargetService, in.Port, in.Alias, p.ID)
 	if connectionConflict(w, err) {
@@ -260,6 +267,10 @@ func (s *Server) updatePrivateConnection(w http.ResponseWriter, r *http.Request)
 		}
 		if status, message := checkEndpoint(endpoint, check.role, check.service); status != 0 {
 			http.Error(w, message, status)
+			return
+		}
+		if check.role == "target" && !databaseConnectionAllowed(endpoint.config.Database, in.TargetService, in.Port, in.Alias) {
+			http.Error(w, "use the database or pooler's service, native port and private hostname from its connection details", 400)
 			return
 		}
 	}
@@ -480,7 +491,6 @@ func (s *Server) projectConnections(w http.ResponseWriter, r *http.Request) {
 		if level < 1 {
 			continue
 		}
-		g.Permissions = permissions(level)
 		var config workloadInput
 		if data, unsealErr := unseal(s.Key, encrypted); unsealErr == nil && json.Unmarshal(data, &config) == nil {
 			g.Services = composeServices(config)
@@ -499,6 +509,11 @@ func (s *Server) projectConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range resources {
+		resources[i].Permissions, err = s.permissionNames(r, "workload", resources[i].ID)
+		if err != nil {
+			http.Error(w, "authorization unavailable", 503)
+			return
+		}
 		visible[resources[i].ID] = &resources[i]
 	}
 	ids := make([]string, 0, len(connections))
@@ -790,7 +805,7 @@ func (s *Server) reconcileLinks(ctx context.Context) error {
 				continue
 			}
 			n.fingerprint = response.Links.Fingerprint
-			if _, err = s.DB.Exec(ctx, "INSERT INTO node_links(node_id,fingerprint) VALUES($1,$2) ON CONFLICT(node_id) DO UPDATE SET fingerprint=EXCLUDED.fingerprint", n.id, n.fingerprint); err != nil {
+			if _, err = s.DB.Exec(ctx, "INSERT INTO node_links(node_id,fingerprint) SELECT id,$2 FROM nodes WHERE id=$1 FOR KEY SHARE ON CONFLICT(node_id) DO UPDATE SET fingerprint=EXCLUDED.fingerprint", n.id, n.fingerprint); err != nil {
 				return err
 			}
 		}
@@ -883,7 +898,7 @@ func (s *Server) linkFailure(ctx context.Context, n *linkNode, failure error) er
 	if delay > 5*time.Minute {
 		delay = 5 * time.Minute
 	}
-	_, err := s.DB.Exec(ctx, `INSERT INTO node_links(node_id,last_error,failures,next_attempt_at) VALUES($1,$2,1,now()+$3::interval)
+	_, err := s.DB.Exec(ctx, `INSERT INTO node_links(node_id,last_error,failures,next_attempt_at) SELECT id,$2,1,now()+$3::interval FROM nodes WHERE id=$1 FOR KEY SHARE
  ON CONFLICT(node_id) DO UPDATE SET last_error=EXCLUDED.last_error,failures=node_links.failures+1,next_attempt_at=EXCLUDED.next_attempt_at`, n.id, message, fmt.Sprintf("%d milliseconds", delay.Milliseconds()))
 	return err
 }
@@ -895,7 +910,7 @@ func (s *Server) pushLinks(ctx context.Context, n *linkNode, plan *linkPlan) err
 	}
 	if !n.capable && n.state != "ready" {
 		// An unreachable worker reports no capabilities; keep its changes pending until it is verified again.
-		_, err := s.DB.Exec(ctx, `INSERT INTO node_links(node_id,last_error,failures) VALUES($1,$2,1) ON CONFLICT(node_id) DO UPDATE SET last_error=EXCLUDED.last_error,failures=GREATEST(node_links.failures,1)`, n.id, n.name+" is not ready; changes apply when it is reachable and verified")
+		_, err := s.DB.Exec(ctx, `INSERT INTO node_links(node_id,last_error,failures) SELECT id,$2,1 FROM nodes WHERE id=$1 FOR KEY SHARE ON CONFLICT(node_id) DO UPDATE SET last_error=EXCLUDED.last_error,failures=GREATEST(node_links.failures,1)`, n.id, n.name+" is not ready; changes apply when it is reachable and verified")
 		return err
 	}
 	if !n.capable {
@@ -962,7 +977,7 @@ func (s *Server) pushLinks(ctx context.Context, n *linkNode, plan *linkPlan) err
 	if _, err = s.DB.Exec(ctx, "DELETE FROM resource_connection_status WHERE node_id=$1 AND NOT (connection_id||'/'||role)=ANY($2)", n.id, keep); err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, `INSERT INTO node_links(node_id,fingerprint,applied_digest,applied_at) VALUES($1,$2,$3,now())
+	_, err = s.DB.Exec(ctx, `INSERT INTO node_links(node_id,fingerprint,applied_digest,applied_at) SELECT id,$2,$3,now() FROM nodes WHERE id=$1 FOR KEY SHARE
  ON CONFLICT(node_id) DO UPDATE SET fingerprint=EXCLUDED.fingerprint,applied_digest=EXCLUDED.applied_digest,applied_at=now(),last_error='',failures=0,next_attempt_at=now()`, n.id, response.Links.Fingerprint, config.Digest)
 	return err
 }

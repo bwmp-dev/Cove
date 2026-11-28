@@ -289,16 +289,43 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
  state text NOT NULL DEFAULT 'pending', attempts integer NOT NULL DEFAULT 0, last_error text NOT NULL DEFAULT '',
  next_attempt timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(operation_id,connection_id)
 );
+CREATE TABLE IF NOT EXISTS image_scanning_settings (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ enabled boolean NOT NULL DEFAULT false, notify boolean NOT NULL DEFAULT false,
+ PRIMARY KEY(team_id,node_id)
+);
+ALTER TABLE image_scanning_settings ADD COLUMN IF NOT EXISTS automatic boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS image_scan_automation_state (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ next_check_at timestamptz NOT NULL DEFAULT now(),
+ attempt_key text NOT NULL DEFAULT '',
+ last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS automatic_image_scans (
+ node_id text PRIMARY KEY REFERENCES nodes(id),
+ id text NOT NULL UNIQUE,
+ workload_id text NOT NULL REFERENCES workloads(id),
+ deployment_id text NOT NULL,
+ payload bytea NOT NULL,
+ attempt_key text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ cancel_requested boolean NOT NULL DEFAULT false
+);
 CREATE OR REPLACE FUNCTION cove_notify_operation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  INSERT INTO notification_deliveries(operation_id,connection_id)
   SELECT NEW.id,c.id FROM infrastructure_connections c JOIN workloads w ON w.team_id=c.team_id
-  WHERE w.id=NEW.workload_id AND c.kind='notification' AND c.created_at<=NEW.created_at ON CONFLICT DO NOTHING;
+  WHERE w.id=NEW.workload_id AND c.kind='notification' AND c.created_at<=NEW.created_at
+  AND (NEW.action<>'image_scan' OR EXISTS(SELECT 1 FROM image_scanning_settings ss WHERE ss.team_id=w.team_id AND ss.node_id=w.node_id AND ss.notify)) FOR KEY SHARE OF c ON CONFLICT DO NOTHING;
  RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS cove_operation_notification ON operations;
 CREATE TRIGGER cove_operation_notification AFTER UPDATE OF state ON operations FOR EACH ROW
  WHEN (OLD.state IS DISTINCT FROM NEW.state AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();
 
+DROP TRIGGER IF EXISTS cove_automatic_scan_notification ON operations;
+CREATE TRIGGER cove_automatic_scan_notification AFTER INSERT ON operations FOR EACH ROW
+ WHEN (NEW.action='image_scan' AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();
 CREATE INDEX IF NOT EXISTS notification_deliveries_due ON notification_deliveries(next_attempt) WHERE state='pending';
 
 CREATE TABLE IF NOT EXISTS cloudflare_zones (
@@ -410,6 +437,15 @@ CREATE TABLE IF NOT EXISTS team_quotas (
  memory_mb bigint NOT NULL DEFAULT 0 CHECK(memory_mb>=0),
  deployments integer NOT NULL DEFAULT 0 CHECK(deployments>=0)
 );
+CREATE TABLE IF NOT EXISTS buildpack_reservations (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id),
+ cpus double precision NOT NULL CHECK(cpus>0),
+ memory_mb bigint NOT NULL CHECK(memory_mb>0),
+ phase_memory_bytes bigint NOT NULL DEFAULT 0 CHECK(phase_memory_bytes>=0),
+ available_memory_bytes bigint NOT NULL DEFAULT 0 CHECK(available_memory_bytes>=0)
+);
+CREATE INDEX IF NOT EXISTS buildpack_reservation_node ON buildpack_reservations(node_id);
 CREATE OR REPLACE FUNCTION cove_enforce_team_quota() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE quota team_quotas; used_count bigint; used_cpu double precision; used_memory bigint;
 BEGIN
@@ -417,6 +453,7 @@ BEGIN
  SELECT * INTO quota FROM team_quotas WHERE team_id=NEW.team_id;
  IF NOT FOUND THEN RETURN NEW; END IF;
  SELECT count(*),COALESCE(sum(configured_cpu),0),COALESCE(sum(configured_memory_mb),0) INTO used_count,used_cpu,used_memory FROM workloads WHERE team_id=NEW.team_id AND id<>NEW.id;
+ SELECT used_cpu+COALESCE(sum(b.cpus),0),used_memory+COALESCE(sum(b.memory_mb),0) INTO used_cpu,used_memory FROM buildpack_reservations b JOIN operations o ON o.id=b.operation_id JOIN workloads w ON w.id=o.workload_id WHERE w.team_id=NEW.team_id AND o.admitted_at IS NOT NULL AND o.state IN ('queued','running');
  IF (quota.resources>0 AND used_count+1>quota.resources) OR (quota.cpus>0 AND used_cpu+COALESCE(NEW.configured_cpu,0)>quota.cpus+0.000001) OR (quota.memory_mb>0 AND used_memory+COALESCE(NEW.configured_memory_mb,0)>quota.memory_mb) THEN
   RAISE EXCEPTION 'team quota exceeded' USING ERRCODE='23514',CONSTRAINT='cove_team_quota';
  END IF;
@@ -652,6 +689,21 @@ CREATE TABLE IF NOT EXISTS preview_branch_deliveries (
  received_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS preview_branch_deliveries_age ON preview_branch_deliveries(received_at);
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS require_second_factor boolean NOT NULL DEFAULT false;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS require_second_factor boolean NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS second_factor_verified boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS account_totp (
+ user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ secret bytea NOT NULL,
+ confirmed boolean NOT NULL DEFAULT false,
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '10 minutes',
+ last_step bigint NOT NULL DEFAULT -1
+);
+CREATE TABLE IF NOT EXISTS recovery_codes (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ code_hash bytea NOT NULL,
+ PRIMARY KEY(user_id,code_hash)
+);
 -- Branch heads of removed previews. The periodic scan must not bring back a preview that was deleted
 -- or expired; only a new head or an explicit request starts one again.
 CREATE TABLE IF NOT EXISTS preview_branch_dismissals (
@@ -674,3 +726,1243 @@ LANGUAGE sql STABLE AS $$
   g->>'scope'='team' OR (g->>'scope'='project' AND g->>'scope_id'=project) OR
   (g->>'scope'='environment' AND g->>'scope_id'=s.scope))
 $$;
+
+CREATE TABLE IF NOT EXISTS github_reporting (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ enabled boolean NOT NULL DEFAULT false,
+ enabled_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS github_operation_feedback (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ revision text NOT NULL,
+ reported_state text NOT NULL DEFAULT '',
+ deployment_id bigint NOT NULL DEFAULT 0,
+ attempts integer NOT NULL DEFAULT 0,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ error text NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS git_deploy_keys (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ repository text NOT NULL,
+ host_key text NOT NULL,
+ public_key text NOT NULL,
+ private_key bytea NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS git_connections (
+ id bigserial PRIMARY KEY,
+ team_id text NOT NULL REFERENCES teams(id),
+ configuration bytea NOT NULL
+);
+CREATE TABLE IF NOT EXISTS git_repositories (
+ id bigserial PRIMARY KEY,
+ connection_id bigint NOT NULL REFERENCES git_connections(id) ON DELETE CASCADE,
+ external_id text NOT NULL,
+ full_name text NOT NULL,
+ clone_url text NOT NULL,
+ default_branch text NOT NULL,
+ UNIQUE(connection_id,external_id),
+ UNIQUE(id,connection_id)
+);
+CREATE TABLE IF NOT EXISTS git_sources (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ connection_id bigint NOT NULL REFERENCES git_connections(id),
+ repository_id bigint NOT NULL,
+ automatic boolean NOT NULL DEFAULT false,
+ reporting boolean NOT NULL DEFAULT false,
+ connected_at timestamptz NOT NULL DEFAULT now(),
+ FOREIGN KEY(repository_id,connection_id) REFERENCES git_repositories(id,connection_id)
+);
+CREATE TABLE IF NOT EXISTS git_provider_feedback (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ reported_state text NOT NULL DEFAULT '',
+ attempts integer NOT NULL DEFAULT 0,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ error text NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS git_source_triggers (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ kind text NOT NULL CHECK(kind IN ('branch','tags','releases')),
+ pattern text NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS deploy_hooks (
+ id text PRIMARY KEY,
+ workload_id text UNIQUE NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ token_hash bytea UNIQUE NOT NULL,
+ creator_id text NOT NULL REFERENCES users(id),
+ expires_at timestamptz NOT NULL,
+ window_start timestamptz NOT NULL DEFAULT now(),
+ window_count integer NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS deploy_hook_receipts (
+ hook_id text NOT NULL REFERENCES deploy_hooks(id) ON DELETE CASCADE,
+ delivery text NOT NULL,
+ request_id text NOT NULL,
+ queue_delivery text NOT NULL,
+ cancelled boolean NOT NULL DEFAULT false,
+ PRIMARY KEY(hook_id,delivery)
+);
+
+CREATE TABLE IF NOT EXISTS secret_providers (
+    id text PRIMARY KEY,
+    team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    configuration bytea NOT NULL
+);
+CREATE INDEX IF NOT EXISTS secret_providers_team ON secret_providers(team_id);
+CREATE TABLE IF NOT EXISTS access_tokens (
+ id text PRIMARY KEY,
+ name text NOT NULL,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ team_id text REFERENCES teams(id) ON DELETE CASCADE,
+ scopes text[] NOT NULL,
+ token_hash bytea NOT NULL UNIQUE,
+ expires_at timestamptz NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS access_tokens_owner ON access_tokens(user_id);
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS mcp_enabled boolean NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS configuration_resource_keys (
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ key text NOT NULL,
+ workload_id text NOT NULL UNIQUE REFERENCES workloads(id) ON DELETE CASCADE,
+ PRIMARY KEY(project_id,key)
+);
+CREATE TABLE IF NOT EXISTS configuration_drafts (
+ id text PRIMARY KEY,
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ creator_id text NOT NULL,
+ payload bytea NOT NULL,
+ base_version text NOT NULL,
+ changes jsonb NOT NULL,
+ operation_ids jsonb NOT NULL DEFAULT '[]',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ applied_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS configuration_drafts_project ON configuration_drafts(project_id,created_at DESC);
+
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS declared_payload bytea;
+CREATE OR REPLACE FUNCTION cove_declared_operation_payload() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ NEW.declared_payload=NEW.payload;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS declared_operation_payload ON operations;
+CREATE TRIGGER declared_operation_payload BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_declared_operation_payload();
+
+CREATE TABLE IF NOT EXISTS configuration_gitops (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ path text NOT NULL DEFAULT 'cove.yaml',
+ automatic boolean NOT NULL DEFAULT false,
+ creator_id text NOT NULL,
+ last_revision text NOT NULL DEFAULT '',
+ desired_payload bytea,
+ last_draft_id text REFERENCES configuration_drafts(id) ON DELETE SET NULL,
+ last_error text NOT NULL DEFAULT '',
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ synced_at timestamptz,
+ next_scan_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS configuration_gitops_due ON configuration_gitops(next_scan_at) WHERE automatic;
+
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS drift_prepared boolean NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS migration_imports (
+ id text PRIMARY KEY,
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ payload bytea NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '24 hours'
+);
+CREATE INDEX IF NOT EXISTS migration_imports_project ON migration_imports(project_id,expires_at);
+
+CREATE TABLE IF NOT EXISTS compose_adoptions (
+ id text PRIMARY KEY,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ environment_id text REFERENCES environments(id) ON DELETE CASCADE,
+ payload bytea NOT NULL,
+ base_version text NOT NULL,
+ resource_ids jsonb NOT NULL,
+ completed jsonb NOT NULL DEFAULT '[]',
+ status text NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','applying','complete')),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '24 hours'
+);
+CREATE INDEX IF NOT EXISTS compose_adoptions_node ON compose_adoptions(node_id,team_id,created_at);
+CREATE TABLE IF NOT EXISTS compose_adoption_claims (
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ project_name text NOT NULL,
+ adoption_id text NOT NULL REFERENCES compose_adoptions(id) ON DELETE CASCADE,
+ workload_id text NOT NULL UNIQUE REFERENCES workloads(id) ON DELETE CASCADE,
+ PRIMARY KEY(node_id,project_name)
+);
+CREATE OR REPLACE FUNCTION cove_pending_adoption() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE resource text;
+BEGIN
+ IF TG_TABLE_NAME='workloads' THEN
+  IF current_setting('cove.adoption_write',true)='true' THEN RETURN NEW; END IF;
+  resource=NEW.id;
+ ELSE
+  IF NEW.state NOT IN ('queued','running') THEN RETURN NEW; END IF;
+  resource=NEW.workload_id;
+ END IF;
+ IF EXISTS(SELECT 1 FROM compose_adoptions a WHERE a.status='applying' AND a.resource_ids ? resource) THEN
+  RAISE EXCEPTION 'complete pending adoption first' USING ERRCODE='23514',CONSTRAINT='cove_pending_adoption';
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS pending_adoption_workload ON workloads;
+CREATE TRIGGER pending_adoption_workload BEFORE UPDATE OF configuration,node_id,team_id,project_id,environment_id ON workloads FOR EACH ROW EXECUTE FUNCTION cove_pending_adoption();
+DROP TRIGGER IF EXISTS pending_adoption_operation ON operations;
+CREATE TRIGGER pending_adoption_operation BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_pending_adoption();
+
+-- Workspace resource organization and personal pins.
+CREATE TABLE IF NOT EXISTS workload_tags (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ tags text[] NOT NULL DEFAULT '{}', CHECK(cardinality(tags)<=12)
+);
+CREATE INDEX IF NOT EXISTS workload_tags_values ON workload_tags USING gin(tags);
+CREATE TABLE IF NOT EXISTS user_pins (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ kind text NOT NULL CHECK(kind IN ('project','environment','workload')),
+ resource_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(user_id,team_id,kind,resource_id)
+);
+CREATE TABLE IF NOT EXISTS user_onboarding (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ dismissed boolean NOT NULL DEFAULT false, PRIMARY KEY(user_id,team_id)
+);
+
+-- Private resource notes and display timezone preferences.
+CREATE TABLE IF NOT EXISTS project_notes (
+ resource_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ content bytea NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS workload_notes (
+ resource_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ content bytea NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS display_timezone text NOT NULL DEFAULT 'UTC';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS display_timezone text;
+
+-- Explicitly enabled, hash-only public deployment summaries.
+CREATE TABLE IF NOT EXISTS project_status_shares (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ title text NOT NULL, token_hash bytea UNIQUE NOT NULL,
+ expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS passkeys (
+ id bytea PRIMARY KEY,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ name text NOT NULL,
+ credential jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+ browser_hash bytea PRIMARY KEY,
+ user_id text REFERENCES users(id) ON DELETE CASCADE,
+ user_version bigint,
+ session_hash bytea,
+ ceremony text NOT NULL CHECK(ceremony IN ('register','login')),
+ data jsonb NOT NULL,
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '5 minutes'
+);
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS password_login_disabled boolean NOT NULL DEFAULT false;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS oidc_registration_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS oidc_auto_redirect text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS oidc_providers (
+ id text PRIMARY KEY,
+ configuration bytea NOT NULL,
+ version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS oidc_identities (
+ provider_id text NOT NULL REFERENCES oidc_providers(id) ON DELETE CASCADE,
+ subject text NOT NULL,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ PRIMARY KEY(provider_id,subject),
+ UNIQUE(provider_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS oidc_states (
+ token_hash bytea PRIMARY KEY,
+ browser_hash bytea NOT NULL,
+ provider_id text NOT NULL REFERENCES oidc_providers(id) ON DELETE CASCADE,
+ provider_version bigint NOT NULL,
+ nonce_hash bytea NOT NULL,
+ verifier bytea NOT NULL,
+ link_user_id text REFERENCES users(id) ON DELETE CASCADE,
+ link_version bigint,
+ session_hash bytea,
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '10 minutes'
+);
+
+CREATE TABLE IF NOT EXISTS login_events (
+ id bigserial PRIMARY KEY,
+ user_id text REFERENCES users(id) ON DELETE SET NULL,
+ success boolean NOT NULL,
+ method text NOT NULL,
+ address text NOT NULL,
+ user_agent text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS login_events_user ON login_events(user_id,id DESC);
+CREATE INDEX IF NOT EXISTS login_events_age ON login_events(created_at);
+CREATE TABLE IF NOT EXISTS authentication_failures (
+ key text PRIMARY KEY,
+ failures integer NOT NULL DEFAULT 0,
+ window_start timestamptz NOT NULL DEFAULT now(),
+ locked_until timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS account_devices (
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ device_hash bytea NOT NULL,
+ last_seen timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(user_id,device_hash)
+);
+
+CREATE TABLE IF NOT EXISTS audit_export_settings (
+ id integer PRIMARY KEY CHECK(id=1),
+ configuration bytea NOT NULL,
+ webhook_enabled boolean NOT NULL DEFAULT false,
+ syslog_enabled boolean NOT NULL DEFAULT false,
+ retention_days integer NOT NULL DEFAULT 365 CHECK(retention_days BETWEEN 1 AND 3650)
+);
+CREATE TABLE IF NOT EXISTS audit_deliveries (
+ id bigserial PRIMARY KEY,
+ event_id bigint NOT NULL,
+ destination text NOT NULL CHECK(destination IN ('webhook','syslog')),
+ configuration bytea NOT NULL,
+ payload jsonb NOT NULL,
+ attempts integer NOT NULL DEFAULT 0,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(event_id,destination)
+);
+CREATE INDEX IF NOT EXISTS audit_deliveries_due ON audit_deliveries(next_attempt_at,id);
+CREATE OR REPLACE FUNCTION cove_queue_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ INSERT INTO audit_deliveries(event_id,destination,configuration,payload)
+ SELECT NEW.id,d.destination,s.configuration,to_jsonb(NEW)
+ FROM audit_export_settings s CROSS JOIN (VALUES ('webhook'),('syslog')) d(destination)
+ WHERE (d.destination='webhook' AND s.webhook_enabled) OR (d.destination='syslog' AND s.syslog_enabled);
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_audit_export ON audit_events;
+CREATE TRIGGER cove_audit_export AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION cove_queue_audit();
+
+CREATE TABLE IF NOT EXISTS team_roles (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ id text NOT NULL,
+ name text NOT NULL,
+ permissions text[] NOT NULL,
+ PRIMARY KEY(team_id,id)
+);
+CREATE OR REPLACE FUNCTION cove_role_permissions(team text,role text) RETURNS text[] LANGUAGE sql STABLE AS $$
+ SELECT CASE role WHEN 'viewer' THEN ARRAY['view'] WHEN 'operator' THEN ARRAY['view','operate','manage_backups']
+ WHEN 'editor' THEN ARRAY['view','operate','edit_configuration','read_secrets','manage_backups']
+ ELSE COALESCE((SELECT permissions FROM team_roles WHERE team_id=team AND id=role),ARRAY[]::text[]) END
+$$;
+CREATE OR REPLACE FUNCTION cove_permission(actor text,team text,project text,environment text,permission text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+ SELECT COALESCE(bool_or(m.role IN ('owner','admin') OR permission=ANY(cove_role_permissions(team,g->>'role'))),false)
+ FROM team_members m LEFT JOIN LATERAL jsonb_array_elements(m.grants) g ON true
+ CROSS JOIN LATERAL (SELECT COALESCE((SELECT p.base_environment_id FROM environment_previews p WHERE p.environment_id=environment AND p.team_id=team),environment) AS scope) s
+ WHERE m.user_id=actor AND m.team_id=team AND (m.role IN ('owner','admin') OR
+ g->>'scope'='team' OR (g->>'scope'='project' AND g->>'scope_id'=project) OR (g->>'scope'='environment' AND g->>'scope_id'=s.scope))
+$$;
+CREATE OR REPLACE FUNCTION cove_access(actor text,team text,project text,environment text) RETURNS integer LANGUAGE sql STABLE AS $$
+ SELECT CASE WHEN cove_permission(actor,team,project,environment,'view') THEN
+ CASE WHEN cove_permission(actor,team,project,environment,'edit_configuration') AND cove_permission(actor,team,project,environment,'read_secrets') AND cove_permission(actor,team,project,environment,'manage_backups') AND cove_permission(actor,team,project,environment,'operate') THEN 3
+ WHEN cove_permission(actor,team,project,environment,'operate') THEN 2 ELSE 1 END ELSE 0 END
+$$;
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_allowlist text[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS outbound_proxy bytea;
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_backup_at timestamptz;
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS latest_panel_version text NOT NULL DEFAULT '';
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_update_checked_at timestamptz;
+CREATE TABLE IF NOT EXISTS workload_security_observations (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ observed_at timestamptz NOT NULL DEFAULT now(), exposed boolean NOT NULL
+);
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS panel_update_channel text NOT NULL DEFAULT '';
+
+ALTER TABLE deployment_policies DROP CONSTRAINT IF EXISTS deployment_policies_check;
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='deployment_policies'::regclass AND conname='deployment_policy_scope') THEN
+  ALTER TABLE deployment_policies ADD CONSTRAINT deployment_policy_scope CHECK(project_id IS NULL OR environment_id IS NULL);
+ END IF;
+END $$;
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS timezone text NOT NULL DEFAULT 'UTC';
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS recurring_windows jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS freezes jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE deployment_policies ADD COLUMN IF NOT EXISTS outside_window text NOT NULL DEFAULT 'block';
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT '';
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS emergency_override_by text;
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS emergency_override_reason text NOT NULL DEFAULT '';
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS emergency_override_at timestamptz;
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS details jsonb NOT NULL DEFAULT '{}';
+CREATE OR REPLACE FUNCTION cove_deployment_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF NEW.action IN ('deploy','rollback') THEN
+  SELECT EXISTS(SELECT 1 FROM workloads w JOIN deployment_policies p ON p.team_id=w.team_id AND ((p.project_id IS NULL AND p.environment_id IS NULL) OR p.project_id=w.project_id OR p.environment_id=w.environment_id) WHERE w.id=NEW.workload_id AND p.approval) INTO NEW.approval_required;
+ END IF;
+ RETURN NEW;
+END $$;
+
+CREATE TABLE IF NOT EXISTS panel_channel_observations (
+ channel text PRIMARY KEY CHECK(channel IN ('beta','release')),
+ version text NOT NULL, revision text NOT NULL, schema_hash text NOT NULL,
+ revision_time timestamptz NOT NULL, checked_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS confirmed_panel_version text NOT NULL DEFAULT '';
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS confirmed_panel_revision text NOT NULL DEFAULT '';
+
+ALTER TABLE panel_channel_observations ADD COLUMN IF NOT EXISTS source_root text NOT NULL DEFAULT '';
+ALTER TABLE panel_channel_observations ADD COLUMN IF NOT EXISTS source_generation bigint NOT NULL DEFAULT 0;
+
+ALTER TABLE workload_security_observations ADD COLUMN IF NOT EXISTS attempted_at timestamptz;
+ALTER TABLE workload_security_observations ALTER COLUMN observed_at DROP NOT NULL;
+
+CREATE TABLE IF NOT EXISTS template_repositories (
+ id text PRIMARY KEY, team_id text REFERENCES teams(id) ON DELETE CASCADE,
+ name text NOT NULL, kind text NOT NULL CHECK(kind IN ('git','index')),
+ url text NOT NULL, ref text NOT NULL DEFAULT '', revision text NOT NULL DEFAULT '',
+ snapshot jsonb, last_error text NOT NULL DEFAULT '', checked_at timestamptz,
+ next_refresh_at timestamptz NOT NULL DEFAULT now(), refresh_until timestamptz NOT NULL DEFAULT '-infinity'
+);
+CREATE TABLE IF NOT EXISTS team_templates (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ id text NOT NULL, definition jsonb NOT NULL, revision text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(team_id,id)
+);
+
+
+ALTER TABLE deploy_hook_receipts ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT '';
+
+CREATE OR REPLACE FUNCTION cove_permission_names(actor text,team text,project text,environment text,admin boolean,catalogue text[]) RETURNS text[] LANGUAGE sql STABLE AS $$
+ SELECT ARRAY(SELECT permission FROM unnest(catalogue) permission WHERE admin OR cove_permission(actor,team,project,environment,permission))
+$$;
+
+CREATE OR REPLACE FUNCTION cove_deployment_environment(resource text) RETURNS text LANGUAGE sql STABLE AS $$
+ SELECT COALESCE((SELECT base_environment_id FROM environment_previews p WHERE p.environment_id=w.environment_id AND p.team_id=w.team_id),
+ (SELECT s.environment_id FROM previews p JOIN workloads s ON s.id=p.source_id WHERE p.workload_id=w.id AND s.team_id=w.team_id),w.environment_id) FROM workloads w WHERE w.id=resource
+$$;
+CREATE OR REPLACE FUNCTION cove_deployment_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF NEW.action IN ('deploy','rollback') THEN
+ SELECT EXISTS(SELECT 1 FROM workloads w JOIN deployment_policies p ON p.team_id=w.team_id AND ((p.project_id IS NULL AND p.environment_id IS NULL) OR p.project_id=w.project_id OR p.environment_id=cove_deployment_environment(w.id)) WHERE w.id=NEW.workload_id AND p.approval) INTO NEW.approval_required;
+ END IF;
+ RETURN NEW;
+END $$;
+ALTER TABLE health_deliveries ADD COLUMN IF NOT EXISTS alert_key text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS health_deliveries_incident_pending ON health_deliveries(connection_id,alert_key,created_at,id) WHERE state='pending';
+
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS owner_user_id text;
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='workloads_owner_member' AND conrelid='workloads'::regclass) THEN
+  ALTER TABLE workloads ADD CONSTRAINT workloads_owner_member FOREIGN KEY(team_id,owner_user_id) REFERENCES team_members(team_id,user_id) ON DELETE SET NULL (owner_user_id);
+ END IF;
+END $$;
+ALTER TABLE health_deliveries ADD COLUMN IF NOT EXISTS subject_id text NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS threshold_rules (
+ id text PRIMARY KEY, team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ name text NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+ metric text NOT NULL CHECK(metric IN ('cpu','memory','disk')),
+ threshold double precision NOT NULL CHECK(threshold>0 AND threshold<=100),
+ confirmation_seconds integer NOT NULL CHECK(confirmation_seconds BETWEEN 60 AND 3600),
+ repeat_seconds integer NOT NULL CHECK(repeat_seconds BETWEEN 300 AND 604800),
+ channel_ids text[] NOT NULL CHECK(cardinality(channel_ids) BETWEEN 1 AND 32)
+);
+CREATE INDEX IF NOT EXISTS threshold_rules_node ON threshold_rules(node_id);
+
+CREATE TABLE IF NOT EXISTS telemetry_settings (
+ id integer PRIMARY KEY CHECK(id=1), configuration jsonb NOT NULL
+);
+INSERT INTO telemetry_settings(id,configuration) VALUES(1,'{"metric_rows":200000,"metric_bytes":268435456,"log_rows":200000,"log_bytes":134217728,"log_days":7,"audit_days":90,"raw_days":1,"hour_days":30,"day_days":365}') ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS metric_samples (
+ id bigserial PRIMARY KEY, node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ workload_id text REFERENCES workloads(id) ON DELETE CASCADE, series text NOT NULL,
+ tier text NOT NULL CHECK(tier IN ('minute','hour','day')), bucket timestamptz NOT NULL,
+ sampled_at timestamptz NOT NULL, payload jsonb NOT NULL CHECK(octet_length(payload::text)<=32768)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS metric_samples_series ON metric_samples(node_id,COALESCE(workload_id,''),series,tier,bucket);
+CREATE INDEX IF NOT EXISTS metric_samples_recent ON metric_samples(sampled_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS workload_log_entries (
+ id text PRIMARY KEY, workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ container_id text NOT NULL, container text NOT NULL, timestamp timestamptz NOT NULL,
+ message text NOT NULL CHECK(octet_length(message)<=8192), clipped boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS workload_logs_recent ON workload_log_entries(timestamp DESC,id DESC);
+CREATE INDEX IF NOT EXISTS workload_logs_resource ON workload_log_entries(workload_id,timestamp DESC,id DESC);
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_since timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_checked_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_limited boolean NOT NULL DEFAULT false;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS telemetry_error text NOT NULL DEFAULT '';
+
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS workload_id text REFERENCES workloads(id) ON DELETE CASCADE;
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS domain text NOT NULL DEFAULT '';
+ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_metric_check;
+ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_metric_check CHECK(metric IN ('cpu','memory','disk','certificate','restarts','oom','crashes','uptime'));
+ALTER TABLE threshold_rules DROP CONSTRAINT IF EXISTS threshold_rules_threshold_check;
+ALTER TABLE threshold_rules ADD CONSTRAINT threshold_rules_threshold_check CHECK(threshold>0 AND threshold<=100000);
+CREATE INDEX IF NOT EXISTS threshold_rules_workload ON threshold_rules(workload_id) WHERE workload_id IS NOT NULL;
+
+ALTER TABLE threshold_rules ADD COLUMN IF NOT EXISTS mount_path text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS operation_retention_runs (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ checked_at timestamptz NOT NULL,
+ error text NOT NULL DEFAULT '',
+ pruned integer NOT NULL DEFAULT 0,
+ protected integer NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS node_costs (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ monthly_minor bigint NOT NULL CHECK(monthly_minor BETWEEN 0 AND 100000000000),
+ currency text NOT NULL CHECK(currency ~ '^[A-Z]{3}$')
+);
+
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS metrics_token_hash bytea;
+CREATE TABLE IF NOT EXISTS log_forwarders (
+ id text PRIMARY KEY,team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ name text NOT NULL,enabled boolean NOT NULL,configuration bytea NOT NULL,
+ last_success timestamptz,last_error text NOT NULL DEFAULT '',sent_entries bigint NOT NULL DEFAULT 0,
+ dropped_entries bigint NOT NULL DEFAULT 0,UNIQUE(team_id,name)
+);
+CREATE TABLE IF NOT EXISTS log_forward_deliveries (
+ id text PRIMARY KEY,forwarder_id text NOT NULL REFERENCES log_forwarders(id) ON DELETE CASCADE,
+ payload bytea NOT NULL CHECK(octet_length(payload)<=524288),entries integer NOT NULL CHECK(entries BETWEEN 1 AND 100),
+ attempts integer NOT NULL DEFAULT 0,next_attempt timestamptz NOT NULL DEFAULT now(),created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS log_forward_due ON log_forward_deliveries(next_attempt,created_at);
+CREATE TABLE IF NOT EXISTS route_checks (
+ id text PRIMARY KEY,workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,domain text NOT NULL,path text NOT NULL,
+ enabled boolean NOT NULL,interval_seconds integer NOT NULL CHECK(interval_seconds BETWEEN 60 AND 86400),
+ timeout_seconds integer NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 10),expected_min integer NOT NULL,expected_max integer NOT NULL,
+ public_label text NOT NULL DEFAULT '',next_check_at timestamptz NOT NULL DEFAULT now(),checked_at timestamptz,
+ last_up boolean,last_status integer,latency_ms double precision,last_error text NOT NULL DEFAULT '',
+ consecutive_failures integer NOT NULL DEFAULT 0,version integer NOT NULL DEFAULT 1,UNIQUE(workload_id,domain)
+);
+CREATE INDEX IF NOT EXISTS route_checks_due ON route_checks(next_check_at) WHERE enabled;
+CREATE TABLE IF NOT EXISTS route_check_results (
+ id bigserial PRIMARY KEY,check_id text NOT NULL REFERENCES route_checks(id) ON DELETE CASCADE,
+ checked_at timestamptz NOT NULL,up boolean NOT NULL,status integer NOT NULL,latency_ms double precision NOT NULL
+);
+CREATE INDEX IF NOT EXISTS route_check_history ON route_check_results(check_id,checked_at DESC);
+CREATE INDEX IF NOT EXISTS route_check_result_age ON route_check_results(checked_at);
+CREATE TABLE IF NOT EXISTS project_status_pages (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,enabled boolean NOT NULL DEFAULT false,
+ title text NOT NULL,slug text NOT NULL UNIQUE CHECK(length(slug)=64)
+);
+CREATE TABLE IF NOT EXISTS traffic_collection (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,cursor_at timestamptz,checked_at timestamptz,
+ available boolean NOT NULL DEFAULT false,limited boolean NOT NULL DEFAULT false,last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS route_traffic (
+ id text PRIMARY KEY,workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,domain text NOT NULL,timestamp timestamptz NOT NULL,
+ status integer NOT NULL,bytes bigint NOT NULL,duration_ms double precision NOT NULL,client_ip text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS route_traffic_recent ON route_traffic(timestamp DESC,id DESC);
+CREATE INDEX IF NOT EXISTS route_traffic_resource ON route_traffic(workload_id,timestamp DESC);
+
+-- Backup transfer bounds.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS backup_transfer_bytes bigint NOT NULL DEFAULT 1073741824 CHECK (backup_transfer_bytes BETWEEN 1048576 AND 68719476736);
+
+-- Host-driven panel backups and recovery.
+CREATE TABLE IF NOT EXISTS panel_recovery (
+ id integer PRIMARY KEY CHECK(id=1),configuration bytea,
+ agent_id text NOT NULL DEFAULT '',checked_at timestamptz,last_scheduled_at timestamptz,
+ updates_paused boolean NOT NULL DEFAULT false,last_error text NOT NULL DEFAULT '',pending_recovery boolean NOT NULL DEFAULT false,pending_remote_job text NOT NULL DEFAULT '',
+ snapshots jsonb NOT NULL DEFAULT '[]' CHECK(jsonb_typeof(snapshots)='array' AND jsonb_array_length(snapshots)<=102)
+);
+INSERT INTO panel_recovery(id) VALUES(1) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS panel_recovery_jobs (
+ id text PRIMARY KEY,actor_id text NOT NULL,action text NOT NULL CHECK(action IN ('backup','restore','resume_updates')),
+ snapshot_id text NOT NULL DEFAULT '',state text NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','succeeded','failed')),
+ requested_at timestamptz NOT NULL DEFAULT now(),finished_at timestamptz,last_error text NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_panel_recovery_job ON panel_recovery_jobs((true)) WHERE state IN ('queued','running');
+CREATE INDEX IF NOT EXISTS panel_recovery_history ON panel_recovery_jobs(requested_at DESC,id DESC);
+
+-- Metrics service capabilities are revalidated against their issuing administrator.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS metrics_token_creator_id text REFERENCES users(id) ON DELETE SET NULL;
+
+-- Route safe audit outcomes through the existing channel delivery queue.
+CREATE OR REPLACE FUNCTION cove_queue_channel_event(event_name text, event_message text, source_team text, resource text, delivery text, affected_user text DEFAULT '') RETURNS void LANGUAGE sql AS $$
+ INSERT INTO health_deliveries(id,team_id,connection_id,event,message,alert_key,subject_id)
+ SELECT delivery||':'||c.id,c.team_id,c.id,event_name,event_message,delivery,resource
+ FROM infrastructure_connections c WHERE c.kind='notification' AND
+ ((source_team IS NOT NULL AND c.team_id=source_team) OR
+ (source_team IS NULL AND affected_user<>'' AND EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=c.team_id AND m.user_id=affected_user)) OR
+ (source_team IS NULL AND affected_user='' AND EXISTS(SELECT 1 FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=c.team_id AND u.is_admin AND NOT u.disabled)))
+ FOR KEY SHARE OF c ON CONFLICT(id) DO NOTHING;
+$$;
+CREATE OR REPLACE FUNCTION cove_notify_audit_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE event_name text; event_message text; affected text:=''; resource text:=''; source_team text:=NEW.team_id;
+BEGIN
+ IF NEW.action='identity membership reconciled' THEN event_name='identity.membership_changed'; event_message='Directory role claims changed. Review managed membership provenance.'; affected=NEW.subject;
+ ELSIF NEW.actor='SCIM' AND NEW.action IN ('POST SCIM users','PUT SCIM users','PATCH SCIM users','DELETE SCIM users') AND NEW.status<300 THEN
+  affected='';
+  IF EXISTS(SELECT 1 FROM users WHERE id=NEW.subject AND disabled) THEN event_name='identity.deprovisioned'; event_message='Provisioning disabled an account and revoked its owned access and automation.';
+  ELSE event_name='identity.provisioned'; event_message='Provisioning saved an account profile. Review its mapped access.'; END IF;
+ ELSIF NEW.action='identity sync failed' OR (NEW.actor='SCIM' AND NEW.action LIKE '% SCIM %' AND NEW.status>=400) OR (NEW.action IN ('POST /auth/ldap/{provider}/sign-in','POST /api/settings/ldap/providers/{provider}/test') AND NEW.status>=500) THEN event_name='identity.sync_failed'; event_message='Directory synchronization or provisioning did not finish. Review its audit activity.';
+ ELSIF NEW.action='authentication lockout' THEN event_name='security.lockout'; event_message='An account authentication lockout occurred.'; affected=NEW.actor;
+ ELSIF NEW.action='account new device' THEN event_name='security.new_device'; event_message='An account signed in from a new browser. Review account login history.'; affected=NEW.actor;
+ ELSIF NEW.action='DELETE /api/users/{id}/second-factor' AND NEW.status<300 THEN event_name='security.second_factor_reset'; event_message='An administrator reset an account second factor.'; affected=NEW.subject; source_team=NULL;
+ ELSIF NEW.action='emergency deployment override' AND NEW.status<300 THEN event_name='deployment.freeze_override'; event_message='An administrator overrode deployment policy. Review the audit log.';
+ ELSIF NEW.actor='deploy hook' AND NEW.action='accepted delivery' THEN event_name='deploy_hook.accepted'; event_message='A deploy hook delivery was accepted. Deployment policy still applies.';
+ ELSIF NEW.actor='deploy hook' AND NEW.status>=400 THEN event_name='deploy_hook.failed'; event_message='A deploy hook delivery was refused. Review its audit event.';
+ ELSIF NEW.action='GitOps diff staged' THEN event_name='gitops.drift'; event_message='GitOps compared its source with saved configuration. Review its configuration diff.';
+ ELSIF NEW.action='configuration applied' AND NEW.status<300 THEN
+  IF EXISTS(SELECT 1 FROM configuration_gitops g WHERE g.project_id=NEW.subject AND g.last_draft_id=NEW.details->>'draft_id') THEN event_name='gitops.applied'; ELSE event_name='configuration.applied'; END IF;
+  event_message='Reviewed project configuration was saved. This did not deploy resources.';
+ ELSIF NEW.action LIKE 'POST /api/projects/{id}/imports%' THEN
+  IF NEW.status<300 THEN event_name='import.reviewed'; event_message='An importer prepared a review. The source system was not changed.'; ELSE event_name='import.failed'; event_message='An importer request was refused. Review the audit log.'; END IF;
+ ELSIF NEW.actor='cpu-scaler' AND NEW.action='scale service replicas' THEN event_name='autoscale.queued'; event_message='CPU observations queued a replica change. Deployment admission still applies.';
+ ELSIF NEW.action='idle state observed' AND NEW.details->>'state'='asleep' THEN event_name='resource.asleep'; event_message='The request-driven resource was observed asleep. Availability checks are deferred.';
+ ELSIF NEW.action='idle state observed' AND NEW.details->>'state'='awake' THEN event_name='resource.awake'; event_message='The request-driven resource was observed awake.';
+ ELSIF NEW.action='resource.adopt' THEN event_name='adoption.succeeded'; event_message='A reviewed resource was adopted without restarting containers.';
+ ELSIF NEW.action LIKE 'POST /api/nodes/{id}/adoptions%' AND NEW.status>=400 THEN event_name='adoption.failed'; event_message='A Compose adoption request did not finish. Reload its review before retrying.';
+ ELSE RETURN NEW;
+ END IF;
+ SELECT id INTO resource FROM workloads WHERE id=NEW.subject AND (NEW.team_id IS NULL OR team_id=NEW.team_id);
+ IF source_team IS NULL AND resource IS NOT NULL THEN SELECT team_id INTO source_team FROM workloads WHERE id=resource; END IF;
+ PERFORM cove_queue_channel_event(event_name,event_message,source_team,COALESCE(resource,''),'audit:'||NEW.id,affected);
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_audit_notifications ON audit_events;
+CREATE TRIGGER cove_audit_notifications AFTER INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION cove_notify_audit_outcome();
+CREATE OR REPLACE FUNCTION cove_audit_lockout() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.locked_until>now() AND (TG_OP='INSERT' OR OLD.locked_until<=now()) THEN
+  INSERT INTO audit_events(actor,action,subject,status) VALUES(CASE WHEN NEW.key LIKE 'account:%' THEN substring(NEW.key from 9) ELSE '' END,'authentication lockout','',429);
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_lockout_notification ON authentication_failures;
+CREATE TRIGGER cove_lockout_notification AFTER INSERT OR UPDATE ON authentication_failures FOR EACH ROW EXECUTE FUNCTION cove_audit_lockout();
+-- Deploy track: per-job calendar timezone. Existing schedules retain UTC semantics.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timezone text NOT NULL DEFAULT 'UTC';
+
+-- Deploy track: bounded hourly image digest checks use the existing durable operation queue.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_image_check_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS due_image_checks ON workloads(next_image_check_at) WHERE kind='service';
+-- Metadata polling must not generate generic deployment notifications every hour.
+DROP TRIGGER IF EXISTS cove_operation_notification ON operations;
+CREATE TRIGGER cove_operation_notification AFTER UPDATE OF state ON operations FOR EACH ROW
+ WHEN (OLD.state IS DISTINCT FROM NEW.state AND NEW.action <> 'image_check' AND NEW.state IN ('succeeded','failed','interrupted','cancelled')) EXECUTE FUNCTION cove_notify_operation();
+
+-- Deploy track: scheduled runs coalesce at most one tick and bound execution.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_overlap_policy text NOT NULL DEFAULT 'skip' CHECK (job_overlap_policy IN ('skip','queue_one','replace'));
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_timeout_seconds integer NOT NULL DEFAULT 1800 CHECK (job_timeout_seconds BETWEEN 5 AND 86400);
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_pending_at timestamptz;
+
+-- Deploy track: health restarts share the durable operation queue and workload lock.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS restart_unhealthy boolean NOT NULL DEFAULT false;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_unhealthy_check_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_unhealthy_restart_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_operation_id text REFERENCES operations(id) ON DELETE SET NULL;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS unhealthy_restart_error text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS unhealthy_restart_attempts ON operations(workload_id,created_at) WHERE action='restart_unhealthy';
+
+-- Deploy track: desired environment suspension and worker-confirmed resource checkpoints.
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS paused boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS environment_suspensions (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ environment_id text NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+ suspended boolean NOT NULL DEFAULT false,
+ resume_wanted boolean NOT NULL DEFAULT false,
+ operation_id text REFERENCES operations(id),
+ action text NOT NULL DEFAULT '' CHECK (action IN ('','suspend','resume')),
+ error text NOT NULL DEFAULT ''
+);
+CREATE OR REPLACE FUNCTION cove_cancel_paused_operation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE held boolean;
+BEGIN
+ IF NEW.action IN ('deploy','rollback','start','restart','restart_unhealthy','rollout_promote','restore','drill') THEN
+  SELECT e.paused INTO held FROM environments e JOIN workloads w ON w.environment_id=e.id WHERE w.id=NEW.workload_id FOR SHARE OF e;
+  IF held THEN NEW.cancel_requested := true; END IF;
+ END IF;
+ RETURN NEW;
+END
+$$;
+DROP TRIGGER IF EXISTS cove_paused_operation ON operations;
+CREATE TRIGGER cove_paused_operation BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_cancel_paused_operation();
+
+-- Deploy track: desired idle sleep policy is committed only after worker route confirmation.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS idle_policy jsonb NOT NULL DEFAULT '{"enabled":false,"after_seconds":300,"request_driven":false}'::jsonb;
+
+-- CPU scaling samples and attempt cooldown survive control-plane restarts.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS next_cpu_check_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_samples jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS last_cpu_scale_at timestamptz;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_operation_id text NOT NULL DEFAULT '';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_status text NOT NULL DEFAULT 'disabled';
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS cpu_scale_error text NOT NULL DEFAULT '';
+
+-- Cross-track observed runtime states and durable rollout notification outcomes.
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS observed_idle_state text NOT NULL DEFAULT 'awake';
+CREATE OR REPLACE FUNCTION cove_notify_deployment_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE event_name text; event_message text; source_team text;
+BEGIN
+ IF NEW.state NOT IN ('succeeded','failed','interrupted','cancelled') OR (OLD.state=NEW.state AND OLD.result IS NOT DISTINCT FROM NEW.result) THEN RETURN NEW; END IF;
+ IF EXISTS(SELECT 1 FROM workloads WHERE id=NEW.workload_id AND cpu_scale_operation_id=NEW.id) THEN
+  IF NEW.state='succeeded' THEN event_name='autoscale.succeeded'; event_message='The observed CPU replica change completed.'; ELSE event_name='autoscale.failed'; event_message='The CPU replica change did not complete. Review its operation.'; END IF;
+ ELSIF NEW.action='rollout_abort' AND NEW.state='succeeded' THEN event_name='rollout.aborted'; event_message='The staged rollout was aborted and retained traffic restored.';
+ ELSIF NEW.action='rollout_promote' AND NEW.state='succeeded' THEN event_name='rollout.promoted'; event_message='The rollout became active.';
+ ELSIF NEW.action IN ('deploy','rollback') AND jsonb_typeof(NEW.result->'rollout')='object' THEN
+  IF NEW.state<>'succeeded' THEN event_name='rollout.failed'; event_message='The rollout did not complete. Review its operation and retained state.';
+  ELSIF NEW.result->'rollout'->>'phase'='waiting' THEN event_name='rollout.staged'; event_message='A healthy candidate is staged for an explicit rollout decision.';
+  ELSIF NEW.result->'rollout'->>'phase'='aborted' THEN event_name='rollout.aborted'; event_message='The rollout was aborted and retained traffic restored.';
+  ELSE event_name='rollout.promoted'; event_message='The rollout became active.'; END IF;
+ ELSIF NEW.action IN ('rollout_promote','rollout_abort') THEN event_name='rollout.failed'; event_message='The rollout decision did not complete. Review its operation.';
+ ELSE RETURN NEW;
+ END IF;
+ SELECT team_id INTO source_team FROM workloads WHERE id=NEW.workload_id;
+ PERFORM cove_queue_channel_event(event_name,event_message,source_team,NEW.workload_id,'operation:'||NEW.id||':'||event_name);
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_deployment_notifications ON operations;
+CREATE TRIGGER cove_deployment_notifications AFTER UPDATE OF state,result ON operations FOR EACH ROW EXECUTE FUNCTION cove_notify_deployment_outcome();
+
+-- Rollout promotion changes live release traffic and inherits preview-aware approval policies.
+CREATE OR REPLACE FUNCTION cove_deployment_approval() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF NEW.action IN ('deploy','rollback','rollout_promote') THEN
+ SELECT EXISTS(SELECT 1 FROM workloads w JOIN deployment_policies p ON p.team_id=w.team_id AND ((p.project_id IS NULL AND p.environment_id IS NULL) OR p.project_id=w.project_id OR p.environment_id=cove_deployment_environment(w.id)) WHERE w.id=NEW.workload_id AND p.approval) INTO NEW.approval_required;
+ END IF;
+ RETURN NEW;
+END $$;
+
+-- A staged candidate is not the deployed declaration until an explicit promotion commits it.
+CREATE OR REPLACE VIEW cove_committed_deployments AS
+ SELECT decision.workload_id,decision.id AS operation_id,declaration.id AS declaration_id,decision.updated_at,COALESCE(declaration.result->>'revision','') AS revision
+ FROM operations decision JOIN operations declaration ON declaration.workload_id=decision.workload_id AND declaration.id=CASE WHEN decision.action='rollout_promote' THEN decision.result->'rollout'->>'release' ELSE decision.id END
+ WHERE decision.state='succeeded' AND decision.action IN ('deploy','rollback','adopt','rollout_promote')
+ AND COALESCE(decision.result->'rollout'->>'phase','') NOT IN ('waiting','aborted')
+ AND (decision.action<>'rollout_promote' OR decision.result->'rollout'->>'phase'='completed');
+
+
+-- Provider feedback follows the traffic decision rather than successful staging.
+CREATE INDEX IF NOT EXISTS operations_rollout_decisions ON operations(workload_id,(result->'rollout'->>'release'),updated_at DESC,id DESC)
+ WHERE state='succeeded' AND action IN ('rollout_promote','rollout_abort','stop');
+CREATE OR REPLACE VIEW cove_deployment_feedback_states AS
+ SELECT source.id,CASE WHEN source.state='succeeded' AND source.result->'rollout'->>'phase'='waiting'
+  THEN CASE decision.phase WHEN 'completed' THEN 'succeeded' WHEN 'aborted' THEN 'cancelled' ELSE 'running' END
+  ELSE source.state END AS state
+ FROM operations source LEFT JOIN LATERAL (
+  SELECT outcome.result->'rollout'->>'phase' AS phase FROM operations outcome
+  WHERE source.state='succeeded' AND source.result->'rollout'->>'phase'='waiting'
+   AND outcome.workload_id=source.workload_id AND outcome.state='succeeded'
+   AND outcome.action IN ('rollout_promote','rollout_abort','stop')
+   AND outcome.result->'rollout'->>'release'=source.id
+   AND outcome.result->'rollout'->>'phase' IN ('completed','aborted')
+  ORDER BY outcome.updated_at DESC,outcome.id DESC LIMIT 1
+ ) decision ON true WHERE source.action='deploy';
+
+
+CREATE TABLE IF NOT EXISTS database_maintenance (
+ id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE, workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ source_id text REFERENCES workloads(id) ON DELETE SET NULL, node_id text NOT NULL REFERENCES nodes(id),
+ kind text NOT NULL CHECK(kind IN ('rotate','extension','upgrade')),
+ configuration bytea NOT NULL,
+ state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','failed','succeeded','discarded')),
+ last_error text NOT NULL DEFAULT '', retry_requested boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS database_maintenance_active ON database_maintenance(workload_id) WHERE state IN ('pending','failed');
+ALTER TABLE database_maintenance ADD COLUMN IF NOT EXISTS cutover_at timestamptz;
+ALTER TABLE database_maintenance ADD COLUMN IF NOT EXISTS cutover_by text NOT NULL DEFAULT '';
+CREATE OR REPLACE FUNCTION cove_database_maintenance_lock() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE resource text;
+BEGIN
+ resource:=OLD.id;
+ PERFORM 1 FROM workloads WHERE id=resource FOR UPDATE;
+ IF EXISTS(SELECT 1 FROM database_maintenance WHERE (state IN ('pending','failed') AND workload_id=resource) OR (state='pending' AND source_id=resource)) OR EXISTS(SELECT 1 FROM object_buckets WHERE state='pending' AND (workload_id=resource OR storage_resource_id=resource)) THEN
+  RAISE EXCEPTION 'database maintenance requires confirmation or retry before changing this resource';
+ END IF;
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS database_maintenance_workloads ON workloads;
+CREATE TRIGGER database_maintenance_workloads BEFORE UPDATE OF configuration,node_id,project_id,environment_id OR DELETE ON workloads FOR EACH ROW EXECUTE FUNCTION cove_database_maintenance_lock();
+
+ALTER TABLE database_access ADD COLUMN IF NOT EXISTS tool text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS object_buckets (
+ id text PRIMARY KEY, workload_id text NOT NULL REFERENCES workloads(id),
+ storage_resource_id text NOT NULL REFERENCES workloads(id),
+ storage_id text REFERENCES infrastructure_connections(id),
+ configuration bytea NOT NULL, state text NOT NULL DEFAULT 'pending',
+ created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(workload_id)
+);
+
+-- Resource-scoped immutable TLS versions keep private keys outside configuration and history.
+CREATE TABLE IF NOT EXISTS route_certificates (
+ id text PRIMARY KEY,
+ workload_id text NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
+ name text NOT NULL,
+ material bytea NOT NULL,
+ metadata jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS route_certificates_workload_idx ON route_certificates(workload_id);
+
+-- Issuer ownership and pending private requests survive outages and prevent premature resource deletion.
+ALTER TABLE route_certificates ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'uploaded';
+CREATE TABLE IF NOT EXISTS route_certificate_issuers (
+ id text PRIMARY KEY,
+ workload_id text NOT NULL REFERENCES workloads(id),
+ zone_id text NOT NULL REFERENCES cloudflare_zones(zone_id),
+ name text NOT NULL,
+ provider text NOT NULL CHECK (provider IN ('cloudflare_origin')),
+ domains text[] NOT NULL,
+ validity_days integer NOT NULL,
+ auto_renew boolean NOT NULL,
+ phase text NOT NULL DEFAULT 'requesting',
+ state bytea NOT NULL,
+ certificate_id text REFERENCES route_certificates(id),
+ operation_id text NOT NULL DEFAULT '',
+ last_error text NOT NULL DEFAULT '',
+ next_check_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS route_certificate_issuers_due ON route_certificate_issuers(next_check_at) WHERE next_check_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS route_certificate_issuers_workload ON route_certificate_issuers(workload_id);
+
+CREATE TABLE IF NOT EXISTS identity_group_mappings (
+ source_kind text NOT NULL CHECK(source_kind IN ('github','scim','ldap')),
+ source_id text NOT NULL, group_id text NOT NULL,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE, role text NOT NULL,
+ PRIMARY KEY(source_kind,source_id,group_id,team_id)
+);
+CREATE TABLE IF NOT EXISTS identity_membership_bases (
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ role text CHECK(role IN ('owner','admin','member')), grants jsonb NOT NULL DEFAULT '[]',
+ PRIMARY KEY(team_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS identity_membership_claims (
+ source_kind text NOT NULL CHECK(source_kind IN ('github','scim','ldap')),
+ source_id text NOT NULL, group_id text NOT NULL,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ role text NOT NULL CHECK(role IN ('owner','admin','member')), grants jsonb NOT NULL DEFAULT '[]',
+ PRIMARY KEY(source_kind,source_id,group_id,team_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS github_team_sync_sources (
+ id text PRIMARY KEY, configuration bytea NOT NULL, enabled boolean NOT NULL DEFAULT false,
+ version bigint NOT NULL DEFAULT 1, checked_at timestamptz, applied_at timestamptz,
+ next_check_at timestamptz NOT NULL DEFAULT now(), refresh_until timestamptz NOT NULL DEFAULT now(),
+ last_error text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS scim_settings (
+ id integer PRIMARY KEY CHECK(id=1), enabled boolean NOT NULL DEFAULT false,
+ configuration bytea NOT NULL, rotated_at timestamptz, version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS scim_users (
+ id text PRIMARY KEY REFERENCES users(id), external_id text NOT NULL DEFAULT '',
+ user_name text NOT NULL UNIQUE, document jsonb NOT NULL,
+ oidc_provider_id text REFERENCES oidc_providers(id) ON DELETE SET NULL,
+ version bigint NOT NULL DEFAULT 1,
+ disabled_by_scim boolean NOT NULL DEFAULT false, deleted_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(), modified_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scim_users_external ON scim_users(external_id) WHERE external_id<>'';
+CREATE TABLE IF NOT EXISTS scim_groups (
+ id text PRIMARY KEY, external_id text NOT NULL DEFAULT '', name text NOT NULL UNIQUE,
+ version bigint NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(),
+ modified_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scim_groups_external ON scim_groups(external_id) WHERE external_id<>'';
+CREATE UNIQUE INDEX IF NOT EXISTS scim_groups_name ON scim_groups(lower(name));
+CREATE TABLE IF NOT EXISTS scim_group_members (
+ group_id text NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
+ user_id text NOT NULL REFERENCES scim_users(id) ON DELETE CASCADE,
+ PRIMARY KEY(group_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS ldap_providers (
+ id text PRIMARY KEY, configuration bytea NOT NULL, enabled boolean NOT NULL DEFAULT true,
+ version bigint NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS ldap_identities (
+ provider_id text NOT NULL REFERENCES ldap_providers(id) ON DELETE CASCADE,
+ subject text NOT NULL, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ username text NOT NULL,
+ PRIMARY KEY(provider_id,subject), UNIQUE(provider_id,user_id)
+);
+
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS directory_sync boolean NOT NULL DEFAULT false;
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS link_session_hash bytea;
+
+-- Owned automation is revalidated against the current catalogue and account policy.
+ALTER TABLE project_status_pages ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE project_status_shares ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS job_schedule_creator_id text REFERENCES users(id) ON DELETE SET NULL;
+CREATE TABLE IF NOT EXISTS scheduled_job_runs (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ creator_id text NOT NULL REFERENCES users(id), dispatch_started boolean NOT NULL DEFAULT false
+);
+ALTER TABLE scheduled_job_runs ADD COLUMN IF NOT EXISTS dispatch_started boolean NOT NULL DEFAULT false;
+CREATE OR REPLACE FUNCTION cove_account_active(owner_id text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=owner_id AND u.email_verified AND NOT u.disabled
+ AND NOT EXISTS(SELECT 1 FROM authentication_failures f WHERE f.key='account:'||u.id AND f.locked_until>now())
+ AND (NOT (SELECT require_second_factor FROM control_settings WHERE id=1)
+ OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))
+$$;
+CREATE OR REPLACE FUNCTION cove_automation_allowed(owner_id text,team text,project text,environment text,permission text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=owner_id AND cove_account_active(u.id)
+ AND (u.is_admin OR cove_permission(u.id,team,project,environment,permission))
+ AND (NOT ((SELECT require_second_factor FROM control_settings WHERE id=1) OR COALESCE((SELECT require_second_factor FROM teams WHERE id=team),false))
+ OR EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))
+$$;
+
+-- Encrypted PostgreSQL PITR policies; collection is bounded to 256 resources globally.
+CREATE TABLE IF NOT EXISTS workload_pitr (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ configuration bytea NOT NULL,enabled boolean NOT NULL,next_backup_at timestamptz NOT NULL DEFAULT now(),
+ operation_id text REFERENCES operations(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS workload_pitr_due ON workload_pitr(next_backup_at) WHERE enabled;
+
+-- Streamed resource file transfer bounds; the text editor remains independently bounded.
+ALTER TABLE control_settings ADD COLUMN IF NOT EXISTS file_transfer_bytes bigint NOT NULL DEFAULT 67108864 CHECK(file_transfer_bytes BETWEEN 1048576 AND 1073741824);
+
+-- Separately pinned forwarding identities never relax a worker's restricted RPC key.
+CREATE TABLE IF NOT EXISTS ssh_bastions (
+ id text PRIMARY KEY,name text NOT NULL,address text NOT NULL,port integer NOT NULL CHECK(port BETWEEN 1 AND 65535),
+ login text NOT NULL,host_key text NOT NULL,public_key text NOT NULL,private_key bytea NOT NULL
+);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS bastion_id text REFERENCES ssh_bastions(id) ON DELETE RESTRICT;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS host_key_error text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS nodes_bastion ON nodes(bastion_id) WHERE bastion_id IS NOT NULL;
+
+-- One resumable SSH key change and last outcome per node, with sealed key material removed at completion.
+CREATE TABLE IF NOT EXISTS node_identity_rotations (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,id text NOT NULL,
+ phase text NOT NULL CHECK(phase IN ('queued','staged','switched','aborting','succeeded','cancelled')),
+ configuration bytea,last_error text NOT NULL DEFAULT '',next_attempt_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Instance-admin cloud credentials and bounded resumable server creation.
+CREATE TABLE IF NOT EXISTS node_providers (
+ id text PRIMARY KEY,
+ kind text NOT NULL CHECK(kind IN ('hetzner','digitalocean','vultr')),
+ name text NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+ secret bytea NOT NULL CHECK(octet_length(secret) BETWEEN 16 AND 8192),
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_provider_id text REFERENCES node_providers(id) ON DELETE SET NULL;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_kind text NOT NULL DEFAULT '' CHECK(cloud_kind IN ('','hetzner','digitalocean','vultr'));
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_server_id text NOT NULL DEFAULT '' CHECK(length(cloud_server_id)<=128);
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS cloud_server_name text NOT NULL DEFAULT '' CHECK(length(cloud_server_name)<=128);
+CREATE TABLE IF NOT EXISTS node_provisions (
+ id text PRIMARY KEY,
+ provider_id text REFERENCES node_providers(id) ON DELETE SET NULL,
+ provider_kind text NOT NULL CHECK(provider_kind IN ('hetzner','digitalocean','vultr')),
+ provider_name text NOT NULL CHECK(length(provider_name) BETWEEN 1 AND 120),
+ team_id text NOT NULL REFERENCES teams(id),
+ node_id text REFERENCES nodes(id) ON DELETE SET NULL,
+ cloud_id text NOT NULL DEFAULT '' CHECK(length(cloud_id)<=128),
+ cloud_name text NOT NULL CHECK(length(cloud_name) BETWEEN 1 AND 128),
+ phase text NOT NULL DEFAULT 'queued' CHECK(phase IN ('queued','creating','server_pending','enrolling','succeeded','failed','uncertain','cancelled')),
+ configuration bytea NOT NULL CHECK(octet_length(configuration)<=16384),
+ last_error text NOT NULL DEFAULT '' CHECK(length(last_error)<=1024),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ next_check_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE node_provisions ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE node_provisions ADD COLUMN IF NOT EXISTS deadline timestamptz NOT NULL DEFAULT now()+interval '20 minutes';
+CREATE INDEX IF NOT EXISTS node_provision_active_idx ON node_provisions(next_check_at) WHERE phase IN ('queued','creating','server_pending','enrolling');
+
+-- Defaults are one bounded CPU/memory pair per existing team or environment.
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_cpu double precision NOT NULL DEFAULT 0 CHECK(resource_default_cpu=0 OR resource_default_cpu BETWEEN 0.01 AND 1024);
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_cpu double precision NOT NULL DEFAULT 0 CHECK(resource_default_cpu=0 OR resource_default_cpu BETWEEN 0.01 AND 1024);
+ALTER TABLE environments ADD COLUMN IF NOT EXISTS resource_default_memory_mb bigint NOT NULL DEFAULT 0 CHECK(resource_default_memory_mb=0 OR resource_default_memory_mb BETWEEN 6 AND 16777216);
+
+CREATE TABLE IF NOT EXISTS workload_moves (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ source_node text REFERENCES nodes(id) ON DELETE SET NULL,
+ target_node text REFERENCES nodes(id) ON DELETE SET NULL,
+ phase text NOT NULL DEFAULT 'queued' CHECK(phase IN ('queued','freezing','exporting','transferring','starting','committing','cleaning','rolling_back','discarding','succeeded','rolled_back')),
+ last_error text NOT NULL DEFAULT '' CHECK(length(last_error)<=1024),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- DNS-01 request identity and cleanup ownership survive issuer/resource removal.
+ALTER TABLE route_certificate_issuers DROP CONSTRAINT IF EXISTS route_certificate_issuers_provider_check;
+ALTER TABLE route_certificate_issuers ADD CONSTRAINT route_certificate_issuers_provider_check CHECK (provider IN ('cloudflare_origin','acme_dns'));
+ALTER TABLE route_certificate_issuers ADD COLUMN IF NOT EXISTS acme_state bytea;
+CREATE TABLE IF NOT EXISTS route_certificate_acme_accounts (
+ directory text PRIMARY KEY,
+ private_key bytea NOT NULL,
+ account_uri text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS route_certificate_dns_intents (
+ id text PRIMARY KEY,
+ issuer_id text REFERENCES route_certificate_issuers(id) ON DELETE SET NULL,
+ workload_id text REFERENCES workloads(id) ON DELETE SET NULL,
+ zone_id text NOT NULL REFERENCES cloudflare_zones(zone_id),
+ cycle_id text NOT NULL,
+ state bytea NOT NULL,
+ cleanup_requested boolean NOT NULL DEFAULT false,
+ phase text NOT NULL DEFAULT 'pending',
+ last_error text NOT NULL DEFAULT '',
+ next_check_at timestamptz DEFAULT now(),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS route_certificate_dns_intents_due ON route_certificate_dns_intents(next_check_at) WHERE phase<>'cleaned';
+CREATE INDEX IF NOT EXISTS route_certificate_dns_intents_zone ON route_certificate_dns_intents(zone_id);
+CREATE INDEX IF NOT EXISTS route_certificate_dns_intents_issuer ON route_certificate_dns_intents(issuer_id);
+
+CREATE OR REPLACE FUNCTION cove_queue_certificate_dns_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF (OLD.issuer_id IS NOT NULL AND NEW.issuer_id IS NULL) OR (OLD.workload_id IS NOT NULL AND NEW.workload_id IS NULL) THEN
+  NEW.cleanup_requested := true;
+  NEW.updated_at := now();
+  IF NEW.phase <> 'cleaned' THEN
+   NEW.phase := 'cleanup';
+   NEW.next_check_at := now();
+  END IF;
+ END IF;
+ RETURN NEW;
+END
+$$;
+DROP TRIGGER IF EXISTS cove_certificate_dns_orphan ON route_certificate_dns_intents;
+CREATE TRIGGER cove_certificate_dns_orphan BEFORE UPDATE OF issuer_id,workload_id ON route_certificate_dns_intents FOR EACH ROW EXECUTE FUNCTION cove_queue_certificate_dns_cleanup();
+
+CREATE OR REPLACE FUNCTION cove_notify_certificate_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE owner_team text;
+BEGIN
+ IF NEW.phase='failed' AND OLD.phase IS DISTINCT FROM NEW.phase THEN
+  SELECT team_id INTO owner_team FROM workloads WHERE id=NEW.workload_id;
+  PERFORM cove_queue_channel_event('certificate.failed','Managed certificate issuance or renewal did not finish. Review certificate issuer status.',owner_team,NEW.workload_id,'certificate:'||NEW.id||':'||NEW.updated_at::text,'');
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_certificate_notifications ON route_certificate_issuers;
+CREATE TRIGGER cove_certificate_notifications AFTER UPDATE OF phase ON route_certificate_issuers FOR EACH ROW EXECUTE FUNCTION cove_notify_certificate_outcome();
+
+CREATE TABLE IF NOT EXISTS node_cloudflare_tunnels (
+ node_id text PRIMARY KEY REFERENCES nodes(id) ON DELETE RESTRICT,
+ id text NOT NULL UNIQUE,
+ zone_id text NOT NULL REFERENCES cloudflare_zones(zone_id) ON DELETE RESTRICT,
+ connection_id text NOT NULL REFERENCES cloudflare_accounts(id) ON DELETE RESTRICT,
+ owner_id text NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ hostnames text[] NOT NULL,
+ image text NOT NULL,
+ phase text NOT NULL DEFAULT 'pending',
+ state bytea NOT NULL,
+ cleanup_requested boolean NOT NULL DEFAULT false,
+ last_error text NOT NULL DEFAULT '',
+ next_check_at timestamptz DEFAULT now(),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION cove_notify_tunnel_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.last_error<>'' AND (OLD.last_error='' OR OLD.phase IS DISTINCT FROM NEW.phase) THEN
+  PERFORM cove_queue_channel_event('tunnel.failed','Managed Tunnel publishing or cleanup needs attention. Review the node Proxy page.',NULL,'','tunnel:'||NEW.id||':'||NEW.updated_at::text,'');
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_tunnel_notifications ON node_cloudflare_tunnels;
+CREATE TRIGGER cove_tunnel_notifications AFTER UPDATE OF phase,last_error ON node_cloudflare_tunnels FOR EACH ROW EXECUTE FUNCTION cove_notify_tunnel_outcome();
+CREATE TABLE IF NOT EXISTS registry_webhooks (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ id text NOT NULL UNIQUE,
+ registry_id text NOT NULL REFERENCES infrastructure_connections(id) ON DELETE RESTRICT,
+ registry_server text NOT NULL,
+	provider text NOT NULL CHECK(provider IN ('distribution','docker_hub','ghcr')),
+ enabled boolean NOT NULL,
+ filters jsonb NOT NULL CHECK(jsonb_typeof(filters)='array' AND jsonb_array_length(filters) BETWEEN 1 AND 32),
+ secret bytea NOT NULL,
+ last_received_at timestamptz,
+ last_matched_at timestamptz,
+	pending_at timestamptz,
+	next_dispatch_at timestamptz NOT NULL DEFAULT now(),
+	last_operation_id text REFERENCES operations(id) ON DELETE SET NULL,
+	last_error text NOT NULL DEFAULT '',
+	last_ignored_reason text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE registry_webhooks ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+CREATE TABLE IF NOT EXISTS registry_webhook_runs (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ creator_id text REFERENCES users(id) ON DELETE SET NULL,
+ dispatch_started boolean NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS registry_webhook_deliveries (
+ webhook_id text NOT NULL REFERENCES registry_webhooks(id) ON DELETE CASCADE,
+ event_key text NOT NULL CHECK(event_key ~ '^[a-f0-9]{64}$'),
+	source_key text NOT NULL CHECK(source_key ~ '^[a-f0-9]{64}$'),
+ image_key text NOT NULL CHECK(image_key ~ '^[a-f0-9]{64}$'),
+ received_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(webhook_id,event_key),
+	UNIQUE(webhook_id,source_key)
+);
+CREATE INDEX IF NOT EXISTS registry_webhook_deliveries_age ON registry_webhook_deliveries(webhook_id,received_at);
+
+CREATE TABLE IF NOT EXISTS image_update_policies (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ policy jsonb NOT NULL, generation text NOT NULL,
+ last_check_id text REFERENCES operations(id) ON DELETE SET NULL,
+ last_operation_id text REFERENCES operations(id) ON DELETE SET NULL,
+ consumed_candidate text NOT NULL DEFAULT '', last_error text NOT NULL DEFAULT '',
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS next_dispatch_at timestamptz NOT NULL DEFAULT now();
+CREATE TABLE IF NOT EXISTS image_update_deployments (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ window_start text NOT NULL, window_end text NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_update_events (
+ operation_id text PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+ summary text NOT NULL CHECK(length(summary)<=32768)
+);
+
+ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS creator_id text REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS generation text NOT NULL DEFAULT '';
+ALTER TABLE image_update_deployments ADD COLUMN IF NOT EXISTS dispatch_started boolean NOT NULL DEFAULT false;
+ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS processed_check_id text REFERENCES operations(id) ON DELETE SET NULL;
+ALTER TABLE image_update_policies ADD COLUMN IF NOT EXISTS retained_images jsonb NOT NULL DEFAULT '{}' CHECK(jsonb_typeof(retained_images)='object');
+
+CREATE TABLE IF NOT EXISTS managed_registries (
+ id text PRIMARY KEY REFERENCES workloads(id) ON DELETE RESTRICT,
+ team_id text NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
+ hostname text NOT NULL,
+ credentials bytea NOT NULL,
+ retention jsonb NOT NULL,
+ state text NOT NULL DEFAULT 'provisioning' CHECK(state IN ('provisioning','ready','maintenance','removing','failed','removed')),
+ previous_state text NOT NULL DEFAULT '',
+ connection_id text UNIQUE REFERENCES infrastructure_connections(id) ON DELETE RESTRICT,
+ operation_id text REFERENCES operations(id) ON DELETE RESTRICT,
+ last_error text NOT NULL DEFAULT '', data_retained boolean NOT NULL DEFAULT false,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_managed_registry_per_team ON managed_registries(team_id) WHERE state<>'removed';
+CREATE UNIQUE INDEX IF NOT EXISTS managed_registry_hostname ON managed_registries(hostname) WHERE state<>'removed';
+CREATE OR REPLACE FUNCTION cove_managed_registry_admission() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE registry_state text;
+BEGIN
+ IF NEW.state IN ('queued','running') AND NEW.action IN ('build','deploy','rollback') THEN
+  FOR registry_state IN SELECT m.state FROM managed_registries m JOIN workloads w ON w.team_id=m.team_id WHERE w.id=NEW.workload_id AND (m.state<>'removed' OR m.data_retained) ORDER BY m.id FOR SHARE OF m LOOP
+   IF registry_state IN ('maintenance','removing') THEN
+    RAISE EXCEPTION 'managed registry maintenance holds team publishers' USING ERRCODE='23514',CONSTRAINT='cove_managed_registry_busy';
+   END IF;
+  END LOOP;
+  SELECT m.state INTO registry_state FROM managed_registries m JOIN workload_connections c ON c.connection_id=m.connection_id WHERE c.workload_id=NEW.workload_id AND c.kind='registry' FOR SHARE OF m;
+  IF registry_state IS NOT NULL AND registry_state<>'ready' THEN
+   RAISE EXCEPTION 'managed registry is not ready for publishing or deployment' USING ERRCODE='23514',CONSTRAINT='cove_managed_registry_busy';
+  END IF;
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_managed_registry_admission ON operations;
+CREATE TRIGGER cove_managed_registry_admission BEFORE INSERT ON operations FOR EACH ROW EXECUTE FUNCTION cove_managed_registry_admission();
+CREATE OR REPLACE FUNCTION cove_managed_registry_binding() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE registry_state text;
+BEGIN
+ SELECT state INTO registry_state FROM managed_registries WHERE connection_id=NEW.connection_id FOR SHARE;
+ IF registry_state IS NOT NULL AND registry_state<>'ready' THEN
+  RAISE EXCEPTION 'managed registry is not ready for new connections' USING ERRCODE='23514',CONSTRAINT='cove_managed_registry_busy';
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_managed_registry_binding ON workload_connections;
+CREATE TRIGGER cove_managed_registry_binding BEFORE INSERT OR UPDATE OF connection_id ON workload_connections FOR EACH ROW EXECUTE FUNCTION cove_managed_registry_binding();
+
+CREATE TABLE IF NOT EXISTS workload_build_nodes (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ node_id text NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS workload_build_recipes (
+ workload_id text PRIMARY KEY REFERENCES workloads(id) ON DELETE CASCADE,
+ configuration bytea NOT NULL,
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS execution_node_id text REFERENCES nodes(id) ON DELETE RESTRICT;
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS build_prepared boolean NOT NULL DEFAULT false;
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='operations' AND column_name='build_legacy') THEN
+  ALTER TABLE operations ADD COLUMN build_legacy boolean NOT NULL DEFAULT false;
+  UPDATE operations SET build_legacy=true WHERE action='build' AND state IN ('queued','running');
+ END IF;
+END $$;
+UPDATE operations o SET execution_node_id=w.node_id FROM workloads w WHERE o.workload_id=w.id AND o.action='build' AND o.state IN ('queued','running') AND o.execution_node_id IS NULL;
+CREATE OR REPLACE FUNCTION cove_build_execution_identity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF OLD.execution_node_id IS NOT NULL AND NEW.execution_node_id IS DISTINCT FROM OLD.execution_node_id THEN
+  RAISE EXCEPTION 'build execution node is immutable' USING ERRCODE='23514';
+ END IF;
+ IF OLD.action='build' AND OLD.build_prepared AND (NOT NEW.build_prepared OR NEW.payload IS DISTINCT FROM OLD.payload) THEN
+  RAISE EXCEPTION 'prepared build inputs are immutable' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS cove_build_execution_identity ON operations;
+CREATE TRIGGER cove_build_execution_identity BEFORE UPDATE OF execution_node_id,payload,build_prepared ON operations FOR EACH ROW EXECUTE FUNCTION cove_build_execution_identity();
+
+CREATE TABLE IF NOT EXISTS preview_ci_credentials (
+ project_id text PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ team_id text NOT NULL REFERENCES teams(id),
+ user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ token_hash bytea NOT NULL UNIQUE,
+ bindings jsonb NOT NULL CHECK(jsonb_typeof(bindings)='object'),
+ recipe_version bigint NOT NULL,
+ expires_at timestamptz NOT NULL,
+ last_received_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS preview_ci_slots (
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ suffix text NOT NULL,
+ sequence bigint NOT NULL CHECK(sequence>0),
+ preview_id text REFERENCES environment_previews(id) ON DELETE SET NULL,
+ delivery_id text NOT NULL,
+ fingerprint text NOT NULL,
+ PRIMARY KEY(project_id,suffix)
+);
+CREATE TABLE IF NOT EXISTS preview_ci_deliveries (
+ project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ delivery_id text NOT NULL,
+ fingerprint text NOT NULL,
+ preview_id text,
+ received_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(project_id,delivery_id)
+);
+CREATE INDEX IF NOT EXISTS preview_ci_deliveries_age ON preview_ci_deliveries(project_id,received_at);
+
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS dns_prepared boolean NOT NULL DEFAULT false;
+ALTER TABLE operations ADD COLUMN IF NOT EXISTS dns_warning text NOT NULL DEFAULT '';
+
+ALTER TABLE managed_registries ADD COLUMN IF NOT EXISTS verification_attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE managed_registries ADD COLUMN IF NOT EXISTS next_verification_at timestamptz;

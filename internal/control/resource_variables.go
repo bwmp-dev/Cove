@@ -59,10 +59,18 @@ func (s *Server) resourceVariables(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid source", 400)
 		return
 	}
-	if !s.requireAccess(w, r, "workload", in.SourceID, 3) {
-		return
+	permission := "read_secrets"
+	if databaseExportKey(in.SourceKey) && !databaseExportSecret(in.SourceKey) {
+		var database bool
+		if err := s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workloads WHERE id=$1 AND team_id=$2 AND kind='database')", in.SourceID, actor(r).Team).Scan(&database); err != nil {
+			http.Error(w, "source permissions unavailable", 503)
+			return
+		}
+		if database {
+			permission = "view"
+		}
 	}
-	if !s.requirePersistentResource(w, r, in.SourceID) {
+	if !s.requirePermission(w, r, "workload", in.SourceID, permission) || !s.requirePersistentResource(w, r, in.SourceID) {
 		return
 	}
 	tx, err := s.DB.Begin(r.Context())
@@ -106,7 +114,17 @@ func (s *Server) resourceVariables(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source unavailable", 503)
 		return
 	}
-	if _, ok := config.Environment[in.SourceKey]; !ok {
+	_, exists := config.Environment[in.SourceKey]
+	if config.Database != nil {
+		exists = false
+	}
+	if !exists && config.Database != nil && databaseExportKey(in.SourceKey) {
+		values, err := databaseExports(config, nil)
+		if err == nil {
+			_, exists = values[in.SourceKey]
+		}
+	}
+	if !exists {
 		http.Error(w, "source variable does not exist", 400)
 		return
 	}

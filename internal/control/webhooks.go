@@ -3,9 +3,6 @@ package control
 import (
 	"context"
 	"cove/internal/worker"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -28,7 +25,7 @@ func (s *Server) getWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var managed bool
-	if err = s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1)", r.PathValue("id")).Scan(&managed); err != nil {
+	if err = s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1)", r.PathValue("id")).Scan(&managed); err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
@@ -93,7 +90,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var encrypted, configuration []byte
 	var stopped bool
-	err = tx.QueryRow(r.Context(), "SELECT webhook_secret,configuration,manually_stopped FROM workloads WHERE id=$1 FOR UPDATE", r.PathValue("id")).Scan(&encrypted, &configuration, &stopped)
+	err = tx.QueryRow(r.Context(), "SELECT webhook_secret,configuration,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=workloads.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=workloads.id)) FROM workloads WHERE id=$1 FOR UPDATE", r.PathValue("id")).Scan(&encrypted, &configuration, &stopped)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && len(encrypted) == 0 {
 		http.NotFound(w, r)
 		return
@@ -107,10 +104,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webhook unavailable", 500)
 		return
 	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(body)
-	signature, err := hex.DecodeString(strings.TrimPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256="))
-	if err != nil || !strings.HasPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256=") || !hmac.Equal(signature, mac.Sum(nil)) {
+	if !s.githubProvider().VerifyWebhook(secret, body, r.Header) {
 		http.Error(w, "invalid webhook signature", 401)
 		return
 	}
@@ -169,7 +163,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	config.Source.Revision = event.After
-	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Source: config.Source, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy}
+	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Source: config.Source, ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout}
 	if err = worker.ValidateRequest(request); err != nil {
 		http.Error(w, "invalid deployment configuration", 400)
 		return
@@ -229,7 +223,7 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	defer tx.Rollback(ctx)
 	var enabled bool
 	var configuration []byte
-	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic)),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
+	if err = tx.QueryRow(ctx, "SELECT NOT manually_stopped AND NOT EXISTS(SELECT 1 FROM environments e WHERE e.id=workloads.environment_id AND e.paused) AND NOT EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=workloads.id) AND (webhook_secret IS NOT NULL OR EXISTS(SELECT 1 FROM github_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1 AND automatic) OR EXISTS(SELECT 1 FROM deploy_hooks h JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE h.workload_id=$1 AND h.expires_at>now() AND cove_automation_allowed(h.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate'))),configuration FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&enabled, &configuration); err != nil {
 		return err
 	}
 	if !enabled {
@@ -253,6 +247,21 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if strings.HasPrefix(delivery, "hook-") {
+		var allowed bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deploy_hook_receipts receipt JOIN deploy_hooks h ON h.id=receipt.hook_id JOIN users u ON u.id=h.creator_id JOIN workloads w ON w.id=h.workload_id WHERE receipt.queue_delivery=$2 AND h.workload_id=$1 AND NOT receipt.cancelled AND h.expires_at>now() AND cove_automation_allowed(h.creator_id,w.team_id,w.project_id,COALESCE(w.environment_id,''),'operate'))`, id, delivery).Scan(&allowed); err != nil {
+			return err
+		}
+		if !allowed {
+			if _, err = tx.Exec(ctx, `UPDATE deploy_hook_receipts SET cancelled=true WHERE queue_delivery=$1`, delivery); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(ctx, `DELETE FROM webhook_deliveries WHERE workload_id=$1 AND delivery=$2 AND operation_id IS NULL`, id, delivery); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 	}
 	var prerequisite string
 	var waiting, abandoned bool
@@ -302,6 +311,15 @@ func (s *Server) dispatchWebhook(ctx context.Context, id string) error {
 	}
 	if _, err = tx.Exec(ctx, "INSERT INTO operations(id,workload_id,action,payload) VALUES($1,$2,'deploy',$3)", request.ID, id, encrypted); err != nil {
 		return err
+	}
+	if strings.HasPrefix(delivery, "hook-") {
+		var reason string
+		if err = tx.QueryRow(ctx, "SELECT reason FROM deploy_hook_receipts WHERE queue_delivery=$1", delivery).Scan(&reason); err != nil {
+			return err
+		}
+		if err = saveOperationReason(ctx, tx, request.ID, reason, "deploy hook"); err != nil {
+			return err
+		}
 	}
 	if prerequisite != "" {
 		if _, err = tx.Exec(ctx, "INSERT INTO operation_dependencies(operation_id,prerequisite_id) VALUES($1,$2)", request.ID, prerequisite); err != nil {

@@ -29,7 +29,7 @@ func TestHealthIgnoresOnlySuccessfulInitServices(t *testing.T) {
 			return err
 		}
 		if args[1] == "inspect" {
-			_, err := io.WriteString(out, "migrate "+exit)
+			_, err := io.WriteString(out, `{"id":"init","service":"migrate","state":{"status":"exited","exitCode":`+exit+`}}`+"\n"+`{"id":"web","service":"web","state":{"status":"running","health":{"status":"healthy"}}}`)
 			return err
 		}
 		t.Fatal(strings.Join(args, " "))

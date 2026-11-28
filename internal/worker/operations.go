@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"cove/internal/outbound"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -25,11 +27,43 @@ var environmentIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var serviceIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type Request struct {
+	AutomaticScan          *AutomaticScan            `json:"automatic_scan,omitempty"`
+	BuildRecipe            *BuildRecipe              `json:"build_recipe,omitempty"`
+	BuildpacksAdmission    *BuildpacksAdmission      `json:"buildpacks_admission,omitempty"`
+	BuildPlatform          string                    `json:"build_platform,omitempty"`
+	ManagedRegistry        *ManagedRegistryOperation `json:"managed_registry,omitempty"`
+	DatabaseMetadata       json.RawMessage           `json:"database_metadata,omitempty"`
+	ManagedDatabase        bool                      `json:"managed_database,omitempty"`
+	DatabaseMaintenance    *DatabaseMaintenance      `json:"database_maintenance,omitempty"`
+	RecordDrift            bool                      `json:"record_drift,omitempty"`
+	ComposeBundle          *ComposeBundle            `json:"compose_bundle,omitempty"`
+	BuiltinDefaults        map[string]string         `json:"builtin_defaults,omitempty"`
+	OutboundProxy          *outbound.Config          `json:"outbound_proxy,omitempty"`
+	resolvedPublicBuiltins map[string]string
+	resolvedSecrets        []string
+	DefaultLimits          *ServiceLimits `json:"default_limits,omitempty"`
+	PITR                   *PITRPolicy    `json:"pitr,omitempty"`
+	PITRRestore            *PITRRestore   `json:"pitr_restore,omitempty"`
+	snapshotMounts         []backupMount
+	snapshotCheck          func(context.Context) error
+	volumeMethod           string
+	snapshotFallback       string
+	ImageUpdates           *ImageUpdateOptions      `json:"image_updates,omitempty"`
+	Certificates           []RouteCertificate       `json:"certificates,omitempty"`
+	Scale                  *CPUScaleOptions         `json:"scale,omitempty"`
+	Idle                   *IdlePolicy              `json:"idle,omitempty"`
+	Suspension             *SuspensionOptions       `json:"suspension,omitempty"`
+	ResumeSuspended        bool                     `json:"resume_suspended,omitempty"`
+	Job                    *JobOptions              `json:"job,omitempty"`
+	Rollout                *RolloutOptions          `json:"rollout,omitempty"`
+	Build                  *BuildOptions            `json:"build,omitempty"`
+	PullLatest             bool                     `json:"pull_latest,omitempty"`
 	EnvironmentPreview     *EnvironmentPreview      `json:"environment_preview,omitempty"`
 	Preview                bool                     `json:"preview,omitempty"`
 	GuardedDeploy          *bool                    `json:"guarded_deploy,omitempty"`
 	RestoreCopy            *RestoreCopy             `json:"restore_copy,omitempty"`
 	FileSecrets            []FileSecret             `json:"file_secrets,omitempty"`
+	DatabaseCAs            map[string]string        `json:"database_cas,omitempty"`
 	ImagePins              map[string]string        `json:"image_pins,omitempty"`
 	Hooks                  *DeploymentHooks         `json:"hooks,omitempty"`
 	Limits                 map[string]ServiceLimits `json:"limits,omitempty"`
@@ -51,22 +85,39 @@ type Request struct {
 	JobService             string                   `json:"job_service,omitempty"`
 }
 type Operation struct {
-	ID         string         `json:"id"`
-	Workload   string         `json:"workload"`
-	Action     string         `json:"action"`
-	State      string         `json:"state"`
-	CreatedAt  time.Time      `json:"created_at"`
-	FinishedAt *time.Time     `json:"finished_at,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	Revision   string         `json:"revision,omitempty"`
-	Preview    *PreviewReport `json:"environment_preview,omitempty"`
+	ScanOrigin              string                 `json:"scan_origin,omitempty"`
+	BuildRecipe             *BuildRecipeInfo       `json:"build_recipe,omitempty"`
+	RegistryRecoveryPending bool                   `json:"registry_recovery_pending,omitempty"`
+	ManagedRegistry         *ManagedRegistryResult `json:"managed_registry,omitempty"`
+	Scale                   *CPUScaleOptions       `json:"scale,omitempty"`
+	Suspension              *SuspensionStatus      `json:"suspension,omitempty"`
+	Job                     *JobResult             `json:"job,omitempty"`
+	Rollout                 *RolloutStatus         `json:"rollout,omitempty"`
+	Build                   *BuildResult           `json:"build,omitempty"`
+	ImageCheck              *ImageCheck            `json:"image_check,omitempty"`
+	ImageScan               *ImageScan             `json:"image_scan,omitempty"`
+	ID                      string                 `json:"id"`
+	Workload                string                 `json:"workload"`
+	Action                  string                 `json:"action"`
+	State                   string                 `json:"state"`
+	CreatedAt               time.Time              `json:"created_at"`
+	FinishedAt              *time.Time             `json:"finished_at,omitempty"`
+	Error                   string                 `json:"error,omitempty"`
+	Revision                string                 `json:"revision,omitempty"`
+	Preview                 *PreviewReport         `json:"environment_preview,omitempty"`
 }
 type journal struct {
-	CancelRequested bool         `json:"cancel_requested,omitempty"`
-	RouteChange     *routeChange `json:"route_change,omitempty"`
-	Operation       Operation    `json:"operation"`
-	Request         Request      `json:"request"`
-	Digest          string       `json:"digest"`
+	RegistryCleanup  *managedRegistryCleanup `json:"registry_cleanup,omitempty"`
+	ImageScanCleanup bool                    `json:"image_scan_cleanup,omitempty"`
+	IdleChange       *idleChange             `json:"idle_change,omitempty"`
+	SuspensionChange *suspensionChange       `json:"suspension_change,omitempty"`
+	JobRun           *jobRun                 `json:"job_run,omitempty"`
+	RolloutChange    *rolloutChange          `json:"rollout_change,omitempty"`
+	CancelRequested  bool                    `json:"cancel_requested,omitempty"`
+	RouteChange      *routeChange            `json:"route_change,omitempty"`
+	Operation        Operation               `json:"operation"`
+	Request          Request                 `json:"request"`
+	Digest           string                  `json:"digest"`
 }
 
 // routeChange is journaled by a route operation before it changes the proxy. Until Committed, the
@@ -79,21 +130,42 @@ type routeChange struct {
 // routeRecovery tracks a running route operation without an executor whose outcome must still be
 // settled from its journal: restored to the previous routes, or completed once committed.
 type routeRecovery struct {
-	workload string
-	state    string
-	next     time.Time
-	running  bool
+	activeSlot bool
+	workload   string
+	state      string
+	next       time.Time
+	running    bool
 }
 type deployedState struct {
-	Private     *PrivateNetwork     `json:"private,omitempty"`
-	Networks    []NetworkAttachment `json:"networks,omitempty"`
-	Routes      []Route             `json:"routes,omitempty"`
-	Revision    string              `json:"revision,omitempty"`
-	ComposePath string              `json:"compose_path"`
-	Environment map[string]string   `json:"environment"`
+	DatabaseMetadata  json.RawMessage     `json:"database_metadata,omitempty"`
+	Traffic           trafficState        `json:"traffic,omitempty"`
+	Generation        string              `json:"generation,omitempty"`
+	Rollout           *RolloutOptions     `json:"rollout,omitempty"`
+	AdditionalSecrets []string            `json:"additional_secrets,omitempty"`
+	PublicBuiltins    map[string]string   `json:"public_builtins,omitempty"`
+	Private           *PrivateNetwork     `json:"private,omitempty"`
+	Networks          []NetworkAttachment `json:"networks,omitempty"`
+	Routes            []Route             `json:"routes,omitempty"`
+	Revision          string              `json:"revision,omitempty"`
+	ComposePath       string              `json:"compose_path"`
+	Environment       map[string]string   `json:"environment"`
 }
 type CommandRunner func(context.Context, string, []string, []string, io.Writer) error
 type Engine struct {
+	cacheProbeMu     sync.Mutex
+	databaseMu       sync.Mutex
+	helperImageMu    sync.Mutex
+	idleMu           sync.Mutex
+	adoptionMu       sync.RWMutex
+	adoptedProjects  map[string]adoptedProject
+	execRunning      int
+	comparisonMu     sync.Mutex
+	moveMu           sync.Mutex
+	hostHelperBinary string
+	observationMu    sync.Mutex
+	tailSlots        chan struct{}
+	scanMu           sync.Mutex
+	automaticScans   map[string]string
 	// Stream runs a command with separate output streams; tests replace it.
 	Stream        func(context.Context, []string, io.Writer, io.Writer) error
 	previewDataMu sync.Mutex
@@ -102,6 +174,7 @@ type Engine struct {
 	preflightMu   sync.Mutex
 	buildMu       sync.Mutex
 	storageMu     sync.Mutex
+	helperOwnerMu sync.Mutex
 	terminalMu    sync.Mutex
 	terminals     map[string]*terminalSession
 	ACMEDirectory string
@@ -118,12 +191,16 @@ type Engine struct {
 	pending       []Operation
 	fatal         chan error
 	draining      bool
+	hostChanging  bool
 	cancels       map[string]context.CancelFunc
 	recovering    map[string]routeRecovery
 	// A custom proxy configuration change that did not commit is restored until it settles.
 	customUnsettled bool
 	customRunning   bool
 	customRetry     time.Time
+	proxyUnsettled  bool
+	proxyRunning    bool
+	proxyRetry      time.Time
 }
 
 func RunCommand(ctx context.Context, dir string, args, environment []string, out io.Writer) error {
@@ -142,7 +219,10 @@ func NewEngine(root string) (*Engine, error) {
 	if err := os.MkdirAll(filepath.Join(root, "workloads"), 0700); err != nil {
 		return nil, err
 	}
-	e := &Engine{Root: root, Run: RunCommand, active: map[string]bool{}, cancels: map[string]context.CancelFunc{}, recovering: map[string]routeRecovery{}, fatal: make(chan error, 1), linkKick: make(chan struct{}, 1)}
+	e := &Engine{Root: root, Run: configuredRunner(root), active: map[string]bool{}, cancels: map[string]context.CancelFunc{}, recovering: map[string]routeRecovery{}, fatal: make(chan error, 1), linkKick: make(chan struct{}, 1)}
+	if err := e.loadAdoptedProjects(); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(filepath.Join(root, "draining.json")); err == nil {
 		e.draining = true
 	} else if !os.IsNotExist(err) {
@@ -167,7 +247,98 @@ func NewEngine(root string) (*Engine, error) {
 	return e, nil
 }
 func ValidateRequest(r Request) error {
-	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
+	if r.DatabaseMaintenance != nil {
+		if r.DatabaseMaintenance.Request.DatabaseMaintenance != nil || r.ID != r.DatabaseMaintenance.ID || r.Workload != r.DatabaseMaintenance.Request.Workload || r.Action != "deploy" {
+			return errors.New("invalid maintenance envelope")
+		}
+		return ValidateDatabaseMaintenance(*r.DatabaseMaintenance)
+	}
+	if r.OutboundProxy != nil {
+		if err := r.OutboundProxy.Validate(); err != nil {
+			return err
+		}
+	}
+	if len(r.DatabaseMetadata) > 0 && (!r.ManagedDatabase || len(r.DatabaseMetadata) > 64<<10 || !json.Valid(r.DatabaseMetadata)) {
+		return errors.New("invalid managed database snapshot metadata")
+	}
+	if r.ManagedDatabase && (r.Scale != nil || r.Rollout != nil || r.Idle != nil || r.Build != nil || r.PullLatest || r.ComposeBundle != nil) {
+		return errors.New("managed databases require explicit single-instance deployments")
+	}
+	if err := r.AutomaticScan.validate(r); err != nil {
+		return err
+	}
+	if err := validateManagedRegistryOperation(r); err != nil {
+		return err
+	}
+	if r.Action == "image_scan" {
+		minimal := Request{ID: r.ID, Workload: r.Workload, Action: r.Action, Kind: r.Kind, JobService: r.JobService, OutboundProxy: r.OutboundProxy, AutomaticScan: r.AutomaticScan}
+		if !reflect.DeepEqual(r, minimal) {
+			return errors.New("image scanning accepts no deployment or credential inputs")
+		}
+	}
+	if r.ImageUpdates != nil {
+		if r.Action != "image_check" || r.Kind == "job" || r.ManagedDatabase {
+			return errors.New("image update discovery requires a service image check")
+		}
+		if err := r.ImageUpdates.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := validateCertificateRequest(r); err != nil {
+		return err
+	}
+	if err := validateCPUScale(r); err != nil {
+		return err
+	}
+	if r.Idle != nil {
+		if r.Action != "idle_policy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("idle policies require a service outside previews")
+		}
+		if err := r.Idle.validate(); err != nil {
+			return err
+		}
+	}
+	if err := validateSuspensionRequest(r); err != nil {
+		return err
+	}
+	if r.ResumeSuspended && r.Action != "deploy" && r.Action != "start" && r.Action != "restart" && r.Action != "restore" {
+		return errors.New("resuming a suspension requires an explicit deploy, start, restart or restore")
+	}
+	if r.Job != nil && (r.Kind != "job" || r.Action != "deploy" || jobTimeout(r.Job) < 5 || jobTimeout(r.Job) > 86400) {
+		return errors.New("job execution settings require a job deployment and timeout from 5 to 86400 seconds")
+	}
+	if err := validateRollout(r); err != nil {
+		return err
+	}
+	if r.Build != nil && r.Action != "build" {
+		return errors.New("build options require a build operation")
+	}
+	if r.BuildRecipe != nil {
+		if r.Action != "build" {
+			return errors.New("build recipes require an explicit build and publish operation")
+		}
+		if err := ValidateRecipeSource(*r.BuildRecipe, r.Source, r.Compose, r.Kind); err != nil {
+			return err
+		}
+		if err := ValidateRecipeSecrets(*r.BuildRecipe, r.FileSecrets); err != nil {
+			return err
+		}
+	}
+	if r.BuildpacksAdmission != nil {
+		if r.Action != "build" || r.BuildRecipe == nil || r.BuildRecipe.Engine != "buildpacks" {
+			return errors.New("CNB memory admission requires its explicit build recipe")
+		}
+		if err := r.BuildpacksAdmission.Validate(); err != nil {
+			return err
+		}
+	}
+	if r.BuildPlatform != "" && (r.Action != "build" || !buildPlatformPattern.MatchString(r.BuildPlatform)) {
+		return errors.New("build platform must name the runtime Linux architecture")
+	}
+	if r.PullLatest && (r.Action != "deploy" || r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil || len(r.ImagePins) > 0) {
+		return errors.New("pull latest requires an unpinned service deployment")
+	}
+	if r.Preview && (r.Private != nil || len(r.Networks) > 0 || r.Hooks != nil || len(r.FileSecrets) > 0 || len(r.DatabaseCAs) > 0 || r.Registry != nil || len(r.ImagePins) > 0 || len(r.Limits) > 0 || r.Backup != nil || r.Kind == "job" || (r.Source != nil && r.Source.Revision == "")) {
 		return errors.New("preview deployment must use a pinned revision and isolated configuration")
 	}
 	if r.GuardedDeploy != nil && *r.GuardedDeploy && r.Kind == "job" {
@@ -179,8 +350,19 @@ func ValidateRequest(r Request) error {
 	if err := ValidateFileSecrets(r.FileSecrets); err != nil {
 		return err
 	}
+	if err := validateDatabaseCAs(r.DatabaseCAs); err != nil {
+		return err
+	}
 	if err := ValidateLimits(r.Limits); err != nil {
 		return err
+	}
+	if r.DefaultLimits != nil {
+		if r.DefaultLimits.GPUs != nil {
+			return errors.New("GPU selection cannot be inherited as a resource default")
+		}
+		if err := ValidateLimits(map[string]ServiceLimits{"default": *r.DefaultLimits}); err != nil {
+			return err
+		}
 	}
 	if err := ValidatePrivateNetwork(r.Private); err != nil {
 		return err
@@ -209,7 +391,34 @@ func ValidateRequest(r Request) error {
 	if !identifier.MatchString(r.ID) || !workloadIdentifier.MatchString(r.Workload) {
 		return errors.New("invalid operation or workload ID")
 	}
+	if err := ValidateComposeBundle(r.ComposeBundle, r.Source, r.Preview); err != nil {
+		return err
+	}
+	if r.ComposeBundle != nil {
+		encoded, err := json.Marshal(r)
+		if err != nil || len(encoded) > (2<<20)-(16<<10) {
+			return errors.New("Compose bundle and environment exceed the worker request limit")
+		}
+	}
 	switch r.Action {
+	case "pitr_restore":
+		if r.PITRRestore == nil || !workloadIdentifier.MatchString(r.PITRRestore.Source) || r.PITRRestore.Source == r.Workload || len(r.PITRRestore.Base) != 62 || !snapshotOwnerID.MatchString(r.PITRRestore.Base[:32]) || r.PITRRestore.Base[32] != '_' || !pitrBaseName.MatchString(r.PITRRestore.Base[33:]) || r.PITRRestore.Timestamp.IsZero() || r.PITRRestore.Timestamp.After(time.Now().Add(time.Minute)) || len(r.Compose) == 0 || len(r.Compose) > 1<<20 || len(r.Environment["COVE_PITR_PASSWORD"]) < 32 {
+			return errors.New("invalid PITR recovery copy")
+		}
+	case "pitr_configure", "pitr_backup", "pitr_forget":
+		if r.PITR == nil || r.Backup == nil || r.Kind == "job" {
+			return errors.New("configure PITR storage for a PostgreSQL service")
+		}
+		if err := ValidatePITR(r.PITR.Settings); err != nil {
+			return err
+		}
+		if !snapshotOwnerID.MatchString(r.PITR.Archive) || len(r.PITR.Key) != 64 {
+			return errors.New("invalid PITR archive identity")
+		}
+		if key, err := hex.DecodeString(r.PITR.Key); err != nil || len(key) != 32 {
+			return errors.New("invalid PITR encryption key")
+		}
+	case "registry_maintenance":
 	case "preview_data", "environment_preview_remove":
 	case "preview_remove":
 		if !r.Preview {
@@ -226,7 +435,45 @@ func ValidateRequest(r Request) error {
 		if r.Preview && r.Source != nil && r.Source.InlineCompose {
 			return errors.New("previews require a repository Compose file")
 		}
+	case "build":
+		if r.Build == nil || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("build requires a registry repository path outside managed previews")
+		}
+		prefix, _, qualified := strings.Cut(r.Build.Repository, "/")
+		if qualified && (strings.ContainsAny(prefix, ".:") || prefix == "localhost" || r.Registry != nil && strings.EqualFold(prefix, r.Registry.Server)) {
+			return errors.New("build repository must be a path without a registry host, tag or digest; the connected registry is added automatically")
+		}
+		if !repositoryPath.MatchString(r.Build.Repository) || len(r.Build.Repository) > 128 {
+			return errors.New("build requires a registry repository path outside managed previews")
+		}
+		if (r.Source == nil || r.Source.InlineCompose) && (len(r.Compose) == 0 || len(r.Compose) > 1024*1024) {
+			return errors.New("compose is required and must not exceed 1 MiB")
+		}
 	case "stop", "start", "restart":
+	case "suspend", "resume":
+	case "idle_policy":
+		if r.Idle == nil {
+			return errors.New("idle policy required")
+		}
+	case "idle_sleep", "idle_wake":
+		if r.Action == "idle_sleep" && (!strings.HasPrefix(r.ID, "idle-") || len(r.ID) > 59) || r.Action == "idle_wake" && !strings.HasPrefix(r.ID, "wake-idle-") {
+			return errors.New("invalid idle operation identity")
+		}
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("idle operations require a service")
+		}
+	case "restart_unhealthy":
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("health restarts require a service outside managed previews")
+		}
+	case "rollout_promote", "rollout_abort":
+		if r.Kind == "job" || r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("rollout actions require a service outside managed previews")
+		}
+	case "image_scan", "image_check":
+		if r.Preview || r.EnvironmentPreview != nil {
+			return errors.New("image checks require a resource outside managed previews")
+		}
 	case "routes":
 		if r.Kind == "job" {
 			return errors.New("only services can have routes")
@@ -259,6 +506,9 @@ func ValidateRequest(r Request) error {
 			return errors.New("deploy a new operation to run a job again")
 		}
 	}
+	if err := validateBuiltins(r.BuiltinDefaults); err != nil {
+		return err
+	}
 	for k, v := range r.Environment {
 		if !environmentIdentifier.MatchString(k) || strings.ContainsRune(v, 0) || len(v) > 65536 {
 			return errors.New("invalid environment variable")
@@ -267,10 +517,14 @@ func ValidateRequest(r Request) error {
 			return errors.New("reserved environment variable")
 		}
 	}
+	payload, err := json.Marshal(RPCRequest{Method: "submit_routes_v2", Request: &r})
+	if err != nil || len(payload) > rpcMessageLimit {
+		return errors.New("operation configuration exceeds the 2 MiB worker request limit")
+	}
 	return nil
 }
 func writeJSON(path string, value any) error {
-	data, err := json.Marshal(value)
+	data, err := marshalWorkerState(value)
 	if err != nil {
 		return err
 	}
@@ -312,12 +566,27 @@ func (e *Engine) read(id string) (journal, error) {
 	return j, err
 }
 func (e *Engine) Submit(r Request) (Operation, error) {
+	if r.BuildRecipe != nil && r.BuildRecipe.Engine == "buildpacks" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		return e.submitBuildpacks(ctx, r)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.submitLocked(r)
 }
 func (e *Engine) submitLocked(r Request) (Operation, error) {
+	return e.submitBuildpacksLocked(r, nil)
+}
+
+func (e *Engine) submitBuildpacksLocked(r Request, admission *BuildpacksAdmission) (Operation, error) {
+	if e.moving(r.Workload) {
+		return Operation{}, errors.New("resource is fenced by an unfinished node move")
+	}
 	if err := ValidateRequest(r); err != nil {
+		return Operation{}, err
+	}
+	if err := e.validateRecipeOutbound(r, nil); err != nil {
 		return Operation{}, err
 	}
 	data, _ := json.Marshal(r)
@@ -333,7 +602,23 @@ func (e *Engine) submitLocked(r Request) (Operation, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return Operation{}, err
 	}
-	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC()}, Request: r, Digest: digest}
+	j := journal{Operation: Operation{ID: r.ID, Workload: r.Workload, Action: r.Action, State: "queued", CreatedAt: time.Now().UTC(), Scale: r.Scale}, Request: r, Digest: digest}
+	if r.Action == "image_scan" {
+		j.Operation.ScanOrigin = "manual"
+		if r.AutomaticScan != nil {
+			j.Operation.ScanOrigin = r.AutomaticScan.Origin
+		}
+	}
+	if r.Action == "build" {
+		j.Operation.BuildRecipe = BuildRecipeSummary(r.BuildRecipe)
+		if r.BuildRecipe != nil && r.BuildRecipe.Engine == "nixpacks" {
+			j.Operation.BuildRecipe.PlannerSHA256 = NixpacksPlannerDigest(runtime.GOARCH)
+		}
+		if admission != nil {
+			j.Operation.BuildRecipe.PhaseMemoryBytes = admission.PhaseMemoryBytes
+			j.Operation.BuildRecipe.AdmissionAvailableMemoryBytes = admission.AvailableMemoryBytes
+		}
+	}
 	if err = writeJSON(e.path(r.ID), j); err != nil {
 		return Operation{}, err
 	}
@@ -344,6 +629,7 @@ func (e *Engine) Status(id string) (Operation, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	j, err := e.read(id)
+	j.Operation.RegistryRecoveryPending = j.RegistryCleanup != nil
 	return j.Operation, err
 }
 func (e *Engine) Logs(id string) (string, error) {
@@ -371,12 +657,18 @@ func (e *Engine) Logs(id string) (string, error) {
 	return string(data), err
 }
 func (e *Engine) Recover() error {
+	if err := e.removeOrphanDatabaseTools(); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if state, err := e.loadCustomIngress(); err != nil {
 		fmt.Fprintln(os.Stderr, "Custom proxy configuration state is unreadable; custom configuration changes and new resource hostnames are refused until it is repaired:", err)
 	} else if unsettledCustom(state.Change) {
 		e.customUnsettled = true
+	}
+	if state, err := e.loadIngressExposures(); err != nil || state.Change != nil && state.Change.FinishedAt == nil {
+		e.proxyUnsettled = true
 	}
 	entries, err := os.ReadDir(filepath.Join(e.Root, "operations"))
 	if err != nil {
@@ -391,6 +683,55 @@ func (e *Engine) Recover() error {
 		if err != nil {
 			return err
 		}
+		if j.RegistryCleanup != nil {
+			cleanup, stop := context.WithTimeout(context.Background(), 2*time.Minute)
+			e.mu.Unlock()
+			err := e.recoverManagedRegistry(context.WithValue(cleanup, registryStartupRecoveryKey{}, true), j)
+			e.mu.Lock()
+			stop()
+			if err != nil {
+				return err
+			}
+			j, err = e.read(id)
+			if err != nil {
+				return err
+			}
+		}
+		if j.ImageScanCleanup {
+			cleanup, stop := context.WithTimeout(context.Background(), time.Minute)
+			err := e.recoverImageScan(cleanup, j.Request)
+			stop()
+			if err != nil {
+				return err
+			}
+			j.ImageScanCleanup = false
+			if err = writeJSON(e.path(id), j); err != nil {
+				return err
+			}
+		}
+		if j.Operation.State == "running" && (j.SuspensionChange != nil || j.IdleChange != nil) {
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
+			continue
+		}
+		if j.Operation.State == "running" && j.Request.Kind == "job" && j.Request.Action == "deploy" {
+			if j.JobRun == nil {
+				j.JobRun = &jobRun{Legacy: true, Started: j.Operation.CreatedAt, Deadline: j.Operation.CreatedAt.Add(30 * time.Minute)}
+			}
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted", activeSlot: true}
+			j.Operation.Error = "Recovering the existing job run; a second run will not start until it settles."
+			if err := writeJSON(e.path(id), j); err != nil {
+				return err
+			}
+			continue
+		}
+		if j.Operation.State == "running" && j.RolloutChange != nil {
+			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted"}
+			j.Operation.Error = "Deployment recovery is restoring or completing the journaled traffic switch."
+			if err = writeJSON(e.path(id), j); err != nil {
+				return err
+			}
+			continue
+		}
 		if j.Operation.State == "running" && j.RouteChange != nil {
 			// The proxy may already serve the new routes, so the outcome is settled by route recovery.
 			e.recovering[id] = routeRecovery{workload: j.Request.Workload, state: "interrupted"}
@@ -403,6 +744,16 @@ func (e *Engine) Recover() error {
 			continue
 		}
 		if j.Operation.State == "running" {
+			if j.Request.Action == "build" {
+				cleanup, cancel := context.WithTimeout(context.Background(), time.Minute)
+				if err := e.recoverBuild(cleanup, j.Request.Workload); err != nil {
+					fmt.Fprintln(os.Stderr, "Interrupted build cache cleanup is pending:", err)
+				}
+				if err := e.cleanupBuildInputs(j.Request); err != nil {
+					fmt.Fprintln(os.Stderr, "Interrupted build input cleanup is pending:", err)
+				}
+				cancel()
+			}
 			if j.Request.GuardedDeploy != nil && *j.Request.GuardedDeploy {
 				cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				err := e.recoverCandidate(cleanup, filepath.Join(e.Root, "workloads", j.Request.Workload))
@@ -426,6 +777,9 @@ func (e *Engine) Recover() error {
 			j.Operation.State = "interrupted"
 			j.Operation.FinishedAt = &now
 			j.Operation.Error = "Worker restarted during execution; inspect workload before starting another operation."
+			if j.Request.Action == "build" {
+				j.Operation.Error = "Worker restarted during build; inspect registry artifacts before starting a new build."
+			}
 			if j.CancelRequested {
 				j.Operation.State = "cancelled"
 				j.Operation.Error = "Cancellation requested; inspect workload state."
@@ -438,30 +792,76 @@ func (e *Engine) Recover() error {
 	return nil
 }
 func (e *Engine) Serve(ctx context.Context) error {
+	e.buildMu.Lock()
+	cacheCtx, cacheCancel := context.WithTimeout(ctx, 2*time.Minute)
+	_, cacheErr := e.recoverBuildCache(cacheCtx, os.Stderr, false)
+	cacheCancel()
+	e.buildMu.Unlock()
+	if cacheErr != nil {
+		fmt.Fprintln(os.Stderr, "Cove build-cache verification or cleanup is pending; builds remain paused:", cacheErr)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	var jobs sync.WaitGroup
 	defer func() { cancel(); jobs.Wait() }()
 	if err := e.Recover(); err != nil {
 		return err
 	}
+	if err := e.recoverTrafficOnStartup(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "Proxy traffic recovery needs repair; deployments remain paused:", err)
+	}
+	if err := e.recoverScanRefresh(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "Automatic vulnerability database refresh recovery is pending; foreground operations remain available.")
+	}
 	if err := e.recoverDrills(ctx); err != nil {
+		return err
+	}
+	if err := e.recoverPITRCopies(ctx); err != nil {
 		return err
 	}
 	if err := e.recoverStorage(ctx); err != nil {
 		return err
 	}
+	e.runProxyRecovery(ctx)
+	closeWake, err := e.startIdleWake(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeWake()
+	if e.ingressExposureReady() == nil {
+		if err := e.recoverIngressDecisions(); err != nil {
+			return err
+		}
+	}
+	pendingCertificates, err := e.certificateReloadPending()
+	if err != nil {
+		return err
+	}
+	pendingRouteTransition, err := e.loadIngressTransition()
+	if err != nil {
+		return err
+	}
 	if routes, err := e.loadIngress(); err != nil {
 		return err
-	} else if len(routes) > 0 {
+	} else if (len(routes) > 0 || pendingCertificates || pendingRouteTransition != nil) && !e.trafficRecoveryPending() {
 		if err = e.syncIngress(ctx, routes, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "Ingress recovery failed; worker remains available for repairs:", err)
 		}
 	}
 	jobs.Go(func() { e.cleanupLoop(ctx) })
 	jobs.Go(func() { e.linkLoop(ctx) })
+	jobs.Go(func() { e.idleLoop(ctx) })
+	jobs.Go(func() { e.cloudflarePublishingLoop(ctx) })
+	jobs.Go(func() { e.certificateRetryLoop(ctx) })
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	nextScanDatabase := time.Time{}
 	for {
+		if !time.Now().Before(nextScanDatabase) {
+			if err := e.dispatchScanDatabase(ctx, &jobs); err != nil {
+				fmt.Fprintln(os.Stderr, "Automatic vulnerability database refresh is unavailable; foreground operations remain available.")
+				nextScanDatabase = time.Now().Add(time.Minute)
+			}
+		}
 		if err := e.dispatch(ctx, &jobs); err != nil {
 			return err
 		}
@@ -475,9 +875,20 @@ func (e *Engine) Serve(ctx context.Context) error {
 	}
 }
 func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
+	if e.trafficRecoveryPending() {
+		return nil
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := time.Now()
+	if e.proxyUnsettled {
+		if !e.proxyRunning && !now.Before(e.proxyRetry) {
+			e.proxyRunning = true
+			jobs.Go(func() { e.runProxyRecovery(ctx) })
+		}
+		return nil
+	}
+
 	for id, recovery := range e.recovering {
 		if recovery.running || now.Before(recovery.next) {
 			continue
@@ -490,16 +901,12 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 		e.customRunning = true
 		jobs.Go(func() { e.runCustomRecovery(ctx) })
 	}
-	if e.draining {
+	if e.draining || e.hostChanging {
 		return nil
 	}
 	sort.Slice(e.pending, func(i, j int) bool { return e.pending[i].CreatedAt.Before(e.pending[j].CreatedAt) })
 	remaining := make([]Operation, 0, len(e.pending))
 	for _, op := range e.pending {
-		if e.busy(op.Workload) || len(e.active) >= 4 {
-			remaining = append(remaining, op)
-			continue
-		}
 		j, err := e.read(op.ID)
 		if err != nil {
 			return err
@@ -507,10 +914,34 @@ func (e *Engine) dispatch(ctx context.Context, jobs *sync.WaitGroup) error {
 		if j.Operation.State != "queued" {
 			continue
 		}
-		e.active[j.Request.Workload] = true
+		if j.Request.AutomaticScan != nil {
+			if e.busy(op.Workload) || len(e.automaticScans) > 0 {
+				remaining = append(remaining, op)
+				continue
+			}
+			if e.automaticScans == nil {
+				e.automaticScans = map[string]string{}
+			}
+			e.automaticScans[op.ID] = op.Workload
+		} else {
+			for id, workload := range e.automaticScans {
+				if workload == op.Workload && e.cancels[id] != nil {
+					e.cancels[id]()
+				}
+			}
+			if e.busy(op.Workload) || len(e.active)+e.recoveringWorkloadCount() >= 4 {
+				remaining = append(remaining, op)
+				continue
+			}
+			e.active[j.Request.Workload] = true
+		}
 		j.Operation.State = "running"
 		if err = writeJSON(e.path(j.Request.ID), j); err != nil {
-			delete(e.active, j.Request.Workload)
+			if j.Request.AutomaticScan == nil {
+				delete(e.active, j.Request.Workload)
+			} else {
+				delete(e.automaticScans, op.ID)
+			}
 			return err
 		}
 		operationCtx, cancel := context.WithCancel(ctx)
@@ -595,28 +1026,75 @@ func (l *boundedLog) flush(final bool) error {
 	return err
 }
 func (e *Engine) execute(parent context.Context, j journal) {
-	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
+	budget := 30 * time.Minute
+	if j.Request.Kind == "job" && j.Request.Action == "deploy" {
+		budget += time.Duration(jobTimeout(j.Request.Job)) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	err := e.perform(ctx, j.Request)
+	baselineFailed := false
+	if err == nil && j.Request.Kind != "job" {
+		switch j.Request.Action {
+		case "deploy", "stop", "start", "restart", "rollback", "routes", "restore", "restore_copy", "rollout_promote", "rollout_abort", "resume", "restart_unhealthy":
+			record := j.Request.RecordDrift
+			if !record {
+				_, baselineErr := os.Stat(filepath.Join(e.Root, "workloads", j.Request.Workload, "drift.json"))
+				record = baselineErr == nil
+				if baselineErr != nil && !os.IsNotExist(baselineErr) {
+					err = baselineErr
+				}
+			}
+			if record && err == nil {
+				err = e.recordDriftBaseline(ctx, j.Request)
+			}
+			baselineFailed = err != nil
+		}
+	}
 	// Containers may have been recreated; attach them to their private links again.
-	defer e.kickLinks()
+	if j.Request.AutomaticScan == nil {
+		defer e.kickLinks()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	defer delete(e.active, j.Request.Workload)
+	if j.Request.AutomaticScan == nil {
+		defer delete(e.active, j.Request.Workload)
+	} else {
+		defer delete(e.automaticScans, j.Request.ID)
+	}
 	defer delete(e.cancels, j.Request.ID)
 	committed := false
 	persisted, readErr := e.read(j.Request.ID)
 	if readErr == nil {
+		j.IdleChange = persisted.IdleChange
+		j.SuspensionChange, j.Operation.Suspension = persisted.SuspensionChange, persisted.Operation.Suspension
+		j.Operation.Job = persisted.Operation.Job
+		j.JobRun = persisted.JobRun
 		j.Operation.Revision = persisted.Operation.Revision
 		j.Operation.Preview = persisted.Operation.Preview
+		j.Operation.ImageCheck = persisted.Operation.ImageCheck
+		j.Operation.ImageScan = persisted.Operation.ImageScan
+		j.Operation.ManagedRegistry = persisted.Operation.ManagedRegistry
+		j.RegistryCleanup = persisted.RegistryCleanup
+		j.ImageScanCleanup = persisted.ImageScanCleanup
+		j.Operation.Rollout = persisted.Operation.Rollout
+		j.RolloutChange = persisted.RolloutChange
+		j.Operation.Build = persisted.Operation.Build
+		j.Operation.BuildRecipe = persisted.Operation.BuildRecipe
 		j.CancelRequested = persisted.CancelRequested
 		committed = persisted.RouteChange != nil && persisted.RouteChange.Committed
 	}
-	if errors.Is(err, errRoutesUnresolved) {
+	if errors.Is(err, errRoutesUnresolved) || errors.Is(err, errRolloutUnresolved) || errors.Is(err, errJobUnresolved) || errors.Is(err, errSuspensionUnresolved) {
 		// The operation stays running, which keeps its hostnames claimed until recovery settles it.
-		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed"}
+		e.recovering[j.Request.ID] = routeRecovery{workload: j.Request.Workload, state: "failed", activeSlot: j.JobRun != nil || j.SuspensionChange != nil || j.IdleChange != nil}
 		if readErr == nil && !committed {
 			persisted.Operation.Error = routeRestoring
+			if j.JobRun != nil {
+				persisted.Operation.Error = "Waiting for the worker to confirm the existing job outcome and stop its containers."
+			}
+			if j.SuspensionChange != nil {
+				persisted.Operation.Error = "Waiting for the worker to confirm the suspension outcome."
+			}
 			readErr = writeJSON(e.path(j.Request.ID), persisted)
 		}
 		if readErr != nil {
@@ -634,6 +1112,18 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	if err != nil {
 		j.Operation.State = "failed"
 		j.Operation.Error = "Operation failed; inspect the operation log."
+		if baselineFailed {
+			j.Operation.Error = "The operation completed, but its runtime configuration baseline could not be recorded; inspect the resource before retrying."
+		} else if errors.Is(err, errBuildCacheFull) {
+			j.Operation.Error = "The verified build cache filesystem is full. Owned cache cleanup was requested; check the node before retrying."
+		}
+		var memoryFailure *buildpacksMemoryError
+		if errors.As(err, &memoryFailure) {
+			j.Operation.Error = memoryFailure.Error()
+		}
+		if errors.Is(err, errBuildpacksPressure) {
+			j.Operation.Error = errBuildpacksPressure.Error()
+		}
 		if ctx.Err() != nil {
 			j.Operation.State = "interrupted"
 			j.Operation.Error = "Execution interrupted; inspect workload before retrying."
@@ -651,6 +1141,18 @@ func (e *Engine) execute(parent context.Context, j journal) {
 			j.Operation.Error = routeOutcome(j.Operation.State)
 		}
 	}
+	if j.RolloutChange != nil && (j.RolloutChange.Committed || j.RolloutChange.Staged) {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
+	}
+	if j.Operation.Job != nil && j.Operation.Job.TimedOut && j.Operation.State != "cancelled" {
+		j.Operation.State, j.Operation.Error = "failed", "Job exceeded its execution timeout; its containers were stopped."
+	}
+	if j.IdleChange == nil && j.SuspensionChange != nil && (j.SuspensionChange.ExposureCommitted || j.SuspensionChange.Action == "suspend" && j.SuspensionChange.Complete) && j.SuspensionChange.Failure == "" {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
+	}
+	if j.IdleChange != nil && j.IdleChange.Committed {
+		j.Operation.State, j.Operation.Error = "succeeded", ""
+	}
 	if saveErr := writeJSON(e.path(j.Request.ID), j); saveErr != nil {
 		fmt.Fprintln(os.Stderr, "could not persist operation result:", saveErr)
 		select {
@@ -660,9 +1162,20 @@ func (e *Engine) execute(parent context.Context, j journal) {
 	}
 }
 func (e *Engine) perform(ctx context.Context, r Request) (result error) {
+	if r.EnvironmentPreview != nil && r.EnvironmentPreview.ImageRegistry != "" && (r.Registry == nil || r.Registry.Server != r.EnvironmentPreview.ImageRegistry) {
+		return errors.New("CI preview images require their connected registry credentials")
+	}
+	jobParent := ctx
+	if r.Kind == "job" && r.Action == "deploy" {
+		prepare, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		ctx = prepare
+	}
 	dir := filepath.Join(e.Root, "workloads", r.Workload)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+	if r.Action != "registry_maintenance" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
 	}
 	file, err := os.OpenFile(filepath.Join(e.Root, "operations", r.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
@@ -670,23 +1183,63 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 	}
 	defer file.Close()
 	// This generated Docker project name is public even when an environment value happens to match part of it.
-	log := &boundedLog{file: file, remaining: 4 * 1024 * 1024, publicIdentifiers: []string{"cove-" + r.Workload}}
+	log := &boundedLog{file: file, remaining: 4 * 1024 * 1024, publicIdentifiers: []string{e.composeProject(r.Workload)}}
 	defer func() {
 		if err := log.flush(true); err != nil && result == nil {
 			result = err
 		}
 	}()
+	if r.DatabaseMaintenance != nil {
+		for _, value := range r.Environment {
+			log.secrets = append(log.secrets, value)
+		}
+		log.secrets = append(log.secrets, r.DatabaseMaintenance.PreviousPassword)
+		if r.OutboundProxy != nil {
+			log.secrets = append(log.secrets, r.OutboundProxy.Secrets()...)
+		}
+		err := e.MaintainDatabase(ctx, *r.DatabaseMaintenance)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	var bundleSecrets []string
+	var publicBuiltins map[string]string
+	if len(r.BuiltinDefaults) > 0 {
+		r.Environment, publicBuiltins = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
+	}
+	for _, certificate := range r.Certificates {
+		log.secrets = append(log.secrets, certificate.PrivateKeyPEM)
+		if err := e.saveRouteCertificate(r.Workload, certificate); err != nil {
+			return err
+		}
+	}
 	env := []string{}
+	log.secrets = append(log.secrets, routeSecrets(r.Routes)...)
+	if r.OutboundProxy != nil {
+		env = append(env, r.OutboundProxy.Env()...)
+		log.secrets = append(log.secrets, r.OutboundProxy.Secrets()...)
+	}
 	if r.Private != nil {
 		log.secrets = append(log.secrets, r.Private.AuthKey)
 	}
 	for k, v := range r.Environment {
 		env = append(env, k+"="+v)
-		log.secrets = append(log.secrets, v)
+		if _, public := publicBuiltins[k]; !public {
+			log.secrets = append(log.secrets, v)
+		}
 	}
-	if r.Registry != nil && r.Action == "deploy" {
+	if r.Registry != nil && (r.Action == "deploy" || r.Action == "image_check" || r.Action == "build") {
 		log.secrets = append(log.secrets, r.Registry.Password)
-		config, err := registryConfig(dir, r.Registry)
+		registryDir := dir
+		if r.Action == "build" {
+			registryDir = filepath.Join(e.Root, "build-auth", r.ID)
+			if err := os.MkdirAll(registryDir, 0700); err != nil {
+				return err
+			}
+			defer os.RemoveAll(registryDir)
+		}
+		config, err := registryConfig(registryDir, r.Registry)
 		if err != nil {
 			return err
 		}
@@ -697,7 +1250,8 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		log.secrets = append(log.secrets, r.Backup.Remote.Password, r.Backup.Remote.SecretKey)
 	}
 	if r.Source != nil {
-		log.secrets = append(log.secrets, r.Source.Token)
+		log.secrets = append(log.secrets, r.Source.Token, r.Source.SSHPrivateKey)
+		log.secrets = append(log.secrets, strings.Split(r.Source.SSHPrivateKey, "\n")...)
 	}
 	if r.Backup != nil {
 		log.secrets = append(log.secrets, r.Backup.Password, r.Backup.AccessKey, r.Backup.SecretKey, r.Backup.SessionToken)
@@ -708,6 +1262,64 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			fmt.Fprintln(log, err)
 		}
 		return err
+	}
+	if r.Action == "registry_maintenance" {
+		err := e.performManagedRegistry(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, "Registry maintenance failed:", err)
+		}
+		return err
+	}
+	if r.Action == "image_check" {
+		err := e.performImageCheck(ctx, r, env, log)
+		if err != nil {
+			fmt.Fprintln(log, "Image check failed:", err)
+		}
+		return err
+	}
+	if r.Action == "image_scan" {
+		err := e.performImageScan(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, "Vulnerability scan failed or was interrupted.")
+		}
+		return err
+	}
+	if r.Action == "build" {
+		r.resolvedPublicBuiltins = publicBuiltins
+		err := e.performBuild(ctx, r, dir, env, log)
+		if err != nil {
+			fmt.Fprintln(log, "Build failed:", err)
+		}
+		return err
+	}
+	if r.Action == "rollout_promote" || r.Action == "rollout_abort" {
+		if r.Action == "rollout_promote" {
+			state, err := e.readSuspension(r.Workload)
+			if err != nil {
+				return err
+			}
+			if state != nil && state.Phase != "awake" {
+				return errors.New("resume the suspended environment before promoting its rollout")
+			}
+		}
+		err := e.performRolloutAction(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "idle_policy" {
+		err := e.performIdlePolicy(ctx, r, log)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
+	if r.Action == "idle_sleep" || r.Action == "idle_wake" {
+		return e.idleOperation(ctx, r, log)
+	}
+	if r.Action == "suspend" {
+		return e.performSuspension(ctx, r, false, log)
 	}
 	if r.Action == "restore_copy" {
 		return e.performRestoreCopy(ctx, r, log)
@@ -755,8 +1367,54 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 	} else if !os.IsNotExist(readErr) {
 		return readErr
 	}
+	if _, err := os.Lstat(filepath.Join(dir, "filesystem-snapshot.json")); err == nil && r.Action != "stop" {
+		return errors.New("restart the worker to recover the pending filesystem snapshot before another operation")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if handled, err := e.suspensionGate(ctx, r, log); handled || err != nil {
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
 	if r.Action == "drill" {
 		return e.performDrill(ctx, r, log)
+	}
+	if _, pending, err := e.pendingRollout(r.Workload); err != nil {
+		return err
+	} else if pending != nil && pending.Phase == "waiting" && r.Action != "stop" && r.Action != "start" && r.Action != "restart" {
+		return errors.New("promote or abort the staged rollout before this operation")
+	}
+	if r.Action == "pitr_configure" {
+		return e.configurePITR(ctx, r)
+	}
+	if r.Action == "pitr_restore" {
+		return e.performPITRCopy(ctx, r, log)
+	}
+	if r.Action == "pitr_backup" {
+		return e.backupPITR(ctx, r)
+	}
+	if r.Action == "pitr_forget" {
+		return e.forgetPITR(ctx, r)
+	}
+	if r.Action == "restore" {
+		state, readErr := e.loadPITR(r.Workload)
+		if readErr == nil && (state.Config.Policy.Settings.Enabled || state.Configuring) {
+			return errors.New("disable PITR capture before restoring this resource")
+		}
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+	}
+	if r.Action == "deploy" || r.Action == "rollback" {
+		state, readErr := e.loadPITR(r.Workload)
+		if readErr == nil && (state.Config.Policy.Settings.Enabled || state.Configuring) {
+			return errors.New("disable PITR capture before redeploying or rolling back this PostgreSQL resource; its retained recovery history remains available")
+		}
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
 	}
 	if r.Action == "backup" || r.Action == "restore" {
 		err := e.performBackup(ctx, r, log)
@@ -768,7 +1426,23 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		return err
 	}
+	if r.Action == "restart_unhealthy" {
+		err := e.restartUnhealthy(ctx, r.Workload, log)
+		if err != nil {
+			fmt.Fprintln(log, err)
+		}
+		return err
+	}
 	if r.Action == "stop" {
+		if _, pending, err := e.pendingRollout(r.Workload); err != nil {
+			return err
+		} else if pending != nil && pending.Phase == "waiting" {
+			abort := r
+			abort.Action = "rollout_abort"
+			if err = e.performRolloutAction(ctx, abort, log); err != nil {
+				return err
+			}
+		}
 		containers, err := e.Containers(ctx, r.Workload)
 		if err != nil {
 			return err
@@ -783,7 +1457,16 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			args = append(args, container.ID)
 		}
-		return e.Run(ctx, dir, args, nil, log)
+		if err := e.Run(ctx, dir, args, nil, log); err != nil {
+			return err
+		}
+		return e.refreshTrafficIngress(ctx, r.Workload, log)
+	}
+	if r.Scale != nil {
+		r, err = e.prepareCPUScale(ctx, r)
+		if err != nil {
+			return err
+		}
 	}
 	composePath := filepath.Join(dir, "compose.yaml")
 	if r.Action == "deploy" {
@@ -802,6 +1485,15 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			composePath, revision, err = e.checkout(ctx, r, dir, log)
 			if err != nil {
 				return err
+			}
+			if _, automatic := publicBuiltins[CoveCommitSHA]; automatic {
+				r.Environment[CoveCommitSHA] = revision
+				publicBuiltins[CoveCommitSHA] = revision
+				for index, value := range env {
+					if strings.HasPrefix(value, CoveCommitSHA+"=") {
+						env[index] = CoveCommitSHA + "=" + revision
+					}
+				}
 			}
 			e.mu.Lock()
 			j, readErr := e.read(r.ID)
@@ -850,11 +1542,55 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		composePath = release.ComposePath
 		env = nil
+		log.secrets = append(log.secrets, release.AdditionalSecrets...)
 		for key, value := range release.Environment {
 			env = append(env, key+"="+value)
-			log.secrets = append(log.secrets, value)
+			if public, ok := release.PublicBuiltins[key]; !ok || public != value {
+				log.secrets = append(log.secrets, value)
+			}
 		}
-		args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}
+		if len(release.Traffic) > 0 || r.Rollout != nil {
+			raw, err := os.ReadFile(release.ComposePath)
+			if err != nil {
+				return err
+			}
+			var config map[string]any
+			if err = decodeResolvedCompose(raw, &config); err != nil {
+				return err
+			}
+			if err = restoreServiceNames(config, release.Traffic); err != nil {
+				return err
+			}
+			options := RolloutOptions{Strategy: "rolling", TimeoutSeconds: 120, DrainSeconds: 5, CanaryPercent: 10}
+			if r.Rollout != nil {
+				options = *r.Rollout
+			}
+			if release.Rollout != nil {
+				options = *release.Rollout
+			}
+			options.Strategy = "rolling"
+			if r.Scale != nil {
+				options.Replicas = mergedCPUReplicas(options.Replicas, r.Scale.Replicas)
+			}
+			r.Rollout = &options
+			r.Environment = release.Environment
+			r.resolvedPublicBuiltins, r.resolvedSecrets = release.PublicBuiltins, release.AdditionalSecrets
+			r.Hooks = nil
+			r.Source = nil
+			input := filepath.Join(dir, r.ID+".rollback-input.compose.json")
+			if err = writeJSON(input, literalCompose(config)); err != nil {
+				return err
+			}
+			err = e.performRollout(ctx, r, dir, []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", input}, env, log)
+			if err != nil {
+				fmt.Fprintln(log, err)
+			}
+			return err
+		}
+		if err = e.validateIdleCandidate(ctx, r, dir, []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}, env); err != nil {
+			return err
+		}
+		args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}
 		if err = e.Run(ctx, dir, args, env, log); err != nil {
 			return err
 		}
@@ -879,12 +1615,15 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		composePath = current.ComposePath
 		env = nil
+		log.secrets = append(log.secrets, current.AdditionalSecrets...)
 		for key, value := range current.Environment {
 			env = append(env, key+"="+value)
-			log.secrets = append(log.secrets, value)
+			if public, ok := current.PublicBuiltins[key]; !ok || public != value {
+				log.secrets = append(log.secrets, value)
+			}
 		}
 	}
-	args := []string{"docker", "compose", "--project-name", "cove-" + strings.ToLower(r.Workload), "--file", composePath}
+	args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 	if r.Action == "deploy" {
 		if r.Preview {
 			composePath, err = e.preparePreview(r, dir, composePath)
@@ -892,7 +1631,28 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				fmt.Fprintln(log, err)
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
+		}
+		composePath, err = e.prepareComposeBundle(ctx, r, dir, composePath, env)
+		if err != nil {
+			return err
+		}
+		args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
+		if r.ComposeBundle != nil {
+			bundleSecrets, err = composeBundleSecrets(composePath)
+			if err != nil {
+				return errors.New("could not prepare Compose bundle log redaction")
+			}
+			log.secrets = append(log.secrets, bundleSecrets...)
+		}
+		if len(r.BuiltinDefaults) > 0 {
+			prepared, err := e.prepareBuiltinEnvironment(ctx, r, dir, args, env)
+			if err != nil {
+				fmt.Fprintln(log, "Could not prepare built-in variables; check Compose required variables and build settings.")
+				return err
+			}
+			composePath = prepared
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if r.Source != nil {
 			resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}
@@ -911,21 +1671,21 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				fmt.Fprintln(log, err)
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
-		if len(r.FileSecrets) > 0 {
+		if len(r.FileSecrets) > 0 || len(r.DatabaseCAs) > 0 {
 			composePath, err = e.prepareFileSecrets(ctx, r, dir, args, env)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if len(r.Networks) > 0 {
 			composePath, err = e.prepareNetworks(ctx, r, dir, args, env, log)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if !r.Preview {
 			linkedPath, linked, err := e.prepareLinks(ctx, r, dir, args, env)
@@ -935,7 +1695,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}
 			if linked {
 				composePath = linkedPath
-				args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+				args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 			}
 		}
 		if r.Private != nil {
@@ -943,26 +1703,39 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
-		if len(r.Limits) > 0 {
+		if len(r.Limits) > 0 || r.DefaultLimits != nil {
 			composePath, err = e.prepareLimits(ctx, r, dir, args, env, log)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 		}
 		if len(r.ImagePins) > 0 {
 			composePath, err = e.preparePromotion(ctx, r, dir, args, env)
 			if err != nil {
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
+		}
+		if err = e.validateIdleCandidate(ctx, r, dir, args, env); err != nil {
+			fmt.Fprintln(log, err)
+			return err
 		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), "config", "--quiet"), env, log); err != nil {
 			return err
 		}
-		if err = e.buildImages(ctx, dir, args, env, log); err != nil {
+		e.warnDeploymentCapacity(ctx, dir, args, env, log, r.Rollout)
+		if r.PullLatest {
+			if err = e.requireDockerProxy(ctx, r.OutboundProxy); err != nil {
+				return err
+			}
+			if err = e.Run(ctx, dir, append(append([]string{}, args...), "pull", "--ignore-buildable", "--policy", "always"), env, log); err != nil {
+				return err
+			}
+		}
+		if err = e.buildImages(ctx, dir, args, env, log, false); err != nil {
 			return err
 		}
 		if r.EnvironmentPreview != nil {
@@ -976,6 +1749,18 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 		}
+		traffic, err := e.loadTraffic(r.Workload)
+		if err != nil {
+			return err
+		}
+		if r.Kind != "job" && (r.Rollout != nil || len(traffic) > 0) {
+			r.resolvedPublicBuiltins, r.resolvedSecrets = publicBuiltins, bundleSecrets
+			err = e.performRollout(ctx, r, dir, args, env, log)
+			if err != nil {
+				fmt.Fprintln(log, err)
+			}
+			return err
+		}
 		up := []string{"up", "--detach", "--no-build", "--wait", "--wait-timeout", "120", "--remove-orphans"}
 		if r.GuardedDeploy != nil && *r.GuardedDeploy {
 			composePath, err = e.testDeploymentCandidate(ctx, r, dir, args, env, log)
@@ -983,7 +1768,7 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				fmt.Fprintln(log, err)
 				return err
 			}
-			args = []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath}
+			args = []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath}
 			if err = e.beginDeployGuard(r, dir, composePath); err != nil {
 				return err
 			}
@@ -994,12 +1779,16 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 			}()
 		}
 		if r.Kind == "job" {
-			up = []string{"up", "--no-build", "--abort-on-container-exit", "--exit-code-from", r.JobService, "--remove-orphans"}
+			err := e.performJob(ctx, jobParent, r, dir, args, env, log)
+			if err != nil {
+				fmt.Fprintln(log, err)
+			}
+			return err
 		}
 		if err = e.Run(ctx, dir, append(append([]string{}, args...), up...), env, log); err != nil {
 			return err
 		}
-		state := deployedState{ComposePath: composePath, Environment: r.Environment}
+		state := deployedState{DatabaseMetadata: r.DatabaseMetadata, ComposePath: composePath, Environment: r.Environment}
 		if r.Kind != "job" {
 			state, err = e.captureRelease(ctx, r, dir, args, env)
 			if err != nil {
@@ -1007,6 +1796,8 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 				return err
 			}
 		}
+		state.AdditionalSecrets = bundleSecrets
+		state.PublicBuiltins = publicBuiltins
 		state.Networks = r.Networks
 		state.Private = r.Private
 		state.Routes = r.Routes
@@ -1032,5 +1823,8 @@ func (e *Engine) perform(ctx context.Context, r Request) (result error) {
 		}
 		return nil
 	}
-	return e.Run(ctx, dir, append(args, r.Action), env, log)
+	if err := e.Run(ctx, dir, append(args, r.Action), env, log); err != nil {
+		return err
+	}
+	return e.refreshTrafficIngress(ctx, r.Workload, log)
 }

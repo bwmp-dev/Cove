@@ -1,55 +1,26 @@
 import { Select } from "./Select";
+import { ChoiceGroup, type Choice } from "./ChoiceGroup";
 import { ResourcePlacement } from "./ResourcePlacement";
-import type { ResourceDraft } from "../lib/templates";
+import type { ResourceDraft } from "../api/templates";
+import { PlacementAdvice } from "./PlacementAdvice";
 import { Link } from "@tanstack/react-router";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import type { Project } from "../api/projects";
-import type { Node, WorkloadInput } from "../api/types";
+import type { Node, Route, WorkloadInput } from "../api/types";
 import { formatBytes } from "../lib/format";
-import { byteLength, composeLimit, formValues, routeRows, validateRoutes, validateWorkload, type EnvRow, type SourceKind, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { byteLength, composeLimit, formValues, isSSHRepository, routeLimits, routeRows, validateRoutes, validateWorkload, type EnvRow, type SourceKind, type WorkloadFormErrors, type WorkloadFormValues } from "../lib/workload-form";
+import { splitRoutes, transportOf, transportRows, transportSummary, transportTargets, validateTransports, type TransportRow } from "../lib/route-transports";
 import { ComposeEditor } from "./ComposeEditor";
 import { EnvironmentEditor } from "./EnvironmentEditor";
 import { RouteEditor } from "./RouteEditor";
-import { nodeStates } from "../lib/nodes";
-import { Button, Field, Notice } from "./ui";
+import { nodeStates, routeProtocolOf } from "../lib/nodes";
+import { Button, Field, Notice, SwitchField } from "./ui";
+import { GitProviderPicker } from "./GitProviderPicker";
+import { automaticDescription, emptySelection, reportingDescription, type ProviderRepository, type ProviderSelection, type ProviderSourceInput } from "../api/git-providers";
 import { buttonClass, describedBy, inputClass } from "../lib/styles";
+import { Trash2 } from "lucide-react";
 
-interface Choice<T extends string> {
-  value: T;
-  label: string;
-  description: string;
-}
-
-function ChoiceGroup<T extends string>({ legend, name, value, choices, onChange }: { legend: string; name: string; value: T; choices: Choice<T>[]; onChange: (value: T) => void }) {
-  return (
-    <fieldset>
-      <legend className="mb-1.5 text-[13px] font-medium text-fg">{legend}</legend>
-      <div className="divide-y divide-line overflow-hidden rounded-md border border-line-strong sm:flex sm:divide-x sm:divide-y-0">
-        {choices.map((choice) => (
-          <label
-            key={choice.value}
-            className="flex flex-1 cursor-pointer items-start gap-2.5 px-3 py-2.5 hover:bg-panel has-[:checked]:bg-raised has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-info"
-          >
-            <input
-              type="radio"
-              name={name}
-              value={choice.value}
-              checked={value === choice.value}
-              onChange={() => onChange(choice.value)}
-              className="mt-0.5 accent-fg focus-visible:outline-none"
-            />
-            <span className="text-[13px] font-medium text-fg">
-              {choice.label}
-              <span className="mt-0.5 block text-xs font-normal text-fg-muted">{choice.description}</span>
-            </span>
-          </label>
-        ))}
-      </div>
-    </fieldset>
-  );
-}
-
-function FormSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
+export function FormSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return (
     <section className="grid gap-x-8 gap-y-3 px-4 pt-5 sm:px-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
       <div>
@@ -104,10 +75,34 @@ export function TypeFields({ values, errors, set, kindHint }: { values: Workload
   );
 }
 
-export function SourceFields({ values, errors, set, tokenHint, tokenSaved = false }: { values: WorkloadFormValues; errors: WorkloadFormErrors; set: SetValue; tokenHint: string; tokenSaved?: boolean }) {
+// The pin is supplied by the operator; Cove never discovers or trusts a host key on first use.
+export function HostKeyField({ id, value, error, onChange }: { id: string; value: string; error?: string; onChange: (value: string) => void }) {
+  return (
+    <Field id={id} label="Host public key" error={error} hint="One line from the Git host, such as ssh-ed25519 AAAA…. Check it against the fingerprints your Git host publishes. Deployments refuse any other host key.">
+      <textarea
+        id={id}
+        className={`${inputClass} font-mono break-all`}
+        rows={2}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="ssh-ed25519 AAAA…"
+        autoComplete="off"
+        autoCapitalize="none"
+        spellCheck={false}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy(id, error, true)}
+      />
+    </Field>
+  );
+}
+
+// `access` chooses how the repository is reached; `provider` replaces the repository URL, branch and
+// credential fields when a Git provider connection supplies them.
+export function SourceFields({ values, errors, set, tokenHint, tokenSaved = false, access, provider }: { values: WorkloadFormValues; errors: WorkloadFormErrors; set: SetValue; tokenHint: string; tokenSaved?: boolean; access?: ReactNode; provider?: ReactNode }) {
   const id = useId();
   const [revealToken, setRevealToken] = useState(false);
   const composeBytes = byteLength(values.compose);
+  const ssh = !provider && isSSHRepository(values.repository);
   const composeEditor = (
     <Field id={`${id}-compose`} label="Compose file" error={errors.compose} hint={`${formatBytes(composeBytes)} of ${formatBytes(composeLimit())}`}>
       <ComposeEditor
@@ -126,7 +121,8 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
       <ChoiceGroup legend="Compose source" name={`${id}-source`} value={values.sourceKind} choices={sourceChoices} onChange={(value) => set("sourceKind", value)} />
       {values.sourceKind === "compose" ? composeEditor : (
         <>
-          <Field id={`${id}-repo`} label="Repository URL" error={errors.repository} hint="HTTPS only. Do not include credentials in the URL.">
+          {access}
+          {provider ?? <Field id={`${id}-repo`} label="Repository URL" error={errors.repository} hint="HTTPS, or ssh://user@host/path to deploy with an SSH deploy key. Do not include credentials in the URL.">
             <input
               id={`${id}-repo`}
               className={`${inputClass} font-mono`}
@@ -140,13 +136,13 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
               aria-invalid={errors.repository ? true : undefined}
               aria-describedby={describedBy(`${id}-repo`, errors.repository, true)}
             />
-          </Field>
+          </Field>}
           <ChoiceGroup legend="Deployment configuration" name={`${id}-git-compose`} value={values.inlineCompose ? "panel" : "repository"} choices={[
             { value: "repository", label: "File in repository", description: "Use the Compose file committed with your code." },
             { value: "panel", label: "Manage in Cove", description: "Keep Compose here and build from the checked-out repository. Previews require a repository file." },
           ]} onChange={(value) => set("inlineCompose", value === "panel")} />
           <div className="grid gap-5 sm:grid-cols-2">
-            <Field id={`${id}-branch`} label="Branch" error={errors.branch}>
+            {!provider && <Field id={`${id}-branch`} label="Branch" error={errors.branch}>
               <input
                 id={`${id}-branch`}
                 className={`${inputClass} font-mono`}
@@ -158,7 +154,7 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
                 aria-invalid={errors.branch ? true : undefined}
                 aria-describedby={describedBy(`${id}-branch`, errors.branch)}
               />
-            </Field>
+            </Field>}
             {!values.inlineCompose && <Field id={`${id}-path`} label="Compose file path" error={errors.composePath} hint="Relative to the repository root.">
               <input
                 id={`${id}-path`}
@@ -177,7 +173,13 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
           <Field id={`${id}-watch`} label="Watch paths" optional error={errors.watchPaths} hint="One repository-relative pattern per line. Supports *, **, ?, and ! exclusions; last match wins. Empty deploys every push. Unknown changes still deploy. Manual deployments are unaffected. Ordered sequences run together when any member matches.">
             <textarea id={`${id}-watch`} className={`${inputClass} font-mono`} rows={3} aria-invalid={errors.watchPaths ? true : undefined} aria-describedby={describedBy(`${id}-watch`, errors.watchPaths, true)} value={values.watchPaths ?? ""} onChange={(event) => set("watchPaths", event.target.value)} spellCheck={false} />
           </Field>
-          <Field id={`${id}-token`} label="Access token" optional error={errors.token} hint={tokenHint}>
+          {ssh && (
+            <>
+              <HostKeyField id={`${id}-host-key`} value={values.sshHostKey} error={errors.sshHostKey} onChange={(value) => set("sshHostKey", value)} />
+              <p className="text-xs text-fg-muted">Deployments authenticate with a read-only deploy key that Cove generates for this resource. Once the source is saved, create the key under SSH deploy key on the Source page and add its public key to the repository.</p>
+            </>
+          )}
+          {!provider && (!ssh || values.token !== "") && <Field id={`${id}-token`} label="Access token" optional error={errors.token} hint={tokenHint}>
             <div className="flex gap-2">
               <input
                 id={`${id}-token`}
@@ -197,11 +199,84 @@ export function SourceFields({ values, errors, set, tokenHint, tokenSaved = fals
                 {revealToken ? "Hide" : "Show"}
               </Button>
             </div>
-          </Field>
+          </Field>}
         </>
       )}
     </>
   );
+}
+
+export type ProviderLink = Pick<ProviderSourceInput, "connection_id" | "repository_id" | "automatic" | "reporting">;
+
+const accessChoices: Choice<"url" | "provider">[] = [
+  { value: "url", label: "Repository URL", description: "HTTPS with an optional access token, or SSH with a deploy key." },
+  { value: "provider", label: "Git provider", description: "Choose a repository from a GitLab, Gitea, Forgejo, Codeberg or Bitbucket Cloud connection." },
+];
+
+function ProviderFields({ selection, errors, automatic, reporting, onSelection, onRepository, onAutomatic, onReporting }: {
+  selection: ProviderSelection;
+  errors: WorkloadFormErrors;
+  automatic: boolean;
+  reporting: boolean;
+  onSelection: (selection: ProviderSelection) => void;
+  onRepository: (repository: ProviderRepository | undefined) => void;
+  onAutomatic: (value: boolean) => void;
+  onReporting: (value: boolean) => void;
+}) {
+  const id = useId();
+  const error = errors.repository ?? errors.branch;
+  return (
+    <div className="space-y-4">
+      <GitProviderPicker value={selection} onChange={onSelection} onRepository={onRepository} />
+      {error && <p role="alert" className="text-xs text-bad">{error}</p>}
+      <SwitchField id={`${id}-automatic`} checked={automatic} onChange={(event) => onAutomatic(event.target.checked)} label="Deploy pushes automatically" description={automaticDescription} />
+      <SwitchField id={`${id}-reporting`} checked={reporting} onChange={(event) => onReporting(event.target.checked)} label="Report deployments" description={reportingDescription} />
+    </div>
+  );
+}
+
+// Listeners exist only on the node and are chosen per resource, so template TCP and UDP routes are created exactly as the
+// template defines them and edited on the Domains page afterwards. The control plane checks their listeners.
+function TemplateTransports({ rows, errors, onRemove }: { rows: TransportRow[]; errors: Record<string, string>; onRemove: (id: string) => void }) {
+  const id = useId();
+  return (
+    <section aria-labelledby={`${id}-title`} className="space-y-2 border-t border-line pt-4">
+      <h3 id={`${id}-title`} className="text-[13px] font-semibold text-fg">
+        TCP and UDP routes from the template
+      </h3>
+      <p className="text-xs text-fg-muted">Created with the resource as listed. Change their listeners and visibility on the resource&apos;s Domains page once it exists. The worker on the selected node must support TCP and UDP routes.</p>
+      {errors.transports && <p role="alert" className="text-xs text-bad">{errors.transports}</p>}
+      <ul aria-label="TCP and UDP routes from the template" className="divide-y divide-line">
+        {rows.map((row, index) => {
+          const route = transportOf(row);
+          const messages = Object.entries(errors).filter(([key]) => key === row.id || key.startsWith(`${row.id}.`));
+          return (
+            <li key={row.id} className="flex items-start gap-2 py-2">
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <p className="text-[13px] text-fg">{transportSummary(route)}</p>
+                <p className="font-mono text-xs break-all text-fg-muted">{transportTargets(route)}</p>
+                {messages.map(([key, message]) => (
+                  <p key={key} className="text-xs text-bad">
+                    {message}
+                  </p>
+                ))}
+              </div>
+              <Button variant="ghost" size="sm" className="px-2" aria-label={`Remove ${route.protocol === "udp" ? "UDP" : "TCP"} route ${row.listener || index + 1}`} title="Remove route" onClick={() => onRemove(row.id)}>
+                <Trash2 aria-hidden className="size-3.5" />
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function checkTemplateTransports(rows: TransportRow[], node: Node | undefined, httpCount: number): { routes?: Route[]; errors: Record<string, string> } {
+  if (rows.length === 0) return { routes: [], errors: {} };
+  // Without a node the worker's support is unknown; the node error already blocks the request.
+  if (!node) return { errors: {} };
+  return validateTransports(rows, { routeProtocol: routeProtocolOf(node), listeners: undefined, saved: [], httpCount });
 }
 
 interface WorkloadFormProps {
@@ -214,7 +289,8 @@ interface WorkloadFormProps {
   serverError: string | null;
   submitLabel: string;
   cancel: ReactNode;
-  onSubmit: (input: WorkloadInput) => void;
+  // `provider` is connected after the resource is created, because the connection is saved per resource.
+  onSubmit: (input: WorkloadInput, provider?: ProviderLink) => void;
 }
 
 // Creates a resource. Existing resources are edited section by section on the resource pages.
@@ -223,22 +299,46 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
   const [errors, setErrors] = useState<WorkloadFormErrors>({});
   const [routeErrors, setRouteErrors] = useState<Record<string, string>>({});
   const [resourcePlacement, setResourcePlacement] = useState(initialProjectId ? `${initialProjectId}:${initialEnvironmentId}` : "");
-  const [routes, setRoutes] = useState(() => routeRows(draft?.routes));
+  const [routes, setRoutes] = useState(() => routeRows(splitRoutes(draft?.routes).http));
+  const [transports, setTransports] = useState(() => transportRows(draft?.routes ?? []));
+  const [access, setAccess] = useState<"url" | "provider">("url");
+  const [selection, setSelection] = useState<ProviderSelection>(emptySelection);
+  const [automatic, setAutomatic] = useState(true);
+  const [reporting, setReporting] = useState(false);
   const id = useId();
 
   const set: SetValue = (key, value) => setValues((current) => ({ ...current, [key]: value }));
 
+  function chooseAccess(next: "url" | "provider") {
+    setAccess(next);
+    setSelection(emptySelection);
+    setValues((current) => ({ ...current, repository: "", branch: next === "url" ? "main" : "", token: "", sshHostKey: "" }));
+  }
+
   const readyNodes = nodes.filter((node) => node.state === "ready");
+  const fileSecrets = draft?.file_secrets ?? [];
+  const selectedNode = nodes.find((node) => node.id === values.nodeId);
+  const [placementProject = "", placementEnvironment = ""] = resourcePlacement.split(":");
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const result = validateWorkload(values, "create");
-    const checkedRoutes = values.kind === "job" ? { routes: [], errors: {} } : validateRoutes(routes);
+    const linked = values.sourceKind === "git" && access === "provider";
+    const result = validateWorkload(linked ? { ...values, token: "", sshHostKey: "" } : values, "create");
+    if (linked && (selection.connectionId === null || selection.repositoryId === null || !selection.branch)) {
+      result.errors.repository = "Select a connection, repository and branch.";
+      delete result.input;
+    }
+    const service = values.kind === "service";
+    const checkedRoutes = service ? validateRoutes(routes, [], [], routeProtocolOf(selectedNode)) : { routes: [], errors: {} };
+    const checkedTransports = service ? checkTemplateTransports(transports, selectedNode, routes.length) : { routes: [], errors: {} };
     setErrors(result.errors);
-    setRouteErrors(checkedRoutes.errors);
-    if (result.input && checkedRoutes.routes && resourcePlacement) {
+    setRouteErrors({ ...checkedRoutes.errors, ...checkedTransports.errors });
+    if (result.input && checkedRoutes.routes && checkedTransports.routes && resourcePlacement) {
       const [projectId, environmentId] = resourcePlacement.split(":");
-      onSubmit({ ...result.input, routes: checkedRoutes.routes, project_id: projectId, environment_id: environmentId });
+      const provider = linked && selection.connectionId !== null && selection.repositoryId !== null ? { connection_id: selection.connectionId, repository_id: selection.repositoryId, automatic, reporting } : undefined;
+      const input: WorkloadInput = { ...result.input, routes: [...checkedRoutes.routes, ...checkedTransports.routes], project_id: projectId, environment_id: environmentId };
+      if (fileSecrets.length > 0) input.file_secrets = fileSecrets;
+      onSubmit(input, provider);
     } else {
       const form = event.currentTarget;
       requestAnimationFrame(() => form.querySelector<HTMLElement>("[aria-invalid=true]")?.focus());
@@ -295,6 +395,14 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
               </Select>
             </Field>
           )}
+          {resourcePlacement && readyNodes.length > 0 && (
+            <PlacementAdvice
+              key={resourcePlacement}
+              projectId={placementProject}
+              environmentId={placementEnvironment}
+              selectedNodeId={values.nodeId}
+            />
+          )}
         </FormSection>
 
         <FormSection title="Type" description="Decides how deploys are run and how their results are reported.">
@@ -302,21 +410,75 @@ export function WorkloadForm({ draft, nodes, projects, initialEnvironmentId, ini
         </FormSection>
 
         <FormSection title="Source">
-          <SourceFields values={values} errors={errors} set={set} tokenHint="Needed for private repositories. Stored encrypted and never shown again." />
+          <SourceFields
+            values={values}
+            errors={errors}
+            set={set}
+            tokenHint="Needed for private repositories. Stored encrypted and never shown again."
+            access={<ChoiceGroup legend="Repository access" name={`${id}-access`} value={access} choices={accessChoices} onChange={chooseAccess} />}
+            provider={
+              access === "provider" ? (
+                <ProviderFields
+                  selection={selection}
+                  errors={errors}
+                  automatic={automatic}
+                  reporting={reporting}
+                  onSelection={(next) => {
+                    setSelection(next);
+                    set("branch", next.branch);
+                  }}
+                  onRepository={(repository) => set("repository", repository?.clone_url ?? "")}
+                  onAutomatic={setAutomatic}
+                  onReporting={setReporting}
+                />
+              ) : undefined
+            }
+          />
         </FormSection>
 
         {values.kind === "service" && (
           <FormSection
             title="Routes"
-            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced."
+            description="The worker serves HTTPS directly. Point DNS at this node and make ports 80 and 443 available; deployment provisions a managed Traefik proxy. Existing services occupying those ports are not replaced. To serve a certificate you provide, upload it on the resource's Domains page after creating it. New TCP and UDP routes are also added there, once the resource exists."
           >
-            <RouteEditor routes={routes} errors={routeErrors} onChange={setRoutes} />
+            <RouteEditor
+              routes={routes}
+              errors={routeErrors}
+              policies={selectedNode ? Boolean(selectedNode.capabilities?.route_policies) : undefined}
+              extensions={selectedNode ? (selectedNode.capabilities?.route_protocol ?? 0) >= 2 : undefined}
+              routeProtocol={routeProtocolOf(selectedNode)}
+              capacity={routeLimits.routes - transports.length}
+              onChange={setRoutes}
+            />
+            {transports.length > 0 && (
+              <TemplateTransports
+                rows={transports}
+                errors={routeErrors}
+                onRemove={(key) => {
+                  setTransports((current) => current.filter((row) => row.id !== key));
+                  setRouteErrors((current) => Object.fromEntries(Object.entries(current).filter(([name]) => name !== "transports" && name !== key && !name.startsWith(`${key}.`))));
+                }}
+              />
+            )}
           </FormSection>
         )}
 
         <FormSection title="Environment" description="Delivered to Compose on the node at deploy time. Values are encrypted at rest and never shown again after saving.">
           <EnvironmentEditor rows={environment} errors={errors.rows} onChange={(rows: EnvRow[]) => set("environment", rows)} />
           {errors.environment && <p className="text-xs text-bad">{errors.environment}</p>}
+          {fileSecrets.length > 0 && (
+            <div className="space-y-1 text-xs text-fg-muted">
+              <p>The template mounts these variables as files instead of exposing them as environment values. Keep the variables listed here.</p>
+              <ul className="space-y-0.5">
+                {fileSecrets.map((file) => (
+                  <li key={file.name} className="break-all">
+                    <span className="font-mono text-fg">{file.variable}</span> → <span className="font-mono">{file.name}</span>
+                    {file.services.length > 0 && ` in ${file.services.join(", ")}`}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </FormSection>
       </fieldset>
 

@@ -1,14 +1,19 @@
 package control
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +36,7 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		Invitation string `json:"invitation_token"`
 		Link       bool   `json:"link"`
 		Password   string `json:"current_password"`
+		Code       string `json:"code"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -52,7 +58,18 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		var hash []byte
 		var version int64
 		err = tx.QueryRow(r.Context(), "SELECT password_hash,auth_version FROM users WHERE id=$1 AND NOT disabled FOR SHARE", p.ID).Scan(&hash, &version)
-		if err != nil || len(in.Password) > 72 || bcrypt.CompareHashAndPassword(hash, []byte(in.Password)) != nil {
+		if err != nil {
+			http.Error(w, "authentication unavailable", 503)
+			return
+		}
+		if len(hash) == 0 {
+			proof, _ := json.Marshal(map[string]string{"current_password": in.Password, "code": in.Code})
+			request := r.Clone(context.WithValue(r.Context(), identityKey{}, p))
+			request.Body = io.NopCloser(bytes.NewReader(proof))
+			if !s.reauthenticate(w, request, tx) {
+				return
+			}
+		} else if len(in.Password) > 72 || bcrypt.CompareHashAndPassword(hash, []byte(in.Password)) != nil {
 			http.Error(w, "current password is incorrect", 400)
 			return
 		}
@@ -69,12 +86,26 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		invite = &id
 	}
 	state, browser, verifier := randomToken(), randomToken(), randomToken()
+	directoryUser := ""
+	if link != nil {
+		directoryUser = *link
+	}
+	directory, err := s.githubDirectoryNeedsOrgScope(r.Context(), directoryUser)
+	if err != nil {
+		http.Error(w, "GitHub settings unavailable", 503)
+		return
+	}
+	var linkSession []byte
+	if directory {
+		cookie, _ := r.Cookie("__Host-cove")
+		linkSession = tokenHash(cookie.Value)
+	}
 	encrypted, err := seal(s.Key, []byte(verifier))
 	if err != nil {
 		http.Error(w, "authentication unavailable", 503)
 		return
 	}
-	_, err = tx.Exec(r.Context(), "INSERT INTO oauth_states(token_hash,browser_hash,verifier,link_user_id,invitation_id,link_version,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '10 minutes')", tokenHash(state), tokenHash(browser), encrypted, link, invite, linkVersion)
+	_, err = tx.Exec(r.Context(), "INSERT INTO oauth_states(token_hash,browser_hash,verifier,link_user_id,invitation_id,link_version,expires_at,directory_sync,link_session_hash) VALUES($1,$2,$3,$4,$5,$6,now()+interval '10 minutes',$7,$8)", tokenHash(state), tokenHash(browser), encrypted, link, invite, linkVersion, directory, linkSession)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}
@@ -85,6 +116,9 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "__Host-cove-oauth", Value: browser, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 600})
 	challenge := sha256.Sum256([]byte(verifier))
 	q := url.Values{"client_id": {config.Github.ClientID}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "scope": {"read:user user:email"}, "state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
+	if directory {
+		q.Set("scope", "read:user user:email read:org")
+	}
 	respond(w, 200, map[string]string{"url": "https://github.com/login/oauth/authorize?" + q.Encode()})
 }
 func (s *Server) githubRequest(r *http.Request, method, endpoint, token string, form url.Values, out any) error {
@@ -124,14 +158,26 @@ func (s *Server) githubRequest(r *http.Request, method, endpoint, token string, 
 	return json.Unmarshal(b, out)
 }
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
-	fail := func(code string) { http.Redirect(w, r, "/login?error="+code, http.StatusSeeOther) }
-	config, _, configErr := s.integrationConfig(r.Context(), s.DB)
-	if configErr != nil {
-		fail("oauth_failed")
-		return
+	ensureLoginDevice(w, r)
+	status := 401
+	userForEvent := ""
+	directoryFlow := false
+	defer func() {
+		s.recordAudit(r, "GitHub callback", status)
+		address, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if !directoryFlow {
+			s.recordLogin(r, userForEvent, status == 200, "github", address)
+		}
+	}()
+	fail := func(code string) {
+		destination := "/login?error=" + code
+		if directoryFlow {
+			destination = "/admin?github_team_sync=error#github-team-sync"
+		}
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 	}
 	cookie, err := r.Cookie("__Host-cove-oauth")
-	if err != nil || config.Github.ClientID == "" || config.Github.ClientSecret == "" {
+	if err != nil {
 		fail("oauth_failed")
 		return
 	}
@@ -139,8 +185,16 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	var browser, encrypted []byte
 	var link, invite *string
 	var linkVersion *int64
-	err = s.DB.QueryRow(r.Context(), "DELETE FROM oauth_states WHERE token_hash=$1 AND expires_at>now() RETURNING browser_hash,verifier,link_user_id,invitation_id,link_version", tokenHash(r.URL.Query().Get("state"))).Scan(&browser, &encrypted, &link, &invite, &linkVersion)
+	var directory bool
+	var linkSession []byte
+	err = s.DB.QueryRow(r.Context(), "DELETE FROM oauth_states WHERE token_hash=$1 AND expires_at>now() RETURNING browser_hash,verifier,link_user_id,invitation_id,link_version,directory_sync,link_session_hash", tokenHash(r.URL.Query().Get("state"))).Scan(&browser, &encrypted, &link, &invite, &linkVersion, &directory, &linkSession)
 	if err != nil || subtle.ConstantTimeCompare(browser, tokenHash(cookie.Value)) != 1 {
+		fail("oauth_failed")
+		return
+	}
+	directoryFlow = directory && link != nil
+	config, _, configErr := s.integrationConfig(r.Context(), s.DB)
+	if configErr != nil || config.Github.ClientID == "" || config.Github.ClientSecret == "" {
 		fail("oauth_failed")
 		return
 	}
@@ -152,6 +206,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	var access struct {
 		Token string `json:"access_token"`
 		Type  string `json:"token_type"`
+		Scope string `json:"scope"`
 	}
 	err = s.githubRequest(r, "POST", "https://github.com/login/oauth/access_token", "", url.Values{"client_id": {config.Github.ClientID}, "client_secret": {config.Github.ClientSecret}, "code": {r.URL.Query().Get("code")}, "redirect_uri": {s.PublicURL + "/auth/github/callback"}, "code_verifier": {string(verifier)}}, &access)
 	if err != nil || access.Token == "" || !strings.EqualFold(access.Type, "bearer") {
@@ -199,7 +254,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	var team, inviteEmail, role string
 	var grants json.RawMessage
 	if invite != nil {
-		err = tx.QueryRow(r.Context(), `SELECT i.team_id,i.email,i.role,i.grants FROM invitations i JOIN users creator ON creator.id=i.created_by WHERE i.id=$1 AND i.consumed_at IS NULL AND i.expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin'))) FOR UPDATE OF i`, invite).Scan(&team, &inviteEmail, &role, &grants)
+		err = tx.QueryRow(r.Context(), `SELECT i.team_id,i.email,i.role,i.grants FROM invitations i JOIN users creator ON creator.id=i.created_by WHERE i.id=$1 AND i.consumed_at IS NULL AND i.expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR (cove_permission(i.created_by,i.team_id,'','','manage_members') AND (i.role<>'admin' OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin'))))) FOR UPDATE OF i`, invite).Scan(&team, &inviteEmail, &role, &grants)
 		if err != nil || !verified[inviteEmail] {
 			fail("oauth_failed")
 			return
@@ -273,8 +328,21 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	token := randomToken()
 	expiry := time.Now().Add(12 * time.Hour)
-	if err == nil {
+	if err == nil && directoryFlow {
+		var valid bool
+		// The Strict account cookie is withheld on cross-site callbacks; the browser-bound state pins its live session.
+		err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.user_id=$2 AND s.expires_at>now() AND u.is_admin AND NOT u.disabled AND (s.second_factor_verified OR NOT EXISTS(SELECT 1 FROM account_totp WHERE user_id=u.id AND confirmed) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id=u.id)))`, linkSession, user).Scan(&valid)
+		if err != nil || !valid {
+			fail("oauth_failed")
+			return
+		}
+	}
+	if err == nil && !directoryFlow {
 		_, err = tx.Exec(r.Context(), "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)", tokenHash(token), user, expiry)
+	}
+	var pending bool
+	if err == nil {
+		err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM account_totp WHERE user_id=$1 AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=$1)", user).Scan(&pending)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -283,6 +351,32 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		fail("oauth_failed")
 		return
 	}
-	setSession(w, token, expiry)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	status = 200
+	userForEvent = user
+	granted := slices.Contains(strings.Fields(strings.ReplaceAll(access.Scope, ",", " ")), "read:org")
+	retained := false
+	if granted {
+		if retained, err = s.storeGithubTeamOAuth(r.Context(), user, githubID, access.Token); err != nil {
+			slog.Error("GitHub directory OAuth connection could not be retained")
+			retained = false
+		}
+	}
+	if directoryFlow {
+		outcome := "connected"
+		if !granted {
+			outcome = "permission_required"
+			status = 403
+		} else if !retained {
+			outcome = "error"
+			status = 503
+		}
+		http.Redirect(w, r, "/admin?github_team_sync="+outcome+"#github-team-sync", http.StatusSeeOther)
+		return
+	}
+	s.completeSignIn(w, r, user, token, expiry)
+	destination := "/"
+	if pending {
+		destination = "/login?authenticated=1"
+	}
+	http.Redirect(w, r, destination, http.StatusSeeOther)
 }

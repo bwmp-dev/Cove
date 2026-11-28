@@ -1,0 +1,42 @@
+name: Cove deploy
+description: Trigger an authenticated Cove deploy and wait for its durable operation.
+inputs:
+  hook-url:
+    description: Public HTTPS deploy-hook URL from Cove.
+    required: true
+  token:
+    description: Deploy-hook token stored in a GitHub Actions secret.
+    required: true
+  reason:
+    description: Optional audited deployment reason.
+    required: false
+    default: ''
+  revision:
+    description: Immutable Git commit SHA; omit for non-Git workloads.
+    required: false
+    default: ''
+  delivery-id:
+    description: Stable ID for retries of this deployment.
+    required: false
+    default: '${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'
+  timeout-seconds:
+    description: Maximum wait time, from 10 to 3600 seconds.
+    required: false
+    default: '600'
+outputs:
+  operation-id:
+    description: Cove operation ID.
+    value: ${{ steps.deploy.outputs.operation-id }}
+runs:
+  using: composite
+  steps:
+    - id: deploy
+      shell: bash
+      env:
+        COVE_DEPLOY_HOOK_URL: ${{ inputs.hook-url }}
+        COVE_DEPLOY_HOOK_TOKEN: ${{ inputs.token }}
+        COVE_DEPLOY_REASON: ${{ inputs.reason }}
+        COVE_DEPLOY_REVISION: ${{ inputs.revision }}
+        COVE_DEPLOY_DELIVERY: ${{ inputs.delivery-id }}
+        COVE_DEPLOY_TIMEOUT: ${{ inputs.timeout-seconds }}
+      run: python3 "$GITHUB_ACTION_PATH/deploy.py"

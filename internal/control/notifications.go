@@ -3,6 +3,8 @@ package control
 import (
 	"bytes"
 	"context"
+	"cove/internal/netpolicy"
+	"cove/internal/outbound"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,28 +12,12 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"time"
 )
 
-func publicWebhookIP(ip net.IP) bool {
-	address, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		return false
-	}
-	address = address.Unmap()
-	if !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() {
-		return false
-	}
-	for _, block := range []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4", "2001:db8::/32", "2002::/16"} {
-		if netip.MustParsePrefix(block).Contains(address) {
-			return false
-		}
-	}
-	return address.Is4() || netip.MustParsePrefix("2000::/3").Contains(address)
-}
+func publicWebhookIP(ip net.IP) bool { return netpolicy.PublicIP(ip) }
 
-func publicWebhookTransport() *http.Transport {
+func publicWebhookTransport(config ...outbound.Config) *http.Transport {
 	return &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
@@ -49,31 +35,54 @@ func publicWebhookTransport() *http.Transport {
 				return nil, errors.New("webhook must resolve to a public address")
 			}
 		}
-		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		c := outbound.Environment()
+		if len(config) > 0 {
+			c = config[0]
+		}
+		proxy, err := c.For("https", address)
+		if err != nil {
+			return nil, err
+		}
+		return outbound.Tunnel(ctx, proxy, network, net.JoinHostPort(ips[0].IP.String(), port))
 	}, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 5 * time.Second}
 }
 
 func (s *Server) sendNotification(ctx context.Context, c *notificationConfig, event map[string]string) error {
-	var payload any = event
-	message := event["message"]
-	switch c.Provider {
-	case "discord":
-		payload = map[string]any{"content": message, "allowed_mentions": map[string]any{"parse": []string{}}}
-	case "slack":
-		payload = map[string]any{"text": message, "mrkdwn": false, "unfurl_links": false, "unfurl_media": false}
+	if c.Provider == "email" {
+		mailer, err := s.mailer(ctx)
+		if err != nil || mailer == nil {
+			return errors.New("notification SMTP unavailable")
+		}
+		subject := event["subject"]
+		if subject == "" {
+			subject = "Cove notification"
+		}
+		if err := mailer(ctx, c.Email, subject, event["message"]); err != nil {
+			return errors.New("notification email delivery failed")
+		}
+		return nil
 	}
+	endpoint, method, payload, headers := notificationRequest(c, event)
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return err
+		return errors.New("invalid notification request")
 	}
+	req.Header = headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Cove")
 	req.Header.Set("X-Cove-Delivery", event["delivery_id"])
-	transport := publicWebhookTransport()
+	if c.Provider == "webhook" && c.SigningSecret != "" {
+		signCoveWebhook(req, c.SigningSecret, data)
+	}
+	config, err := s.outboundConfig(ctx)
+	if err != nil {
+		return errors.New("outbound configuration unavailable")
+	}
+	transport := publicWebhookTransport(config)
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if s.NotificationTransport != nil {
@@ -130,8 +139,8 @@ func (s *Server) dispatchNotifications(ctx context.Context) error {
 }
 
 func (s *Server) deliverNotification(ctx context.Context, operation, connection string, attempt int) error {
-	var team, name, action, state string
-	err := s.DB.QueryRow(ctx, `SELECT w.team_id,w.name,o.action,o.state FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1`, operation).Scan(&team, &name, &action, &state)
+	var team, name, action, state, subject string
+	err := s.DB.QueryRow(ctx, `SELECT w.team_id,w.name,o.action,o.state,w.id FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1`, operation).Scan(&team, &name, &action, &state, &subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -148,10 +157,35 @@ func (s *Server) deliverNotification(ctx context.Context, operation, connection 
 	status := "sent"
 	message := ""
 	n := c.Notification
-	if !n.Enabled || state == "succeeded" && !n.Success || state != "succeeded" && !n.Failure {
+	scanEvent, scanSummary, scanAllowed, scanErr := s.scanNotification(ctx, operation, action)
+	if errors.Is(scanErr, errScanBaselinePending) {
+		_, err := s.DB.Exec(ctx, `UPDATE notification_deliveries SET attempts=GREATEST(0,attempts-1),next_attempt=now()+interval '1 minute',last_error='Waiting for an earlier automatic scan result before comparing findings.' WHERE operation_id=$1 AND connection_id=$2`, operation, connection)
+		return err
+	}
+	if scanErr != nil {
+		return scanErr
+	}
+	eventName := operationEvent(action, state)
+	if action == "image_scan" {
+		eventName = scanEvent
+	}
+	if n.Owner {
+		n.Email, err = s.notificationOwnerEmail(ctx, team, subject)
+		if err != nil {
+			return err
+		}
+	}
+	if !scanAllowed || !notificationMatches(n, eventName) || n.Owner && n.Email == "" {
 		status = "skipped"
 	} else {
 		event := map[string]string{"delivery_id": operation + ":" + connection, "event": "operation." + state, "operation_id": operation, "resource": name, "action": action, "state": state, "url": s.PublicURL + "/operations/" + operation, "message": "Cove: " + action + " " + state + " for " + name + ". " + s.PublicURL + "/operations/" + operation}
+		if len(n.Events) > 0 {
+			event["event"] = eventName
+		}
+		if action == "image_scan" {
+			event["event"] = eventName
+			event["message"] = "Cove: " + scanSummary + " " + event["url"]
+		}
 		if err = s.sendNotification(ctx, n, event); err != nil {
 			message = err.Error()
 			status = "pending"

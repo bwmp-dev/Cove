@@ -3,6 +3,8 @@ import { Checkbox } from "../components/Checkbox";
 import { Select } from "../components/Select";
 import { SharedVariables } from "../components/SharedVariables";
 import { TeamQuota } from "../components/TeamQuota";
+import { DeploymentPolicy } from "../components/DeploymentPolicy";
+import { ResourceDefaultsSection } from "../components/ResourceDefaults";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useId, useState, type FormEvent } from "react";
@@ -12,6 +14,7 @@ import { nodesQuery } from "../api/queries";
 import {
   invitationsQuery,
   membersQuery,
+  rolesQuery,
   teamNodesQuery,
   useCreateInvitation,
   useCreateTeam,
@@ -19,6 +22,7 @@ import {
   useRevokeInvitation,
   useSetTeamNodes,
   useUpdateMember,
+  type CustomRole,
   type Member,
 } from "../api/teams";
 import type { TeamMembership, TeamRole } from "../api/types";
@@ -28,11 +32,15 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
+import { TeamTimezone } from "../components/TimezoneSettings";
+import { CustomRoles, TeamSecondFactor } from "../components/TeamSecurity";
 import { Button, EmptyState, Field, LoadingRows, Notice, PageHeader, QueryError, Section, SectionGrid, SettingRows } from "../components/ui";
-import { currentTeam, managesTeam, teamRoleDescriptions, teamRoleLabels } from "../lib/permissions";
-import { useOnline } from "../lib/hooks";
+import { isManaged, provenanceLabel } from "../lib/directory";
+import { currentTeam, memberManagement, teamRoleDescriptions, teamRoleLabels, type MemberManagement } from "../lib/permissions";
+import { useOnline, useReviewed } from "../lib/hooks";
 import { useSession, useSwitchTeam } from "../lib/session";
 import { inputClass, listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
+import { TemplateRepositories } from "../components/TemplateRepositories";
 
 function RoleSelect({ id, value, onChange, allowOwner }: { id: string; value: TeamRole; onChange: (role: TeamRole) => void; allowOwner: boolean }) {
   return (
@@ -46,7 +54,7 @@ function RoleSelect({ id, value, onChange, allowOwner }: { id: string; value: Te
   );
 }
 
-function MemberEditor({ team, member, projects, onClose }: { team: TeamMembership; member: Member; projects: Project[]; onClose: () => void }) {
+function MemberEditor({ team, member, projects, customRoles, management, onClose }: { team: TeamMembership; member: Member; projects: Project[]; customRoles?: CustomRole[]; management: MemberManagement; onClose: () => void }) {
   const id = useId();
   const online = useOnline();
   const update = useUpdateMember(team.id);
@@ -60,8 +68,9 @@ function MemberEditor({ team, member, projects, onClose }: { team: TeamMembershi
         update.mutate({ userId: member.user_id, role, grants: role === "member" ? fromGrantRows(grants) : [] }, { onSuccess: onClose });
       }}
     >
-      <RoleSelect id={`${id}-role`} value={role} onChange={setRole} allowOwner={team.role === "owner"} />
-      {role === "member" && <GrantsEditor teamId={team.id} teamName={team.name} projects={projects} grants={grants} onChange={setGrants} />}
+      {/* Delegated managers can change an ordinary member's grants but never promote them. */}
+      {management === "full" && <RoleSelect id={`${id}-role`} value={role} onChange={setRole} allowOwner={team.role === "owner"} />}
+      {role === "member" && <GrantsEditor teamId={team.id} teamName={team.name} projects={projects} grants={grants} onChange={setGrants} customRoles={customRoles} />}
       {update.isError && <Notice tone="error" title="Could not update the member">{errorMessage(update.error)}</Notice>}
       <div className="flex flex-wrap justify-end gap-2">
         <Button variant="ghost" onClick={onClose} disabled={update.isPending}>
@@ -75,10 +84,24 @@ function MemberEditor({ team, member, projects, onClose }: { team: TeamMembershi
   );
 }
 
-function Members({ team, projects }: { team: TeamMembership; projects: Project[] }) {
+function PromoteDialog({ team, member, pending, onConfirm, onCancel }: { team: TeamMembership; member: Member; pending: boolean; onConfirm: () => void; onCancel: () => void }) {
+  const reviewed = useReviewed({ email: member.email, source: provenanceLabel(member.managed_by) });
+  return (
+    <ConfirmDialog open title={`Make ${reviewed.email} a local owner?`} confirmLabel="Make local owner" pending={pending} onCancel={onCancel} onConfirm={onConfirm}>
+      <p>
+        They become an owner of {team.name}, and stay one even if {reviewed.source} later removes their access. Use this to recover control of a team whose owners come only from a directory.
+      </p>
+    </ConfirmDialog>
+  );
+}
+
+export function Members({ team, projects, customRoles, management }: { team: TeamMembership; projects: Project[]; customRoles?: CustomRole[]; management: MemberManagement }) {
   const session = useSession();
   const members = useQuery(membersQuery(team.id));
   const remove = useRemoveMember(team.id);
+  const promote = useUpdateMember(team.id);
+  const [promoting, setPromoting] = useState<Member | null>(null);
+  const canPromote = team.role === "owner" || session?.is_admin === true;
   const online = useOnline();
   const [editing, setEditing] = useState<string | null>(null);
   const [removing, setRemoving] = useState<Member | null>(null);
@@ -93,6 +116,13 @@ function Members({ team, projects }: { team: TeamMembership; projects: Project[]
   }
   return (
     <>
+      {promote.isError && (
+        <div className="p-3">
+          <Notice tone="error" title="Could not make the member a local owner">
+            {errorMessage(promote.error)}
+          </Notice>
+        </div>
+      )}
       {remove.isError && (
         <div className="p-3">
           <Notice tone="error" title="Could not remove the member">
@@ -105,6 +135,10 @@ function Members({ team, projects }: { team: TeamMembership; projects: Project[]
           const self = member.user_id === session?.user_id;
           // The API refuses to remove the last owner, so explain that instead of offering a failing action.
           const lastOwner = member.role === "owner" && members.data.filter((item) => item.role === "owner").length === 1;
+          // The API refuses delegated managers any change to owners and admins.
+          const protectedMember = management !== "full" && member.role !== "member";
+          // The API refuses ordinary edits of directory-managed memberships; only an owner's promotion to local owner is allowed.
+          const managed = isManaged(member.managed_by);
           return (
             <li key={member.user_id}>
               <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2 px-4 py-3">
@@ -114,11 +148,24 @@ function Members({ team, projects }: { team: TeamMembership; projects: Project[]
                     {member.user_id === session?.user_id && <span className="ml-2 text-xs font-normal text-fg-subtle">You</span>}
                   </p>
                   <p className="text-xs break-all text-fg-muted">{member.email}</p>
+                  <p className="text-xs text-fg-subtle">{managed ? `Managed by ${provenanceLabel(member.managed_by)}` : "Added manually"}</p>
                 </div>
                 <div className="min-w-0 text-[13px] text-fg-muted sm:max-w-sm">
                   <p className="text-fg">{teamRoleLabels[member.role]}</p>
-                  {member.role === "member" ? <GrantList grants={member.grants} projects={projects} teamName={team.name} /> : <p className="text-xs">Full team access</p>}
+                  {member.role === "member" ? <GrantList grants={member.grants} projects={projects} teamName={team.name} customRoles={customRoles} /> : <p className="text-xs">Full team access</p>}
                 </div>
+                {managed ? (
+                  <div className="flex min-w-0 flex-col items-start gap-1.5 sm:max-w-56 sm:items-end">
+                    <p className="text-xs text-fg-muted sm:text-right">Change the directory's group mappings to edit or remove this member.</p>
+                    {canPromote && (
+                      <Button variant="ghost" size="sm" disabled={!online} pending={promote.isPending && promote.variables.userId === member.user_id} onClick={() => { promote.reset(); setPromoting(member); }}>
+                        Make local owner<span className="sr-only"> {member.email}</span>
+                      </Button>
+                    )}
+                  </div>
+                ) : protectedMember ? (
+                  <p className="self-center text-xs text-fg-muted">Managed by owners and admins</p>
+                ) : (
                 <div className="flex gap-2">
                   <Button variant="ghost" size="sm" disabled={!online || editing === member.user_id} onClick={() => setEditing(member.user_id)}>
                     Edit<span className="sr-only"> {member.email}</span>
@@ -131,12 +178,22 @@ function Members({ team, projects }: { team: TeamMembership; projects: Project[]
                     </Button>
                   )}
                 </div>
+                )}
               </div>
-              {editing === member.user_id && <MemberEditor team={team} member={member} projects={projects} onClose={() => setEditing(null)} />}
+              {editing === member.user_id && <MemberEditor team={team} member={member} projects={projects} customRoles={customRoles} management={management} onClose={() => setEditing(null)} />}
             </li>
           );
         })}
       </ul>
+      {promoting && (
+        <PromoteDialog
+          team={team}
+          member={promoting}
+          pending={promote.isPending}
+          onCancel={() => setPromoting(null)}
+          onConfirm={() => promote.mutate({ userId: promoting.user_id, role: "owner", grants: [] }, { onSettled: () => setPromoting(null) })}
+        />
+      )}
       <ConfirmDialog
         open={removing !== null}
         title={removing?.user_id === session?.user_id ? `Leave ${team.name}?` : `Remove ${removing?.email ?? "member"}?`}
@@ -156,7 +213,7 @@ function Members({ team, projects }: { team: TeamMembership; projects: Project[]
   );
 }
 
-function InviteForm({ team, projects }: { team: TeamMembership; projects: Project[] }) {
+function InviteForm({ team, projects, customRoles, management }: { team: TeamMembership; projects: Project[]; customRoles?: CustomRole[]; management: MemberManagement }) {
   const id = useId();
   const online = useOnline();
   const create = useCreateInvitation(team.id);
@@ -202,14 +259,16 @@ function InviteForm({ team, projects }: { team: TeamMembership; projects: Projec
       <Field layout="row" id={`${id}-email`} label="Email">
         <input id={`${id}-email`} className={inputClass} type="email" required autoComplete="off" value={email} onChange={(event) => setEmail(event.target.value)} />
       </Field>
-      <Field layout="row" id={`${id}-role`} label="Team role" hint={teamRoleDescriptions[role]}>
-        <Select id={`${id}-role`} className={inputClass} value={role} onChange={(event) => setRole(event.target.value as "admin" | "member")} aria-describedby={`${id}-role-hint`}>
-          <option value="member">{teamRoleLabels.member}</option>
-          <option value="admin">{teamRoleLabels.admin}</option>
-        </Select>
-      </Field>
+      {management === "full" && (
+        <Field layout="row" id={`${id}-role`} label="Team role" hint={teamRoleDescriptions[role]}>
+          <Select id={`${id}-role`} className={inputClass} value={role} onChange={(event) => setRole(event.target.value as "admin" | "member")} aria-describedby={`${id}-role-hint`}>
+            <option value="member">{teamRoleLabels.member}</option>
+            <option value="admin">{teamRoleLabels.admin}</option>
+          </Select>
+        </Field>
+      )}
       </SettingRows>
-      {role === "member" && <GrantsEditor teamId={team.id} teamName={team.name} projects={projects} grants={grants} onChange={setGrants} />}
+      {role === "member" && <GrantsEditor teamId={team.id} teamName={team.name} projects={projects} grants={grants} onChange={setGrants} customRoles={customRoles} />}
       {create.isError && <Notice tone="error" title="Could not create the invitation">{errorMessage(create.error)}</Notice>}
       <div className="flex justify-end border-t border-line pt-4">
         <Button type="submit" variant="primary" disabled={!online} pending={create.isPending}>
@@ -220,7 +279,7 @@ function InviteForm({ team, projects }: { team: TeamMembership; projects: Projec
   );
 }
 
-function PendingInvitations({ team, projects }: { team: TeamMembership; projects: Project[] }) {
+function PendingInvitations({ team, projects, customRoles }: { team: TeamMembership; projects: Project[]; customRoles?: CustomRole[] }) {
   const invitations = useQuery(invitationsQuery(team.id));
   const revoke = useRevokeInvitation(team.id);
   const online = useOnline();
@@ -253,7 +312,7 @@ function PendingInvitations({ team, projects }: { team: TeamMembership; projects
             </div>
             {invitation.role === "member" && (
               <div className="min-w-0 text-fg-muted sm:max-w-sm">
-                <GrantList grants={invitation.grants} projects={projects} teamName={team.name} />
+                <GrantList grants={invitation.grants} projects={projects} teamName={team.name} customRoles={customRoles} />
               </div>
             )}
             <Button variant="ghost" size="sm" disabled={!online} pending={revoke.isPending && revoke.variables === invitation.id} onClick={() => revoke.mutate(invitation.id)}>
@@ -353,7 +412,7 @@ function TeamNodes({ team }: { team: TeamMembership }) {
   );
 }
 
-function YourAccess({ team, projects }: { team: TeamMembership; projects: Project[] | undefined }) {
+function YourAccess({ team, projects, customRoles }: { team: TeamMembership; projects: Project[] | undefined; customRoles?: CustomRole[] }) {
   return (
     <table className="w-full text-left text-[13px]">
       <caption className="sr-only">Your access</caption>
@@ -370,7 +429,7 @@ function YourAccess({ team, projects }: { team: TeamMembership; projects: Projec
       <tbody>
         <tr className={tableRowClass}>
           <td className="py-2.5 pr-4 pl-4 align-top">{teamRoleLabels[team.role]}</td>
-          <td className="py-2.5 pr-4 text-fg-muted">{team.role === "member" ? <GrantList grants={team.grants} projects={projects} teamName={team.name} /> : "Full team access, including members and invitations"}</td>
+          <td className="py-2.5 pr-4 text-fg-muted">{team.role === "member" ? <GrantList grants={team.grants} projects={projects} teamName={team.name} customRoles={customRoles} /> : "Full team access, including members and invitations"}</td>
         </tr>
       </tbody>
     </table>
@@ -413,6 +472,9 @@ export function TeamPage() {
   const projects = useQuery(projectsQuery);
   const team = currentTeam(session);
   const member = session?.teams.some((item) => item.id === team?.id) ?? false;
+  const management = memberManagement(session);
+  // Custom role names are readable by owners, admins and team-wide member managers; everyone else sees a generic label.
+  const roles = useQuery({ ...rolesQuery(team?.id ?? ""), enabled: Boolean(team) && management !== "none" });
 
   if (!team) {
     return (
@@ -426,34 +488,44 @@ export function TeamPage() {
     );
   }
 
-  const manager = managesTeam(team) || Boolean(session?.is_admin);
+  const manager = management === "full";
+  const owner = team.role === "owner" || Boolean(session?.is_admin);
   const role = member ? teamRoleLabels[team.role] : "Instance administrator";
   return (
     <>
       <PageHeader icon={<Users aria-hidden />} title={team.name} description={`Your role: ${role}. Projects, resources and API tokens belong to the selected team.`} />
       {!manager && (
         <Section title="Your access" flush>
-          <YourAccess team={team} projects={projects.data} />
+          <YourAccess team={team} projects={projects.data} customRoles={roles.data?.roles} />
         </Section>
       )}
-      {manager && projects.isError && (
+      {management !== "none" && projects.isError && (
         <div className="px-4 pt-5 sm:px-6">
           <QueryError what="projects" error={projects.error} onRetry={() => void projects.refetch()} retrying={projects.isFetching} />
         </div>
       )}
       <SectionGrid>
-        {manager && (
+        {management !== "none" && (
           <div className="space-y-5">
-            <Section title="Members" description="Owners and admins manage everything in the team. Members only see what their grants cover." flush>
-              <Members team={team} projects={projects.data ?? []} />
+            <Section
+              title="Members"
+              description={
+                manager
+                  ? "Owners and admins manage everything in the team. Members only see what their grants cover."
+                  : "Your role lets you invite members and change members' grants. Owners and admins are managed by team owners and admins."
+              }
+              flush
+            >
+              <Members team={team} projects={projects.data ?? []} customRoles={roles.data?.roles} management={management} />
             </Section>
             <Section title="Invite someone" description="Invitations work even when registration is closed.">
-              <InviteForm team={team} projects={projects.data ?? []} />
+              <InviteForm team={team} projects={projects.data ?? []} customRoles={roles.data?.roles} management={management} />
             </Section>
             <Section title="Pending invitations" flush>
-              <PendingInvitations team={team} projects={projects.data ?? []} />
+              <PendingInvitations team={team} projects={projects.data ?? []} customRoles={roles.data?.roles} />
             </Section>
-            <SharedVariables scope="team" />
+            {manager && <CustomRoles team={team} />}
+            {manager && <SharedVariables scope="team" />}
           </div>
         )}
         {/* Two column stacks, so each column flows on its own instead of sharing grid rows. */}
@@ -464,7 +536,12 @@ export function TeamPage() {
           </div>
           <TeamNodes team={team} />
         </Section>
+        {manager && <TeamSecondFactor team={team} canChange={owner} />}
         {manager && <TeamQuota teamId={team.id} admin={Boolean(session?.is_admin)} />}
+        {manager && <TeamTimezone key={team.id} teamId={team.id} />}
+        {manager && <DeploymentPolicy scope="team" id={team.id} />}
+        {manager && <TemplateRepositories scope={{ kind: "team", teamId: team.id }} />}
+        <ResourceDefaultsSection key={team.id} target={{ scope: "team" }} canEdit={manager} />
         <Section title="Create another team">
           <CreateTeam />
         </Section>

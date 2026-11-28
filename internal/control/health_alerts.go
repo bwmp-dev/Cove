@@ -12,17 +12,44 @@ import (
 )
 
 func (s *Server) recordHealth(ctx context.Context, team, kind, subject, message string, bad bool) error {
+	return s.recordHealthRouted(ctx, team, kind, subject, message, bad, "")
+}
+
+func (s *Server) recordHealthRouted(ctx context.Context, team, kind, subject, message string, bad bool, ruleID string) error {
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var liveTeam string
+	if err = tx.QueryRow(ctx, `SELECT id FROM teams WHERE id=$1 FOR KEY SHARE`, team).Scan(&liveTeam); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	confirmation, repeat := 120, 86400
+	maxGap := 120
+	var channels []string
+	if ruleID != "" {
+		err = tx.QueryRow(ctx, `SELECT confirmation_seconds,repeat_seconds,channel_ids,GREATEST(120,COALESCE((SELECT interval_seconds*2+timeout_seconds FROM route_checks c WHERE c.workload_id=r.workload_id AND c.domain=r.domain AND r.metric='uptime'),120)) FROM threshold_rules r WHERE id=$1 AND team_id=$2 FOR SHARE`, ruleID, team).Scan(&confirmation, &repeat, &channels, &maxGap)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO health_alerts(team_id,kind,subject,message) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, team, kind, subject, message)
 	if err != nil {
 		return err
 	}
+	if ruleID != "" && bad {
+		if _, err = tx.Exec(ctx, `UPDATE health_alerts SET first_seen=now() WHERE team_id=$1 AND kind=$2 AND subject=$3 AND NOT active AND checked_at<now()-make_interval(secs=>$4)`, team, kind, subject, maxGap); err != nil {
+			return err
+		}
+	}
 	var active, notify bool
-	err = tx.QueryRow(ctx, `SELECT active,first_seen<=now()-interval '2 minutes' AND (last_notified IS NULL OR last_notified<=now()-interval '24 hours') FROM health_alerts WHERE team_id=$1 AND kind=$2 AND subject=$3 FOR UPDATE`, team, kind, subject).Scan(&active, &notify)
+	err = tx.QueryRow(ctx, `SELECT active,first_seen<=now()-make_interval(secs=>$4) AND (last_notified IS NULL OR last_notified<=now()-make_interval(secs=>$5)) FROM health_alerts WHERE team_id=$1 AND kind=$2 AND subject=$3 FOR UPDATE`, team, kind, subject, confirmation, repeat).Scan(&active, &notify)
 	if err != nil {
 		return err
 	}
@@ -37,7 +64,14 @@ func (s *Server) recordHealth(ctx context.Context, team, kind, subject, message 
 		active = false
 	}
 	if event != "" {
-		_, err = tx.Exec(ctx, `INSERT INTO health_deliveries(id,team_id,connection_id,event,message) SELECT $1||':'||id,team_id,id,$3,$4 FROM infrastructure_connections WHERE team_id=$2 AND kind='notification'`, resourceID(), team, event, message)
+		if ruleID != "" {
+			if bad {
+				event = "threshold.alert"
+			} else {
+				event = "threshold.recovered"
+			}
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO health_deliveries(id,team_id,connection_id,event,message,alert_key,subject_id) SELECT $1||':'||id,team_id,id,$3,$4,$5,$6 FROM infrastructure_connections WHERE team_id=$2 AND kind='notification' AND ($7::text[] IS NULL OR id=ANY($7)) FOR KEY SHARE`, resourceID(), team, event, message, team+":"+kind+":"+subject, subject, channels)
 		if err != nil {
 			return err
 		}
@@ -84,24 +118,25 @@ func (s *Server) checkBackupHealth(ctx context.Context) error {
 	}
 	_, err = s.DB.Exec(ctx, `DELETE FROM health_alerts a WHERE
  (kind='backup_overdue' AND NOT EXISTS(SELECT 1 FROM workloads w WHERE w.id=a.subject AND w.team_id=a.team_id AND w.backup_interval>0)) OR
- (kind='resource_unhealthy' AND NOT EXISTS(SELECT 1 FROM workloads w WHERE w.id=a.subject AND w.team_id=a.team_id AND w.kind='service')) OR
- (kind IN ('node_unreachable','disk_low') AND NOT EXISTS(SELECT 1 FROM team_nodes t WHERE t.node_id=a.subject AND t.team_id=a.team_id))`)
+ (kind='resource_unhealthy' AND NOT EXISTS(SELECT 1 FROM workloads w WHERE w.id=a.subject AND w.team_id=a.team_id AND w.kind IN ('service','database'))) OR
+ (kind IN ('node_unreachable','disk_low','host_key_changed') AND NOT EXISTS(SELECT 1 FROM team_nodes t WHERE t.node_id=a.subject AND t.team_id=a.team_id)) OR
+ (kind LIKE 'threshold_%' AND NOT EXISTS(SELECT 1 FROM threshold_rules r JOIN team_nodes t ON t.team_id=r.team_id AND t.node_id=r.node_id WHERE a.kind='threshold_'||r.id AND a.team_id=r.team_id AND a.subject=COALESCE(r.workload_id,r.node_id)))`)
 	return err
 }
 
 func (s *Server) dispatchHealthNotifications(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `UPDATE health_deliveries SET attempts=attempts+1,next_attempt=now()+interval '1 minute' WHERE id IN (SELECT id FROM health_deliveries WHERE state='pending' AND next_attempt<=now() ORDER BY next_attempt LIMIT 4 FOR UPDATE SKIP LOCKED) RETURNING id,team_id,connection_id,event,message,attempts`)
+	rows, err := s.DB.Query(ctx, `UPDATE health_deliveries SET attempts=attempts+1,next_attempt=now()+interval '1 minute' WHERE id IN (SELECT id FROM health_deliveries WHERE state='pending' AND next_attempt<=now() ORDER BY next_attempt LIMIT 4 FOR UPDATE SKIP LOCKED) RETURNING id,team_id,connection_id,event,message,alert_key,subject_id,attempts`)
 	if err != nil {
 		return err
 	}
 	type job struct {
-		id, team, connection, event, message string
-		attempt                              int
+		id, team, connection, event, message, alertKey, subject string
+		attempt                                                 int
 	}
 	var jobs []job
 	for rows.Next() {
 		var j job
-		if err = rows.Scan(&j.id, &j.team, &j.connection, &j.event, &j.message, &j.attempt); err != nil {
+		if err = rows.Scan(&j.id, &j.team, &j.connection, &j.event, &j.message, &j.alertKey, &j.subject, &j.attempt); err != nil {
 			break
 		}
 		jobs = append(jobs, j)
@@ -120,14 +155,37 @@ func (s *Server) dispatchHealthNotifications(ctx context.Context) error {
 			state = "skipped"
 		} else if readErr != nil {
 			return readErr
-		} else if !c.Notification.Enabled || !c.Notification.Health {
+		} else if !notificationMatches(c.Notification, j.event) {
 			state = "skipped"
 		} else {
-			if sendErr := s.sendNotification(ctx, c.Notification, map[string]string{"delivery_id": j.id, "event": j.event, "message": "Cove: " + j.message}); sendErr != nil {
-				last = sendErr.Error()
-				state = "pending"
-				if j.attempt >= 6 {
-					state = "failed"
+			if c.Notification.Owner {
+				c.Notification.Email, err = s.notificationOwnerEmail(ctx, j.team, j.subject)
+				if err != nil {
+					return err
+				}
+				if c.Notification.Email == "" {
+					state = "skipped"
+				}
+			}
+			if j.alertKey != "" && (c.Notification.Provider == "pagerduty" || c.Notification.Provider == "opsgenie") {
+				var earlier bool
+				if err = s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM health_deliveries p JOIN health_deliveries d ON d.id=$1 WHERE p.connection_id=d.connection_id AND p.alert_key=d.alert_key AND p.state='pending' AND (p.created_at,p.id)<(d.created_at,d.id))`, j.id).Scan(&earlier); err != nil {
+					return err
+				}
+				if earlier {
+					if _, err = s.DB.Exec(ctx, `UPDATE health_deliveries SET attempts=attempts-1 WHERE id=$1`, j.id); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			if state != "skipped" {
+				if sendErr := s.sendNotification(ctx, c.Notification, map[string]string{"delivery_id": j.id, "event": j.event, "message": "Cove: " + j.message, "alert_key": j.alertKey}); sendErr != nil {
+					last = sendErr.Error()
+					state = "pending"
+					if j.attempt >= 6 {
+						state = "failed"
+					}
 				}
 			}
 		}
@@ -202,11 +260,14 @@ func (s *Server) nodeHealth(ctx context.Context, id, state string, p *worker.Pro
 			}
 		}
 	}
+	if state == "ready" && p != nil && p.Metrics != nil {
+		return s.evaluateThresholdSample(ctx, id, p.Metrics)
+	}
 	return nil
 }
 
 func (s *Server) checkResourceHealth(ctx context.Context) error {
-	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,manually_stopped FROM workloads w WHERE kind='service' AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
+	rows, err := s.DB.Query(ctx, `SELECT id,node_id,team_id,name,(manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id)) FROM workloads w WHERE kind IN ('service','database') AND (health_checked_at IS NULL OR health_checked_at<now()-interval '1 minute') AND EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt') AND state='succeeded') AND NOT EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) ORDER BY health_checked_at NULLS FIRST LIMIT 8`)
 	if err != nil {
 		return err
 	}
@@ -233,6 +294,9 @@ func (s *Server) checkResourceHealth(ctx context.Context) error {
 		if _, err = s.DB.Exec(ctx, `UPDATE workloads SET health_checked_at=now() WHERE id=$1`, i.id); err != nil {
 			return err
 		}
+		if err = s.evaluateResourceThresholds(ctx, i.id); err != nil {
+			return err
+		}
 		if i.stopped {
 			if _, err = s.DB.Exec(ctx, `DELETE FROM health_alerts WHERE team_id=$1 AND subject=$2 AND kind='resource_unhealthy'`, i.team, i.id); err != nil {
 				return err
@@ -243,20 +307,27 @@ func (s *Server) checkResourceHealth(ctx context.Context) error {
 		if rpcErr != nil || response.Error != "" {
 			continue
 		}
+		idleState := "awake"
+		if response.Suspension != nil && response.Suspension.Reason == "idle" && response.Suspension.Phase != "awake" {
+			idleState = "asleep"
+		}
+		if _, err = s.DB.Exec(ctx, `WITH changed AS (UPDATE workloads SET observed_idle_state=$2 WHERE id=$1 AND observed_idle_state IS DISTINCT FROM $2 RETURNING team_id) INSERT INTO audit_events(actor,action,subject,status,team_id,details) SELECT 'runtime-observer','idle state observed',$1,200,team_id,jsonb_build_object('state',$2::text) FROM changed`, i.id, idleState); err != nil {
+			return err
+		}
 		bad := len(response.Containers) == 0
 		for _, container := range response.Containers {
-			if !container.ExpectedCompleted && (container.State != "running" || strings.Contains(container.Status, "(unhealthy)")) {
+			if !container.ExpectedCompleted && (container.State != "running" || container.Health == "unhealthy" || strings.Contains(container.Status, "(unhealthy)")) {
 				bad = true
 			}
 		}
 		// An operator may have stopped or redeployed it while the SSH read was in flight.
 		var suppressed bool
-		if err = s.DB.QueryRow(ctx, `SELECT manually_stopped OR EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) FROM workloads w WHERE id=$1`, i.id).Scan(&suppressed); errors.Is(err, pgx.ErrNoRows) {
+		if err = s.DB.QueryRow(ctx, `SELECT manually_stopped OR EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) OR EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id) OR EXISTS(SELECT 1 FROM operations WHERE workload_id=w.id AND state IN ('queued','running')) FROM workloads w WHERE id=$1`, i.id).Scan(&suppressed); errors.Is(err, pgx.ErrNoRows) {
 			continue
 		} else if err != nil {
 			return err
 		}
-		if suppressed {
+		if suppressed || response.Suspension != nil && (response.Suspension.Reason == "idle" || response.Suspension.Reason == "manual_stop") && response.Suspension.Phase != "awake" {
 			continue
 		}
 		if err = s.recordHealth(ctx, i.team, "resource_unhealthy", i.id, "Resource stopped unexpectedly or unhealthy: "+i.name, bad); err != nil {

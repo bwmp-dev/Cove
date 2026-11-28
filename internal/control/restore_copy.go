@@ -37,6 +37,14 @@ func (s *Server) restoreCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upgrade and verify the worker before restoring a separate resource", 409)
 		return
 	}
+	if _, err = environmentOperationGate(r.Context(), tx, r.PathValue("id"), "restore"); err != nil {
+		http.Error(w, "resume the environment before restoring a resource copy", 409)
+		return
+	}
+	if err = s.idleOperationGate(r.Context(), tx, r.PathValue("id"), "restore"); err != nil {
+		http.Error(w, "start the sleeping resource before restoring a resource copy", 409)
+		return
+	}
 	var active bool
 	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE workload_id=$1 AND state IN ('queued','running'))`, r.PathValue("id")).Scan(&active); err != nil {
 		http.Error(w, "operations unavailable", 503)
@@ -74,6 +82,22 @@ func (s *Server) restoreCopy(w http.ResponseWriter, r *http.Request) {
 	}
 	plan := result.RestoreCopy
 	config := workloadInput{Name: in.Name, NodeID: node, Compose: plan.Compose, Environment: plan.Environment, Kind: "service", Limits: source.Limits}
+	if source.Database != nil {
+		var database databaseResource
+		if len(plan.DatabaseMetadata) == 0 || json.Unmarshal(plan.DatabaseMetadata, &database) != nil || database.Engine != source.Database.Engine || database.PublicAccess != nil || database.Pooler {
+			http.Error(w, "redeploy the private database with an updated worker and create a new backup before managed recovery; public TLS and pooler copies require the database maintenance recovery flow", 409)
+			return
+		}
+		database.Host = databaseHostname(target)
+		database.PrivateHost, database.PrivateCompose, database.SettingsOperation = "", "", ""
+		config.Database = &database
+		request.ManagedDatabase = true
+		request.DatabaseMetadata, err = json.Marshal(databaseMetadata(&database))
+		if err != nil {
+			http.Error(w, "recovery metadata unavailable", 503)
+			return
+		}
+	}
 	if err = validateWorkload(config); err != nil {
 		http.Error(w, "backup recovery configuration is invalid", 409)
 		return
@@ -89,7 +113,7 @@ func (s *Server) restoreCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cpu, memory := configuredUsage(config)
-	if _, err = tx.Exec(r.Context(), `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,manually_stopped,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,'service',NULLIF($5,''),$6,$7,true,$8,$9)`, target, node, in.Name, encrypted, environment, actor(r).Team, project, cpu, memory); err != nil {
+	if _, err = tx.Exec(r.Context(), `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,manually_stopped,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$10,NULLIF($5,''),$6,$7,true,$8,$9)`, target, node, in.Name, encrypted, environment, actor(r).Team, project, cpu, memory, resourceKind(config)); err != nil {
 		if !quotaError(w, err) {
 			http.Error(w, "could not create recovery resource", 503)
 		}

@@ -50,7 +50,7 @@ func (e *Engine) testDeploymentCandidate(ctx context.Context, r Request, dir str
 		return "", err
 	}
 	var config map[string]any
-	if err := json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err := unmarshalCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", err
 	}
 	name, err := guardedService(config)
@@ -100,6 +100,7 @@ func (e *Engine) testDeploymentCandidate(ctx context.Context, r Request, dir str
 	if declared != "null" && declared != "{}" {
 		return "", errors.New("guarded deployment does not support images with declared persistent volumes")
 	}
+	preserveImageReference(service, refs[0])
 	service["image"] = digest
 	service["pull_policy"] = "never"
 	delete(service, "build")
@@ -116,7 +117,7 @@ func (e *Engine) testDeploymentCandidate(ctx context.Context, r Request, dir str
 		result = errors.Join(result, e.recoverCandidate(cleanup, dir))
 	}()
 	candidate := "cove-candidate-" + r.ID
-	command := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", path, "run", "--detach", "--no-deps", "--no-TTY", "--name", candidate, "--label", "dev.cove.candidate=" + r.ID, name}
+	command := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", path, "run", "--detach", "--no-deps", "--no-TTY", "--name", candidate, "--label", "dev.cove.candidate=" + r.ID, name}
 	if err = e.Run(ctx, dir, command, env, out); err != nil {
 		return "", err
 	}
@@ -208,7 +209,7 @@ func (e *Engine) recoverDeployGuard(ctx context.Context, workload string, out io
 		return err
 	}
 	if guard.Previous == nil {
-		if err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", "cove-" + workload, "--file", guard.Compose, "down", "--remove-orphans"}, nil, out); err != nil {
+		if err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", e.composeProject(workload), "--file", guard.Compose, "down", "--remove-orphans"}, nil, out); err != nil {
 			return err
 		}
 	} else {
@@ -217,7 +218,7 @@ func (e *Engine) recoverDeployGuard(ctx context.Context, workload string, out io
 		for key, value := range previous.Environment {
 			env = append(env, key+"="+value)
 		}
-		if err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", "cove-" + workload, "--file", previous.ComposePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}, env, io.Discard); err != nil {
+		if err = e.Run(ctx, dir, []string{"docker", "compose", "--project-name", e.composeProject(workload), "--file", previous.ComposePath, "up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", "--remove-orphans"}, env, io.Discard); err != nil {
 			return errors.New("automatic recovery of the previous release failed; recovery marker retained")
 		}
 		if err = e.applyIngress(ctx, workload, previous.Routes, out); err != nil {

@@ -3,7 +3,9 @@ import { Link } from "@tanstack/react-router";
 import { LayoutDashboard } from "lucide-react";
 import { projectsQuery } from "../api/projects";
 import { nodesQuery, operationsQuery, workloadsQuery } from "../api/queries";
+import { ActivityFeed } from "../components/ActivityFeed";
 import { OperationsTable } from "../components/OperationsTable";
+import { SetupChecklist } from "../components/SetupChecklist";
 import { EmptyState, LoadingRows, PageHeader, QueryError, Section } from "../components/ui";
 import { linkClass } from "../lib/styles";
 
@@ -32,6 +34,7 @@ export function DashboardPage() {
   const failed = queries.find((query) => query.isError);
   return <>
     <PageHeader icon={<LayoutDashboard aria-hidden />} title="Dashboard" description="Projects, infrastructure, and recent activity for your current team." />
+    <SetupChecklist />
     {failed ? <Section title="Overview"><QueryError what="dashboard data" error={failed.error} onRetry={() => void failed.refetch()} retrying={failed.isFetching} /></Section>
       : queries.some((query) => query.isPending) ? <LoadingRows label="Loading dashboard" />
       : <>
@@ -44,5 +47,6 @@ export function DashboardPage() {
           {operations.data?.length ? <OperationsTable operations={operations.data.slice(0, 10)} workloadNames={new Map(resources.data?.map((resource) => [resource.id, resource.name]))} caption="Recent operations" /> : <EmptyState title="No operations yet">Deployment and other resource operations will appear here.</EmptyState>}
         </Section>
       </>}
+    <ActivityFeed />
   </>;
 }

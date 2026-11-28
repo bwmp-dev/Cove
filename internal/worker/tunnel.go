@@ -3,6 +3,7 @@ package worker
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"golang.org/x/crypto/ssh"
@@ -18,14 +19,18 @@ import (
 )
 
 type TunnelRequest struct {
-	ID        string    `json:"id"`
-	Workload  string    `json:"workload"`
-	Service   string    `json:"service"`
-	Port      int       `json:"port"`
-	PublicKey string    `json:"public_key"`
-	Expires   time.Time `json:"expires_at"`
+	Credentials *DatabaseToolCredentials `json:"credentials,omitempty"`
+	Tool        string                   `json:"tool,omitempty"`
+	ID          string                   `json:"id"`
+	Workload    string                   `json:"workload"`
+	Service     string                   `json:"service"`
+	Port        int                      `json:"port"`
+	PublicKey   string                   `json:"public_key"`
+	Expires     time.Time                `json:"expires_at"`
 }
 type tunnelLease struct {
+	closed      bool
+	helper      string
 	request     TunnelRequest
 	container   string
 	connections map[net.Conn]bool
@@ -33,6 +38,9 @@ type tunnelLease struct {
 }
 
 func ValidateTunnel(in TunnelRequest) error {
+	if err := validateDatabaseTool(in); err != nil {
+		return err
+	}
 	if !identifier.MatchString(in.ID) || !workloadIdentifier.MatchString(in.Workload) || !serviceIdentifier.MatchString(in.Service) || in.Port < 1 || in.Port > 65535 || len(in.PublicKey) > 8192 {
 		return errors.New("invalid database access request")
 	}
@@ -93,11 +101,61 @@ func (e *Engine) OpenTunnel(ctx context.Context, in TunnelRequest) error {
 	if len(e.tunnels) >= 32 {
 		return errors.New("node temporary access limit reached")
 	}
-	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+in.Workload, "--filter", "label=com.docker.compose.service="+in.Service)
-	if err != nil || len(strings.Fields(ids)) != 1 {
+	ids, err := e.trafficContainers(ctx, in.Workload, in.Service, true)
+	if err != nil || len(ids) != 1 {
 		return errors.New("select exactly one running service container")
 	}
-	container := strings.TrimSpace(ids)
+	container := ids[0]
+	helper := ""
+	if in.Tool != "" {
+		if err = writeJSON(filepath.Join(e.Root, "database-tools.json"), true); err != nil {
+			return err
+		}
+		for _, lease := range e.tunnels {
+			if lease.request.Workload == in.Workload && lease.helper != "" {
+				return errors.New("close the existing admin tool before opening another")
+			}
+		}
+		helper = "cove-dbtool-" + in.ID
+		defer func() {
+			if e.tunnels[in.ID] == nil {
+				cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				defer cancel()
+				if cleanupErr := e.removeDatabaseTool(cleanup, helper, in.ID); cleanupErr != nil {
+					lease := &tunnelLease{request: in, helper: helper, closed: true, connections: map[net.Conn]bool{}}
+					e.tunnels[in.ID] = lease
+					lease.timer = time.AfterFunc(15*time.Second, func() {
+						if err := e.CloseTunnel(in.ID); err != nil {
+							slog.Error("admin tool cleanup requires retry", "access", in.ID)
+						}
+					})
+				}
+			}
+		}()
+		project := e.composeProject(in.Workload)
+		network := project + "_default"
+		owner, inspectErr := e.output(ctx, "docker", "network", "inspect", "--format", `{{index .Labels "com.docker.compose.project"}}`, network)
+		if inspectErr != nil || owner != project {
+			return errors.New("private admin tool requires the database's managed default network")
+		}
+		seconds := strconv.Itoa(int(time.Until(in.Expires).Seconds()) + 1)
+		image, memory, command, environment, mounts, toolErr := e.databaseToolCommand(in)
+		if toolErr != nil {
+			return toolErr
+		}
+		args := []string{"docker", "run", "-d", "--name", helper, "--log-driver", "none", "--label", "cove.database-tool=true", "--label", fmt.Sprintf("cove.database-tool.root=%x", sha256.Sum256([]byte(e.Root))), "--label", "cove.database-tool.workload=" + in.Workload, "--network", network, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", memory, "--cpus", "0.5"}
+		for _, value := range environment {
+			name, _, _ := strings.Cut(value, "=")
+			args = append(args, "-e", name)
+		}
+		args = append(args, mounts...)
+		args = append(args, "--entrypoint", "timeout", image, seconds)
+		args = append(args, command...)
+		if err = e.Run(ctx, e.Root, args, environment, io.Discard); err != nil {
+			return errors.New("could not start the private admin tool")
+		}
+		container = helper
+	}
 	if _, err = e.tunnelTarget(ctx, container, in.Port); err != nil {
 		return err
 	}
@@ -116,7 +174,7 @@ func (e *Engine) OpenTunnel(ctx context.Context, in TunnelRequest) error {
 	if err = e.tunnelKeys(in.ID, line); err != nil {
 		return err
 	}
-	lease := &tunnelLease{request: in, container: container, connections: map[net.Conn]bool{}}
+	lease := &tunnelLease{request: in, container: container, helper: helper, connections: map[net.Conn]bool{}}
 	e.tunnels[in.ID] = lease
 	lease.timer = time.AfterFunc(time.Until(in.Expires), func() {
 		if err := e.CloseTunnel(in.ID); err != nil {
@@ -133,13 +191,51 @@ func (e *Engine) CloseTunnel(id string) error {
 	e.tunnelMu.Lock()
 	defer e.tunnelMu.Unlock()
 	if lease := e.tunnels[id]; lease != nil {
-		lease.timer.Stop()
+		lease.closed = true
+		if lease.timer != nil {
+			lease.timer.Stop()
+		}
 		for conn := range lease.connections {
 			conn.Close()
 		}
+		err := e.tunnelKeys(id, "")
+		if lease.helper != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			err = errors.Join(err, e.removeDatabaseTool(ctx, lease.helper, id))
+		}
+		if err != nil {
+			lease.timer = time.AfterFunc(15*time.Second, func() {
+				if err := e.CloseTunnel(id); err != nil {
+					slog.Error("expired admin tool cleanup requires retry", "access", id)
+				}
+			})
+			return err
+		}
 		delete(e.tunnels, id)
+		return nil
 	}
 	return e.tunnelKeys(id, "")
+}
+
+func (e *Engine) removeOrphanDatabaseTools() error {
+	if _, err := os.Stat(filepath.Join(e.Root, "database-tools.json")); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", fmt.Sprintf("label=cove.database-tool.root=%x", sha256.Sum256([]byte(e.Root))))
+	if err != nil {
+		return err
+	}
+	for _, id := range strings.Fields(ids) {
+		if err = e.Run(ctx, e.Root, []string{"docker", "rm", "-f", "-v", id}, nil, io.Discard); err != nil {
+			return errors.New("could not remove orphaned private admin tool")
+		}
+	}
+	return os.RemoveAll(filepath.Join(e.Root, "database-tools"))
 }
 
 func (e *Engine) tunnelTarget(ctx context.Context, container string, port int) (string, error) {
@@ -160,7 +256,7 @@ func (e *Engine) serveTunnel(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/tunnel/")
 	e.tunnelMu.Lock()
 	lease := e.tunnels[id]
-	if lease == nil || time.Now().After(lease.request.Expires) || len(lease.connections) >= 16 {
+	if lease == nil || lease.closed || time.Now().After(lease.request.Expires) || len(lease.connections) >= 16 {
 		e.tunnelMu.Unlock()
 		http.Error(w, "access unavailable", 403)
 		return

@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Boxes, Timer } from "lucide-react";
+import { ResourceIcon } from "./ResourceIcon";
 import { useMemo } from "react";
 import { operationsQuery } from "../api/queries";
 import type { Project } from "../api/projects";
 import type { WorkloadSummary } from "../api/types";
 import { findPlacement } from "../lib/hierarchy";
-import { actionLabels, latestByWorkload } from "../lib/operations";
+import { actionLabels, latestByWorkload, resourceTypeLabel } from "../lib/operations";
 import { listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { RelativeTime } from "./RelativeTime";
 import { OperationStateLabel } from "./status";
@@ -73,18 +73,17 @@ export function ResourceTable({ resources, caption, projects, assignAction = fal
         <tbody>
           {resources.map((resource) => {
             const operation = latest.get(resource.id);
-            const Icon = resource.kind === "job" ? Timer : Boxes;
             return (
               <tr key={resource.id} className={tableRowClass}>
                 <td className="py-2.5 pr-4 pl-4">
                   <div className="flex min-w-0 items-center gap-3">
-                    <Icon aria-hidden className="hidden size-4 shrink-0 text-fg-subtle sm:block" />
+                    <ResourceIcon kind={resource.kind} className="hidden size-4 shrink-0 text-fg-subtle sm:block" />
                     <div className="min-w-0">
                       <Link to="/resources/$resourceId" params={{ resourceId: resource.id }} className={`${listLinkClass} break-words`}>
                         {resource.name}
                       </Link>
                       <p className="text-xs text-fg-subtle">
-                        {resource.kind === "job" ? "Job" : "Service"}
+                        {resourceTypeLabel(resource.kind)}
                         <span className="sm:hidden"> · {resource.node}</span>
                       </p>
                       {projects && (

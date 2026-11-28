@@ -1,6 +1,7 @@
 package control
 
 import (
+	"cove/internal/catalog"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -110,7 +111,7 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 		environments[source] = id
 	}
 	rows, err := tx.Query(ctx, `SELECT w.id,w.configuration,COALESCE(w.environment_id,''),w.project_id,w.node_id,
- CASE WHEN $4 THEN 3 ELSE cove_access($5,w.team_id,w.project_id,COALESCE(e.id,'')) END
+ CASE WHEN $4 THEN 3 ELSE cove_access($5,w.team_id,w.project_id,COALESCE(e.id,'')) END,EXISTS(SELECT 1 FROM managed_registries m WHERE m.id=w.id)
  FROM workloads w LEFT JOIN environments e ON e.id=w.environment_id
 	 WHERE w.team_id=$1 AND (($2='workload' AND w.id=$3) OR ($2='environment' AND e.id=$3) OR ($2='project' AND w.project_id=$3)) ORDER BY w.id`, p.Team, kind, source, p.Admin, p.ID)
 	if err != nil {
@@ -121,12 +122,13 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 		configuration                  []byte
 		id, environment, project, node string
 		level                          int
+		managedRegistry                bool
 	}
 	items := []item{}
 	clonedResources := map[string]string{}
 	for rows.Next() {
 		var v item
-		if err = rows.Scan(&v.id, &v.configuration, &v.environment, &v.project, &v.node, &v.level); err != nil {
+		if err = rows.Scan(&v.id, &v.configuration, &v.environment, &v.project, &v.node, &v.level, &v.managedRegistry); err != nil {
 			break
 		}
 		items = append(items, v)
@@ -144,6 +146,10 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, v := range items {
+		if v.managedRegistry {
+			http.Error(w, "managed registries cannot be cloned; select application resources instead", 409)
+			return
+		}
 		if v.level < 3 {
 			http.Error(w, "permission denied", 403)
 			return
@@ -163,6 +169,7 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "configuration unavailable", 500)
 			return
 		}
+		config.Autoscale = nil
 		config.Routes = nil
 		config.Backup = nil
 		config.Private = nil
@@ -173,7 +180,27 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			config.Kind = "service"
 		}
 		if !in.IncludeSecrets {
+			if config.ComposeBundle != nil && (len(config.ComposeBundle.Files) > 0 || len(config.ComposeBundle.Assets) > 0) {
+				config.ComposeBundle = nil
+			}
 			config.Environment = nil
+			if config.Database != nil {
+				engine, ok := findDatabaseEngine(config.Database.Engine)
+				if !ok {
+					http.Error(w, "database engine unavailable", 409)
+					return
+				}
+				definition, _, e := databaseTemplate(engine)
+				if e != nil {
+					http.Error(w, "database template unavailable", 503)
+					return
+				}
+				config.Environment, e = catalog.Values(definition, nil, false)
+				if e != nil {
+					http.Error(w, "database credentials unavailable", 503)
+					return
+				}
+			}
 			if config.Source != nil {
 				config.Source.Token = ""
 			}
@@ -189,6 +216,12 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			target = v.environment
 			config.Name = in.Name
 		}
+		if config.Database != nil {
+			if err = isolateDatabaseCopy(&config, next); err != nil {
+				http.Error(w, "could not isolate database configuration", 503)
+				return
+			}
+		}
 		clonedResources[v.id] = next
 		data, err = json.Marshal(config)
 		if err != nil {
@@ -201,7 +234,7 @@ func (s *Server) clone(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cpu, memory := configuredUsage(config)
-		if _, err = tx.Exec(ctx, "INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10)", next, v.node, config.Name, encrypted, config.Kind, target, p.Team, project, cpu, memory); err != nil {
+		if _, err = tx.Exec(ctx, "INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10)", next, v.node, config.Name, encrypted, resourceKind(config), target, p.Team, project, cpu, memory); err != nil {
 			if quotaError(w, err) {
 				return
 			}

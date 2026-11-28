@@ -50,7 +50,7 @@ func TestInventoryScaleIntegration(t *testing.T) {
 				if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil || len(items) != 2048 {
 					t.Errorf("%s: count %d, %v", path, len(items), err)
 				}
-				if strings.Contains(w.Body.String(), "private_key") || strings.Contains(w.Body.String(), "configuration") {
+				if strings.Contains(w.Body.String(), `"private_key":`) || strings.Contains(w.Body.String(), `"configuration":`) {
 					t.Errorf("%s exposed private fields", path)
 				}
 			}

@@ -52,7 +52,7 @@ func (s *Server) InitAdministrator(ctx context.Context, password string) error {
 	return err
 }
 
-func (s *Server) sameOrigin(r *http.Request) bool { return r.Header.Get("Origin") == s.PublicURL }
+func (s *Server) sameOrigin(r *http.Request) bool { return r.Header.Get("Origin") == s.panelOrigin() }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(r) {
@@ -60,8 +60,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Password string `json:"password"`
-		Email    string `json:"email"`
+		Password   string `json:"password"`
+		Email      string `json:"email"`
+		BreakGlass bool   `json:"break_glass"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -101,6 +102,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication unavailable", 503)
 		return
 	}
+	var disabled, admin bool
+	if err = tx.QueryRow(r.Context(), "SELECT c.password_login_disabled,u.is_admin FROM control_settings c CROSS JOIN users u WHERE c.id=1 AND u.id=$1", userID).Scan(&disabled, &admin); err != nil {
+		http.Error(w, "authentication unavailable", 503)
+		return
+	}
+	if disabled && !(in.BreakGlass && admin) {
+		http.Error(w, "password login disabled", 403)
+		return
+	}
 	token := randomToken()
 	expiry := time.Now().Add(12 * time.Hour)
 	_, err = tx.Exec(r.Context(), "INSERT INTO sessions(token_hash,expires_at,user_id,user_agent) VALUES($1,$2,$3,$4)", tokenHash(token), expiry, userID, sessionUserAgent(r))
@@ -111,8 +121,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication unavailable", 503)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "__Host-cove", Value: token, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expiry})
-	respond(w, 200, map[string]string{"user": userID})
+	s.completeSignIn(w, r, userID, token, expiry)
+	var required bool
+	if s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM account_totp WHERE user_id=$1 AND confirmed) OR EXISTS(SELECT 1 FROM passkeys WHERE user_id=$1)", userID).Scan(&required) != nil {
+		http.Error(w, "authentication unavailable", 503)
+		return
+	}
+	respond(w, 200, map[string]any{"user": userID, "second_factor_required": required})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(r) {

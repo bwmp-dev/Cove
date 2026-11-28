@@ -39,7 +39,7 @@ func TestIngressConfigurationAcceptance(t *testing.T) {
 	var router ingressRouter
 	for name, router = range config.HTTP.Routers {
 	}
-	current := []map[string]string{{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service}}
+	current := []map[string]any{{"name": name + "@file", "status": "enabled", "rule": router.Rule, "service": router.Service, "entryPoints": router.EntryPoints}}
 	encode := func() string {
 		data, err := json.Marshal(current)
 		if err != nil {

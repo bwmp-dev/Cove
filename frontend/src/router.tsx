@@ -4,7 +4,9 @@ import { sessionQuery } from "./api/queries";
 import { ApiError } from "./api/client";
 import { AppShell } from "./components/AppShell";
 import { NotFound, RouteError } from "./components/RouteStates";
+import { TimezoneProvider } from "./components/TimezoneProvider";
 import { parseOperationsSearch } from "./lib/operations";
+import { basePath, withBasePath } from "./lib/base-path";
 import { safeRedirect } from "./lib/redirect";
 import { rememberTeam, selectedTeam } from "./lib/team";
 
@@ -18,17 +20,22 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
   errorComponent: RouteError,
 });
 
+const flag = (value: unknown) => value === true || value === 1 || value === "1" || value === "true";
+
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  validateSearch: (search: Record<string, unknown>): { redirect?: string; error?: string } => ({
+  // authenticated marks the return from a provider sign-in; break_glass is the administrator password route that skips auto-redirect.
+  validateSearch: (search: Record<string, unknown>): { redirect?: string; error?: string; authenticated?: true; break_glass?: true } => ({
     ...(typeof search.redirect === "string" ? { redirect: search.redirect } : {}),
     ...(typeof search.error === "string" ? { error: search.error } : {}),
+    ...(flag(search.authenticated) ? { authenticated: true } : {}),
+    ...(flag(search.break_glass) ? { break_glass: true } : {}),
   }),
   beforeLoad: async ({ context, search }) => {
     const session = await context.queryClient.ensureQueryData(sessionQuery).catch(() => null);
     if (session) {
-      throw redirect({ href: safeRedirect(search.redirect) });
+      throw redirect({ href: withBasePath(safeRedirect(search.redirect)) });
     }
   },
   component: lazyRouteComponent(() => import("./routes/login"), "LoginPage"),
@@ -39,6 +46,20 @@ const verifyRoute = createRoute({ getParentRoute: () => rootRoute, path: "/verif
 const forgotRoute = createRoute({ getParentRoute: () => rootRoute, path: "/forgot-password", component: lazyRouteComponent(() => import("./routes/auth"), "ForgotPasswordPage") });
 const resetRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reset-password", component: lazyRouteComponent(() => import("./routes/auth"), "ResetPasswordPage") });
 const inviteRoute = createRoute({ getParentRoute: () => rootRoute, path: "/invite", component: lazyRouteComponent(() => import("./routes/auth"), "InvitationPage") });
+// Public status page for an opted-in project share link; it needs no session and sits outside the authenticated app.
+const sharedStatusRoute = createRoute({ getParentRoute: () => rootRoute, path: "/shared/$share", component: lazyRouteComponent(() => import("./routes/shared-status"), "SharedStatusPage") });
+// Public project status pages sit outside the authenticated shell and never read the session.
+const statusRoute = createRoute({ getParentRoute: () => rootRoute, path: "/status/$slug", component: lazyRouteComponent(() => import("./routes/status"), "PublicStatusPage") });
+
+// The display zone is a private preference, so only the authenticated app requests it. Public pages such as shared
+// status links stay outside, where an expired cached session must not redirect a valid public link to sign-in.
+function AuthenticatedApp() {
+  return (
+    <TimezoneProvider>
+      <AppShell />
+    </TimezoneProvider>
+  );
+}
 
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -56,7 +77,7 @@ const appRoute = createRoute({
       rememberTeam(session.team_id || null);
     }
   },
-  component: AppShell,
+  component: AuthenticatedApp,
   errorComponent: RouteError,
 });
 
@@ -80,6 +101,7 @@ const projectRoute = createRoute({ getParentRoute: () => appRoute, path: "/proje
 const projectOverviewRoute = createRoute({ getParentRoute: () => projectRoute, path: "/", component: lazyRouteComponent(() => import("./routes/project"), "ProjectOverview") });
 const environmentRoute = createRoute({ getParentRoute: () => projectRoute, path: "/environments/$environmentId", component: lazyRouteComponent(() => import("./routes/project"), "EnvironmentPage") });
 const projectPreviewsRoute = createRoute({ getParentRoute: () => projectRoute, path: "/previews", component: lazyRouteComponent(() => import("./routes/project-previews"), "ProjectPreviews") });
+const projectConfigurationRoute = createRoute({ getParentRoute: () => projectRoute, path: "/configuration", component: lazyRouteComponent(() => import("./routes/project-configuration"), "ProjectConfiguration") });
 
 const resourcesRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources", component: lazyRouteComponent(() => import("./routes/workloads"), "WorkloadsPage") });
 const resourceNewRoute = createRoute({
@@ -91,9 +113,11 @@ const resourceNewRoute = createRoute({
   }),
   component: lazyRouteComponent(() => import("./routes/workload-new"), "NewWorkloadPage"),
 });
+const resourceBrowserRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources/organize", component: lazyRouteComponent(() => import("./routes/resource-browser"), "ResourceBrowserPage") });
 const resourceRoute = createRoute({ getParentRoute: () => appRoute, path: "/resources/$resourceId", component: lazyRouteComponent(() => import("./routes/workload-detail"), "WorkloadPage") });
 const resourceOverviewRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceOverview") });
 const resourceLogsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/logs", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceLogs") });
+const resourceMetricsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/metrics", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceMetrics") });
 const resourceOperationsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/operations", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceOperations") });
 // Configuration used to be one page; keep its address working for saved links.
 const resourceConfigurationRoute = createRoute({
@@ -118,7 +142,10 @@ const resourceDomainsRoute = createRoute({ getParentRoute: () => resourceRoute, 
 const resourceEnvironmentRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/environment", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceEnvironment") });
 const resourceNetworkingRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/networking", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceNetworking") });
 const resourceRegistryRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/registry", component: lazyRouteComponent(() => import("./routes/resource-config"), "ResourceRegistryPage") });
+const resourceDatabaseRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/database", component: lazyRouteComponent(() => import("./routes/database"), "ResourceDatabase") });
+const resourceObjectStorageRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/object-storage", component: lazyRouteComponent(() => import("./routes/object-storage"), "ResourceObjectStorage") });
 const resourceBackupsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/backups", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceBackups") });
+const resourceFilesRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/files", component: lazyRouteComponent(() => import("./routes/resource-files"), "ResourceFiles") });
 const resourceSettingsRoute = createRoute({ getParentRoute: () => resourceRoute, path: "/settings", component: lazyRouteComponent(() => import("./routes/workload-detail"), "ResourceSettings") });
 
 const nodesRoute = createRoute({ getParentRoute: () => appRoute, path: "/nodes", component: lazyRouteComponent(() => import("./routes/nodes"), "NodesPage") });
@@ -133,6 +160,7 @@ const operationsRoute = createRoute({
 });
 const operationRoute = createRoute({ getParentRoute: () => appRoute, path: "/operations/$operationId", component: lazyRouteComponent(() => import("./routes/operation-detail"), "OperationPage") });
 const tokensRoute = createRoute({ getParentRoute: () => appRoute, path: "/tokens", component: lazyRouteComponent(() => import("./routes/tokens"), "TokensPage") });
+const apiDocsRoute = createRoute({ getParentRoute: () => appRoute, path: "/api-docs", component: lazyRouteComponent(() => import("./routes/api-docs"), "ApiDocsPage") });
 const accountRoute = createRoute({ getParentRoute: () => appRoute, path: "/account", component: lazyRouteComponent(() => import("./routes/account"), "AccountPage") });
 const teamRoute = createRoute({ getParentRoute: () => appRoute, path: "/team", component: lazyRouteComponent(() => import("./routes/team"), "TeamPage") });
 const adminRoute = createRoute({ getParentRoute: () => appRoute, path: "/admin", component: lazyRouteComponent(() => import("./routes/admin"), "AdminPage") });
@@ -145,6 +173,8 @@ const routeTree = rootRoute.addChildren([
   forgotRoute,
   resetRoute,
   inviteRoute,
+  sharedStatusRoute,
+  statusRoute,
   appRoute.addChildren([
     indexRoute,
     dashboardRoute,
@@ -155,12 +185,14 @@ const routeTree = rootRoute.addChildren([
     storageRoute,
     notificationsRoute,
     projectsRoute,
-    projectRoute.addChildren([projectOverviewRoute, environmentRoute, projectPreviewsRoute]),
+    projectRoute.addChildren([projectOverviewRoute, environmentRoute, projectPreviewsRoute, projectConfigurationRoute]),
     resourcesRoute,
     resourceNewRoute,
+    resourceBrowserRoute,
     resourceRoute.addChildren([
       resourceOverviewRoute,
       resourceLogsRoute,
+      resourceMetricsRoute,
       resourceOperationsRoute,
       resourceConfigurationRoute,
       resourceGeneralRoute,
@@ -179,6 +211,9 @@ const routeTree = rootRoute.addChildren([
       resourceNetworkingRoute,
       resourceRegistryRoute,
       resourceBackupsRoute,
+      resourceFilesRoute,
+      resourceDatabaseRoute,
+      resourceObjectStorageRoute,
       resourceSettingsRoute,
     ]),
     nodesRoute,
@@ -188,6 +223,7 @@ const routeTree = rootRoute.addChildren([
     operationsRoute,
     operationRoute,
     tokensRoute,
+    apiDocsRoute,
     accountRoute,
     teamRoute,
     adminRoute,
@@ -198,6 +234,7 @@ const routeTree = rootRoute.addChildren([
 export function createAppRouter(queryClient: QueryClient) {
   return createRouter({
     routeTree,
+    basepath: basePath || "/",
     context: { queryClient },
     defaultPreload: "intent",
     defaultPreloadStaleTime: 0,

@@ -1,7 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { DeleteResource } from "../components/DeleteResource";
 import { CleanupPreview } from "../components/CleanupPreview";
-import { getRouteApi, Link } from "@tanstack/react-router";
+import { BuildCacheSection } from "../components/BuildCache";
+import { ComposeAdoption, reviewFromHash } from "../components/ComposeAdoption";
+import { NodeCleanup } from "../components/NodeCleanup";
+import { NodeMounts } from "../components/NodeMounts";
+import { getRouteApi, Link, useLocation } from "@tanstack/react-router";
 import { KeyRound, Network, Pencil, RefreshCw, Server } from "lucide-react";
 import { useState } from "react";
 import { errorMessage } from "../api/client";
@@ -10,10 +14,17 @@ import { nodesQuery, workloadsQuery } from "../api/queries";
 import type { Node, NodeState } from "../api/types";
 import { EnrollmentPanel } from "../components/EnrollmentPanel";
 import { NodeLinks } from "../components/NodeLinks";
+import { NodeMetricHistory } from "../components/MetricHistory";
 import { NodeForm } from "../components/NodeForm";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
 import { nodeStates } from "../lib/nodes";
+import { NodeCost } from "../components/NodeCost";
+import { NodeCloudOrigin } from "../components/NodeProviders";
+import { NodeSSH } from "../components/NodeSSH";
+import { HostSecurityUpdates } from "../components/HostSecurityUpdates";
+import { NodeFirewall } from "../components/NodeFirewall";
+import { NodeGPUs } from "../components/GPUs";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, Meter, MeterGroup, Notice, PageHeader, QueryError, Section, SectionGrid } from "../components/ui";
 import { projectsQuery } from "../api/projects";
 import { findPlacement } from "../lib/hierarchy";
@@ -83,6 +94,7 @@ function NodeDetail({ node }: { node: Node }) {
   const [renewedFrom, setRenewedFrom] = useState<NodeState>("pending");
   const ssh = node.mode === "ssh";
   const admin = useSession()?.is_admin ?? false;
+  const hash = useLocation({ select: (location) => location.hash });
   const info = nodeStates[node.state];
 
   return (
@@ -208,9 +220,11 @@ function NodeDetail({ node }: { node: Node }) {
         </Section>
 
         {admin && <NodeUsage node={node} />}
+        {admin && <HostSecurityUpdates node={node} />}
         <Section title="Capabilities" description="Reported by the worker during the last verification.">
           <Capabilities node={node} />
         </Section>
+        <BuildCacheSection node={node} />
 
         </div>
         <div className="space-y-5">
@@ -232,6 +246,12 @@ function NodeDetail({ node }: { node: Node }) {
           />
         </Section>}
 
+        {admin && <NodeSSH node={node} verify={verify} />}
+
+        {admin && <NodeCloudOrigin nodeId={node.id} />}
+
+        {admin && <NodeCost nodeId={node.id} />}
+
         {admin && <NodeLinks nodeId={node.id} />}
 
         {admin && (
@@ -246,7 +266,7 @@ function NodeDetail({ node }: { node: Node }) {
         <Section title="Resources on this node" flush>
           <NodeResources nodeId={node.id} />
         </Section>
-        {admin && <CleanupPreview nodeId={node.id} />}
+        {admin && (node.capabilities?.scheduled_cleanup ? <NodeCleanup node={node} /> : <CleanupPreview nodeId={node.id} />)}
         {admin && (
           <Section title="Danger zone" tone="danger">
             <DeleteResource kind="node" id={node.id} />
@@ -254,6 +274,15 @@ function NodeDetail({ node }: { node: Node }) {
         )}
         </div>
       </SectionGrid>
+      {admin && <ComposeAdoption node={node} initialReview={reviewFromHash(hash)} />}
+      {admin && <NodeMounts node={node} />}
+      {admin && <NodeFirewall node={node} />}
+      {admin && <NodeGPUs node={node} />}
+      {admin && (
+        <Section title="Usage history" description="Host usage recorded by Cove from this node's worker." flush>
+          <NodeMetricHistory nodeId={node.id} />
+        </Section>
+      )}
     </>
   );
 }
@@ -287,7 +316,7 @@ function NodeUsage({ node }: { node: Node }) {
   const metrics = node.capabilities?.metrics;
   const fresh = metrics && node.state === "ready" && now - new Date(metrics.sampled_at).getTime() < 180_000;
   const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
-  return <Section title="Node usage" description="Host usage at the last probe. Disk covers the filesystem containing /var/lib/cove; separately mounted Docker or application disks are not included.">
+  return <Section title="Node usage" description="Host usage at the last probe. Disk covers the filesystem containing /var/lib/cove; other mounts are listed under Mounted filesystems.">
     <div className="space-y-4">
       {fresh ? <>
         <MeterGroup label="Node usage" columns={3}>

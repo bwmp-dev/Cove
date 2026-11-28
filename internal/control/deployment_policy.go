@@ -11,28 +11,47 @@ import (
 )
 
 type deploymentPolicy struct {
-	WindowStart string     `json:"window_start"`
-	WindowEnd   string     `json:"window_end"`
-	Approval    bool       `json:"approval"`
-	FreezeFrom  *time.Time `json:"freeze_from"`
-	FreezeUntil *time.Time `json:"freeze_until"`
+	Timezone      string         `json:"timezone"`
+	Windows       []changeWindow `json:"recurring_windows"`
+	Freezes       []changeFreeze `json:"freezes"`
+	OutsideWindow string         `json:"outside_window"`
+	WindowStart   string         `json:"window_start"`
+	WindowEnd     string         `json:"window_end"`
+	Approval      bool           `json:"approval"`
+	FreezeFrom    *time.Time     `json:"freeze_from"`
+	FreezeUntil   *time.Time     `json:"freeze_until"`
 }
 
 func (s *Server) deploymentPolicy(w http.ResponseWriter, r *http.Request) {
 	var project, environment string
 	if strings.Contains(r.URL.Path, "/projects/") {
 		project = r.PathValue("id")
-	} else {
+	} else if strings.Contains(r.URL.Path, "/environments/") {
 		environment = r.PathValue("id")
 	}
 	team := actor(r).Team
+	if strings.Contains(r.URL.Path, "/teams/") {
+		team = r.PathValue("id")
+	}
+	if project != "" || environment != "" {
+		var belongs bool
+		if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM projects WHERE id=$1 AND team_id=$3) OR EXISTS(SELECT 1 FROM environments e JOIN projects p ON p.id=e.project_id WHERE e.id=$2 AND p.team_id=$3)`, project, environment, team).Scan(&belongs); err != nil {
+			http.Error(w, "policy scope unavailable", 503)
+			return
+		}
+		if !belongs {
+			http.Error(w, "policy scope does not belong to the selected team", 403)
+			return
+		}
+	}
 	if r.Method == "GET" {
 		var policy deploymentPolicy
-		err := s.DB.QueryRow(r.Context(), `SELECT approval,freeze_from,freeze_until,window_start,window_end FROM deployment_policies WHERE team_id=$1 AND project_id IS NOT DISTINCT FROM NULLIF($2,'') AND environment_id IS NOT DISTINCT FROM NULLIF($3,'')`, team, project, environment).Scan(&policy.Approval, &policy.FreezeFrom, &policy.FreezeUntil, &policy.WindowStart, &policy.WindowEnd)
+		err := s.DB.QueryRow(r.Context(), `SELECT approval,freeze_from,freeze_until,window_start,window_end,timezone,recurring_windows,freezes,outside_window FROM deployment_policies WHERE team_id=$1 AND project_id IS NOT DISTINCT FROM NULLIF($2,'') AND environment_id IS NOT DISTINCT FROM NULLIF($3,'')`, team, project, environment).Scan(&policy.Approval, &policy.FreezeFrom, &policy.FreezeUntil, &policy.WindowStart, &policy.WindowEnd, &policy.Timezone, &policy.Windows, &policy.Freezes, &policy.OutsideWindow)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "deployment policy unavailable", 503)
 			return
 		}
+		normalizeSchedule(&policy)
 		respond(w, 200, policy)
 		return
 	}
@@ -44,14 +63,11 @@ func (s *Server) deploymentPolicy(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &policy) {
 		return
 	}
-	if !validDeploymentWindow(policy.WindowStart, policy.WindowEnd) {
-		http.Error(w, "set two different UTC times in HH:MM format, or clear both deployment window times", 400)
+	if err := validateSchedule(&policy); err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
-	if (policy.FreezeFrom == nil) != (policy.FreezeUntil == nil) || policy.FreezeFrom != nil && (!policy.FreezeUntil.After(*policy.FreezeFrom) || policy.FreezeUntil.Sub(*policy.FreezeFrom) > 366*24*time.Hour) {
-		http.Error(w, "set both freeze dates with an end after the start, at most one year apart", 400)
-		return
-	}
+
 	tx, err := s.DB.Begin(r.Context())
 	if err != nil {
 		http.Error(w, "policy unavailable", 503)
@@ -62,7 +78,7 @@ func (s *Server) deploymentPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "policy unavailable", 503)
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO deployment_policies(team_id,project_id,environment_id,approval,freeze_from,freeze_until,window_start,window_end) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8) ON CONFLICT(team_id,project_id,environment_id) DO UPDATE SET approval=$4,freeze_from=$5,freeze_until=$6,window_start=$7,window_end=$8`, team, project, environment, policy.Approval, policy.FreezeFrom, policy.FreezeUntil, policy.WindowStart, policy.WindowEnd); err != nil {
+	if _, err = tx.Exec(r.Context(), `INSERT INTO deployment_policies(team_id,project_id,environment_id,approval,freeze_from,freeze_until,window_start,window_end,timezone,recurring_windows,freezes,outside_window) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(team_id,project_id,environment_id) DO UPDATE SET approval=$4,freeze_from=$5,freeze_until=$6,window_start=$7,window_end=$8,timezone=$9,recurring_windows=$10,freezes=$11,outside_window=$12`, team, project, environment, policy.Approval, policy.FreezeFrom, policy.FreezeUntil, policy.WindowStart, policy.WindowEnd, policy.Timezone, policy.Windows, policy.Freezes, policy.OutsideWindow); err != nil {
 		http.Error(w, "could not save policy", 503)
 		return
 	}
@@ -95,38 +111,22 @@ func (s *Server) approveDeployment(w http.ResponseWriter, r *http.Request) {
 }
 
 func deploymentGate(ctx context.Context, tx pgx.Tx, id string) (string, error) {
-	var approval, approved bool
-	var until *time.Time
-	err := tx.QueryRow(ctx, `SELECT o.approval_required OR EXISTS(SELECT 1 FROM deployment_policies p WHERE p.team_id=w.team_id AND (p.project_id=w.project_id OR p.environment_id=w.environment_id) AND p.approval),o.approved_at IS NOT NULL,(SELECT max(p.freeze_until) FROM deployment_policies p WHERE p.team_id=w.team_id AND (p.project_id=w.project_id OR p.environment_id=w.environment_id) AND p.freeze_from<=now() AND p.freeze_until>now()) FROM operations o JOIN workloads w ON w.id=o.workload_id WHERE o.id=$1`, id).Scan(&approval, &approved, &until)
+	now := time.Now()
+	reason, err := scheduledDeploymentGate(ctx, tx, id, now)
+	if err != nil || reason != "" {
+		return reason, err
+	}
+	var start, end string
+	var override bool
+	err = tx.QueryRow(ctx, `SELECT d.window_start,d.window_end,o.emergency_override_at IS NOT NULL FROM image_update_deployments d JOIN operations o ON o.id=d.operation_id WHERE d.operation_id=$1`, id).Scan(&start, &end, &override)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
-	if approval && !approved {
-		if _, err = tx.Exec(ctx, `UPDATE operations SET approval_required=true WHERE id=$1`, id); err != nil {
-			return "", err
-		}
-		return "Waiting for a team administrator to approve this deployment.", nil
-	}
-	if until != nil {
-		return "Deployment freeze is active until " + until.UTC().Format(time.RFC3339) + ".", nil
-	}
-	rows, err := tx.Query(ctx, `SELECT p.window_start,p.window_end FROM deployment_policies p JOIN workloads w ON p.team_id=w.team_id AND (p.project_id=w.project_id OR p.environment_id=w.environment_id) JOIN operations o ON o.workload_id=w.id WHERE o.id=$1`, id)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	now := time.Now().UTC().Format("15:04")
-	for rows.Next() {
-		var start, end string
-		if err = rows.Scan(&start, &end); err != nil {
-			return "", err
-		}
-		if !withinDeploymentWindow(start, end, now) {
-			return "Waiting for the daily UTC deployment window " + start + "–" + end + ".", nil
-		}
-	}
-	if err = rows.Err(); err != nil {
-		return "", err
+	if !override && !withinDeploymentWindow(start, end, now.UTC().Format("15:04")) {
+		return "Waiting for the image update UTC maintenance window.", nil
 	}
 	return "", nil
 }
@@ -161,7 +161,7 @@ func withinDeploymentWindow(start, end, now string) bool {
 }
 
 func holdDeployment(ctx context.Context, tx pgx.Tx, id, message string) (bool, error) {
-	result, err := json.Marshal(map[string]string{"error": message})
+	result, err := json.Marshal(map[string]string{"error": message, "hold_reason": message})
 	if err != nil {
 		return false, err
 	}

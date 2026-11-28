@@ -340,7 +340,7 @@ func (e *Engine) removePreview(ctx context.Context, r Request, out io.Writer) er
 	for _, kind := range []string{"network", "volume"} {
 		label := "dev.cove.preview=" + r.Workload
 		if kind == "network" {
-			label = "com.docker.compose.project=cove-" + r.Workload
+			label = "com.docker.compose.project=" + e.composeProject(r.Workload)
 		}
 		ids, err := e.output(ctx, "docker", kind, "ls", "-q", "--filter", "label="+label)
 		if err != nil {

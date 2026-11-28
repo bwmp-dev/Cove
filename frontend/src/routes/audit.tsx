@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { request } from "../api/client";
 import { FilterSelect, FilterToolbar, NoMatches } from "../components/FilterToolbar";
+import { ClientPagination } from "../components/ListPagination";
 import { RelativeTime } from "../components/RelativeTime";
 import { StatusLabel } from "../components/status";
 import { EmptyState, LoadingRows, PageHeader, QueryError, Section } from "../components/ui";
@@ -18,6 +19,8 @@ interface Event {
   subject: string;
   status: number;
   created_at: string;
+  // Structured context; reason is free text supplied with deployments and emergency overrides.
+  details?: { reason?: string } | null;
 }
 
 const results = {
@@ -51,7 +54,7 @@ function Events() {
   const filtering = Boolean(query || outcome);
   const filtered = events.data.filter((event) => {
     if (outcome && result(event.status) !== outcome) return false;
-    return !query || [event.actor, event.action, event.subject].some((value) => value.toLowerCase().includes(query));
+    return !query || [event.actor, event.action, event.subject, event.details?.reason ?? ""].some((value) => value.toLowerCase().includes(query));
   });
   const reset = () => {
     setSearch("");
@@ -63,7 +66,7 @@ function Events() {
         label="Filter audit events"
         search={search}
         onSearch={setSearch}
-        searchPlaceholder="Search actor, action or subject"
+        searchPlaceholder="Search actor, action, subject or reason"
         active={filtering}
         onReset={reset}
         summary={filtering ? `${filtered.length} of ${events.data.length} events` : `${events.data.length} events`}
@@ -80,6 +83,8 @@ function Events() {
       {filtered.length === 0 ? (
         <NoMatches what="events" scope="None of the 100 most recent events match the search and filters." onReset={reset} />
       ) : (
+        <ClientPagination rows={filtered} resetKey={`${query}|${outcome}`} label="Audit event pages" noun="events">
+          {(rows) => (
         <table className="w-full table-fixed text-left">
           <caption className="sr-only">Audit events</caption>
           <thead>
@@ -99,7 +104,7 @@ function Events() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((event) => {
+            {rows.map((event) => {
               const { tone, label } = results[result(event.status)];
               const status = <StatusLabel tone={tone} label={`${label} · ${event.status}`} />;
               return (
@@ -107,6 +112,7 @@ function Events() {
                   <td className="py-2 pr-4 pl-4">
                     <p className="font-mono text-xs break-all text-fg">{event.action}</p>
                     {event.subject && <p className="mt-0.5 text-xs break-all text-fg-muted">{event.subject}</p>}
+                    {event.details?.reason && <p className="mt-0.5 text-xs whitespace-pre-wrap break-words text-fg-muted">Reason: {event.details.reason}</p>}
                     <p className="mt-0.5 text-xs break-all text-fg-muted md:hidden">{event.actor}</p>
                     <p className="mt-1 sm:hidden">{status}</p>
                   </td>
@@ -120,6 +126,8 @@ function Events() {
             })}
           </tbody>
         </table>
+          )}
+        </ClientPagination>
       )}
     </>
   );

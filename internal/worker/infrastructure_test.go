@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -133,7 +134,11 @@ func TestPrivateRegistryDeployment(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	root := filepath.Join(filepath.Dir(fixture), "registry-worker")
+	suffix := ""
+	if os.Getenv("COVE_TEST_REGISTRY_FAILURE") == "1" {
+		suffix = "-failure"
+	}
+	root := filepath.Join(filepath.Dir(fixture), "registry-worker"+suffix)
 	e, err := NewEngine(root)
 	if err != nil {
 		t.Fatal(err)
@@ -158,13 +163,17 @@ func TestPrivateRegistryDeployment(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	workload := "registry-" + filepath.Base(filepath.Dir(fixture))
+	workload := "registry-" + filepath.Base(filepath.Dir(fixture)) + suffix
+	project := "cove-" + workload
+	if !strings.HasPrefix(project, "cove-registry-cove-infra-") {
+		t.Fatal("registry fixture requires its own random infrastructure project")
+	}
+	assertRegistryProjectRemoved(t, project)
+	if t.Failed() {
+		t.FailNow()
+	}
+	t.Cleanup(func() { cleanupRegistryProject(t, project) })
 	request := Request{ID: "registrydeploy", Workload: workload, Action: "deploy", Registry: registry, Kind: "service", Compose: "services:\n  app:\n    image: " + image + "\n    pull_policy: always\n    command: [sleep, '60']\n"}
-	defer func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
-		defer stop()
-		_ = e.Run(cleanup, root, []string{"docker", "compose", "--project-name", "cove-" + workload, "--file", filepath.Join(root, "workloads", workload, "compose.yaml"), "down"}, nil, io.Discard)
-	}()
 	if _, err = e.Submit(request); err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +181,82 @@ func TestPrivateRegistryDeployment(t *testing.T) {
 		logs, _ := e.Logs(request.ID)
 		t.Fatal(err, logs)
 	}
+	if suffix != "" {
+		t.Fatal("intentional registry fixture failure after deployment")
+	}
 	entries, err := filepath.Glob(filepath.Join(root, "workloads", workload, "registry-*"))
 	if err != nil || len(entries) > 0 {
 		t.Fatal("deployment credentials were not removed", err)
 	}
+}
+
+func TestPrivateRegistryDeploymentFailureCleanup(t *testing.T) {
+	fixture := os.Getenv("COVE_STORAGE_FIXTURE")
+	if fixture == "" {
+		t.Skip("isolated registry fixture not configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.v", "-test.run=^TestPrivateRegistryDeployment$")
+	command.Env = append(os.Environ(), "COVE_TEST_REGISTRY_FAILURE=1")
+	output, err := command.CombinedOutput()
+	if err == nil || command.ProcessState == nil || command.ProcessState.ExitCode() != 1 || !bytes.Contains(output, []byte("intentional registry fixture failure after deployment")) {
+		t.Fatalf("expected the deployed child test to fail: %v\n%s", err, output)
+	}
+	if bytes.Contains(output, []byte("registry cleanup failed")) {
+		t.Fatalf("failed child could not clean its project: %s", output)
+	}
+	assertRegistryProjectRemoved(t, "cove-registry-"+filepath.Base(filepath.Dir(fixture))+"-failure")
+	t.Log("Real child test exited 1 after deployment; its containers and network are absent")
+}
+
+func registryProjectResources(t *testing.T, ctx context.Context, project, kind string) []string {
+	t.Helper()
+	args := []string{"ps", "-aq"}
+	if kind == "network" {
+		args = []string{"network", "ls", "-q"}
+	}
+	output, err := exec.CommandContext(ctx, "docker", append(args, "--filter", "label=com.docker.compose.project="+project)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("registry cleanup failed listing %s: %v: %s", kind, err, output)
+	}
+	return strings.Fields(string(output))
+}
+
+func assertRegistryProjectRemoved(t *testing.T, project string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for _, kind := range []string{"container", "network"} {
+		if remaining := registryProjectResources(t, ctx, project, kind); len(remaining) != 0 {
+			t.Errorf("registry cleanup failed: project %s retains %s: %v", project, kind, remaining)
+		}
+	}
+}
+
+func cleanupRegistryProject(t *testing.T, project string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, kind := range []string{"container", "network"} {
+		for _, id := range registryProjectResources(t, ctx, project, kind) {
+			field := ".Config.Labels"
+			if kind == "network" {
+				field = ".Labels"
+			}
+			output, err := exec.CommandContext(ctx, "docker", kind, "inspect", "--format", "{{index "+field+" \"com.docker.compose.project\"}}", id).CombinedOutput()
+			if err != nil || strings.TrimSpace(string(output)) != project {
+				t.Errorf("registry cleanup failed: ownership could not be confirmed for %s %s", kind, id)
+				continue
+			}
+			args := []string{"rm", "-f", "-v", id}
+			if kind == "network" {
+				args = []string{"network", "rm", id}
+			}
+			if output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil {
+				t.Errorf("registry cleanup failed removing %s: %v: %s", kind, err, output)
+			}
+		}
+	}
+	assertRegistryProjectRemoved(t, project)
 }

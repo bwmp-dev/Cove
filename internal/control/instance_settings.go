@@ -58,7 +58,11 @@ func (s *Server) mailer(ctx context.Context) (func(context.Context, string, stri
 		return s.SendMail, nil
 	}
 	c := config.SMTP
-	return SMTPMailer(c.Host, c.Port, c.Username, c.Password, c.From)
+	proxy, err := s.outboundConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return SMTPMailer(c.Host, c.Port, c.Username, c.Password, c.From, proxy)
 }
 
 // Import host settings once so subsequent dashboard edits survive restarts.

@@ -389,7 +389,7 @@ func TestEnvironmentPreviewPlanAndRecipe(t *testing.T) {
 	// Another team's Cloudflare zone cannot be claimed through a template.
 	f.sql(`INSERT INTO teams(id,name) VALUES('other','Other')`)
 	zone, _ := f.s.sealJSON(cloudflareZone{ZoneID: "zone1", Domain: "other.example", Token: "t", Enabled: true, Nodes: map[string]string{}})
-	f.sql(`INSERT INTO cloudflare_zones(zone_id,domain,configuration) VALUES('zone1','other.example',$1)`, zone)
+	f.sql(`INSERT INTO cloudflare_zones(zone_id,domain,owner_id,configuration) VALUES('zone1','other.example','bootstrap',$1)`, zone)
 	f.sql(`INSERT INTO cloudflare_zone_teams(zone_id,team_id,domains) VALUES('zone1','other',ARRAY['other.example','*.other.example'])`)
 	invalid = recipe
 	invalid.DomainTemplate = "{resource}-{preview}.other.example"

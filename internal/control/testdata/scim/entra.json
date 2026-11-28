@@ -1,0 +1,12 @@
+{
+  "source": "https://learn.microsoft.com/en-us/entra/identity/app-provisioning/use-scim-to-provision-users-and-groups",
+  "evidence": "Synthetic identities in the documented Entra User/Group PATCH request shapes, including the legacy string active value and member remove value array.",
+  "requests": [
+    {"method":"POST","path":"/Users","status":201,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"entra@example.invalid","externalId":"entra-fixture","active":true,"emails":[{"value":"entra@example.invalid","type":"work","primary":true}]}},
+    {"method":"POST","path":"/Groups","status":201,"body":{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"Entra fixture","externalId":"entra-group","members":[]}},
+    {"method":"PATCH","path":"/Groups/$group","status":204,"body":{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"Add","path":"members","value":[{"value":"$user"}]}]}},
+    {"method":"PATCH","path":"/Groups/$group","status":204,"body":{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"Remove","path":"members","value":[{"value":"$user"}]}]}},
+    {"method":"PATCH","path":"/Users/$user","status":200,"body":{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"Replace","path":"active","value":"False"}]}},
+    {"method":"GET","path":"/Groups?excludedAttributes=members&filter=displayName%20eq%20%22Entra%20fixture%22","status":200}
+  ]
+}

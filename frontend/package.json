@@ -24,8 +24,10 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "lucide-react": "^1.73.0",
+    "qrcode-generator": "^2.0.4",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
+    "swagger-ui-react": "^5.34.1",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
@@ -38,6 +40,7 @@
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@types/swagger-ui-react": "^5.18.0",
     "@vitejs/plugin-react": "^6.3.0",
     "eslint": "^10.15.0",
     "eslint-plugin-jsx-a11y": "^6.10.2",

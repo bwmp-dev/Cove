@@ -17,18 +17,22 @@ import (
 )
 
 type BackupConfig struct {
-	DrillIntervalHours int              `json:"drill_interval_hours,omitempty"`
-	Database           *DatabaseBackup  `json:"database,omitempty"`
-	StorageID          string           `json:"storage_id,omitempty"`
-	Remote             *StorageLocation `json:"remote,omitempty"`
-	CACertificate      string           `json:"ca_certificate,omitempty"`
-	Repository         string           `json:"repository"`
-	Password           string           `json:"password,omitempty"`
-	AccessKey          string           `json:"access_key,omitempty"`
-	SecretKey          string           `json:"secret_key,omitempty"`
-	SessionToken       string           `json:"session_token,omitempty"`
-	KeepLast           int              `json:"keep_last"`
-	IntervalHours      int              `json:"interval_hours"`
+	VolumeSnapshot     *VolumeSnapshotConfig `json:"volume_snapshot,omitempty"`
+	KeepDaily          int                   `json:"keep_daily,omitempty"`
+	KeepWeekly         int                   `json:"keep_weekly,omitempty"`
+	KeepMonthly        int                   `json:"keep_monthly,omitempty"`
+	DrillIntervalHours int                   `json:"drill_interval_hours,omitempty"`
+	Database           *DatabaseBackup       `json:"database,omitempty"`
+	StorageID          string                `json:"storage_id,omitempty"`
+	Remote             *StorageLocation      `json:"remote,omitempty"`
+	CACertificate      string                `json:"ca_certificate,omitempty"`
+	Repository         string                `json:"repository"`
+	Password           string                `json:"password,omitempty"`
+	AccessKey          string                `json:"access_key,omitempty"`
+	SecretKey          string                `json:"secret_key,omitempty"`
+	SessionToken       string                `json:"session_token,omitempty"`
+	KeepLast           int                   `json:"keep_last"`
+	IntervalHours      int                   `json:"interval_hours"`
 }
 type backupMount struct {
 	Type        string
@@ -38,15 +42,18 @@ type backupMount struct {
 	RW          bool
 }
 type BackupRecord struct {
-	VerifiedAt   *time.Time      `json:"verified_at,omitempty"`
-	Verification string          `json:"verification,omitempty"`
-	Database     *DatabaseBackup `json:"database,omitempty"`
-	ID           string          `json:"id"`
-	Workload     string          `json:"workload"`
-	Snapshot     string          `json:"snapshot"`
-	Created      time.Time       `json:"created_at"`
-	Repository   string          `json:"repository"`
-	Mounts       []backupMount   `json:"-"`
+	VolumeMethod   string          `json:"volume_method,omitempty"`
+	FallbackReason string          `json:"fallback_reason,omitempty"`
+	DataSnapshot   string          `json:"data_snapshot,omitempty"`
+	VerifiedAt     *time.Time      `json:"verified_at,omitempty"`
+	Verification   string          `json:"verification,omitempty"`
+	Database       *DatabaseBackup `json:"database,omitempty"`
+	ID             string          `json:"id"`
+	Workload       string          `json:"workload"`
+	Snapshot       string          `json:"snapshot"`
+	Created        time.Time       `json:"created_at"`
+	Repository     string          `json:"repository"`
+	Mounts         []backupMount   `json:"-"`
 }
 type backupManifest struct {
 	Record BackupRecord  `json:"record"`
@@ -54,10 +61,14 @@ type backupManifest struct {
 	State  deployedState `json:"state"`
 }
 type storageRecovery struct {
-	DatabaseContainer string   `json:"database_container,omitempty"`
-	Containers        []string `json:"containers"`
-	Restoring         bool     `json:"restoring"`
-	Helper            string   `json:"helper"`
+	DatabaseUser       string   `json:"database_user,omitempty"`
+	DatabaseVerify     string   `json:"database_verify,omitempty"`
+	DatabaseEngine     string   `json:"database_engine,omitempty"`
+	DatabaseAppendOnly bool     `json:"database_appendonly,omitempty"`
+	DatabaseContainer  string   `json:"database_container,omitempty"`
+	Containers         []string `json:"containers"`
+	Restoring          bool     `json:"restoring"`
+	Helper             string   `json:"helper"`
 }
 
 func ValidateBackup(b *BackupConfig) error {
@@ -66,6 +77,12 @@ func ValidateBackup(b *BackupConfig) error {
 	}
 	if err := validateDatabaseBackup(b.Database); err != nil {
 		return err
+	}
+	if err := validateVolumeSnapshot(b.VolumeSnapshot); err != nil {
+		return err
+	}
+	if b.Database != nil && b.VolumeSnapshot != nil {
+		return errors.New("filesystem snapshots apply only to volume backups")
 	}
 	if b.CACertificate != "" {
 		roots := x509.NewCertPool()
@@ -78,6 +95,9 @@ func ValidateBackup(b *BackupConfig) error {
 	}
 	if b.KeepLast < 1 || b.KeepLast > 1000 || b.IntervalHours < 0 || b.IntervalHours > 8760 {
 		return errors.New("backup retention must be 1-1000 and interval 0-8760 hours")
+	}
+	if b.KeepDaily < 0 || b.KeepDaily > 366 || b.KeepWeekly < 0 || b.KeepWeekly > 520 || b.KeepMonthly < 0 || b.KeepMonthly > 120 {
+		return errors.New("daily retention must be 0-366, weekly 0-520 and monthly 0-120")
 	}
 	if len(b.Password) < 16 || len(b.Password) > 4096 {
 		return errors.New("backup encryption password must contain 16-4096 bytes")
@@ -210,10 +230,21 @@ func (e *Engine) backupMounts(ctx context.Context, workload string) ([]backupMou
 }
 
 func (e *Engine) restic(ctx context.Context, r Request, mounts []backupMount, writable bool, out io.Writer, command ...string) error {
+	return e.resticInput(ctx, r, mounts, writable, nil, out, command...)
+}
+
+func (e *Engine) resticInput(ctx context.Context, r Request, mounts []backupMount, writable bool, input io.Reader, out io.Writer, command ...string) error {
+	owner, ownerErr := e.backupHelperOwner(e.Root != "")
+	if ownerErr != nil {
+		return ownerErr
+	}
 	b := r.Backup
 	repository := b.Repository
 	env := []string{"RESTIC_PASSWORD=" + b.Password, "AWS_ACCESS_KEY_ID=" + b.AccessKey, "AWS_SECRET_ACCESS_KEY=" + b.SecretKey, "AWS_SESSION_TOKEN=" + b.SessionToken}
-	args := []string{"docker", "run", "--rm", "--name", "cove-backup-" + r.ID, "--label", "dev.cove.operation=" + r.ID, "--network", "host", "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/data", "-e", "RESTIC_PASSWORD", "-e", "RESTIC_REPOSITORY", "-e", "AWS_ACCESS_KEY_ID", "-e", "AWS_SECRET_ACCESS_KEY", "-e", "AWS_SESSION_TOKEN"}
+	args := []string{"docker", "run", "--rm", "--log-driver", "none", "--name", "cove-backup-" + r.ID, "--label", "dev.cove.operation=" + r.ID, "--network", "host", "--read-only", "--tmpfs", "/tmp", "--tmpfs", "/data", "-e", "RESTIC_PASSWORD", "-e", "RESTIC_REPOSITORY", "-e", "AWS_ACCESS_KEY_ID", "-e", "AWS_SECRET_ACCESS_KEY", "-e", "AWS_SESSION_TOKEN"}
+	if owner != "" {
+		args = append(args, "--label", "dev.cove.backup-owner="+owner)
+	}
 	if b.CACertificate != "" {
 		path := filepath.Join(e.Root, "workloads", r.Workload, "backup-ca.pem")
 		if err := os.WriteFile(path, []byte(b.CACertificate), 0600); err != nil {
@@ -246,14 +277,14 @@ func (e *Engine) restic(ctx context.Context, r Request, mounts []backupMount, wr
 		}
 		args = append(args, "--mount", spec)
 	}
-	if len(command) > 0 && command[0] == "backup" {
+	if len(command) > 0 && command[0] == "backup" && input == nil {
 		metadata := filepath.Join(e.Root, "workloads", r.Workload, "backups", r.ID+".source.json")
 		args = append(args, "--mount", "type=bind,source="+metadata+",target=/cove-manifest.json,readonly")
 	}
 	image := "restic/restic:0.19.1"
 	if b.Remote != nil {
 		image = remoteBackupImage
-		remoteEnv, err := storageEnvironment(b.Remote)
+		remoteEnv, err := e.storageEnvironment(b.Remote, r.OutboundProxy)
 		if err != nil {
 			return err
 		}
@@ -274,11 +305,22 @@ func (e *Engine) restic(ctx context.Context, r Request, mounts []backupMount, wr
 		args = append(args, mounts...)
 	}
 	args = append(args, image, "--no-cache")
+	if input != nil {
+		args = append([]string{"docker", "run", "--interactive"}, args[2:]...)
+	}
 	args = append(args, command...)
-	err := e.Run(ctx, e.Root, args, env, out)
-	if ctx.Err() != nil {
+	var err error
+	if input == nil {
+		err = e.Run(ctx, e.Root, args, env, out)
+	} else {
+		err = runInput(ctx, e.Root, args, env, input, out)
+	}
+	if ctx.Err() != nil || (input != nil && err != nil) {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
+		if owner != "" {
+			return errors.Join(err, e.removeBackupHelper(cleanup, owner, "cove-backup-"+r.ID, r.ID))
+		}
 		if removeErr := e.Run(cleanup, e.Root, []string{"docker", "rm", "-f", "cove-backup-" + r.ID}, nil, io.Discard); removeErr != nil {
 			return errors.Join(err, removeErr)
 		}
@@ -317,17 +359,35 @@ func (e *Engine) Backups(workload string) ([]BackupRecord, error) {
 }
 
 func (e *Engine) makeBackup(ctx context.Context, r Request, mounts []backupMount, state deployedState, out io.Writer) (backupManifest, error) {
+	return e.makeBackupWithData(ctx, r, mounts, state, out, "")
+}
+
+func (e *Engine) makeBackupWithData(ctx context.Context, r Request, mounts []backupMount, state deployedState, out io.Writer, dataSnapshot string) (backupManifest, error) {
 	dir := filepath.Join(e.Root, "workloads", r.Workload, "backups")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return backupManifest{}, err
 	}
 	manifest := backupManifest{Record: BackupRecord{ID: r.ID, Workload: r.Workload, Repository: r.Backup.Repository, Created: time.Now().UTC(), Database: r.Backup.Database}, Mounts: mounts, State: state}
+	manifest.Record.DataSnapshot = dataSnapshot
+	manifest.Record.VolumeMethod, manifest.Record.FallbackReason = r.volumeMethod, r.snapshotFallback
 	metadata := filepath.Join(dir, r.ID+".source.json")
 	if err := writeJSON(metadata, manifest); err != nil {
 		return manifest, err
 	}
-	if err := e.restic(ctx, r, mounts, false, out, "backup", "/data", "/cove-manifest.json", "--tag", "cove-workload:"+r.Workload, "--tag", "cove-operation:"+r.ID); err != nil {
+	backupMounts := mounts
+	if r.snapshotMounts != nil {
+		backupMounts = r.snapshotMounts
+	}
+	if dataSnapshot != "" {
+		backupMounts = nil
+	}
+	if err := e.restic(ctx, r, backupMounts, false, out, "backup", "/data", "/cove-manifest.json", "--tag", "cove-workload:"+r.Workload, "--tag", "cove-operation:"+r.ID); err != nil {
 		return backupManifest{}, err
+	}
+	if r.snapshotCheck != nil {
+		if err := r.snapshotCheck(ctx); err != nil {
+			return backupManifest{}, err
+		}
 	}
 	result := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	if err := e.restic(ctx, r, nil, false, result, "snapshots", "--json", "--tag", "cove-operation:"+r.ID); err != nil {
@@ -350,6 +410,9 @@ func (e *Engine) performBackup(ctx context.Context, r Request, out io.Writer) (r
 	e.backupMu.Lock()
 	defer e.backupMu.Unlock()
 	if r.Backup.Database != nil {
+		if extendedDatabase(r.Backup.Database.Engine) {
+			return e.performExtendedDatabaseBackup(ctx, r, out)
+		}
 		return e.performDatabaseBackup(ctx, r, out)
 	}
 	dir := filepath.Join(e.Root, "workloads", r.Workload)
@@ -424,6 +487,14 @@ func (e *Engine) performBackup(ctx context.Context, r Request, out io.Writer) (r
 			}
 		}
 	}
+	if r.Action == "backup" && r.Backup.VolumeSnapshot != nil {
+		handled, reason, snapshotErr := e.performFilesystemBackup(ctx, r, mounts, running, current, out)
+		if handled || snapshotErr != nil {
+			return snapshotErr
+		}
+		r.volumeMethod, r.snapshotFallback = "stopped", reason
+		fmt.Fprintln(out, "Filesystem snapshot unavailable; using a stopped backup:", reason)
+	}
 	recovery := storageRecovery{Containers: running, Restoring: interruptedRestore, Helper: "cove-backup-" + r.ID}
 	if err = writeJSON(recoveryPath, recovery); err != nil {
 		return err
@@ -479,29 +550,38 @@ func (e *Engine) performBackup(ctx context.Context, r Request, out io.Writer) (r
 func (e *Engine) pruneBackups(ctx context.Context, r Request, out io.Writer) error {
 	e.backupMu.Lock()
 	defer e.backupMu.Unlock()
+	return e.pruneBackupsLocked(ctx, r, out)
+}
+
+func (e *Engine) pruneBackupsLocked(ctx context.Context, r Request, out io.Writer) error {
 	records, err := e.Backups(r.Workload)
 	if err != nil {
 		return err
 	}
-	kept := 0
+	retained := retainedBackups(records, r.Backup)
+	pruned := false
 	for _, record := range records {
 		if record.Repository != r.Backup.Repository {
 			continue
 		}
-		kept++
-		if kept <= r.Backup.KeepLast {
+		if retained[record.ID] {
 			continue
 		}
-		if err = e.restic(ctx, r, nil, false, out, "forget", record.Snapshot); err != nil {
+		if record.DataSnapshot != "" {
+			if err = e.forgetDatabaseSnapshots(ctx, r, record); err != nil {
+				return err
+			}
+		} else if err = e.restic(ctx, r, nil, false, out, "forget", record.Snapshot); err != nil {
 			return err
 		}
+		pruned = true
 		for _, suffix := range []string{".json", ".source.json"} {
 			if err = os.Remove(filepath.Join(e.Root, "workloads", r.Workload, "backups", record.ID+suffix)); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}
 	}
-	if kept > r.Backup.KeepLast {
+	if pruned {
 		return e.restic(ctx, r, nil, false, out, "prune")
 	}
 	return nil
@@ -538,6 +618,14 @@ func (e *Engine) recoverStorage(ctx context.Context) error {
 			}
 		}
 		if state.Restoring {
+			if state.DatabaseVerify != "" {
+				if !identifier.MatchString(state.DatabaseVerify) {
+					return errors.New("invalid database verifier recovery identity")
+				}
+				if err = e.cleanupDatabaseVerifier(ctx, Request{ID: state.DatabaseVerify, Workload: entry.Name()}); err != nil {
+					return err
+				}
+			}
 			if state.DatabaseContainer != "" {
 				if err = e.Run(ctx, e.Root, []string{"docker", "stop", "--time", "30", state.DatabaseContainer}, nil, os.Stderr); err != nil {
 					return err

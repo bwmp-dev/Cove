@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -108,36 +107,6 @@ func (s *Server) previewRepositoryAccess(ctx context.Context, project string, re
 	return installation, clone, err
 }
 
-// githubBranchHead reads a branch head from GitHub. A missing branch returns an empty head.
-func (s *Server) githubBranchHead(ctx context.Context, installation, repository int64, branch string) (string, error) {
-	token, err := s.installationToken(ctx, installation, repository)
-	if err != nil {
-		return "", err
-	}
-	segments := strings.Split(branch, "/")
-	for i, segment := range segments {
-		segments[i] = url.PathEscape(segment)
-	}
-	var ref struct {
-		Ref    string `json:"ref"`
-		Object struct {
-			SHA string `json:"sha"`
-		} `json:"object"`
-	}
-	err = s.appAPI(ctx, "GET", fmt.Sprintf("/repositories/%d/git/ref/heads/%s", repository, strings.Join(segments, "/")), token, nil, &ref)
-	var status *githubStatusError
-	if errors.As(err, &status) && status.Status == 404 {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	if ref.Ref != "refs/heads/"+branch || !gitCommit.MatchString(ref.Object.SHA) {
-		return "", errors.New("GitHub returned an unexpected branch")
-	}
-	return ref.Object.SHA, nil
-}
-
 // scanPreviewRecipes periodically lists matching branches, so previews converge even when webhooks
 // are missed, and re-checks the branches of existing previews so deletions are noticed.
 func (s *Server) scanPreviewRecipes(ctx context.Context) error {
@@ -178,40 +147,22 @@ func (s *Server) scanPreviewRecipes(ctx context.Context) error {
 				slog.Warn("environment preview repository unavailable", "project", e.project, "repository", repository)
 				continue
 			}
-			token, err := s.installationToken(ctx, installation, repository)
+			refs, err := s.githubProvider().Branches(ctx, installation, repository, prefix)
 			if err != nil {
-				slog.Warn("environment preview repository token unavailable", "project", e.project, "repository", repository)
-				continue
-			}
-			segments := strings.Split(strings.TrimSuffix(prefix, "/"), "/")
-			for i, segment := range segments {
-				segments[i] = url.PathEscape(segment)
-			}
-			path := fmt.Sprintf("/repositories/%d/git/matching-refs/heads/%s", repository, strings.Join(segments, "/"))
-			if strings.HasSuffix(prefix, "/") {
-				path += "/"
-			}
-			var refs []struct {
-				Ref string `json:"ref"`
-			}
-			if err = s.appAPI(ctx, "GET", path, token, nil, &refs); err != nil {
 				slog.Warn("environment preview branch listing failed", "project", e.project, "repository", repository, "error", err)
 				continue
-			}
-			if len(refs) > 200 {
-				refs = refs[:200]
 			}
 			for _, ref := range refs {
 				branch := strings.TrimPrefix(ref.Ref, "refs/heads/")
 				if !strings.HasPrefix(branch, prefix) || len(branch) == len(prefix) || !validPreviewBranch(branch) {
 					continue
 				}
-				if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, e.project, repository, branch); err != nil {
+				if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) SELECT id,$2,$3 FROM projects WHERE id=$1 FOR KEY SHARE ON CONFLICT DO NOTHING`, e.project, repository, branch); err != nil {
 					return err
 				}
 			}
 		}
-		if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) SELECT p.project_id,b.repository_id,b.branch FROM environment_preview_branches b JOIN environment_previews p ON p.id=b.preview_id WHERE p.project_id=$1 AND p.state<>'deleting' ON CONFLICT DO NOTHING`, e.project); err != nil {
+		if _, err = s.DB.Exec(ctx, `INSERT INTO preview_branch_signals(project_id,repository_id,branch) SELECT p.project_id,b.repository_id,b.branch FROM environment_preview_branches b JOIN environment_previews p ON p.id=b.preview_id WHERE p.project_id=$1 AND p.state<>'deleting' FOR KEY SHARE OF p ON CONFLICT DO NOTHING`, e.project); err != nil {
 			return err
 		}
 	}
@@ -292,7 +243,7 @@ func (s *Server) applyPreviewSignal(ctx context.Context, project string, reposit
 	if err != nil {
 		return "", true, err
 	}
-	head, err := s.githubBranchHead(ctx, installation, repository, branch)
+	head, err := s.githubProvider().BranchHead(ctx, installation, repository, branch)
 	if err != nil {
 		return "", true, err
 	}
@@ -304,6 +255,13 @@ func (s *Server) applyPreviewSignal(ctx context.Context, project string, reposit
 		return "", err != nil, err
 	}
 	suffix := strings.TrimPrefix(branch, prefix)
+	var ciKey bool
+	if err = s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM preview_ci_slots WHERE project_id=$1 AND suffix=$2)`, project, suffix).Scan(&ciKey); err != nil {
+		return "", true, err
+	}
+	if ciKey {
+		return "This preview key is reserved for CI image submissions.", false, nil
+	}
 	// A branch that names an existing preview through another repository joins it.
 	err = s.DB.QueryRow(ctx, `SELECT id FROM environment_previews WHERE project_id=$1 AND suffix=$2 AND state<>'deleting'`, project, suffix).Scan(&previewID)
 	if err == nil {
@@ -312,6 +270,13 @@ func (s *Server) applyPreviewSignal(ctx context.Context, project string, reposit
 			return "", true, err
 		}
 		defer tx.Rollback(ctx)
+		p, problem := s.loadPreviewRow(ctx, tx, previewID, true)
+		if problem != nil {
+			return "", true, problem
+		}
+		if p.Snapshot.CI != nil {
+			return "This preview key is reserved for CI image submissions.", false, nil
+		}
 		if _, err = tx.Exec(ctx, `INSERT INTO environment_preview_branches(preview_id,repository_id,repository,branch,head,checked_at) VALUES($1,$2,$3,$4,'',now()) ON CONFLICT DO NOTHING`, previewID, repository, repositoryName(clone), branch); err != nil {
 			return "", true, err
 		}
@@ -342,7 +307,7 @@ func (s *Server) applyPreviewSignal(ctx context.Context, project string, reposit
 		if err != nil {
 			continue
 		}
-		otherHead, err := s.githubBranchHead(ctx, otherInstallation, other, branch)
+		otherHead, err := s.githubProvider().BranchHead(ctx, otherInstallation, other, branch)
 		if err != nil {
 			return "", true, err
 		}
@@ -399,7 +364,7 @@ func (s *Server) updatePreviewBranch(ctx context.Context, id string, repository 
 	if err != nil {
 		return err
 	}
-	if p.State == "deleting" {
+	if p.State == "deleting" || p.Snapshot.CI != nil {
 		return tx.Commit(ctx)
 	}
 	var previous string

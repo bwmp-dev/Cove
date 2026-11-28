@@ -1,4 +1,5 @@
-import type { EnvironmentPreview, PlannedResource, PreviewPlan, PreviewRecipe, PreviewResourcePolicy, PreviewStage, PreviewState, RecipeView, VariableMode } from "../api/previews";
+import type { EnvironmentPreview, PlannedResource, PreviewCIInputs, PreviewPlan, PreviewRecipe, PreviewResourcePolicy, PreviewStage, PreviewState, RecipeView, VariableMode } from "../api/previews";
+import type { Workload } from "../api/types";
 import type { Tone } from "./nodes";
 
 export const previewStates: Record<PreviewState, { tone: Tone; label: string }> = {
@@ -20,6 +21,52 @@ export const stageLabels: Record<PreviewStage, string> = {
   ready: "Running",
   remove: "Removing",
 };
+
+// Legacy pull request previews set preview_source_id; resources in an environment preview set environment_preview_id.
+export function isManagedPreview(workload: Pick<Workload, "preview_source_id" | "environment_preview_id">) {
+  return Boolean(workload.preview_source_id || workload.environment_preview_id);
+}
+
+export interface ReviewedCIInputs {
+  identity: string;
+  revision: string;
+  recipeVersion: number;
+  resources: { id: string; images: { service: string; reference: string }[] }[];
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const byKey = <T,>([a]: [string, T], [b]: [string, T]) => a.localeCompare(b);
+
+// A registry reference pinned only by digest. A tag (a colon in the last path segment) is not accepted.
+function pinnedReference(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const name = /^([^\s@]+\/[^\s@]+)@sha256:[0-9a-f]{64}$/.exec(value)?.[1];
+  return name !== undefined && !name.slice(name.lastIndexOf("/") + 1).includes(":");
+}
+
+// The CI inputs an editor may approve, or null when anything is missing or malformed, so a partial or unrecognised
+// map can never be presented as what will run.
+export function reviewableCIInputs(inputs: PreviewCIInputs | undefined): ReviewedCIInputs | null {
+  const value: unknown = inputs;
+  if (!isRecord(value) || !isRecord(value.images)) return null;
+  const { identity, revision, recipe_version: recipeVersion } = value;
+  if (typeof identity !== "string" || !/^[0-9a-f]{64}$/.test(identity)) return null;
+  if (typeof revision !== "string" || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(revision)) return null;
+  if (typeof recipeVersion !== "number" || !Number.isSafeInteger(recipeVersion) || recipeVersion < 1) return null;
+  const resources: ReviewedCIInputs["resources"] = [];
+  for (const [id, services] of Object.entries(value.images).sort(byKey)) {
+    if (!/^\S+$/.test(id) || !isRecord(services)) return null;
+    const images = Object.entries(services).sort(byKey);
+    if (images.length === 0) return null;
+    const pinned: ReviewedCIInputs["resources"][number]["images"] = [];
+    for (const [service, reference] of images) {
+      if (!/^\S+$/.test(service) || !pinnedReference(reference)) return null;
+      pinned.push({ service, reference });
+    }
+    resources.push({ id, images: pinned });
+  }
+  return resources.length === 0 ? null : { identity, revision, recipeVersion, resources };
+}
 
 export function shortRevision(revision: string) {
   return revision ? revision.slice(0, 7) : "";

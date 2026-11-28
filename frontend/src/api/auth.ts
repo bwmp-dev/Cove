@@ -77,7 +77,7 @@ export function useAcceptInvitation() {
 export function useGitHubStart() {
   return useMutation({
     ...transient,
-    mutationFn: async (input: { invitation_token?: string; link?: boolean; current_password?: string }) => {
+    mutationFn: async (input: { invitation_token?: string; link?: boolean; current_password?: string; code?: string }) => {
       const result = await request<{ url: string }>("POST", "/auth/github/start", input);
       if (!isGitHubAuthorizeURL(result.url)) throw new ApiError(502, "GitHub sign-in returned an unexpected address.");
       return result;

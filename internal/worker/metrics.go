@@ -8,15 +8,22 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 type NodeMetrics struct {
-	SampledAt       time.Time `json:"sampled_at"`
-	CPUPercent      float64   `json:"cpu_percent"`
-	MemoryTotal     uint64    `json:"memory_total"`
-	MemoryAvailable uint64    `json:"memory_available"`
-	DiskTotal       uint64    `json:"disk_total"`
-	DiskAvailable   uint64    `json:"disk_available"`
+	Mounts          []MountMetric `json:"mounts"`
+	MountsLimited   bool          `json:"mounts_limited"`
+	CPUs            int           `json:"cpus"`
+	NetworkRX       *uint64       `json:"network_rx,omitempty"`
+	NetworkTX       *uint64       `json:"network_tx,omitempty"`
+	SampledAt       time.Time     `json:"sampled_at"`
+	CPUPercent      float64       `json:"cpu_percent"`
+	MemoryTotal     uint64        `json:"memory_total"`
+	MemoryAvailable uint64        `json:"memory_available"`
+	DiskTotal       uint64        `json:"disk_total"`
+	DiskAvailable   uint64        `json:"disk_available"`
 }
 
 type SharedHost struct {
@@ -59,26 +66,39 @@ func (e *Engine) containerMetrics(ctx context.Context, containers []Container) e
 		for i := range containers {
 			if strings.HasPrefix(sample.ID, containers[i].ID) {
 				containers[i].Metrics = &ContainerMetrics{CPU: sample.CPUPerc, Memory: sample.MemUsage, MemoryPercent: sample.MemPerc, Network: sample.NetIO, DiskIO: sample.BlockIO, PIDs: sample.PIDs}
+				containers[i].Metrics.Usage = containerUsage(containers[i].Metrics)
 			}
 		}
 	}
 }
 
 type ContainerMetrics struct {
-	CPU           string `json:"cpu"`
-	Memory        string `json:"memory"`
-	MemoryPercent string `json:"memory_percent"`
-	Network       string `json:"network"`
-	DiskIO        string `json:"disk_io"`
-	PIDs          string `json:"pids"`
+	Usage         *ContainerUsage `json:"usage,omitempty"`
+	CPU           string          `json:"cpu"`
+	Memory        string          `json:"memory"`
+	MemoryPercent string          `json:"memory_percent"`
+	Network       string          `json:"network"`
+	DiskIO        string          `json:"disk_io"`
+	PIDs          string          `json:"pids"`
 }
 
 func (e *Engine) HealthContainers(ctx context.Context, workload string) ([]Container, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	containers, err := e.Containers(ctx, workload)
 	if err != nil {
 		return nil, err
 	}
+	if err = e.inspectContainerStates(ctx, containers); err != nil {
+		return nil, err
+	}
+	if len(containers) == 0 {
+		return containers, nil
+	}
 	data, err := os.ReadFile(filepath.Join(e.Root, "workloads", workload, "current.json"))
+	if os.IsNotExist(err) {
+		return containers, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -92,19 +112,26 @@ func (e *Engine) HealthContainers(ctx context.Context, workload string) ([]Conta
 	}
 	var config struct {
 		Services map[string]struct {
-			DependsOn map[string]struct {
-				Condition string `json:"condition"`
-			} `json:"depends_on"`
-		} `json:"services"`
+			DependsOn any `yaml:"depends_on"`
+			Labels    any `yaml:"labels"`
+		} `yaml:"services"`
 	}
-	if err = json.Unmarshal(data, &config); err != nil {
+	if err = yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
 	completed := map[string]bool{}
 	for _, service := range config.Services {
-		for name, dependency := range service.DependsOn {
-			if dependency.Condition == "service_completed_successfully" {
-				completed[name] = true
+		dependencies, _ := service.DependsOn.(map[string]any)
+		for name, raw := range dependencies {
+			dependency, _ := raw.(map[string]any)
+			if dependency["condition"] == "service_completed_successfully" {
+				labels, _ := config.Services[name].Labels.(map[string]any)
+				logical, _ := labels["dev.cove.service"].(string)
+				if serviceIdentifier.MatchString(logical) {
+					completed[logical] = true
+				} else {
+					completed[name] = true
+				}
 			}
 		}
 	}
@@ -115,12 +142,7 @@ func (e *Engine) HealthContainers(ctx context.Context, workload string) ([]Conta
 		if container.State != "exited" {
 			continue
 		}
-		details, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "com.docker.compose.service"}} {{.State.ExitCode}}`, container.ID)
-		if err != nil {
-			return nil, err
-		}
-		fields := strings.Fields(details)
-		if len(fields) == 2 && completed[fields[0]] && fields[1] == "0" {
+		if completed[container.Service] && container.ExitCode != nil && *container.ExitCode == 0 {
 			containers[i].ExpectedCompleted = true
 		}
 	}

@@ -1,13 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { request } from "../api/client";
-import { GitHubAppSetup } from "./GitHubApp";
+import type { Workload } from "../api/types";
+import { GitHubAppSetup, GitHubSource } from "./GitHubApp";
 
 const session = vi.hoisted(() => ({ is_admin: true, team_id: "team", teams: [{ id: "team", name: "Team", role: "member", grants: [{ scope: "team", role: "editor" }] }] }));
 vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: () => "GitHub unavailable" }));
 vi.mock("../lib/session", () => ({ useSession: () => session }));
-vi.mock("@tanstack/react-router", () => ({ useRouterState: () => "", useBlocker: () => ({ status: "idle" }) }));
+vi.mock("@tanstack/react-router", () => ({ useRouterState: () => "", useBlocker: () => ({ status: "idle" }), Link: ({ children, title }: { children: ReactNode; title?: string }) => <a href="#operation" title={title}>{children}</a> }));
 afterEach(() => { vi.clearAllMocks(); session.is_admin = true; });
 
 it("prepares a manifest before submitting to GitHub and invalidates it after edits", async () => {
@@ -100,4 +102,48 @@ it("lets a personal connection manager share with multiple editable teams", asyn
   } finally {
     session.teams.splice(1);
   }
+});
+
+const workload = { id: "web", name: "web" } as Workload;
+const failedReport = { operation_id: "op-12345678-abcd", reported_state: "running", error: "GitHub reporting failed; check App permissions and provider availability", next_attempt_at: new Date(Date.now() + 120_000).toISOString() };
+
+function mockSource(reporting: { enabled: boolean; reports: unknown[] }, put?: (body: unknown) => Promise<unknown>) {
+  vi.mocked(request).mockImplementation((method, path, body) => {
+    if (path === "/api/workloads/web/github") return Promise.resolve({ installation_id: 1, repository_id: 2, automatic: true });
+    if (path === "/api/github/repositories") return Promise.resolve([]);
+    if (path === "/api/workloads/web/github/reporting") return method === "PUT" && put ? put(body) : Promise.resolve(reporting);
+    return Promise.reject(new Error(`unexpected ${method} ${path}`));
+  });
+}
+
+it("enables deployment reporting through the reporting endpoint and shows failures", async () => {
+  mockSource({ enabled: false, reports: [failedReport] }, body => Promise.resolve({ enabled: (body as { enabled: boolean }).enabled, reports: [] }));
+  render(<QueryClientProvider client={new QueryClient()}><GitHubSource workload={workload} /></QueryClientProvider>);
+  expect(await screen.findByText(failedReport.error)).toBeInTheDocument();
+  expect(screen.getByText("Running")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /Operation op-12345/ })).toBeInTheDocument();
+  const toggle = screen.getByRole("switch", { name: "Report deployments to GitHub" });
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await screen.findByText("Reporting setting saved");
+  expect(request).toHaveBeenCalledWith("PUT", "/api/workloads/web/github/reporting", { enabled: true });
+  expect(screen.getByRole("switch", { name: "Report deployments to GitHub" })).toBeChecked();
+  expect(screen.getByText(/No deployments reported yet/)).toBeInTheDocument();
+});
+
+it("keeps the change unsaved when GitHub rejects the reporting permissions", async () => {
+  mockSource({ enabled: false, reports: [] }, () => Promise.reject(new Error("approve permissions")));
+  render(<QueryClientProvider client={new QueryClient()}><GitHubSource workload={workload} /></QueryClientProvider>);
+  fireEvent.click(await screen.findByRole("switch", { name: "Report deployments to GitHub" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(await screen.findByText("Could not change GitHub reporting")).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Report deployments to GitHub" })).toBeChecked();
+  expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+});
+
+it("shows previews the inherited reporting setting without a toggle", async () => {
+  mockSource({ enabled: false, reports: [] });
+  render(<QueryClientProvider client={new QueryClient()}><GitHubSource workload={{ ...workload, preview_source_id: "source" }} /></QueryClientProvider>);
+  expect(await screen.findByText(/Previews follow the setting/)).toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "Report deployments to GitHub" })).not.toBeInTheDocument();
 });

@@ -45,6 +45,15 @@
   --color-info-tint: #171c25;
   --color-info-line: #2d405c;
 
+  /* Categorical series for charts and per-container log labels only. They carry no status meaning,
+     are always paired with a text label, and stay at least 3:1 against surface. */
+  --color-series-1: #6aa6f8;
+  --color-series-2: #d08cf0;
+  --color-series-3: #3fc1b0;
+  --color-series-4: #f08aa6;
+  --color-series-5: #c2c45a;
+  --color-series-6: #e8a06a;
+
   /* Widest page content column (max-w-page). Wider panels only add empty space between labels and values. */
   --container-page: 80rem;
 }

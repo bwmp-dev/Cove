@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"cove/internal/cli"
 	"cove/internal/connect"
 	"cove/internal/control"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"net/http"
@@ -23,9 +26,35 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] != "panel-backup-plan" {
+		if err := cli.Run(ctx, os.Args[1:]); err != nil {
+			var exit *cli.ExitError
+			if errors.As(err, &exit) {
+				os.Exit(exit.Code)
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	key, err := base64.StdEncoding.DecodeString(os.Getenv("COVE_ENCRYPTION_KEY"))
 	if err != nil {
 		log.Fatal("COVE_ENCRYPTION_KEY must be base64")
+	}
+	if len(os.Args) > 1 && os.Args[1] == "panel-backup-plan" {
+		if len(os.Args) != 3 || os.Args[2] != "seal" && os.Args[2] != "open" {
+			log.Fatal("use panel-backup-plan seal or open")
+		}
+		if localKey := os.Getenv("COVE_PANEL_PLAN_KEY"); localKey != "" {
+			key, err = base64.StdEncoding.DecodeString(localKey)
+			if err != nil {
+				log.Fatal("invalid local panel plan key")
+			}
+		}
+		if err = control.PanelRecoveryPlan(os.Stdin, os.Stdout, key, os.Args[2] == "seal"); err != nil {
+			log.Fatal("panel recovery plan validation failed")
+		}
+		return
 	}
 	db, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
@@ -45,6 +74,7 @@ func main() {
 	if err = s.Init(ctx); err != nil {
 		log.Fatal(err)
 	}
+	http.DefaultTransport = s.OutboundTransport(http.DefaultTransport.(*http.Transport))
 	if err = s.InitAdministrator(ctx, os.Getenv("COVE_ADMIN_PASSWORD")); err != nil {
 		log.Fatal(err)
 	}

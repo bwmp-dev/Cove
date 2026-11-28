@@ -23,7 +23,7 @@ type project struct {
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), "SELECT p.id,p.name,COALESCE(e.id,''),COALESCE(e.name,''),COALESCE(pv.id,''),CASE WHEN $3 THEN 3 ELSE cove_access($1,p.team_id,p.id,'') END,CASE WHEN $3 THEN 3 ELSE cove_access($1,p.team_id,p.id,COALESCE(e.id,'')) END FROM projects p LEFT JOIN environments e ON e.project_id=p.id LEFT JOIN environment_previews pv ON pv.environment_id=e.id WHERE p.team_id=$2 AND ($3 OR cove_access($1,p.team_id,p.id,COALESCE(e.id,''))>0) ORDER BY p.name,e.name", actor(r).ID, actor(r).Team, actor(r).Admin)
+	rows, err := s.DB.Query(r.Context(), "SELECT p.id,p.name,COALESCE(e.id,''),COALESCE(e.name,''),COALESCE(pv.id,''),cove_permission_names($1,p.team_id,p.id,'',$3,$4),cove_permission_names($1,p.team_id,p.id,COALESCE(e.id,''),$3,$4) FROM projects p LEFT JOIN environments e ON e.project_id=p.id LEFT JOIN environment_previews pv ON pv.environment_id=e.id WHERE p.team_id=$2 AND ($3 OR cove_access($1,p.team_id,p.id,COALESCE(e.id,''))>0) ORDER BY p.name,e.name", actor(r).ID, actor(r).Team, actor(r).Admin, permissionCatalogue)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -33,16 +33,17 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, name string
 		var env environment
-		var pl, el int
+		var pl, el []string
 		if err = rows.Scan(&id, &name, &env.ID, &env.Name, &env.PreviewID, &pl, &el); err != nil {
 			http.Error(w, "could not read projects", 500)
 			return
 		}
 		if len(items) == 0 || items[len(items)-1].ID != id {
-			items = append(items, project{ID: id, Name: name, Environments: []environment{}, Permissions: permissions(pl)})
+			names := permissionMetadata(r, pl)
+			items = append(items, project{ID: id, Name: name, Environments: []environment{}, Permissions: names})
 		}
 		if env.ID != "" {
-			env.Permissions = permissions(el)
+			env.Permissions = permissionMetadata(r, el)
 			items[len(items)-1].Environments = append(items[len(items)-1].Environments, env)
 		}
 	}
@@ -82,6 +83,9 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request, isEnvironme
 }
 
 func groupError(w http.ResponseWriter, err error) {
+	if managedRegistryAdmissionError(w, err) {
+		return
+	}
 	var constraint *pgconn.PgError
 	if errors.As(err, &constraint) && (constraint.Code == "23505" || constraint.Code == "23503") {
 		http.Error(w, "name already exists, group is in use, or referenced group no longer exists", 409)
@@ -116,26 +120,16 @@ func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) assignEnvironment(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Environment string `json:"environment_id"`
 		Project     string `json:"project_id"`
+		Environment string `json:"environment_id"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
-	project, ok := s.resourceProject(w, r, in.Project, in.Environment)
-	if !ok {
+	if _, ok := s.resourceProject(w, r, in.Project, in.Environment); !ok {
 		return
 	}
-	result, err := s.DB.Exec(r.Context(), "UPDATE workloads SET environment_id=NULLIF($2,''),project_id=$3 WHERE id=$1", r.PathValue("id"), in.Environment, project)
-	if err != nil {
-		groupError(w, err)
-		return
-	}
-	if result.RowsAffected() == 0 {
-		http.NotFound(w, r)
-		return
-	}
-	respond(w, 200, map[string]bool{"ok": true})
+	http.Error(w, "review and confirm placement changes through the resource move endpoint", 409)
 }
 
 func (s *Server) resourceProject(w http.ResponseWriter, r *http.Request, project, environment string) (string, bool) {

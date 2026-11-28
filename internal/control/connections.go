@@ -9,17 +9,28 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
 
 type notificationConfig struct {
-	Health   bool   `json:"health"`
-	Provider string `json:"provider"`
-	URL      string `json:"url"`
-	Enabled  bool   `json:"enabled"`
-	Success  bool   `json:"success"`
-	Failure  bool   `json:"failure"`
+	Owner            bool     `json:"owner,omitempty"`
+	Token            string   `json:"token,omitempty"`
+	TokenSet         bool     `json:"token_set,omitempty"`
+	Target           string   `json:"target,omitempty"`
+	UserKey          string   `json:"user_key,omitempty"`
+	UserKeySet       bool     `json:"user_key_set,omitempty"`
+	Events           []string `json:"events,omitempty"`
+	Email            string   `json:"email,omitempty"`
+	SigningSecret    string   `json:"signing_secret,omitempty"`
+	SigningSecretSet bool     `json:"signing_secret_set,omitempty"`
+	Health           bool     `json:"health"`
+	Provider         string   `json:"provider"`
+	URL              string   `json:"url"`
+	Enabled          bool     `json:"enabled"`
+	Success          bool     `json:"success"`
+	Failure          bool     `json:"failure"`
 }
 
 type connectionConfig struct {
@@ -59,15 +70,27 @@ func validateConnection(kind string, c connectionConfig) error {
 			return errors.New("notification configuration required")
 		}
 		n := c.Notification
+		if err := validateNotificationRouting(n); err != nil {
+			return err
+		}
+		if n.Provider == "email" {
+			if _, ok := normalizeEmail(n.Email); !ok && !n.Owner {
+				return errors.New("a valid recipient email is required")
+			}
+			return nil
+		}
+		if n.Provider == "telegram" || n.Provider == "pushover" || n.Provider == "pagerduty" {
+			return nil
+		}
 		u, err := url.Parse(n.URL)
 		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || len(n.URL) > 4096 || strings.ContainsAny(n.URL, "\r\n") {
 			return errors.New("an HTTPS webhook URL is required")
 		}
-		if n.Provider != "webhook" && n.Provider != "discord" && n.Provider != "slack" {
-			return errors.New("select webhook, Discord, or Slack")
+		if slices.Contains([]string{"gotify", "matrix", "opsgenie", "ntfy"}, n.Provider) && u.RawQuery != "" {
+			return errors.New("provider base URLs cannot contain a query")
 		}
-		if !n.Success && !n.Failure && !n.Health {
-			return errors.New("select at least one notification event")
+		if !slices.Contains([]string{"webhook", "discord", "slack", "ntfy", "gotify", "matrix", "teams", "opsgenie"}, n.Provider) {
+			return errors.New("select a supported notification provider")
 		}
 	}
 	return nil
@@ -88,6 +111,12 @@ func redactConnection(c connectionConfig) connectionConfig {
 	if c.Notification != nil {
 		v := *c.Notification
 		v.URL = ""
+		v.SigningSecretSet = v.SigningSecret != ""
+		v.SigningSecret = ""
+		v.TokenSet = v.Token != ""
+		v.Token = ""
+		v.UserKeySet = v.UserKey != ""
+		v.UserKey = ""
 		c.Notification = &v
 	}
 	return c
@@ -98,21 +127,23 @@ func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
 	team := actor(r).Team
 	id := r.PathValue("id")
 	if r.Method == "GET" {
-		rows, err := s.DB.Query(r.Context(), `SELECT id,configuration FROM infrastructure_connections WHERE team_id=$1 AND kind=$2 ORDER BY name`, team, kind)
+		rows, err := s.DB.Query(r.Context(), `SELECT c.id,c.configuration,CASE WHEN EXISTS(SELECT 1 FROM object_buckets b WHERE b.storage_id=c.id) THEN 'Storage on the same node is not offsite. Keep an independent backup in another failure domain.' ELSE '' END,COALESCE(m.id,'') FROM infrastructure_connections c LEFT JOIN managed_registries m ON m.connection_id=c.id WHERE c.team_id=$1 AND c.kind=$2 ORDER BY c.name`, team, kind)
 		if err != nil {
 			http.Error(w, "connections unavailable", 503)
 			return
 		}
 		defer rows.Close()
 		type item struct {
-			ID string `json:"id"`
+			ID              string `json:"id"`
+			Warning         string `json:"warning,omitempty"`
+			ManagedRegistry string `json:"managed_registry_id,omitempty"`
 			connectionConfig
 		}
 		items := []item{}
 		for rows.Next() {
 			var v item
 			var enc []byte
-			if rows.Scan(&v.ID, &enc) != nil {
+			if rows.Scan(&v.ID, &enc, &v.Warning, &v.ManagedRegistry) != nil {
 				http.Error(w, "connections unavailable", 503)
 				return
 			}
@@ -139,6 +170,15 @@ func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var old connectionConfig
 	if id != "" {
+		var managed bool
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM managed_registries WHERE connection_id=$1)`, id).Scan(&managed); err != nil {
+			http.Error(w, "connection ownership unavailable", 503)
+			return
+		}
+		if managed {
+			http.Error(w, "this connection is managed by its registry", 409)
+			return
+		}
 		var encrypted []byte
 		err = tx.QueryRow(r.Context(), `SELECT configuration FROM infrastructure_connections WHERE id=$1 AND team_id=$2 AND kind=$3 FOR UPDATE`, id, team, kind).Scan(&encrypted)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -204,6 +244,17 @@ func (s *Server) connections(w http.ResponseWriter, r *http.Request) {
 	if old.Notification != nil && in.Notification != nil && old.Notification.Provider == in.Notification.Provider && in.Notification.URL == "" {
 		in.Notification.URL = old.Notification.URL
 	}
+	if old.Notification != nil && in.Notification != nil && old.Notification.Provider == in.Notification.Provider && in.Notification.SigningSecret == "" {
+		in.Notification.SigningSecret = old.Notification.SigningSecret
+	}
+	if old.Notification != nil && in.Notification != nil && old.Notification.Provider == in.Notification.Provider {
+		if in.Notification.Token == "" {
+			in.Notification.Token = old.Notification.Token
+		}
+		if in.Notification.UserKey == "" {
+			in.Notification.UserKey = old.Notification.UserKey
+		}
+	}
 	if err = validateConnection(kind, in); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -267,8 +318,18 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if kind == "notification" {
+		if c.Notification.Owner {
+			if err = s.DB.QueryRow(r.Context(), `SELECT email FROM users WHERE id=$1 AND email_verified AND NOT disabled AND email IS NOT NULL`, actor(r).ID).Scan(&c.Notification.Email); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					http.Error(w, "verify your account email before testing owner delivery", 409)
+				} else {
+					http.Error(w, "account unavailable", 503)
+				}
+				return
+			}
+		}
 		if err = s.sendNotification(r.Context(), c.Notification, map[string]string{"event": "test", "message": "Cove notification connection test"}); err != nil {
-			http.Error(w, "notification test failed; check the webhook and delivery permissions", 502)
+			http.Error(w, "notification test failed; check the channel configuration and delivery permissions", 502)
 			return
 		}
 		respond(w, 200, map[string]bool{"ok": true})
@@ -281,7 +342,7 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var allowed bool
-	err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM nodes n JOIN team_nodes t ON t.node_id=n.id WHERE n.id=$1 AND t.team_id=$2 AND n.state='ready' AND COALESCE((n.capabilities->>'infrastructure')::boolean,false))`, in.Node, actor(r).Team).Scan(&allowed)
+	err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM nodes n JOIN team_nodes t ON t.node_id=n.id WHERE n.id=$1 AND t.team_id=$2 AND n.state='ready' AND COALESCE((n.capabilities->>'infrastructure')::boolean,false) AND (NOT $3::boolean OR COALESCE((n.capabilities->>'backblaze_b2')::boolean,false)))`, in.Node, actor(r).Team, kind == "storage" && c.Storage.Protocol == "b2").Scan(&allowed)
 	if err != nil || !allowed {
 		http.Error(w, "select a ready team node with an upgraded worker", 409)
 		return
@@ -347,6 +408,9 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
+		if managedRegistryAdmissionError(w, err) {
+			return
+		}
 		http.Error(w, "could not update registry", 503)
 		return
 	}
@@ -354,6 +418,206 @@ func (s *Server) resourceRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) error {
+	if err := s.prepareBuildRecipe(ctx, r); err != nil {
+		return err
+	}
+	if r.Action == "registry_maintenance" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT n.state='ready' AND COALESCE((n.capabilities->>'managed_registry')::boolean,false) FROM workloads w JOIN nodes n ON n.id=w.node_id JOIN managed_registries m ON m.id=w.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("managed registry maintenance requires a ready supported worker")
+		}
+		return nil
+	}
+	if r.Action == "image_scan" {
+		if err := s.requireImageScanning(ctx, r.Workload); err != nil {
+			return err
+		}
+		var prepared bool
+		err := s.DB.QueryRow(ctx, `SELECT drift_prepared FROM operations WHERE id=$1`, r.ID).Scan(&prepared)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if !prepared {
+			c, err := s.outboundConfig(ctx)
+			if err != nil {
+				return err
+			}
+			if s.propagateOutbound(c) {
+				r.OutboundProxy = &c
+			}
+		}
+		if r.OutboundProxy != nil {
+			var supported bool
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'outbound_proxy')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+				return err
+			}
+			if !supported {
+				return errors.New("upgrade and verify scanner outbound proxy support before scanning")
+			}
+		}
+		if !prepared {
+			payload, err := s.sealJSON(r)
+			if err != nil {
+				return err
+			}
+			_, err = s.DB.Exec(ctx, `UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1`, r.ID, payload)
+			return err
+		}
+		return nil
+	}
+	var driftPrepared bool
+	err := s.DB.QueryRow(ctx, `SELECT drift_prepared FROM operations WHERE id=$1`, r.ID).Scan(&driftPrepared)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if !driftPrepared {
+		if !r.InfrastructurePrepared {
+			if err := s.prepareGPUAssignments(ctx, r); err != nil {
+				return err
+			}
+			if err := s.prepareResourceDefaults(ctx, r); err != nil {
+				return err
+			}
+			var encrypted []byte
+			if err := s.DB.QueryRow(ctx, "SELECT kind='database',configuration FROM workloads WHERE id=$1", r.Workload).Scan(&r.ManagedDatabase, &encrypted); err != nil {
+				return err
+			}
+			if r.ManagedDatabase {
+				if r.DatabaseMaintenance != nil {
+					if err := s.DB.QueryRow(ctx, "SELECT configuration FROM database_maintenance WHERE id=$1", r.ID).Scan(&encrypted); err != nil {
+						return err
+					}
+				}
+				var config workloadInput
+				if err := s.unsealJSON(encrypted, &config); err != nil {
+					return err
+				}
+				metadata := databaseMetadata(config.Database)
+				if metadata == nil {
+					return errors.New("managed database metadata unavailable")
+				}
+				var err error
+				r.DatabaseMetadata, err = json.Marshal(metadata)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if !r.InfrastructurePrepared && (r.Action == "stop" || r.Action == "start" || r.Action == "restart") {
+			r.Backup = nil
+		}
+		if !r.InfrastructurePrepared && r.OutboundProxy == nil {
+			c, err := s.outboundConfig(ctx)
+			if err != nil {
+				return err
+			}
+			if s.propagateOutbound(c) {
+				r.OutboundProxy = &c
+			}
+		}
+		// Previously prepared requests may already exist on a worker with a recorded digest.
+		if !r.InfrastructurePrepared && r.Action == "deploy" {
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'drift')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&r.RecordDrift); err != nil {
+				return err
+			}
+		}
+		payload, err := s.sealJSON(r)
+		if err != nil {
+			return err
+		}
+		if _, err = s.DB.Exec(ctx, `UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1`, r.ID, payload); err != nil {
+			return err
+		}
+	}
+	if r.Action == "deploy" && r.ComposeBundle != nil {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'compose_bundles')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before deploying multiple Compose files or profiles")
+		}
+	}
+	if r.Action == "backup" && r.Backup != nil && r.Backup.VolumeSnapshot != nil {
+		var capable bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'filesystem_snapshots')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {
+			return err
+		}
+		if !capable {
+			return errors.New("upgrade and verify this worker before using filesystem snapshots")
+		}
+	}
+	if r.Action == "backup" && r.Backup != nil && (r.Backup.KeepDaily > 0 || r.Backup.KeepWeekly > 0 || r.Backup.KeepMonthly > 0) {
+		var capable bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'backup_retention')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {
+			return err
+		}
+		if !capable {
+			return errors.New("upgrade and verify the worker before applying daily, weekly or monthly retention")
+		}
+	}
+	if r.Backup != nil && r.Backup.Database != nil && (r.Action == "backup" || r.Action == "restore" || r.Action == "drill" || r.Action == "restore_copy") {
+		d := r.Backup.Database
+		if d.Engine == "mongodb" || d.Engine == "redis" || d.Engine == "valkey" {
+			var capable bool
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'extended_logical_backups')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {
+				return err
+			}
+			if !capable {
+				return errors.New("upgrade and verify the worker before using MongoDB, Redis or Valkey backups")
+			}
+		}
+	}
+	if err := checkRouteProtocol(ctx, s.DB, r.Workload, r.Routes); err != nil {
+		return err
+	}
+	if r.Rollout != nil && r.Rollout.Strategy == "disabled" {
+		r.Rollout = nil
+	}
+	if r.Rollout != nil || r.Action == "rollout_promote" || r.Action == "rollout_abort" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'rollouts')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before using deployment rollouts")
+		}
+	}
+	if r.Action == "build" {
+		if _, err := buildExecutionNode(ctx, s.DB, r.Workload, r.ID); err != nil {
+			return err
+		}
+	}
+	if r.ImageUpdates != nil {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'image_updates')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before checking image updates")
+		}
+	}
+	if r.PullLatest || r.Action == "image_check" {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'image_lifecycle')::boolean,false) AND ($2<>'job' OR COALESCE((n.capabilities->>'job_image_lifecycle')::boolean,false)) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload, r.Kind).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before using image lifecycle operations")
+		}
+	}
+	if r.Action == "deploy" && worker.HasRoutePolicies(r.Routes) {
+		var supported bool
+		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'route_policies')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+			return err
+		}
+		if !supported {
+			return errors.New("upgrade and verify the worker before applying route policies")
+		}
+	}
 	if r.Action == "deploy" && r.Hooks != nil && (len(r.Hooks.BeforeSteps) > 0 || r.Hooks.Assertions != nil) {
 		var supported bool
 		if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'guarded_hooks')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
@@ -398,7 +662,7 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			if err != nil {
 				return err
 			}
-			if _, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2 WHERE id=$1", r.ID, sealed); err != nil {
+			if _, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1", r.ID, sealed); err != nil {
 				return err
 			}
 		}
@@ -410,6 +674,14 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		}
 		if !supported {
 			return errors.New("upgrade and verify the worker before deploying environment previews")
+		}
+		if r.EnvironmentPreview.ImageRegistry != "" {
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'preview_ci_images')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&supported); err != nil {
+				return err
+			}
+			if !supported {
+				return errors.New("upgrade and verify the worker before deploying CI preview images")
+			}
 		}
 	}
 	if r.Action == "deploy" && r.GuardedDeploy != nil && *r.GuardedDeploy {
@@ -437,6 +709,18 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 		}
 		if !supported {
 			return errors.New("upgrade and verify the worker before promoting images")
+		}
+	}
+	if r.Backup != nil && r.Backup.Database != nil && (r.Action == "backup" || r.Action == "restore" || r.Action == "drill" || r.Action == "restore_copy") {
+		d := r.Backup.Database
+		if d.Engine == "mongodb" || d.Engine == "redis" || d.Engine == "valkey" {
+			var capable bool
+			if err := s.DB.QueryRow(ctx, `SELECT COALESCE((n.capabilities->>'extended_logical_backups')::boolean,false) FROM nodes n JOIN workloads w ON w.node_id=n.id WHERE w.id=$1`, r.Workload).Scan(&capable); err != nil {
+				return err
+			}
+			if !capable {
+				return errors.New("upgrade and verify the worker before using MongoDB, Redis or Valkey backups")
+			}
 		}
 	}
 	if r.Action == "deploy" && r.Hooks != nil && (r.Hooks.Before != nil || r.Hooks.After != nil) {
@@ -472,18 +756,27 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	if r.InfrastructurePrepared {
 		return nil
 	}
+	if r.Kind == "job" && r.Action == "deploy" && r.Job == nil {
+		options, err := jobExecutionOptions(ctx, s.DB, r.Workload)
+		if err != nil {
+			return err
+		}
+		r.Job = options
+	}
 	var team string
 	if err := s.DB.QueryRow(ctx, "SELECT team_id FROM workloads WHERE id=$1", r.Workload).Scan(&team); err != nil {
 		return err
 	}
-	if r.Action == "deploy" && !r.Preview {
-		resolved, err := s.resolveSharedVariables(ctx, r.Workload, r.Environment)
+	if r.Action == "deploy" || r.Action == "build" {
+		if err := s.resolveDeploymentVariables(ctx, r); err != nil {
+			return err
+		}
+		r.DatabaseCAs, err = s.databaseBindingCAs(ctx, r.Workload)
 		if err != nil {
 			return err
 		}
-		r.Environment = resolved
 	}
-	if r.Action == "deploy" && r.Registry == nil {
+	if (r.Action == "deploy" || r.Action == "image_check" || r.Action == "build") && r.Registry == nil {
 		var id string
 		err := s.DB.QueryRow(ctx, `SELECT connection_id FROM workload_connections WHERE workload_id=$1 AND kind='registry'`, r.Workload).Scan(&id)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -496,6 +789,12 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 			}
 			r.Registry = c.Registry
 		}
+	}
+	if r.Action == "build" && r.Registry == nil {
+		return errors.New("connect a registry before building images")
+	}
+	if r.EnvironmentPreview != nil && r.EnvironmentPreview.ImageRegistry != "" && (r.Registry == nil || r.Registry.Server != r.EnvironmentPreview.ImageRegistry) {
+		return errors.New("the CI preview registry connection is missing or changed")
 	}
 	if r.Backup != nil && r.Backup.StorageID != "" {
 		c, err := s.readConnection(ctx, r.Backup.StorageID, team, "storage")
@@ -517,6 +816,6 @@ func (s *Server) prepareInfrastructure(ctx context.Context, r *worker.Request) e
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2 WHERE id=$1", r.ID, encrypted)
+	_, err = s.DB.Exec(ctx, "UPDATE operations SET payload=$2,drift_prepared=true WHERE id=$1", r.ID, encrypted)
 	return err
 }

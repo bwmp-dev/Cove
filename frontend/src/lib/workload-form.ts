@@ -1,5 +1,8 @@
-import type { GitSourceInput, Route, Workload, WorkloadInput, WorkloadKind } from "../api/types";
-import type { ResourceDraft } from "./templates";
+import type { Listener } from "../api/ingress-listeners";
+import type { GitSourceInput, Route, RouteCertificate, RouteForwardAuth, RoutePolicy, RouteTimeouts, RouteVisibility, Workload, WorkloadInput, WorkloadKind } from "../api/types";
+import { ownershipProblem, wildcardCovers } from "./certificates";
+import type { ResourceDraft } from "../api/templates";
+import { formatBinding, listenerName } from "./ingress-listeners";
 
 export interface EnvRow {
   id: string;
@@ -22,11 +25,13 @@ export interface WorkloadFormValues {
   inlineCompose?: boolean;
   watchPaths?: string;
   token: string;
+  // Pinned public host key, used only for ssh:// repositories.
+  sshHostKey: string;
   // null keeps the saved environment unchanged (edit only).
   environment: EnvRow[] | null;
 }
 
-export type WorkloadFormErrors = Partial<Record<"name" | "nodeId" | "jobService" | "compose" | "repository" | "branch" | "composePath" | "watchPaths" | "token" | "environment" | "form", string>> & {
+export type WorkloadFormErrors = Partial<Record<"name" | "nodeId" | "jobService" | "compose" | "repository" | "branch" | "composePath" | "watchPaths" | "token" | "sshHostKey" | "environment" | "form", string>> & {
   rows?: Record<string, string>;
 };
 
@@ -51,17 +56,47 @@ export function validateEnvironmentKey(key: string): string | null {
   return null;
 }
 
+const sshUser = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$/;
+
+// The server selects deploy-key authentication by this exact lowercase prefix.
+export function isSSHRepository(value: string) {
+  return value.trim().startsWith("ssh://");
+}
+
+// Mirrors the worker's source validation: HTTPS without credentials, or ssh://user@host[:port]/path for deploy keys.
 export function validateRepository(value: string): string | null {
   if (value === "") return "Enter the repository URL.";
+  if (/^[\w.-]+@[^/:]+:(?!\/\/)/.test(value)) return "Use the ssh:// form, as in ssh://git@github.com/acme/app.git.";
   let url: URL;
   try {
     url = new URL(value);
   } catch {
     return "Enter a valid URL.";
   }
-  if (url.protocol !== "https:" || url.host === "") return "Use an HTTPS URL.";
-  if (url.username || url.password) return "Remove credentials from the URL; use the access token field instead.";
   if (url.search || url.hash) return "Remove the query string or fragment.";
+  if (url.protocol === "ssh:") {
+    if (!isSSHRepository(value)) return "Start the URL with lowercase ssh://.";
+    if (url.password) return "Remove the password from the URL; SSH sources use the deploy key.";
+    if (!sshUser.test(url.username)) return "Include the SSH user, as in ssh://git@github.com/acme/app.git.";
+    if (url.host === "") return "Enter the SSH host.";
+    if (url.pathname === "" || url.pathname === "/") return "Include the repository path.";
+    return null;
+  }
+  if (url.protocol !== "https:" || url.host === "") return "Use an HTTPS or ssh:// URL.";
+  if (url.username || url.password) return "Remove credentials from the URL; use the access token field instead.";
+  return null;
+}
+
+const hostKeyType = /^(?:ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-nistp(?:256|384|521)|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/;
+
+// One public key in authorized_keys form ("type base64 [comment]"), the same shape the server accepts as a pin.
+export function validateHostKey(value: string): string | null {
+  if (value === "") return "Paste the Git host's public SSH host key.";
+  if (/[\r\n\0]/.test(value)) return "Paste a single host key on one line.";
+  const [type = "", key = ""] = value.split(/\s+/);
+  if (!hostKeyType.test(type) && hostKeyType.test(key)) return "Remove the host name at the start; paste only the key type and key.";
+  if (!hostKeyType.test(type)) return "Start with the key type, such as ssh-ed25519.";
+  if (!/^[A-Za-z0-9+/]{16,}={0,3}$/.test(key)) return "The key after the type is not valid base64.";
   return null;
 }
 
@@ -131,12 +166,19 @@ export function validateWorkload(values: WorkloadFormValues, mode: "create" | "e
     if (repositoryError) errors.repository = repositoryError;
     if (branchError) errors.branch = branchError;
     if (pathError) errors.composePath = pathError;
-    if (values.token.length > 8192 || /[\r\n\0]/.test(values.token)) errors.token = "Enter a single-line token.";
+    const ssh = isSSHRepository(repository);
+    const sshHostKey = values.sshHostKey.trim();
+    if (ssh) {
+      const hostKeyError = validateHostKey(sshHostKey);
+      if (hostKeyError) errors.sshHostKey = hostKeyError;
+      if (values.token !== "") errors.token = "SSH repositories authenticate with the deploy key. Clear the access token.";
+    } else if (values.token.length > 8192 || /[\r\n\0]/.test(values.token)) errors.token = "Enter a single-line token.";
     const watchPaths = (values.watchPaths ?? "").split(/\r?\n/).map((p) => p.trim()).filter(Boolean);
     if (watchPaths.length > 64 || watchPaths.some((p) => p.length > 256 || p === "!" || p.startsWith("/") || p.startsWith("!/") || (p.includes("\\") || [...p].some((c) => c.charCodeAt(0) < 32)) || p.replace(/^!/, "").split("/").some((part) => part === ".." || part === "."))) errors.watchPaths = "Watch paths must be relative patterns, at most 64 patterns of 256 characters.";
     source = { repository, branch, compose_path: composePath, watch_paths: watchPaths };
     if (values.inlineCompose) source.inline_compose = true;
-    if (values.token !== "") source.token = values.token;
+    if (ssh) source.ssh_host_key = sshHostKey;
+    else if (values.token !== "") source.token = values.token;
   }
 
   let environment: Record<string, string> | undefined;
@@ -196,39 +238,776 @@ export function formValues(workload: Workload | undefined, draft?: ResourceDraft
     inlineCompose: workload?.source?.inline_compose ?? false,
     watchPaths: workload?.source?.watch_paths?.join("\n") ?? "",
     token: "",
+    sshHostKey: workload?.source?.ssh_host_key ?? "",
     environment: workload ? null : Object.entries(draft?.environment ?? {}).map(([key, value]) => createRow(key, value)),
   };
 }
 
-export type RouteRow = Route & { id: string };
+export interface HeaderRow {
+  id: string;
+  name: string;
+  value: string;
+  // The API holds a value it does not return. A blank value sends the marker so the saved value is kept; a typed one replaces it.
+  hidden?: boolean;
+}
 
+// The API returns every saved nonempty header value as this marker and keeps the saved value when it is sent back for
+// the same header on the same hostname.
+export const redactedHeader = "[COVE_REDACTED]";
+
+export interface UpstreamRow {
+  id: string;
+  service: string;
+  port: number;
+}
+
+export interface ErrorPageRow {
+  id: string;
+  status: string;
+  html: string;
+}
+
+export type AuthMode = "off" | "url" | "service";
+
+// Fields of every mode are kept while editing so switching modes back does not lose what was typed; only the selected
+// mode's fields are saved. Header and cookie names are one per line.
+export interface ForwardAuthDraft {
+  mode: AuthMode;
+  url: string;
+  service: string;
+  port: number;
+  path: string;
+  responseHeaders: string;
+  responseCookies: string;
+  // The API never returns a saved verification URL or service path. A blank URL or path then keeps the saved value, so
+  // each is sent only when someone types a new one.
+  hidden: boolean;
+}
+
+// Editable form of a route policy. Header maps and upstreams become rows so each one has its own field and error.
+export interface PolicyDraft {
+  // null when the route has no maintenance setting; a disabled object keeps its custom page for later.
+  maintenance: { enabled: boolean; html: string } | null;
+  errorPages: ErrorPageRow[];
+  forwardAuth: ForwardAuthDraft;
+  pathPrefix: string;
+  requestHeaders: HeaderRow[];
+  responseHeaders: HeaderRow[];
+  securityHeaders: boolean;
+  ipAllowList: string;
+  redirectHost: string;
+  redirectPermanent: boolean;
+  // Empty keeps an omitted value omitted; the worker treats it like "acme".
+  certificateSource: "" | "acme" | "default" | "uploaded";
+  // Saved only with the "uploaded" source. Kept as loaded even when the certificate list cannot be read.
+  certificateId: string;
+  upstreams: UpstreamRow[];
+  sticky: boolean;
+  // Empty keeps an omitted visibility omitted (public). "public" is kept only when it was saved explicitly.
+  visibility: "" | RouteVisibility;
+  // The managed listener of a private route; kept as loaded even when the node's listeners cannot be read.
+  listener: string;
+  timeouts: TimeoutDraft;
+}
+
+// Upstream timeouts in seconds as typed; empty or 0 keeps the proxy default.
+export interface TimeoutDraft {
+  dial: string;
+  header: string;
+  idle: string;
+}
+
+export interface RouteRow {
+  id: string;
+  protocol?: "http";
+  domain: string;
+  service: string;
+  port: number;
+  auth?: string;
+  policy?: PolicyDraft;
+}
+
+export const routeLimits = { headers: 32, cidrs: 64, upstreams: 15, routes: 32 } as const;
+export const timeoutLimits = { dial: 600, header: 600, idle: 3600 } as const;
+export const routePageLimits = { pageBytes: 16_384, totalBytes: 65_536, errorPages: 8, authHeaders: 32, authCookies: 16, authURL: 2048 } as const;
+
+export function emptyForwardAuth(): ForwardAuthDraft {
+  return { mode: "off", url: "", service: "", port: 80, path: "", responseHeaders: "", responseCookies: "", hidden: false };
+}
+
+export function emptyPolicy(): PolicyDraft {
+  return { maintenance: null, errorPages: [], forwardAuth: emptyForwardAuth(), pathPrefix: "", requestHeaders: [], responseHeaders: [], securityHeaders: false, ipAllowList: "", redirectHost: "", redirectPermanent: false, certificateSource: "", certificateId: "", upstreams: [], sticky: false, visibility: "", listener: "", timeouts: emptyTimeouts() };
+}
+
+export function emptyTimeouts(): TimeoutDraft {
+  return { dial: "", header: "", idle: "" };
+}
+
+function timeoutDraft(timeouts: RouteTimeouts | null | undefined): TimeoutDraft {
+  const text = (value: number | undefined) => (value ? String(value) : "");
+  return { dial: text(timeouts?.dial_seconds), header: text(timeouts?.response_header_seconds), idle: text(timeouts?.idle_connection_seconds) };
+}
+
+function headerRows(headers: Record<string, string> | null | undefined): HeaderRow[] {
+  return Object.entries(headers ?? {}).map(([name, value]) => (value === redactedHeader ? { id: crypto.randomUUID(), name, value: "", hidden: true } : { id: crypto.randomUUID(), name, value }));
+}
+
+function forwardAuthDraft(auth: RouteForwardAuth | null | undefined): ForwardAuthDraft {
+  if (!auth) return emptyForwardAuth();
+  // A saved setting without a URL or service is an external destination whose URL the API redacted.
+  return {
+    mode: auth.service ? "service" : "url",
+    hidden: auth.service ? !auth.path : !auth.url,
+    url: auth.url ?? "",
+    service: auth.service ?? "",
+    port: auth.port ?? 80,
+    path: auth.path ?? "",
+    responseHeaders: (auth.response_headers ?? []).join("\n"),
+    responseCookies: (auth.response_cookies ?? []).join("\n"),
+  };
+}
+
+function policyDraft(policy: RoutePolicy): PolicyDraft {
+  return {
+    maintenance: policy.maintenance ? { enabled: policy.maintenance.enabled, html: policy.maintenance.html ?? "" } : null,
+    errorPages: Object.entries(policy.error_pages ?? {}).map(([status, html]) => ({ id: crypto.randomUUID(), status, html })),
+    forwardAuth: forwardAuthDraft(policy.forward_auth),
+    pathPrefix: policy.path_prefix ?? "",
+    requestHeaders: headerRows(policy.request_headers),
+    responseHeaders: headerRows(policy.response_headers),
+    securityHeaders: policy.security_headers ?? false,
+    ipAllowList: (policy.ip_allow_list ?? []).join("\n"),
+    redirectHost: policy.redirect_host ?? "",
+    redirectPermanent: policy.redirect_permanent ?? false,
+    certificateSource: policy.certificate_source ?? "",
+    certificateId: policy.certificate_id ?? "",
+    upstreams: (policy.upstreams ?? []).map((target) => ({ id: crypto.randomUUID(), ...target })),
+    sticky: policy.sticky ?? false,
+    visibility: policy.visibility ?? "",
+    listener: policy.listener ?? "",
+    timeouts: timeoutDraft(policy.timeouts),
+  };
+}
+
+// HTTP routes only; TCP and UDP routes are edited as TransportRows. An explicit "http" protocol is kept so a route saved
+// through the API compares and saves unchanged, while one without it keeps the legacy shape.
 export function routeRows(routes: Route[] | undefined): RouteRow[] {
-  return (routes ?? []).map((route) => ({ ...route, id: crypto.randomUUID() }));
+  return (routes ?? []).map(({ protocol, policy, domain, service, port, auth }) => ({ id: crypto.randomUUID(), ...(protocol === "http" ? { protocol } : {}), domain, service, port, ...(auth ? { auth } : {}), ...(policy ? { policy: policyDraft(policy) } : {}) }));
+}
+
+export function cidrList(text: string) {
+  return text.split(/[\s,]+/).filter(Boolean);
+}
+
+export function keepsHiddenHeader(row: HeaderRow) {
+  return row.hidden === true && row.value === "";
+}
+
+function headerMap(rows: HeaderRow[]) {
+  return Object.fromEntries(rows.map((row) => [row.name.trim(), keepsHiddenHeader(row) ? redactedHeader : row.value]));
+}
+
+export function nameList(text: string) {
+  return text.split(/[\s,]+/).filter(Boolean);
+}
+
+function forwardAuthOf(draft: ForwardAuthDraft): RouteForwardAuth | undefined {
+  if (draft.mode === "off") return undefined;
+  const auth: RouteForwardAuth = {};
+  if (draft.mode === "url") {
+    const url = draft.url.trim();
+    if (url) auth.url = url;
+  } else {
+    auth.service = draft.service.trim();
+    auth.port = draft.port;
+    const path = draft.path.trim();
+    if (path) auth.path = path;
+  }
+  const headers = nameList(draft.responseHeaders);
+  const cookies = nameList(draft.responseCookies);
+  if (headers.length > 0) auth.response_headers = headers;
+  if (cookies.length > 0) auth.response_cookies = cookies;
+  return auth;
+}
+
+// Leaves out empty settings so a route without any policy keeps the legacy shape every worker accepts.
+function policyOf(draft: PolicyDraft): RoutePolicy | undefined {
+  const policy: RoutePolicy = {};
+  if (draft.maintenance) policy.maintenance = draft.maintenance.html ? { enabled: draft.maintenance.enabled, html: draft.maintenance.html } : { enabled: draft.maintenance.enabled };
+  if (draft.errorPages.length > 0) policy.error_pages = Object.fromEntries(draft.errorPages.map((page) => [page.status.trim(), page.html]));
+  const auth = forwardAuthOf(draft.forwardAuth);
+  if (auth) policy.forward_auth = auth;
+  const path = draft.pathPrefix.trim();
+  const redirect = draft.redirectHost.trim().toLowerCase();
+  const cidrs = cidrList(draft.ipAllowList);
+  if (path) policy.path_prefix = path;
+  if (draft.requestHeaders.length > 0) policy.request_headers = headerMap(draft.requestHeaders);
+  if (draft.responseHeaders.length > 0) policy.response_headers = headerMap(draft.responseHeaders);
+  if (draft.securityHeaders) policy.security_headers = true;
+  if (cidrs.length > 0) policy.ip_allow_list = cidrs;
+  if (redirect) {
+    policy.redirect_host = redirect;
+    if (draft.redirectPermanent) policy.redirect_permanent = true;
+  }
+  if (draft.certificateSource) policy.certificate_source = draft.certificateSource;
+  if (draft.certificateSource === "uploaded") policy.certificate_id = draft.certificateId;
+  if (draft.upstreams.length > 0) policy.upstreams = draft.upstreams.map((target) => ({ service: target.service.trim(), port: target.port }));
+  if (draft.sticky) policy.sticky = true;
+  if (draft.visibility) policy.visibility = draft.visibility;
+  if (isPrivateVisibility(draft.visibility)) policy.listener = draft.listener;
+  const timeouts = timeoutsOf(draft.timeouts);
+  if (timeouts) policy.timeouts = timeouts;
+  return Object.keys(policy).length > 0 ? policy : undefined;
+}
+
+// Only positive whole numbers are sent; invalid text is reported by validateRoutes before saving.
+function timeoutsOf(draft: TimeoutDraft): RouteTimeouts | undefined {
+  const timeouts: RouteTimeouts = {};
+  const seconds = (text: string) => (/^[0-9]+$/.test(text.trim()) ? Number(text.trim()) : 0);
+  if (seconds(draft.dial) > 0) timeouts.dial_seconds = seconds(draft.dial);
+  if (seconds(draft.header) > 0) timeouts.response_header_seconds = seconds(draft.header);
+  if (seconds(draft.idle) > 0) timeouts.idle_connection_seconds = seconds(draft.idle);
+  return Object.keys(timeouts).length > 0 ? timeouts : undefined;
+}
+
+export function draftUsesTimeouts(draft: PolicyDraft | undefined) {
+  return draft !== undefined && timeoutsOf(draft.timeouts) !== undefined;
+}
+
+function routeOf(row: RouteRow): Route {
+  const route: Route = { domain: row.domain.trim().toLowerCase(), service: row.service.trim(), port: row.port };
+  if (row.protocol) route.protocol = row.protocol;
+  if (row.auth) route.auth = row.auth;
+  const policy = row.policy && policyOf(row.policy);
+  if (policy) route.policy = policy;
+  return route;
+}
+
+export function isPrivateVisibility(visibility: string | undefined): visibility is "lan" | "tailscale" {
+  return visibility === "lan" || visibility === "tailscale";
+}
+
+export function routesUsePolicies(rows: RouteRow[]) {
+  return rows.some((row) => row.policy !== undefined && policyOf(row.policy) !== undefined);
+}
+
+export function draftUsesExtensions(draft: PolicyDraft | undefined) {
+  return draft !== undefined && (draft.maintenance !== null || draft.errorPages.length > 0 || draft.forwardAuth.mode !== "off");
+}
+
+export function routesUseExtensions(rows: RouteRow[]) {
+  return rows.some((row) => draftUsesExtensions(row.policy));
+}
+
+const retainedFields = ["maintenance", "error_pages", "forward_auth", "request_headers", "response_headers"] as const;
+
+// The API keeps a saved extension or header map when its field is omitted on the same hostname, so a removed one, or one on a route
+// that was deleted and added again, must be sent as null. It also keeps a saved stored certificate or proxy default
+// choice while both certificate_source and certificate_id are omitted, so that selection is cleared with a null
+// certificate_id. A saved private visibility is kept the same way, so a hostname switched back to public names
+// "public" with a null listener, and saved upstream timeouts are cleared with null. Routes on hostnames without saved
+// extensions, certificate choices, privacy or timeouts keep the shape older workers accept.
+function withRemovals(route: Route, saved: Route[]): Route {
+  const matches = saved.filter((item) => item.domain === route.domain);
+  const removed = retainedFields.filter((field) => route.policy?.[field] === undefined && matches.some((item) => item.policy?.[field] != null));
+  const certificateRemoved = route.policy?.certificate_source === undefined && matches.some((item) => item.policy?.certificate_id || item.policy?.certificate_source === "default");
+  const privacyRemoved = route.policy?.visibility === undefined && matches.some((item) => isPrivateVisibility(item.policy?.visibility) || item.policy?.listener);
+  const timeoutsRemoved = route.policy?.timeouts === undefined && matches.some((item) => item.policy?.timeouts != null);
+  if (removed.length === 0 && !certificateRemoved && !privacyRemoved && !timeoutsRemoved) return route;
+  const policy: RoutePolicy = { ...route.policy };
+  for (const field of removed) policy[field] = null;
+  if (certificateRemoved) policy.certificate_id = null;
+  if (privacyRemoved) {
+    policy.visibility = "public";
+    policy.listener = null;
+  }
+  if (timeoutsRemoved) policy.timeouts = null;
+  return { ...route, policy };
+}
+
+// Names a saved policy's maintenance, forward-auth and error pages for summaries; empty when none is set.
+export function extensionSummary(policy: RoutePolicy | undefined) {
+  const parts: string[] = [];
+  if (policy?.maintenance?.enabled) parts.push("maintenance on");
+  if (policy?.forward_auth) parts.push("forward-auth");
+  const pages = Object.keys(policy?.error_pages ?? {}).length;
+  if (pages > 0) parts.push(pages === 1 ? "1 error page" : `${pages} error pages`);
+  return parts;
 }
 
 const domainLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const composeService = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
+const routePath = /^\/[a-zA-Z0-9/_.~%+@:-]*$/;
+const headerName = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+// Matches the worker, which rejects every control character in header values.
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((c) => {
+    const code = c.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+}
+const proxyHeaders = new Set(["x-cove-auth-hop", "keep-alive", "proxy-connection", "host", "forwarded", "connection", "upgrade", "transfer-encoding", "content-length", "te", "trailer", "proxy-authorization", "proxy-authenticate"]);
+const presetHeaders = new Set(["strict-transport-security", "x-content-type-options", "x-frame-options", "referrer-policy"]);
 
-// Mirrors the worker's route validation so mistakes are reported next to the field before saving.
-export function validateRoutes(rows: RouteRow[]): { routes?: Route[]; errors: Record<string, string> } {
+export function isHostname(value: string) {
+  return value.length <= 253 && value.includes(".") && value.split(".").every((label) => domainLabel.test(label));
+}
+
+export function isWildcardHostname(value: string) {
+  return value.startsWith("*.");
+}
+
+// A route hostname may begin with "*." when the rest is a complete DNS name: *.example.com, not *.com.
+function isRouteHostname(value: string) {
+  return isWildcardHostname(value) ? value.length <= 253 && isHostname(value.slice(2)) : isHostname(value);
+}
+
+function isPrefixLength(bits: string, max: number) {
+  return /^(0|[1-9][0-9]{0,2})$/.test(bits) && Number(bits) <= max;
+}
+
+function isIPv4(value: string) {
+  const parts = value.split(".");
+  return parts.length === 4 && parts.every((part) => /^(0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
+}
+
+function isIPv6(value: string) {
+  if (!value.includes(":") || !/^[0-9a-fA-F:.]+$/.test(value)) return false;
+  const tail = value.lastIndexOf(":");
+  const last = value.slice(tail + 1);
+  const embedded = last.includes(".");
+  if (embedded && !isIPv4(last)) return false;
+  const groups = embedded ? `${value.slice(0, tail + 1)}0:0` : value;
+  const halves = groups.split("::");
+  if (halves.length > 2) return false;
+  const parts = halves.map((half) => (half === "" ? [] : half.split(":")));
+  if (parts.some((list) => list.some((group) => !/^[0-9a-fA-F]{1,4}$/.test(group)))) return false;
+  const count = parts.reduce((total, list) => total + list.length, 0);
+  return halves.length === 2 ? count < 8 : count === 8;
+}
+
+// Accepts the CIDR forms Go's netip.ParsePrefix accepts: no zones and no leading zeros.
+export function isCIDR(value: string) {
+  const slash = value.indexOf("/");
+  if (slash < 0) return false;
+  const address = value.slice(0, slash);
+  const bits = value.slice(slash + 1);
+  if (isIPv4(address)) return isPrefixLength(bits, 32);
+  return isIPv6(address) && isPrefixLength(bits, 128);
+}
+
+// kept: lowercase names of headers saved on this hostname, the only ones whose hidden value the API can keep.
+function headerErrors(rows: HeaderRow[], key: string, preset: boolean, kept: Set<string>, errors: Record<string, string>) {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const name = row.name.trim();
+    const lower = name.toLowerCase();
+    const field = `${key}.${row.id}`;
+    if (name === "") errors[field] = "Enter a header name.";
+    else if (name.length > 128 || !headerName.test(name)) errors[field] = "Use a header name of up to 128 characters without spaces or separators.";
+    else if (seen.has(lower)) errors[field] = "Each header can be set once.";
+    else if (proxyHeaders.has(lower) || lower.startsWith("x-forwarded-")) errors[field] = "The proxy controls this header.";
+    else if (preset && presetHeaders.has(lower)) errors[field] = "The security headers preset sets this header. Turn the preset off to set it here.";
+    else if (row.value.length > 4096 || hasControlCharacter(row.value)) errors[field] = "Use a value of at most 4096 characters without tabs, line breaks or other control characters.";
+    else if (row.value === redactedHeader) errors[field] = "This value is reserved for hidden saved values. Enter a different value.";
+    else if (keepsHiddenHeader(row) && !kept.has(lower)) errors[field] = "Enter a new value. A hidden saved value stays only with its own header on the same hostname.";
+    seen.add(lower);
+  }
+}
+
+function isPublicIPv4(value: string) {
+  const [a = 0, b = 0, c = 0] = value.split(".").map(Number);
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b < 128) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b < 32) return false;
+  if (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)))) return false;
+  if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false;
+  return !(a === 203 && b === 0 && c === 113);
+}
+
+// Mirrors the worker's check of literal addresses; hostnames are resolved and checked by the worker at connect time.
+function isPublicIPv6(value: string) {
+  const lower = value.toLowerCase();
+  if (lower.startsWith("::ffff:")) return true;
+  const first = parseInt(lower.split(":")[0] || "0", 16);
+  if (first < 0x2000 || first > 0x3fff || first === 0x2002) return false;
+  return !/^2001:0?db8:/.test(lower);
+}
+
+function authURLError(value: string) {
+  if (value === "") return "Enter the provider's HTTPS verification URL.";
+  if (value.length > routePageLimits.authURL || hasControlCharacter(value) || value.includes(" ")) return `Use a URL of at most ${routePageLimits.authURL} characters without spaces or control characters.`;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "Enter a full URL such as https://auth.example.com/api/verify.";
+  }
+  if (url.protocol !== "https:" || url.hostname === "") return "Use an https:// URL with a hostname.";
+  if (url.username || url.password || /^https:\/\/[^/?#]*@/i.test(value)) return "Remove the user name and password from the URL.";
+  if (value.includes("#")) return "Remove the #fragment from the URL.";
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if ((isIPv4(host) && !isPublicIPv4(host)) || (host.includes(":") && !isPublicIPv6(host))) {
+    return "Private and reserved addresses are refused. Choose an auth service in this resource, or expose the provider at its own authenticated HTTPS hostname.";
+  }
+  return null;
+}
+
+function authPathError(value: string) {
+  if (value === "") return null;
+  if (!value.startsWith("/") || value.startsWith("//")) return "Start the path with a single /.";
+  if (value.length > routePageLimits.authURL || hasControlCharacter(value) || value.includes(" ")) return `Use a path of at most ${routePageLimits.authURL} characters without spaces or control characters.`;
+  if (value.includes("#")) return "Remove the #fragment from the path.";
+  return null;
+}
+
+function nameListError(names: string[], kind: "header" | "cookie") {
+  const seen = new Set<string>();
+  for (const name of names) {
+    const key = kind === "header" ? name.toLowerCase() : name;
+    if (name.length > 128 || !headerName.test(name)) return `${name} is not a valid ${kind} name.`;
+    if (seen.has(key)) return `${name} is listed more than once.`;
+    if (kind === "header" && (key === "cookie" || key === "set-cookie")) return "List cookie names under response cookies instead of Cookie or Set-Cookie.";
+    if (kind === "header" && (proxyHeaders.has(key) || key.startsWith("x-forwarded-"))) return `The proxy controls ${name}.`;
+    seen.add(key);
+  }
+  return null;
+}
+
+// retained is true when the API holds forward-auth for this hostname, so a hidden URL left blank keeps it.
+function forwardAuthErrors(row: RouteRow, auth: ForwardAuthDraft, retained: boolean, errors: Record<string, string>) {
+  if (auth.mode === "off") return;
+  if (auth.mode === "url") {
+    const url = auth.url.trim();
+    const error = url === "" && auth.hidden && retained ? null : authURLError(url);
+    if (error) errors[`${row.id}.auth.url`] = error;
+  } else {
+    if (!composeService.test(auth.service.trim())) errors[`${row.id}.auth.service`] = "Enter the Compose service that answers verification requests.";
+    else if (!Number.isInteger(auth.port) || auth.port < 1 || auth.port > 65535) errors[`${row.id}.auth.service`] = "Use a container port from 1 to 65535.";
+    const error = authPathError(auth.path.trim());
+    if (error) errors[`${row.id}.auth.path`] = error;
+  }
+  const headers = nameList(auth.responseHeaders);
+  const headerError = headers.length > routePageLimits.authHeaders ? `Use at most ${routePageLimits.authHeaders} headers.` : nameListError(headers, "header");
+  if (headerError) errors[`${row.id}.auth.headers`] = headerError;
+  const cookies = nameList(auth.responseCookies);
+  const cookieError = cookies.length > routePageLimits.authCookies ? `Use at most ${routePageLimits.authCookies} cookie names.` : nameListError(cookies, "cookie");
+  if (cookieError) errors[`${row.id}.auth.cookies`] = cookieError;
+}
+
+function pageErrors(row: RouteRow, draft: PolicyDraft, errors: Record<string, string>) {
+  if (draft.maintenance) {
+    const html = draft.maintenance.html;
+    if (html.includes("\0")) errors[`${row.id}.maintenance`] = "Remove the NUL characters from the page.";
+    else if (byteLength(html) > routePageLimits.pageBytes) errors[`${row.id}.maintenance`] = "Keep the page within 16 KiB.";
+  }
+  const seen = new Set<string>();
+  let total = 0;
+  for (const page of draft.errorPages) {
+    const status = page.status.trim();
+    const field = `${row.id}.page.${page.id}`;
+    const bytes = byteLength(page.html);
+    total += bytes;
+    if (!/^[45][0-9]{2}$/.test(status)) errors[field] = "Use an HTTP status from 400 to 599.";
+    else if (seen.has(status)) errors[field] = `Status ${status} already has a page.`;
+    else if (page.html.trim() === "") errors[field] = "Enter the HTML to show.";
+    else if (page.html.includes("\0")) errors[field] = "Remove the NUL characters from the page.";
+    else if (bytes > routePageLimits.pageBytes) errors[field] = "Keep each page within 16 KiB.";
+    seen.add(status);
+  }
+  if (draft.errorPages.length > routePageLimits.errorPages) errors[`${row.id}.pages`] = `Use at most ${routePageLimits.errorPages} error pages.`;
+  else if (total > routePageLimits.totalBytes) errors[`${row.id}.pages`] = "Keep all error pages of this route within 64 KiB together.";
+}
+
+function policyErrors(row: RouteRow, domain: string, service: string, saved: Route[], errors: Record<string, string>) {
+  const draft = row.policy;
+  if (!draft) return;
+  pageErrors(row, draft, errors);
+  forwardAuthErrors(row, draft.forwardAuth, saved.some((item) => item.domain === domain && item.policy?.forward_auth), errors);
+  if (draft.certificateSource === "uploaded" && draft.certificateId === "") errors[`${row.id}.certificate`] = "Choose a certificate version.";
+  const path = draft.pathPrefix.trim();
+  if (path && (path.length > 1024 || !routePath.test(path))) errors[`${row.id}.path`] = "Start with / and use a URL path without a query string, spaces or wildcards.";
+  const redirect = draft.redirectHost.trim().toLowerCase();
+  if (redirect && (!isHostname(redirect) || redirect === domain)) errors[`${row.id}.redirect`] = "Use a DNS hostname different from this route's hostname.";
+  const savedHere = saved.filter((item) => item.domain === domain);
+  for (const [key, rows, field] of [["request", draft.requestHeaders, "request_headers"], ["response", draft.responseHeaders, "response_headers"]] as const) {
+    if (rows.length > routeLimits.headers) errors[`${row.id}.${key}`] = `Use at most ${routeLimits.headers} headers.`;
+    const kept = new Set(savedHere.flatMap((item) => Object.keys(item.policy?.[field] ?? {})).map((name) => name.toLowerCase()));
+    headerErrors(rows, `${row.id}.${key}`, draft.securityHeaders, kept, errors);
+  }
+  cidrErrors(row.id, draft.ipAllowList, errors);
+  upstreamErrors(row.id, service, row.port, draft.upstreams, errors);
+  timeoutErrors(row.id, draft.timeouts, errors);
+}
+
+export function isComposeService(value: string) {
+  return composeService.test(value);
+}
+
+export function upstreamErrors(key: string, service: string, port: number, upstreams: UpstreamRow[], errors: Record<string, string>) {
+  if (upstreams.length > routeLimits.upstreams) errors[`${key}.upstreams`] = `Use at most ${routeLimits.upstreams} additional upstreams.`;
+  const targets = new Set([`${service}:${port}`]);
+  for (const target of upstreams) {
+    const name = target.service.trim();
+    const field = `${key}.upstream.${target.id}`;
+    if (!composeService.test(name)) errors[field] = "Enter the Compose service name.";
+    else if (!Number.isInteger(target.port) || target.port < 1 || target.port > 65535) errors[field] = "Use a container port from 1 to 65535.";
+    else if (targets.has(`${name}:${target.port}`)) errors[field] = "This service and port is already a target of the route.";
+    targets.add(`${name}:${target.port}`);
+  }
+}
+
+export function cidrErrors(key: string, text: string, errors: Record<string, string>) {
+  const cidrs = cidrList(text);
+  const invalid = cidrs.find((cidr) => !isCIDR(cidr));
+  if (cidrs.length > routeLimits.cidrs) errors[`${key}.cidr`] = `Use at most ${routeLimits.cidrs} ranges.`;
+  else if (invalid) errors[`${key}.cidr`] = `${invalid} is not an IPv4 or IPv6 CIDR range such as 10.0.0.0/8.`;
+}
+
+function timeoutErrors(key: string, draft: TimeoutDraft, errors: Record<string, string>) {
+  for (const [field, max] of [["dial", timeoutLimits.dial], ["header", timeoutLimits.header], ["idle", timeoutLimits.idle]] as const) {
+    const text = draft[field].trim();
+    if (text !== "" && (!/^[0-9]+$/.test(text) || Number(text) > max)) errors[`${key}.timeouts.${field}`] = `Enter whole seconds from 0 to ${max}.`;
+  }
+}
+
+// The certificate a route selects as the worker compares them: an omitted source is Let's Encrypt.
+function certificateSelection(route: Route) {
+  const source = route.policy?.certificate_source;
+  if (source === "default") return "default";
+  if (source === "uploaded") return `uploaded/${route.policy?.certificate_id ?? ""}`;
+  return "acme";
+}
+
+// TLS is chosen before the request path is known, so every path on a hostname must select the same certificate source
+// and version, the first path setting it. Stored certificates are registered in the proxy's shared certificate store,
+// so each may name only hostnames this resource routes. Certificates missing from the list are left to the control plane.
+function certificateErrors(rows: RouteRow[], routes: Route[], certificates: RouteCertificate[], errors: Record<string, string>) {
+  const hostnames = routes.map((route) => route.domain);
+  const selected = new Map<string, string>();
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route) return;
+    const selection = certificateSelection(route);
+    const expected = selected.get(route.domain);
+    if (expected === undefined) selected.set(route.domain, selection);
+    if (errors[`${row.id}.certificate`]) return;
+    if (expected !== undefined && selection !== expected) {
+      const message = `Every path on ${route.domain} must use the same certificate source and version.`;
+      if (row.policy) errors[`${row.id}.certificate`] = message;
+      else errors[row.id] ??= `${message} Set it under Advanced routing.`;
+      return;
+    }
+    const id = route.policy?.certificate_id;
+    const certificate = id ? certificates.find((item) => item.id === id) : undefined;
+    if (certificate && isWildcardHostname(route.domain) && !certificate.dns_names.some((name) => name.toLowerCase() === route.domain)) {
+      errors[`${row.id}.certificate`] = `Choose a certificate that names ${route.domain} itself. Certificates for individual hostnames below it do not cover the wildcard route.`;
+      return;
+    }
+    const problem = certificate && ownershipProblem(certificate, hostnames);
+    if (problem) errors[`${row.id}.certificate`] = problem;
+  });
+}
+
+// Wildcard hostnames and the proxy default certificate need route protocol 4. Saved uses on an older worker are kept
+// and left for the control plane to reject; only new ones are reported here. routeProtocol is undefined while unknown.
+function protocolErrors(rows: RouteRow[], routes: Route[], saved: Route[], routeProtocol: number | undefined, errors: Record<string, string>) {
+  if (routeProtocol === undefined || routeProtocol >= 4) return;
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route || errors[row.id]) return;
+    const before = saved.filter((item) => item.domain === route.domain);
+    if (isWildcardHostname(route.domain) && before.length === 0) errors[row.id] = "Wildcard hostnames need a newer worker on this node. Upgrade it and verify the node again.";
+    else if (route.policy?.certificate_source === "default" && !before.some((item) => item.policy?.certificate_source === "default") && !errors[`${row.id}.certificate`]) {
+      errors[`${row.id}.certificate`] = "The proxy default certificate needs a newer worker on this node. Upgrade it and verify the node again, or choose another certificate.";
+    }
+  });
+}
+
+// Wildcard routes are matched against a certificate naming the same wildcard; HTTP-01 cannot issue one. An exact
+// hostname one label below a wildcard route of this resource must also select a stored certificate, or a Let's Encrypt
+// or proxy default certificate could shadow the wildcard's TLS identity.
+function wildcardErrors(rows: RouteRow[], routes: Route[], errors: Record<string, string>) {
+  const wildcards = routes.filter((route) => isWildcardHostname(route.domain)).map((route) => route.domain);
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route || errors[row.id] || route.policy?.certificate_source === "uploaded") return;
+    const covering = wildcards.find((pattern) => wildcardCovers(pattern, route.domain));
+    let message: string;
+    if (isWildcardHostname(route.domain)) message = `A wildcard hostname needs a stored certificate that names ${route.domain}. Let's Encrypt cannot issue one here.`;
+    else if (covering) message = `${route.domain} is covered by the wildcard route ${covering}, so it must also select a stored certificate: the wildcard version or one for ${route.domain}.`;
+    else return;
+    if (row.policy) errors[`${row.id}.certificate`] ??= `${message} Choose Stored certificate.`;
+    else errors[row.id] = `${message} Choose one under Advanced routing.`;
+  });
+}
+
+export const visibilityNames: Record<RouteVisibility, string> = { public: "Public", lan: "LAN", tailscale: "Tailscale" };
+
+// The source ranges the proxy accepts on LAN and Tailscale listeners, for HTTP routes and TCP routes alike.
+export const privateRanges: Record<"lan" | "tailscale", string> = {
+  lan: "private IPv4 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or private IPv6 addresses outside Tailscale's range",
+  tailscale: "Tailscale addresses (100.64.0.0/10 and fd7a:115c:a1e0::/48)",
+};
+
+export function listenerBindings(listener: Listener) {
+  return listener.bindings.length > 0 ? listener.bindings.map(formatBinding).join(", ") : "no bindings";
+}
+
+// "LAN only via office (192.168.10.2:8443)" for a saved or edited private route; empty for a public one.
+export function visibilitySummary(policy: Pick<RoutePolicy, "visibility" | "listener"> | undefined, list?: Listener[]) {
+  const visibility = policy?.visibility;
+  if (!isPrivateVisibility(visibility)) return "";
+  const id = policy?.listener ?? "";
+  if (!id) return `${visibilityNames[visibility]} only, no listener selected`;
+  const listener = list?.find((item) => item.id === id);
+  return `${visibilityNames[visibility]} only via ${id}${listener ? ` (${listenerBindings(listener)})` : ""}`;
+}
+
+function privacyOf(route: Route) {
+  const visibility = route.policy?.visibility || "public";
+  return { visibility, listener: isPrivateVisibility(visibility) ? (route.policy?.listener ?? "") : "" };
+}
+
+function overlaps(a: string, b: string) {
+  return a === b || wildcardCovers(a, b) || wildcardCovers(b, a);
+}
+
+// Mirrors the worker: a private route needs an explicit managed HTTPS listener of the same visibility and a stored or
+// proxy default certificate, and every path and overlapping wildcard of a hostname shares one visibility and listener.
+// listeners: the node's saved listeners; undefined while they are unknown, which leaves listener checks to the API.
+// New privacy settings need route protocol 5; saved ones on an older worker are kept for the control plane to reject.
+function visibilityErrors(rows: RouteRow[], routes: Route[], saved: Route[], routeProtocol: number | undefined, listeners: Listener[] | undefined, errors: Record<string, string>) {
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    if (!route || errors[row.id]) return;
+    const { visibility, listener } = privacyOf(route);
+    const savedPrivacy = saved.filter((item) => item.domain === route.domain).map(privacyOf);
+    const changed = route.policy?.visibility !== undefined && !savedPrivacy.some((item) => item.visibility === visibility && item.listener === listener);
+    if (changed && routeProtocol !== undefined && routeProtocol < 5) {
+      errors[`${row.id}.visibility`] = "Private routing needs a newer worker on this node. Upgrade it and verify the node again.";
+      return;
+    }
+    const other = routes.find((item, position) => position < index && overlaps(item.domain, route.domain) && (privacyOf(item).visibility !== visibility || privacyOf(item).listener !== listener));
+    if (other) {
+      const message = other.domain === route.domain ? `Every path on ${route.domain} must use the same visibility and listener.` : `${route.domain} overlaps ${other.domain}, so both must use the same visibility and listener.`;
+      if (row.policy) errors[`${row.id}.visibility`] = message;
+      else errors[row.id] = `${message} Set it under Advanced routing.`;
+      return;
+    }
+    if (!isPrivateVisibility(visibility)) return;
+    if (listener === "") errors[`${row.id}.listener`] = "Choose the listener that serves this hostname.";
+    else if (!listenerName.test(listener)) errors[`${row.id}.listener`] = "This listener ID is not valid. Choose a listener from the node.";
+    else if (listeners) {
+      const match = listeners.find((item) => item.id === listener);
+      if (!match) errors[`${row.id}.listener`] = `Listener ${listener} is not configured on this node. Choose another listener or make the route public.`;
+      else if (match.protocol !== "https" || match.visibility !== visibility) errors[`${row.id}.listener`] = `Listener ${listener} is not a ${visibilityNames[visibility]} HTTPS listener. Choose another listener.`;
+    }
+    const source = route.policy?.certificate_source;
+    if (source !== "default" && source !== "uploaded") errors[`${row.id}.certificate`] ??= "Private routes cannot use Let's Encrypt. Choose the proxy default certificate or a stored certificate.";
+  });
+}
+
+// Upstream timeouts need route protocol 6, so they are refused while it is unknown too. Timeouts saved on the same
+// hostname and path are kept for the control plane to judge; clearing them is always allowed.
+function timeoutProtocolErrors(rows: RouteRow[], routes: Route[], saved: Route[], routeProtocol: number | undefined, errors: Record<string, string>) {
+  if (routeProtocol !== undefined && routeProtocol >= 6) return;
+  rows.forEach((row, index) => {
+    const route = routes[index];
+    const timeouts = route?.policy?.timeouts;
+    if (!route || !timeouts) return;
+    const unchanged = saved.some((item) => item.domain === route.domain && (item.policy?.path_prefix ?? "") === (route.policy?.path_prefix ?? "") && JSON.stringify(canonical(item.policy?.timeouts ?? null)) === JSON.stringify(canonical(timeouts)));
+    if (unchanged) return;
+    errors[`${row.id}.timeouts`] = routeProtocol === undefined ? "Upstream timeouts can be set once the worker capabilities of the node are known. Clear them or try again later." : "Upstream timeouts need a newer worker on this node. Upgrade it and verify the node again, or clear them.";
+  });
+}
+
+// Whether the routes use anything that needs route protocol 4: a wildcard hostname or the proxy default certificate.
+export function routesNeedProtocol4(rows: RouteRow[]) {
+  return rows.some((row) => isWildcardHostname(row.domain.trim()) || row.policy?.certificateSource === "default");
+}
+
+// Mirrors the worker's route validation so mistakes are reported next to the field before saving. Hostname, service
+// and port errors are keyed by the row id; policy errors by "<row id>.<field>". Pass the saved routes when editing so
+// removed maintenance, error page and forward-auth settings are sent as explicit nulls, and the resource's uploaded
+// certificates so their hostname rules are checked, and the node's listeners once they are known.
+export function validateRoutes(rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number, listeners?: Listener[]): { routes?: Route[]; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   const seen = new Set<string>();
   const routes = rows.map((row) => {
-    const domain = row.domain.trim().toLowerCase();
-    const service = row.service.trim();
+    const route = routeOf(row);
+    const { domain, service } = route;
+    const path = route.policy?.path_prefix ?? "";
+    const claim = `${domain} ${path}`;
     if (domain === "") errors[row.id] = "Enter a hostname.";
-    else if (domain.length > 253 || !domain.includes(".") || !domain.split(".").every((label) => domainLabel.test(label))) {
-      errors[row.id] = "Use a DNS hostname such as app.example.com, without a scheme, port, path or wildcard.";
-    } else if (seen.has(domain)) errors[row.id] = "Each hostname can be routed once.";
+    else if (!isRouteHostname(domain)) errors[row.id] = "Use a DNS hostname such as app.example.com or *.example.com, without a scheme, port or path.";
+    else if (seen.has(claim)) errors[row.id] = path ? "Each hostname and path prefix can be routed once." : "Each hostname can be routed once.";
     else if (!composeService.test(service)) errors[row.id] = "Enter the Compose service name.";
     else if (!Number.isInteger(row.port) || row.port < 1 || row.port > 65535) errors[row.id] = "Use a container port from 1 to 65535.";
-    seen.add(domain);
-    return { domain, service, port: row.port };
+    seen.add(claim);
+    policyErrors(row, domain, service, saved, errors);
+    return route;
   });
-  return Object.keys(errors).length > 0 ? { errors } : { routes, errors };
+  certificateErrors(rows, routes, certificates, errors);
+  protocolErrors(rows, routes, saved, routeProtocol, errors);
+  wildcardErrors(rows, routes, errors);
+  visibilityErrors(rows, routes, saved, routeProtocol, listeners, errors);
+  timeoutProtocolErrors(rows, routes, saved, routeProtocol, errors);
+  return Object.keys(errors).length > 0 ? { errors } : { routes: routes.map((route) => withRemovals(route, saved)), errors };
+}
+
+// Certificate, visibility and listener errors shown after a save attempt depend on the selected choice and on every
+// route's hostname, so they are re-checked against the edited rows: an error for a choice that was replaced is cleared
+// or updated. Other errors stay until the next save, and no such error appears on a row that had none.
+export function refreshCertificateErrors(errors: Record<string, string>, rows: RouteRow[], saved: Route[] = [], certificates: RouteCertificate[] = [], routeProtocol?: number, listeners?: Listener[]) {
+  const shown = Object.keys(errors).filter((key) => key.endsWith(".certificate") || key.endsWith(".visibility") || key.endsWith(".listener"));
+  if (shown.length === 0) return errors;
+  const current = validateRoutes(rows, saved, certificates, routeProtocol, listeners).errors;
+  const next = { ...errors };
+  for (const key of shown) {
+    if (current[key]) next[key] = current[key];
+    else delete next[key];
+  }
+  return next;
+}
+
+export function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, canonical(item)]),
+    );
+  }
+  return value;
+}
+
+const hideHeader = (row: HeaderRow): HeaderRow => (row.value === "" ? row : { ...row, value: "", hidden: true });
+
+// After a save, typed verification URLs, service paths and header values are dropped from the form; the API keeps them.
+export function withoutRouteSecrets(rows: RouteRow[]): RouteRow[] {
+  return rows.map((row) => {
+    if (!row.policy) return row;
+    const auth = row.policy.forwardAuth;
+    const forwardAuth = auth.mode === "off" ? auth : { ...auth, url: "", path: "", hidden: true };
+    return { ...row, policy: { ...row.policy, forwardAuth, requestHeaders: row.policy.requestHeaders.map(hideHeader), responseHeaders: row.policy.responseHeaders.map(hideHeader) } };
+  });
+}
+
+// Hostnames that start or stop bypassing Let's Encrypt (a stored certificate or the proxy default) compared with the
+// saved routes, including removed ones. The worker may have to restart the node's shared proxy to take a cached Let's
+// Encrypt certificate out or put it back. Changing between stored versions, or between a stored version and the proxy
+// default, keeps the cached certificate out and is not listed.
+const bypassesAcme = (source: string | undefined) => source === "uploaded" || source === "default";
+
+export function certificateSwitches(rows: RouteRow[], saved: Route[] = []) {
+  const before = new Set(saved.filter((route) => bypassesAcme(route.policy?.certificate_source)).map((route) => route.domain));
+  const after = new Set(rows.filter((row) => bypassesAcme(row.policy?.certificateSource)).map((row) => row.domain.trim().toLowerCase()));
+  return [...new Set([...before, ...after])].filter((domain) => before.has(domain) !== after.has(domain));
 }
 
 export function sameRoutes(rows: RouteRow[], routes: Route[] | undefined) {
-  const saved = routes ?? [];
-  return rows.length === saved.length && rows.every((row, index) => row.domain.trim().toLowerCase() === saved[index]?.domain && row.service.trim() === saved[index]?.service && row.port === saved[index]?.port);
+  return JSON.stringify(canonical(rows.map(routeOf))) === JSON.stringify(canonical(routes ?? []));
 }

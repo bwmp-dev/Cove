@@ -11,6 +11,11 @@ export const nodeStates: Record<NodeState, { tone: Tone; label: string; descript
 };
 
 // SSH verification needs the host key captured during registration.
+// The node worker's route protocol, or undefined while the node is unknown. Missing capabilities count as protocol 0.
+export function routeProtocolOf(node: Node | undefined) {
+  return node ? (node.capabilities?.route_protocol ?? 0) : undefined;
+}
+
 export function canVerify(node: Node) {
   return node.mode === "local" || node.state !== "pending";
 }

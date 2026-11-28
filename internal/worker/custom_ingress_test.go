@@ -855,3 +855,14 @@ func TestCustomIngressAdoptsMigratedCertificates(t *testing.T) {
 	}
 	succeeded(t, put(e, "tracker-migration-certificate.yaml", "# reviewed\n"+outside, contentRevision(outside)))
 }
+
+func TestCustomIngressCannotReferenceManagedRouteKeys(t *testing.T) {
+	for _, path := range []string{"/data/cove-certificates/app/version.key", "/data/cove-certificates/app/version.crt", "/data/certificate-probes.json"} {
+		if certificatePath(path) {
+			t.Fatal("custom configuration could reference private managed certificate material", path)
+		}
+	}
+	if !certificatePath("/data/certs/operator-managed.key") {
+		t.Fatal("operator-managed certificate path regressed")
+	}
+}

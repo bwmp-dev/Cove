@@ -1,5 +1,6 @@
-import { ResourcePlacement } from "../components/ResourcePlacement";
+import { ResourceMove } from "../components/ResourceMove";
 import { Clone } from "../components/Clone";
+import { SaveAsTemplate } from "../components/SaveAsTemplate";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
@@ -8,14 +9,18 @@ import {
   ChevronDown,
   ClipboardCheck,
   Container,
+  Database,
+  HardDrive,
   FileClock,
   FileCode,
+  FolderOpen,
   Gauge,
   GitPullRequest,
   Globe,
   History,
   KeyRound,
   LayoutDashboard,
+  ChartLine,
   Network,
   Play,
   RotateCcw,
@@ -33,22 +38,46 @@ import {
 import { createContext, use, useEffect, useId, useMemo, useRef, useState } from "react";
 import { errorMessage, isStatus } from "../api/client";
 import { useCancelOperation, useQueueOperation } from "../api/mutations";
-import { projectsQuery, useAssignEnvironment, type Project } from "../api/projects";
-import { nodesQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
-import type { Operation, Workload } from "../api/types";
+import { projectsQuery, type Project } from "../api/projects";
+import { nodesQuery, operationQuery, workloadOperationsQuery, workloadQuery } from "../api/queries";
+import { ResourceExec } from "../components/ResourceExec";
+import type { Operation, Route, WorkerOperation, Workload } from "../api/types";
 import { Backups } from "../components/Backups";
+import { PostgresPITR } from "../components/PostgresPITR";
+import { useCapacityGate } from "../components/CapacityCheck";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DeployDialog } from "../components/DeployReview";
 import { DeleteResource } from "../components/DeleteResource";
+import { LiveLogs } from "../components/LiveLogs";
+import { LogHistory } from "../components/LogHistory";
+import { EnvironmentHoldNotice, useEnvironmentHold } from "../components/EnvironmentSuspension";
+import { IdleHoldNotice, useIdleState } from "../components/IdleSleep";
+import { ScaleOutcome } from "../components/CpuAutoscale";
+import { JobOutcome } from "../components/JobOutcome";
 import { LogViewer } from "../components/LogViewer";
+import { OperationResultNotice } from "../components/OperationResultNotice";
+import { WorkloadMetricHistory } from "../components/MetricHistory";
 import { OperationsTable } from "../components/OperationsTable";
+import { Notes } from "../components/Notes";
 import { RelativeTime } from "../components/RelativeTime";
-import { ContainerLogs, RuntimeContainers } from "../components/Runtime";
+import { RouteTraffic } from "../components/RouteTraffic";
+import { RuntimeContainers } from "../components/Runtime";
+import { PendingRolloutMessage, StagedRollout, usePendingRollout } from "../components/StagedRollout";
 import { NodeStateLabel, OperationStateLabel } from "../components/status";
+import { PinButton } from "../components/PinButton";
 import { Breadcrumbs, Button, DefinitionList, EmptyState, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section } from "../components/ui";
 import { countLabel, findPlacement } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
-import { can } from "../lib/permissions";
-import { actionLabels, activeOperation, allowedActions, isActive, stateLabels, workloadKind } from "../lib/operations";
+import { backupRights, can, currentTeam, managesTeam, pitrRights } from "../lib/permissions";
+import { pitrApplies } from "../lib/pitr";
+import { useSession } from "../lib/session";
+import { actionLabels, activeOperation, allowedActions, isActive, isSuspensionAction, latestDeploymentOperation, resourceTypeLabel, stateLabels, workerResult, workloadKind } from "../lib/operations";
+import { holdBlocks, holdReason, type EnvironmentHold } from "../lib/suspension";
+import { idleBlocks, idleReason, type IdleHold } from "../lib/idle";
+import { resultSummary } from "../lib/rollouts";
+import { ResourceIcon } from "../components/ResourceIcon";
+import { engineName } from "../lib/databases";
+import { isLinkableRoute, isTransportRoute, transportSummary } from "../lib/route-transports";
 import { buttonClass, groupLabelClass, navItemClass, linkClass } from "../lib/styles";
 
 const route = getRouteApi("/app/resources/$resourceId");
@@ -64,7 +93,8 @@ export function useResource() {
 const actionIcons = { deploy: Rocket, start: Play, stop: Square, restart: RotateCcw } as const;
 
 function outcome(operation: Operation, kind: "service" | "job") {
-  if (kind === "job" && operation.action === "deploy") {
+  // Workers with job results report the exit status themselves; it is shown with JobOutcome.
+  if (kind === "job" && operation.action === "deploy" && !workerResult(operation)?.job) {
     if (operation.state === "succeeded") return "The last run completed with exit code 0.";
     if (operation.state === "failed") return "The last run failed. Check the logs for the job's exit status.";
   }
@@ -76,7 +106,8 @@ function outcome(operation: Operation, kind: "service" | "job") {
 
 function LatestOperation({ operation, kind }: { operation: Operation; kind: "service" | "job" }) {
   const message = outcome(operation, kind);
-  const error = operation.result?.error;
+  const worker = workerResult(operation);
+  const revision = worker?.revision;
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px]">
@@ -85,19 +116,31 @@ function LatestOperation({ operation, kind }: { operation: Operation; kind: "ser
         </Link>
         <OperationStateLabel state={operation.state} />
         <RelativeTime value={operation.created_at} className="text-fg-muted" />
-        {operation.result?.revision && (
-          <span className="font-mono text-xs text-fg-muted" title={operation.result.revision}>
-            {operation.result.revision.slice(0, 7)}
+        {revision && (
+          <span className="font-mono text-xs text-fg-muted" title={revision}>
+            {revision.slice(0, 7)}
           </span>
         )}
       </div>
       {message && <p className="text-[13px] text-fg-muted">{message}</p>}
-      {error && (
-        <Notice tone="error" title="Worker error">
-          <span className="font-mono text-xs break-words">{error}</span>
-        </Notice>
+      {worker?.job && <JobOutcome job={worker.job} />}
+      {worker?.rollout && <RolloutResult rollout={worker.rollout} />}
+      {worker?.scale && (
+        <div className="text-[13px]">
+          <ScaleOutcome scale={worker.scale} />
+        </div>
       )}
+      <OperationResultNotice operation={operation} />
       <LogViewer operationId={operation.id} active={isActive(operation.state)} />
+    </div>
+  );
+}
+
+function RolloutResult({ rollout }: { rollout: NonNullable<WorkerOperation["rollout"]> }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[13px] text-fg-muted">{resultSummary(rollout)}</p>
+      {rollout.reason && <p className="text-xs break-words text-fg-muted">{rollout.reason}</p>}
     </div>
   );
 }
@@ -129,12 +172,17 @@ function PlacementLink({ workload, projects }: { workload: Workload; projects: P
 }
 
 // Explains why the resource actions are disabled and offers the way out, next to the actions themselves.
-function ActiveOperationStatus({ id, operation, kind }: { id: string; operation: Operation; kind: "service" | "job" }) {
+function ActiveOperationStatus({ id, operation, kind, database }: { id: string; operation: Operation; kind: "service" | "job"; database: boolean }) {
   const cancel = useCancelOperation(operation.id);
+  // Only the detail endpoint reports can_cancel; database maintenance refuses cancellation once queued.
+  const detail = useQuery({ ...operationQuery(operation.id), enabled: database });
+  const cancellable = !database || (detail.data !== undefined && detail.data.can_cancel !== false);
   const online = useOnline();
   const [confirm, setConfirm] = useState(false);
   const label = kind === "job" && operation.action === "deploy" ? "Run" : actionLabels[operation.action];
   const requested = operation.cancel_requested || cancel.isSuccess;
+  // Pause and resume operations belong to the environment; they are changed from its page, not cancelled here.
+  const environmentOwned = isSuspensionAction(operation.action);
   return (
     <div id={id} className="flex max-w-md flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted md:justify-end md:text-right">
       <span>
@@ -144,15 +192,16 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
         <Link to="/operations/$operationId" params={{ operationId: operation.id }} className={linkClass}>
           View operation
         </Link>
-        <button
+        {!environmentOwned && cancellable && <button
           type="button"
           className={`${linkClass} disabled:cursor-not-allowed disabled:text-fg-disabled disabled:no-underline`}
           disabled={!online || cancel.isPending || requested}
           onClick={() => setConfirm(true)}
         >
           {requested ? "Cancellation requested" : "Cancel operation"}
-        </button>
+        </button>}
       </span>
+      {database && detail.data?.can_cancel === false && <span>Database maintenance cannot be cancelled after it is queued.</span>}
       {cancel.isError && <span role="alert" className="text-bad">Could not request cancellation: {errorMessage(cancel.error)}</span>}
       <ConfirmDialog open={confirm} title="Cancel this operation?" confirmLabel="Cancel operation" danger onCancel={() => setConfirm(false)} onConfirm={() => { setConfirm(false); cancel.mutate(); }}>
         This stops the deployment command when the worker acknowledges it. Changes already made to containers are not undone; check the resource afterward.
@@ -161,15 +210,22 @@ function ActiveOperationStatus({ id, operation, kind }: { id: string; operation:
   );
 }
 
-function useResourceActions(workload: Workload) {
+function useResourceActions(workload: Workload, hold: EnvironmentHold, holdId: string, idle: IdleHold, idleId: string) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const queue = useQueueOperation(workload.id);
   const online = useOnline();
   const [confirmStop, setConfirmStop] = useState(false);
+  const [confirmDeploy, setConfirmDeploy] = useState(false);
   const kind = workloadKind(workload.kind);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
-  const blocked = !online || Boolean(active) || queue.isPending || operations.isPending;
+  const pendingRollout = usePendingRollout(workload, Boolean(active));
+  // The capacity check runs first; a passed or skipped check opens the deployment review, which still asks for a reason.
+  const capacity = useCapacityGate({ workloadId: workload.id, actionLabel: kind === "job" ? "Deploy and run" : "Deploy", onDeploy: () => setConfirmDeploy(true) });
+  const blocked = !online || Boolean(active) || queue.isPending || operations.isPending || capacity.checking;
   const statusId = useId();
+  const rolloutId = useId();
+  const deployLabel = kind === "job" ? "Deploy and run" : actionLabels.deploy;
+  const queuedAction = queue.variables?.action;
 
   return {
     buttons: (
@@ -177,16 +233,19 @@ function useResourceActions(workload: Workload) {
         <div className="flex flex-wrap items-center gap-2">
           {allowedActions(kind).filter(action => !workload.preview_source_id || action === "stop").map((action) => {
             const Icon = actionIcons[action];
-            const pending = queue.isPending && queue.variables === action;
-            const label = kind === "job" && action === "deploy" ? "Deploy and run" : actionLabels[action];
+            const pending = (queue.isPending && queuedAction === action) || (action === "deploy" && capacity.checking);
+            const label = action === "deploy" ? deployLabel : actionLabels[action];
+            const waitsForRollout = action === "deploy" && Boolean(pendingRollout);
+            const held = action !== "stop" && holdBlocks(hold, action);
+            const asleep = action !== "stop" && idleBlocks(idle, action);
             return (
               <Button
                 key={action}
                 variant={action === "deploy" ? "primary" : "secondary"}
-                disabled={blocked}
-                aria-describedby={active ? statusId : undefined}
+                disabled={blocked || waitsForRollout || held || asleep}
+                aria-describedby={active ? statusId : held && hold.kind !== "loading" ? holdId : asleep && idle.kind !== "loading" ? idleId : waitsForRollout ? rolloutId : undefined}
                 pending={pending}
-                onClick={() => (action === "stop" ? setConfirmStop(true) : queue.mutate(action))}
+                onClick={() => (action === "stop" ? setConfirmStop(true) : action === "deploy" ? capacity.start() : queue.mutate({ action }))}
               >
                 {!pending && <Icon aria-hidden className="size-3.5" />}
                 {label}
@@ -194,11 +253,24 @@ function useResourceActions(workload: Workload) {
             );
           })}
         </div>
-        {active && <ActiveOperationStatus id={statusId} operation={active} kind={kind} />}
+        {active && <ActiveOperationStatus id={statusId} operation={active} kind={kind} database={workload.kind === "database"} />}
+        {!active && pendingRollout && <PendingRolloutMessage id={rolloutId} workloadId={workload.id} action="deploy again" className="max-w-md md:text-right" />}
       </div>
     ),
     feedback: (
       <>
+        {capacity.dialog}
+        <DeployDialog
+          open={confirmDeploy}
+          title={`${deployLabel} ${workload.name}?`}
+          confirmLabel={deployLabel}
+          workloadId={workload.id}
+          pending={queue.isPending}
+          onCancel={() => setConfirmDeploy(false)}
+          onDeploy={(reason) => queue.mutate({ action: "deploy", reason }, { onSettled: () => setConfirmDeploy(false) })}
+        >
+          Cove queues the deployment with the saved configuration. Deployment policies, approvals and windows still apply.
+        </DeployDialog>
         <ConfirmDialog
           open={confirmStop}
           title={`Stop ${workload.name}?`}
@@ -207,17 +279,17 @@ function useResourceActions(workload: Workload) {
           onCancel={() => setConfirmStop(false)}
           onConfirm={() => {
             setConfirmStop(false);
-            queue.mutate("stop");
+            queue.mutate({ action: "stop" });
           }}
         >
           {kind === "job"
             ? "The job's containers on the node will be stopped. Deploy runs the job again."
             : "The resource's containers on the node will be stopped and stay down until you start or deploy it again."}
         </ConfirmDialog>
-        {queue.isSuccess && (
+        {queue.isSuccess && queuedAction && (
           <Notice
             tone="success"
-            title={`${actionLabels[queue.variables]} queued`}
+            title={`${actionLabels[queuedAction]} queued`}
             action={
               <Link to="/operations/$operationId" params={{ operationId: queue.data.id }} className={buttonClass("ghost")}>
                 View operation
@@ -225,8 +297,8 @@ function useResourceActions(workload: Workload) {
             }
           />
         )}
-        {queue.isError && (
-          <Notice tone={isStatus(queue.error, 409) ? "warn" : "error"} title={`Could not queue ${actionLabels[queue.variables].toLowerCase()}`}>
+        {queue.isError && queuedAction && (
+          <Notice tone={isStatus(queue.error, 409) ? "warn" : "error"} title={`Could not queue ${actionLabels[queuedAction].toLowerCase()}`}>
             {isStatus(queue.error, 409) ? "Another operation is already active for this resource. Wait for it to finish." : errorMessage(queue.error)}
           </Notice>
         )}
@@ -235,15 +307,45 @@ function useResourceActions(workload: Workload) {
   };
 }
 
+// Links the first public exact hostname. Wildcard patterns and private (LAN or Tailscale) hostnames show as text, and
+// a resource with only TCP and UDP routes names its first listener instead, because raw routes have no URL.
+function HeaderRoute({ routes }: { routes: Route[] }) {
+  const http = routes.filter((route) => !isTransportRoute(route));
+  const first = http.find(isLinkableRoute) ?? http[0] ?? routes[0];
+  if (!first) return null;
+  const more = routes.length > 1 && <span className="text-fg-subtle"> +{routes.length - 1}</span>;
+  let label;
+  if (isTransportRoute(first)) label = <span className="break-words">{transportSummary(first)}</span>;
+  else if (!isLinkableRoute(first)) label = <span className="font-mono text-xs break-all">{first.domain}</span>;
+  else {
+    label = (
+      <a href={`https://${first.domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
+        {first.domain}
+      </a>
+    );
+  }
+  return (
+    <span>
+      {label}
+      {more}
+    </span>
+  );
+}
+
 function ResourceHeader({ workload }: { workload: Workload }) {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const nodes = useQuery(nodesQuery);
   const projects = useQuery(projectsQuery);
-  const actions = useResourceActions(workload);
+  const { hold, state: holdState } = useEnvironmentHold(workload);
+  const holdId = useId();
+  const idle = useIdleState(workload);
+  const idleId = useId();
+  const actions = useResourceActions(workload, hold, holdId, idle.hold, idleId);
   const kind = workloadKind(workload.kind);
   const node = nodes.data?.find((item) => item.id === workload.node_id);
   const placement = findPlacement(projects.data, workload.environment_id, workload.project_id);
-  const latest = operations.data?.find((operation) => operation.workload_id === workload.id);
+  const latest = operations.data ? latestDeploymentOperation(operations.data, workload.id) : undefined;
+  const admin = useSession()?.is_admin ?? false;
 
   return (
     <>
@@ -277,11 +379,11 @@ function ResourceHeader({ workload }: { workload: Workload }) {
             {workload.name}
           </Breadcrumbs>
         }
-        icon={kind === "job" ? <Timer className="size-4" /> : <Boxes className="size-4" />}
+        icon={<ResourceIcon kind={workload.kind} className="size-4" />}
         title={workload.name}
         description={
           <MetaList>
-            <span key="kind">{kind === "job" ? "Job" : "Service"}</span>
+            <span key="kind">{workload.database ? `${resourceTypeLabel(workload.kind)} · ${engineName(workload.database.engine)} ${workload.database.version}` : resourceTypeLabel(workload.kind)}</span>
             <span key="node" className="inline-flex min-w-0 items-center gap-2 align-middle">
               <Link to="/nodes/$nodeId" params={{ nodeId: workload.node_id }} className="truncate rounded hover:text-fg">
                 {node?.name ?? "Node"}
@@ -289,7 +391,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
               {node && <NodeStateLabel state={node.state} />}
             </span>
             {latest && (
-              <span key="operation" className="inline-flex items-center gap-2 align-middle">
+              <span key="operation" className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 align-middle">
                 <Link to="/operations/$operationId" params={{ operationId: latest.id }} className="rounded hover:text-fg">
                   {kind === "job" && latest.action === "deploy" ? "Run" : actionLabels[latest.action]}
                 </Link>
@@ -297,14 +399,7 @@ function ResourceHeader({ workload }: { workload: Workload }) {
                 <RelativeTime value={latest.created_at} className="text-fg-subtle" />
               </span>
             )}
-            {workload.routes?.[0] && (
-              <span key="domain">
-                <a href={`https://${workload.routes[0].domain}`} target="_blank" rel="noreferrer" className="rounded break-all hover:text-fg">
-                  {workload.routes[0].domain}
-                </a>
-                {workload.routes.length > 1 && <span className="text-fg-subtle"> +{workload.routes.length - 1}</span>}
-              </span>
-            )}
+            {workload.routes?.length ? <HeaderRoute key="domain" routes={workload.routes} /> : null}
             {workload.manually_stopped && (
               <span key="stopped" className="text-warn">
                 Manually stopped, automatic deployments paused
@@ -312,10 +407,45 @@ function ResourceHeader({ workload }: { workload: Workload }) {
             )}
           </MetaList>
         }
-        actions={can(workload.permissions, "operate") ? actions.buttons : undefined}
+        actions={
+          <>
+            <PinButton kind="workload" id={workload.id} name={workload.name} />
+            {can(workload.permissions, "operate") && actions.buttons}
+          </>
+        }
       />
       <div className="space-y-2 px-4 pt-4 empty:hidden sm:px-6" aria-live="polite">
         {actions.feedback}
+        {workload.pending_adoption_id && (
+          <Notice
+            tone="warn"
+            title="Node adoption pending"
+            action={
+              admin ? (
+                <Link to="/nodes/$nodeId" params={{ nodeId: workload.node_id }} hash={`adoption-${workload.pending_adoption_id}`} className={buttonClass("secondary")}>
+                  Open adoption
+                </Link>
+              ) : undefined
+            }
+          >
+            This resource was reserved by an adoption that has not finished. Its running containers were not restarted, and it stays read-only until the adoption completes.
+            {admin ? " Resume or refresh the adoption on the node page." : " Ask an instance administrator to finish the adoption on the node page."}
+          </Notice>
+        )}
+        <EnvironmentHoldNotice
+          id={holdId}
+          hold={hold}
+          onRetry={() => void holdState.refetch()}
+          retrying={holdState.isFetching}
+          environment={
+            placement?.environment && (
+              <Link to="/projects/$projectId/environments/$environmentId" params={{ projectId: placement.project.id, environmentId: placement.environment.id }} className={buttonClass("secondary")}>
+                Open {placement.environment.name}
+              </Link>
+            )
+          }
+        />
+        <IdleHoldNotice id={idleId} workload={workload} idle={idle} />
         {workload.preview_source_id && <Notice>This is a temporary preview. Its configuration is managed by <Link to="/resources/$resourceId/previews" params={{ resourceId: workload.preview_source_id }} className="underline">the source resource</Link>. Closing it deletes its preview data.</Notice>}
         {node && node.state !== "ready" && (
           <Notice
@@ -382,6 +512,7 @@ export function WorkloadPage() {
 type ResourcePath =
   | "/resources/$resourceId"
   | "/resources/$resourceId/logs"
+  | "/resources/$resourceId/metrics"
   | "/resources/$resourceId/operations"
   | "/resources/$resourceId/limits"
   | "/resources/$resourceId/general"
@@ -391,6 +522,7 @@ type ResourcePath =
   | "/resources/$resourceId/networking"
   | "/resources/$resourceId/registry"
   | "/resources/$resourceId/backups"
+  | "/resources/$resourceId/files"
   | "/resources/$resourceId/preflight"
   | "/resources/$resourceId/schedule"
   | "/resources/$resourceId/hooks"
@@ -399,6 +531,8 @@ type ResourcePath =
   | "/resources/$resourceId/promotion"
   | "/resources/$resourceId/troubleshooting"
   | "/resources/$resourceId/configuration-history"
+  | "/resources/$resourceId/database"
+  | "/resources/$resourceId/object-storage"
   | "/resources/$resourceId/settings";
 
 interface ResourceSection {
@@ -409,13 +543,17 @@ interface ResourceSection {
 }
 
 // Grouped by what the visitor is doing: watching the resource, configuring what runs, controlling releases, or managing its data and lifecycle.
-function resourceSections(workload: Workload): { label: string; links: ResourceSection[] }[] {
+// File access needs Read secrets and Edit configuration on the resource, because it reads and changes application data
+// that may hold secrets; the control plane enforces this too.
+function resourceSections(workload: Workload, canEditFiles: boolean): { label: string; links: ResourceSection[] }[] {
+  if (workload.kind === "database") return databaseSections();
   const service = workloadKind(workload.kind) === "service";
   return [
     {
       label: "Monitor",
       links: [
         { to: "/resources/$resourceId", label: "Overview", icon: LayoutDashboard, exact: true },
+        { to: "/resources/$resourceId/metrics", label: "Metrics", icon: ChartLine },
         { to: "/resources/$resourceId/logs", label: "Logs", icon: ScrollText },
         { to: "/resources/$resourceId/operations", label: "Operations", icon: History },
         { to: "/resources/$resourceId/troubleshooting", label: "Troubleshooting", icon: Stethoscope },
@@ -427,6 +565,7 @@ function resourceSections(workload: Workload): { label: string; links: ResourceS
         { to: "/resources/$resourceId/general", label: "General", icon: SlidersHorizontal },
         { to: "/resources/$resourceId/source", label: "Source", icon: FileCode },
         { to: "/resources/$resourceId/environment", label: "Environment variables", icon: KeyRound },
+        ...(workload.preview_source_id ? [] : [{ to: "/resources/$resourceId/object-storage" as const, label: "Object storage", icon: HardDrive }]),
         ...(service ? [{ to: "/resources/$resourceId/domains" as const, label: "Domains", icon: Globe }] : []),
         { to: "/resources/$resourceId/networking", label: "Networking", icon: Network },
         { to: "/resources/$resourceId/registry", label: "Registry", icon: Container },
@@ -448,6 +587,48 @@ function resourceSections(workload: Workload): { label: string; links: ResourceS
       label: "Manage",
       links: [
         ...(service ? [{ to: "/resources/$resourceId/backups" as const, label: "Backups", icon: Archive }] : []),
+        ...(canEditFiles ? [{ to: "/resources/$resourceId/files" as const, label: "Files", icon: FolderOpen }] : []),
+        { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
+      ],
+    },
+  ];
+}
+
+// Managed databases have generated configuration, no public routes and no hooks, so only the pages that apply are offered.
+function databaseSections(): { label: string; links: ResourceSection[] }[] {
+  return [
+    {
+      label: "Monitor",
+      links: [
+        { to: "/resources/$resourceId", label: "Overview", icon: LayoutDashboard, exact: true },
+        { to: "/resources/$resourceId/metrics", label: "Metrics", icon: ChartLine },
+        { to: "/resources/$resourceId/logs", label: "Logs", icon: ScrollText },
+        { to: "/resources/$resourceId/operations", label: "Operations", icon: History },
+        { to: "/resources/$resourceId/troubleshooting", label: "Troubleshooting", icon: Stethoscope },
+      ],
+    },
+    {
+      label: "Configure",
+      links: [
+        { to: "/resources/$resourceId/database", label: "Database", icon: Database },
+        { to: "/resources/$resourceId/general", label: "General", icon: SlidersHorizontal },
+        { to: "/resources/$resourceId/source", label: "Configuration", icon: FileCode },
+        { to: "/resources/$resourceId/environment", label: "Environment variables", icon: KeyRound },
+        { to: "/resources/$resourceId/networking", label: "Networking", icon: Network },
+        { to: "/resources/$resourceId/limits", label: "Resource limits", icon: Gauge },
+      ],
+    },
+    {
+      label: "Deploy",
+      links: [
+        { to: "/resources/$resourceId/preflight", label: "Preflight", icon: ClipboardCheck },
+        { to: "/resources/$resourceId/configuration-history", label: "Change history", icon: FileClock },
+      ],
+    },
+    {
+      label: "Manage",
+      links: [
+        { to: "/resources/$resourceId/backups", label: "Backups", icon: Archive },
         { to: "/resources/$resourceId/settings", label: "Settings", icon: Settings },
       ],
     },
@@ -519,7 +700,7 @@ function MobileResourceNav({ workload, groups }: { workload: Workload; groups: {
 }
 
 function ResourceNav({ workload }: { workload: Workload }) {
-  const groups = resourceSections(workload);
+  const groups = resourceSections(workload, can(workload.permissions, "read_secrets") && can(workload.permissions, "edit_configuration"));
   return (
     <>
       <MobileResourceNav workload={workload} groups={groups} />
@@ -542,13 +723,14 @@ export function ResourceOverview() {
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const projects = useQuery(projectsQuery);
   const kind = workloadKind(workload.kind);
-  const history = useMemo(() => (operations.data ?? []).filter((operation) => operation.workload_id === workload.id), [operations.data, workload.id]);
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
-  const latest = history[0];
+  // An active image check shows its progress here; otherwise housekeeping checks do not replace the latest deployment.
+  const latest = active ?? (operations.data ? latestDeploymentOperation(operations.data, workload.id) : undefined);
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       <div className="min-w-0">
+        <StagedRollout workload={workload} operationActive={Boolean(active)} />
         <Section title={active ? "Active operation" : kind === "job" ? "Last run" : "Latest operation"}>
           {operations.isPending ? (
             <p className="text-[13px] text-fg-muted">Loading operations</p>
@@ -567,28 +749,51 @@ export function ResourceOverview() {
           description={kind === "job" ? "Containers from the latest run. An exited job container is expected after a run completes." : "Live Docker state on the node."}
           flush
         >
-          <RuntimeContainers workloadId={workload.id} kind={kind} operationActive={Boolean(active)} />
+          <RuntimeContainers workloadId={workload.id} kind={kind} operationActive={Boolean(active)} manuallyStopped={workload.manually_stopped} />
         </Section>
+        <Notes key={workload.id} scope="resource" id={workload.id} canEdit={can(workload.permissions, "edit")} />
       </div>
       <Section title="Details">
         <DefinitionList
           compact
           items={[
             { term: "Placement", value: <PlacementLink workload={workload} projects={projects.data} /> },
-            { term: "Type", value: kind === "job" ? "Job" : "Service" },
-            { term: "Source", value: workload.source ? <span className="font-mono text-xs break-all">{workload.source.repository}</span> : "Compose file" },
+            { term: "Type", value: resourceTypeLabel(workload.kind) },
+            ...(workload.database
+              ? [
+                  { term: "Engine", value: `${engineName(workload.database.engine)} ${workload.database.version}` },
+                  {
+                    term: "Connection",
+                    value: (
+                      <Link to="/resources/$resourceId/database" params={{ resourceId: workload.id }} className="rounded font-mono text-xs break-all underline underline-offset-4">
+                        {workload.database.host}:{workload.database.port}
+                      </Link>
+                    ),
+                  },
+                ]
+              : [{ term: "Source", value: workload.source ? <span className="font-mono text-xs break-all">{workload.source.repository}</span> : "Compose file" }]),
             ...(workload.source ? [{ term: "Branch", value: <span className="font-mono text-xs">{workload.source.branch}</span> }] : []),
-            ...(kind === "service"
+            ...(kind === "service" && !workload.database
               ? [
                   {
                     term: "Domains",
                     value: workload.routes?.length ? (
                       <div className="space-y-1">
-                        {workload.routes.map((item) => (
-                          <a key={item.domain} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
-                            {item.domain}
-                          </a>
-                        ))}
+                        {workload.routes.map((item) =>
+                          isTransportRoute(item) ? (
+                            <span key={`${item.protocol}-${item.policy?.listener ?? ""}`} className="block break-words">
+                              {transportSummary(item)}
+                            </span>
+                          ) : !isLinkableRoute(item) ? (
+                            <span key={`${item.domain}${item.policy?.path_prefix ?? ""}`} className="block font-mono text-xs break-all">
+                              {item.domain}
+                            </span>
+                          ) : (
+                            <a key={`${item.domain}${item.policy?.path_prefix ?? ""}`} className="block break-all underline underline-offset-4" href={`https://${item.domain}`} target="_blank" rel="noreferrer">
+                              {item.domain}
+                            </a>
+                          ),
+                        )}
                       </div>
                     ) : (
                       <Link to="/resources/$resourceId/domains" params={{ resourceId: workload.id }} className="rounded text-fg-muted underline underline-offset-4 hover:text-fg">
@@ -615,10 +820,38 @@ export function ResourceOverview() {
 
 export function ResourceLogs() {
   const workload = useResource();
+  const operations = useQuery(workloadOperationsQuery(workload.id));
+  const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
   return (
-    <Section title="Container logs" description="Recent output from the resource's containers on the node.">
-      <ContainerLogs workloadId={workload.id} />
-    </Section>
+    <>
+      <Section title="Live tail" description="Output from every container, merged in timestamp order and read directly from the node. Kept only on this page, never stored by Cove.">
+        <LiveLogs workloadId={workload.id} supported={node ? Boolean(node.capabilities?.structured_logs) : undefined} />
+      </Section>
+      <Section title="Stored log history" description="Lines Cove collected from the containers and kept under the instance retention settings. Search and filters apply to all stored lines, 500 per page." flush>
+        <LogHistory workloadId={workload.id} />
+      </Section>
+      <Section title="Run a command" width="form" description="Run one bounded command in a running container of this resource, for example a migration or a status check. Only editors who can read secrets can run commands.">
+        {can(workload.permissions, "edit") && can(workload.permissions, "read_secrets") ? (
+          <ResourceExec key={workload.id} workload={workload} operationActive={Boolean(active)} />
+        ) : (
+          <p className="text-[13px] text-fg-muted">Your access to this resource does not include running commands. Ask a team administrator for editor access that includes reading secrets.</p>
+        )}
+      </Section>
+    </>
+  );
+}
+
+export function ResourceMetrics() {
+  const workload = useResource();
+  return (
+    <>
+      <Section title="Metric history" description="Container usage recorded by Cove, with deploys and rollbacks." flush>
+        <WorkloadMetricHistory workloadId={workload.id} />
+      </Section>
+      {workloadKind(workload.kind) !== "job" && <RouteTraffic workloadId={workload.id} />}
+    </>
   );
 }
 
@@ -647,49 +880,31 @@ export function ResourceBackups() {
   const workload = useResource();
   const operations = useQuery(workloadOperationsQuery(workload.id));
   const active = operations.data ? activeOperation(operations.data, workload.id) : undefined;
+  const nodes = useQuery(nodesQuery);
+  const node = nodes.data?.find((item) => item.id === workload.node_id);
+  const { hold } = useEnvironmentHold(workload);
+  const idle = useIdleState(workload);
   if (workloadKind(workload.kind) === "job") {
     return <EmptyState title="Backups are not available for jobs">Backup policies apply to long-running services with persistent data.</EmptyState>;
   }
   return (
-    <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts. Containers stop briefly for consistency.">
-      <Backups workloadId={workload.id} busy={Boolean(active)} canOperate={can(workload.permissions, "operate")} canEdit={can(workload.permissions, "edit")} />
-    </Section>
-  );
-}
-
-function PlacementForm({ workload }: { workload: Workload }) {
-  const projects = useQuery(projectsQuery);
-  const assign = useAssignEnvironment(workload.id);
-  const online = useOnline();
-  const [selected, setSelected] = useState(`${workload.project_id}:${workload.environment_id ?? ""}`);
-  const current = `${workload.project_id}:${workload.environment_id ?? ""}`;
-
-  return (
-    <form
-      className="space-y-4"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const [project_id, environment_id] = selected.split(":");
-        if (project_id) assign.mutate({ project_id, environment_id: environment_id ?? "" });
-      }}
-    >
-      <ResourcePlacement projects={projects.data ?? []} value={selected} onChange={(value) => { assign.reset(); setSelected(value); }} />
-      {projects.isError && <QueryError what="projects" error={projects.error} onRetry={() => void projects.refetch()} retrying={projects.isFetching} />}
-      {assign.isError && (
-        <Notice tone="error" title="Could not change placement">
-          {errorMessage(assign.error)}
-        </Notice>
+    <>
+      <Section width="form" title="Backups" description="Encrypted snapshots of writable volumes and bind mounts, or online database dumps. Volume snapshots stop containers briefly for consistency.">
+        <Backups workloadId={workload.id} busy={Boolean(active)} rights={backupRights(workload.permissions)} support={{ retention: node ? Boolean(node.capabilities?.backup_retention) : undefined, instanceEngines: node ? Boolean(node.capabilities?.extended_logical_backups) : undefined, transfers: node ? Boolean(node.capabilities?.backup_transfers) : undefined, snapshots: node ? Boolean(node.capabilities?.filesystem_snapshots) : undefined, nodeName: node?.name }} restoreHeld={holdReason(hold, "restore", "Restoring, verifying and copying backups")} verifyHeld={holdReason(hold, "drill", "Verifying and copying backups")} database={workload.database ?? undefined} />
+      </Section>
+      {pitrApplies(workload) && (
+        <Section width="form" title="PostgreSQL point-in-time recovery" description="Continuous WAL capture with periodic base backups, restored to a chosen time as a new resource. Separate from the backups above.">
+          <PostgresPITR workloadId={workload.id} managed={Boolean(workload.database)} busy={Boolean(active)} rights={pitrRights(workload.permissions)} nodeName={node?.name} captureHeld={holdReason(hold, "restart", "Changing capture or taking a base backup") ?? idleReason(idle.hold, "deploy", "Changing capture or taking a base backup") ?? undefined} restoreHeld={holdReason(hold, "restore_copy", "Restoring to a new resource") ?? undefined} />
+        </Section>
       )}
-      {assign.isSuccess && selected === current && <Notice tone="success" title="Placement saved" />}
-      <Button type="submit" variant="primary" disabled={!online || !selected || selected === current} pending={assign.isPending}>
-        Save placement
-      </Button>
-    </form>
+    </>
   );
 }
 
 export function ResourceSettings() {
   const workload = useResource();
+  const session = useSession();
+  const publishesTemplates = Boolean(session?.is_admin) || managesTeam(currentTeam(session));
   if (!can(workload.permissions, "edit")) {
     return (
       <EmptyState title="Settings need editor access">
@@ -700,10 +915,16 @@ export function ResourceSettings() {
   }
   return (
     <>
-      <Section width="form" title="Placement" description="Projects and environments organise resources. Nodes are chosen when a resource is created.">
-        <PlacementForm workload={workload} />
-      </Section>
+      <ResourceMove workload={workload} />
+      {workload.database && (
+        <div className="px-4 pt-5 sm:px-6">
+          <div className="max-w-3xl">
+            <Notice title="Cloning a database">The copy gets freshly generated credentials, a new private hostname and empty storage. Data is not copied; use a backup's separate recovery copy to carry data.</Notice>
+          </div>
+        </div>
+      )}
       <Clone kind="resource" id={workload.id} name={workload.name} />
+      {publishesTemplates && !workload.preview_source_id && !workload.database && <SaveAsTemplate workloadId={workload.id} workloadName={workload.name} />}
       <Section width="form" title="Danger zone" tone="danger">
         <DeleteResource kind="workload" id={workload.id} />
       </Section>

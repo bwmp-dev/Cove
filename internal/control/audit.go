@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -45,29 +46,30 @@ func (s *Server) authenticated(next http.Handler, w http.ResponseWriter, r *http
 func (s *Server) recordAudit(r *http.Request, actor string, status int) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
-	if _, err := s.DB.Exec(ctx, "INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,$2,$3,$4,(SELECT id FROM teams WHERE id=$5))", actor, r.Pattern, r.PathValue("id"), status, auditTeam(r)); err != nil {
+	if _, err := s.DB.Exec(ctx, "INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,$2,$3,$4,(SELECT id FROM teams WHERE id=$5 FOR KEY SHARE))", actor, r.Pattern, r.PathValue("id"), status, auditTeam(r)); err != nil {
 		slog.Error("audit event could not be persisted", "action", r.Pattern, "status", status)
 	}
 }
 func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), "SELECT id,actor,action,subject,status,created_at FROM audit_events WHERE team_id=$1 OR ($2 AND team_id IS NULL) ORDER BY id DESC LIMIT 100", actor(r).Team, actor(r).Admin)
+	rows, err := s.DB.Query(r.Context(), "SELECT id,actor,action,subject,status,created_at,details FROM audit_events WHERE team_id=$1 OR ($2 AND team_id IS NULL) ORDER BY id DESC LIMIT 100", actor(r).Team, actor(r).Admin)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	defer rows.Close()
 	type event struct {
-		ID      int64     `json:"id"`
-		Actor   string    `json:"actor"`
-		Action  string    `json:"action"`
-		Subject string    `json:"subject"`
-		Status  int       `json:"status"`
-		Created time.Time `json:"created_at"`
+		Details json.RawMessage `json:"details"`
+		ID      int64           `json:"id"`
+		Actor   string          `json:"actor"`
+		Action  string          `json:"action"`
+		Subject string          `json:"subject"`
+		Status  int             `json:"status"`
+		Created time.Time       `json:"created_at"`
 	}
 	events := []event{}
 	for rows.Next() {
 		var v event
-		if rows.Scan(&v.ID, &v.Actor, &v.Action, &v.Subject, &v.Status, &v.Created) != nil {
+		if rows.Scan(&v.ID, &v.Actor, &v.Action, &v.Subject, &v.Status, &v.Created, &v.Details) != nil {
 			http.Error(w, "could not read audit events", 500)
 			return
 		}

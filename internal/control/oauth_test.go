@@ -111,6 +111,19 @@ func TestGitHubOAuthIntegration(t *testing.T) {
 	f.call("root", "", "PUT", "/api/settings", map[string]bool{"registration_enabled": false}, 200)
 	state, cookie = start("", map[string]any{})
 	callback(state, cookie, "/")
+	secret, err := seal(f.s.Key, []byte("12345678901234567890"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sql("INSERT INTO account_totp(user_id,secret,confirmed) SELECT id,$1,true FROM users WHERE github_id='100'", secret)
+	state, cookie = start("", map[string]any{})
+	pendingResponse := callback(state, cookie, "/login?authenticated=1")
+	for _, c := range pendingResponse.Result().Cookies() {
+		if c.Name == "__Host-cove" {
+			f.call(c.Value, "", "GET", "/api/session", nil, 401)
+		}
+	}
+	f.sql("DELETE FROM account_totp WHERE user_id=(SELECT id FROM users WHERE github_id='100')")
 	f.sql("UPDATE users SET disabled=true WHERE github_id='100'")
 	state, cookie = start("", map[string]any{})
 	callback(state, cookie, "/login?error=account_exists")

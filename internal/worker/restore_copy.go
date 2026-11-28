@@ -15,14 +15,18 @@ import (
 )
 
 type RestoreCopy struct {
-	Source      string            `json:"source"`
-	Compose     string            `json:"compose"`
-	Environment map[string]string `json:"environment"`
-	Volumes     []string          `json:"volumes"`
-	Mounts      []backupMount     `json:"mounts"`
+	DatabaseMetadata json.RawMessage   `json:"database_metadata,omitempty"`
+	Source           string            `json:"source"`
+	Compose          string            `json:"compose"`
+	Environment      map[string]string `json:"environment"`
+	Volumes          []string          `json:"volumes"`
+	Mounts           []backupMount     `json:"mounts"`
 }
 
 func isolateRestore(config map[string]any, manifest backupManifest, target string) ([]string, []backupMount, error) {
+	if err := restoreServiceNames(config, manifest.State.Traffic); err != nil {
+		return nil, nil, err
+	}
 	services, ok := config["services"].(map[string]any)
 	if !ok || len(services) == 0 {
 		return nil, nil, errors.New("snapshot has no services")
@@ -183,7 +187,7 @@ func (e *Engine) PlanRestoreCopy(ctx context.Context, r Request, source string) 
 	if err != nil {
 		return nil, err
 	}
-	return &RestoreCopy{Source: source, Compose: string(raw), Environment: manifest.State.Environment, Volumes: volumes, Mounts: mounts}, nil
+	return &RestoreCopy{DatabaseMetadata: manifest.State.DatabaseMetadata, Source: source, Compose: string(raw), Environment: manifest.State.Environment, Volumes: volumes, Mounts: mounts}, nil
 }
 
 func (e *Engine) performRestoreCopy(ctx context.Context, r Request, out io.Writer) (result error) {
@@ -220,7 +224,7 @@ func (e *Engine) performRestoreCopy(ctx context.Context, r Request, out io.Write
 	if err = os.MkdirAll(root, 0700); err != nil {
 		return err
 	}
-	if err = writeJSON(filepath.Join(root, r.ID+".json"), map[string]string{"workload": r.Workload}); err != nil {
+	if err = writeJSON(filepath.Join(root, r.ID+".json"), map[string]any{"workload": r.Workload, "database_verify": r.Backup.Database != nil && extendedDatabase(r.Backup.Database.Engine)}); err != nil {
 		return err
 	}
 	defer func() {
@@ -269,7 +273,12 @@ func (e *Engine) performRestoreCopy(ctx context.Context, r Request, out io.Write
 		}
 		mounts = []backupMount{{Type: "bind", Source: stage, RW: true}}
 	}
-	if err = e.restic(ctx, source, mounts, true, out, "restore", manifest.Record.Snapshot, "--target", "/", "--include", "/data", "--verify"); err != nil {
+	if manifest.Record.DataSnapshot != "" {
+		err = e.readDatabaseSnapshot(ctx, source, manifest, filepath.Join(root, r.ID, "000", "database.dump"))
+	} else {
+		err = e.restic(ctx, source, mounts, true, out, "restore", manifest.Record.Snapshot, "--target", "/", "--include", "/data", "--verify")
+	}
+	if err != nil {
 		return err
 	}
 	if manifest.Record.Database != nil {
@@ -296,9 +305,34 @@ func (e *Engine) restoreCopyDatabase(ctx context.Context, r Request, d *Database
 		env = append(env, key+"="+value)
 	}
 	name := "cove-copy-db-" + r.ID
-	args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", path, "run", "--detach", "--no-deps", "--no-TTY", "--name", name, "--label", "dev.cove.drill=" + r.ID, d.Service}
+	args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", path, "run", "--detach", "--no-deps", "--no-TTY", "--use-aliases", "--name", name, "--label", "dev.cove.drill=" + r.ID, d.Service}
 	if err = e.Run(ctx, dir, args, env, out); err != nil {
 		return err
+	}
+	if extendedDatabase(d.Engine) {
+		ready := false
+		for attempt := 0; attempt < 90; attempt++ {
+			command := redisAuth + redisCLI(d.Engine) + " PING"
+			if d.Engine == "mongodb" {
+				command = `mongosh --nodb --quiet --eval '` + mongoCredentials + `const c=new Mongo("mongodb://127.0.0.1:27017"); if(user)c.getDB("admin").auth(user,password); const a=c.getDB("admin"); const h=a.runCommand({hello:1}),opts=a.runCommand({getCmdLineOpts:1}).parsed,set=opts.replication&&(opts.replication.replSetName||opts.replication.replSet);if(set&&!h.isWritablePrimary){if(!h.setName)a.runCommand({replSetInitiate:{_id:set,members:[{_id:0,host:"` + d.Service + `:27017"}]}});quit(1)} if(!a.runCommand({ping:1}).ok)quit(1);'`
+			}
+			if e.Run(ctx, dir, []string{"docker", "exec", name, "sh", "-ec", command}, nil, io.Discard) == nil {
+				ready = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
+		if !ready {
+			return errors.New("restored database did not initialize")
+		}
+		if err = e.restoreExtendedDatabase(ctx, r, name, dump, out); err != nil {
+			return err
+		}
+		return e.Run(ctx, dir, []string{"docker", "stop", "--time", "45", name}, nil, out)
 	}
 	ready := false
 	for attempt := 0; attempt < 90; attempt++ {

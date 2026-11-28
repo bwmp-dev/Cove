@@ -1,10 +1,12 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, Boxes, Cable, Lock, Network, Plus, Timer } from "lucide-react";
+import { ArrowRight, Cable, Lock, Network, Plus } from "lucide-react";
+import { ResourceIcon } from "./ResourceIcon";
 import { useId, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import { connectionGraphQuery, useCreateConnection, useRemoveConnection, useRetryConnection, useUpdateConnection } from "../api/private-connections";
-import { workloadsQuery } from "../api/queries";
+import { workloadQuery, workloadsQuery } from "../api/queries";
+import { databaseEndpoints } from "../lib/databases";
 import type { WorkloadSummary } from "../api/types";
 import {
   aliasPattern,
@@ -382,7 +384,6 @@ function GraphView({ graph, all, onConnect, onEdit, canConnect, editableIds }: {
             if (!position) return null;
             const selected = selection?.kind === "resource" && selection.id === node.id;
             const status = node.resource ? resourceStatus(node.resource) : null;
-            const Icon = node.resource ? (node.resource.kind === "job" ? Timer : Boxes) : Lock;
             const choosing = connectFrom !== null && connectFrom !== node.id;
             return (
               <div key={node.id} data-node-id={node.id} className="absolute" style={{ left: position.x, top: position.y, width: NODE_WIDTH, height: NODE_HEIGHT }}>
@@ -394,7 +395,7 @@ function GraphView({ graph, all, onConnect, onEdit, canConnect, editableIds }: {
                   className={`flex size-full min-w-0 flex-col justify-center gap-1 rounded-md border px-3 text-left transition-colors ${selected ? "border-info bg-info-tint" : choosing ? "border-info-line bg-panel hover:bg-info-tint" : node.external ? "border-dashed border-line-strong bg-panel hover:bg-raised" : "border-line-strong bg-panel hover:bg-raised"}`}
                 >
                   <span className="flex min-w-0 items-center gap-2 pr-5">
-                    <Icon aria-hidden className="size-3.5 shrink-0 text-fg-subtle" />
+                    {node.resource ? <ResourceIcon kind={node.resource.kind} className="size-3.5 shrink-0 text-fg-subtle" /> : <Lock aria-hidden className="size-3.5 shrink-0 text-fg-subtle" />}
                     <span className="truncate text-[13px] font-medium text-fg" title={nodeTitle(node)}>
                       {nodeTitle(node)}
                     </span>
@@ -773,15 +774,24 @@ function ConnectionForm({ draft, graph, candidates, onClose }: { draft: Draft; g
   const [alias, setAlias] = useState(existing?.alias ?? (target ? suggestedAlias(nameOf(target)) : ""));
   const aliasEdited = useRef(Boolean(existing));
   const mutation = existing ? update : create;
-  const targets = candidates.filter((candidate) => candidate.kind === "service" && candidate.id !== source);
-  const portNumber = Number(port);
-  const aliasError = alias !== "" && !validAlias(alias) ? "Use a lowercase DNS name such as postgres.internal. Names starting with cove- are reserved." : undefined;
-  const valid = source && target && sourceService && targetService && Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535 && validAlias(alias);
+  const targets = candidates.filter((candidate) => candidate.kind !== "job" && candidate.id !== source);
+  // A managed database accepts connections only to its own service, native port and generated hostname.
+  const targetIsDatabase = candidates.find((candidate) => candidate.id === target)?.kind === "database";
+  const targetDetail = useQuery({ ...workloadQuery(target), enabled: Boolean(target) && targetIsDatabase });
+  const database = targetIsDatabase ? targetDetail.data?.database : undefined;
+  const endpoints = database ? databaseEndpoints(database) : [];
+  const endpoint = endpoints.find((item) => String(item.port) === port) ?? endpoints[0];
+  const effectiveTargetService = endpoint ? endpoint.service : targetService;
+  const effectiveAlias = endpoint ? endpoint.alias : alias;
+  const effectivePort = endpoint ? String(endpoint.port) : port;
+  const portNumber = Number(effectivePort);
+  const aliasError = effectiveAlias !== "" && !validAlias(effectiveAlias) ? "Use a lowercase DNS name such as postgres.internal. Names starting with cove- are reserved." : undefined;
+  const valid = source && target && sourceService && effectiveTargetService && Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535 && validAlias(effectiveAlias) && (!targetIsDatabase || database);
 
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!valid || mutation.isPending) return;
-    const input = { source_service: sourceService.trim(), target_service: targetService.trim(), port: portNumber, alias: alias.trim() };
+    const input = { source_service: sourceService.trim(), target_service: effectiveTargetService.trim(), port: portNumber, alias: effectiveAlias.trim() };
     if (existing) update.mutate({ id: existing.id, ...input }, { onSuccess: onClose });
     else create.mutate({ source_id: source, target_id: target, ...input }, { onSuccess: onClose });
   }
@@ -837,6 +847,34 @@ function ConnectionForm({ draft, graph, candidates, onClose }: { draft: Draft; g
             }}
           />
           {serviceField("source", source, sourceService, setSourceService)}
+          {database ? (
+            <>
+              <Field id={`${id}-target-service`} label="Target service" hint="Set by the managed database.">
+                <input id={`${id}-target-service`} className={`${inputClass} font-mono`} value={effectiveTargetService} readOnly aria-describedby={`${id}-target-service-hint`} />
+              </Field>
+              {endpoints.length > 1 ? (
+                <Field id={`${id}-port`} label="Endpoint" hint="The native protocol, or another endpoint the database offers.">
+                  <Select id={`${id}-port`} value={effectivePort} onChange={(event) => setPort(event.target.value)}>
+                    {endpoints.map((item) => (
+                      <option key={item.key} value={String(item.port)}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              ) : (
+                <Field id={`${id}-port`} label="Target port" hint="The database's native port.">
+                  <input id={`${id}-port`} className={inputClass} value={effectivePort} readOnly aria-describedby={`${id}-port-hint`} />
+                </Field>
+              )}
+              <Field id={`${id}-alias`} label="Private hostname" hint={endpoint?.key === "pooler" ? "The pooler's generated hostname, used by its DB_POOL_HOST and DB_POOL_URL exports." : "The database's hostname, used by its DB_HOST and DB_URL exports."}>
+                <input id={`${id}-alias`} className={`${inputClass} font-mono`} value={effectiveAlias} readOnly aria-describedby={`${id}-alias-hint`} />
+              </Field>
+            </>
+          ) : targetIsDatabase ? (
+            <p className="text-xs text-fg-muted sm:col-span-2">{targetDetail.isError ? `Could not read the database: ${errorMessage(targetDetail.error)}` : "Reading the database's connection details"}</p>
+          ) : (
+            <>
           {serviceField("target", target, targetService, setTargetService)}
           <Field id={`${id}-port`} label="Target port" hint="The container port the target service listens on.">
             <input id={`${id}-port`} className={inputClass} inputMode="numeric" pattern="[0-9]*" value={port} required onChange={(event) => setPort(event.target.value.replace(/\D/g, "").slice(0, 5))} aria-describedby={`${id}-port-hint`} />
@@ -857,9 +895,11 @@ function ConnectionForm({ draft, graph, candidates, onClose }: { draft: Draft; g
               }}
             />
           </Field>
+            </>
+          )}
         </div>
         <p className="text-xs text-fg-muted">
-          Protocol: TCP. UDP is not forwarded. The source connects to <span className="font-mono">{alias || "hostname"}:{port || "port"}</span>; the target cannot start connections back. Other resources, including other sources of the same target, do not gain access. Both resources need edit access.
+          Protocol: TCP. UDP is not forwarded. The source connects to <span className="font-mono">{effectiveAlias || "hostname"}:{effectivePort || "port"}</span>; the target cannot start connections back. Other resources, including other sources of the same target, do not gain access. Both resources need edit access.
         </p>
       </fieldset>
       {mutation.isError && (

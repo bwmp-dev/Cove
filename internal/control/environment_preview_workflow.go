@@ -20,10 +20,11 @@ import (
 // previewSnapshot is the recipe a preview was created with, plus its access credentials. Later
 // recipe edits apply to new previews; an existing preview keeps its data and routing decisions.
 type previewSnapshot struct {
-	Recipe   previewRecipe `json:"recipe"`
-	Username string        `json:"username,omitempty"`
-	Password string        `json:"password,omitempty"`
-	Auth     string        `json:"auth,omitempty"`
+	Recipe   previewRecipe    `json:"recipe"`
+	CI       *previewCIInputs `json:"ci,omitempty"`
+	Username string           `json:"username,omitempty"`
+	Password string           `json:"password,omitempty"`
+	Auth     string           `json:"auth,omitempty"`
 }
 
 // previewBaseline pins what production ran when the preview was created. Resources without a
@@ -52,9 +53,14 @@ type previewResourceRow struct {
 	DataState, DataOperation, DeployOperation string
 	RoutesOperation, RemoveOperation          string
 	Routes                                    []worker.Route
+	CIImages                                  map[string]string
+	CIRegistry, CIIdentity, CIRevision        string
 }
 
 func (r previewResourceRow) desiredKey() string {
+	if r.CIIdentity != "" {
+		return "ci:" + r.CIIdentity
+	}
 	if r.BranchRevision != "" {
 		return "branch:" + r.BranchRevision
 	}
@@ -97,7 +103,15 @@ func (s *Server) loadPreviewRow(ctx context.Context, q interface {
 
 func (s *Server) loadPreviewResources(ctx context.Context, q interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 }, id string) ([]previewResourceRow, error) {
+	p, err := s.loadPreviewRow(ctx, q, id, false)
+	if err != nil {
+		return nil, err
+	}
+	if p.Snapshot.CI != nil && (validatePreviewCIImages(p.Snapshot.CI.Images, p.Snapshot.CI.Bindings) != nil || p.Snapshot.CI.Identity != previewCIInputIdentity(p.Snapshot.CI.Revision, p.Snapshot.CI.Images)) {
+		return nil, errors.New("saved CI preview inputs are incomplete")
+	}
 	rows, err := q.Query(ctx, `SELECT r.base_id,r.resource_id,r.name,r.kind,w.node_id,r.position,r.repository_id,r.baseline,r.baseline_revision,r.baseline_release,r.branch_revision,r.deployed_key,r.deploying_key,r.isolation,r.data_state,r.data_operation,r.deploy_operation,r.routes_operation,r.remove_operation,r.routes FROM environment_preview_resources r JOIN workloads w ON w.id=r.resource_id WHERE r.preview_id=$1 ORDER BY r.position,r.name,r.base_id`, id)
 	if err != nil {
 		return nil, err
@@ -118,6 +132,15 @@ func (s *Server) loadPreviewResources(ctx context.Context, q interface {
 		}
 		if err = json.Unmarshal(routes, &item.Routes); err != nil {
 			return nil, err
+		}
+		if p.Snapshot.CI != nil {
+			if binding, ok := p.Snapshot.CI.Bindings[item.BaseID]; ok {
+				item.CIImages = p.Snapshot.CI.Images[item.BaseID]
+				if worker.ValidatePreviewRegistryImages(item.CIImages, binding.Server) != nil {
+					return nil, errors.New("saved CI preview images are invalid")
+				}
+				item.CIRegistry, item.CIIdentity, item.CIRevision = binding.Server, p.Snapshot.CI.Identity, p.Snapshot.CI.Revision
+			}
 		}
 		list = append(list, item)
 	}
@@ -143,13 +166,22 @@ func (s *Server) createPreviewRecord(ctx context.Context, tx pgx.Tx, project str
 	var existing string
 	err := tx.QueryRow(ctx, `SELECT id FROM environment_previews WHERE project_id=$1 AND suffix=$2`, project, suffix).Scan(&existing)
 	if err == nil {
+		if len(branches) > 0 {
+			p, problem := s.loadPreviewRow(ctx, tx, existing, true)
+			if problem != nil {
+				return "", false, problem
+			}
+			if p.Snapshot.CI != nil {
+				return "", false, errors.New("preview key is reserved for CI image submissions")
+			}
+		}
 		return existing, false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", false, err
 	}
 	var team string
-	if err = tx.QueryRow(ctx, `SELECT team_id FROM projects WHERE id=$1`, project).Scan(&team); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT team_id FROM projects WHERE id=$1 FOR KEY SHARE`, project).Scan(&team); err != nil {
 		return "", false, err
 	}
 	taken := map[string]bool{}
@@ -200,7 +232,11 @@ func (s *Server) createPreviewRecord(ctx context.Context, tx pgx.Tx, project str
 			return "", false, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,'environment preview created',$2,201,$3)`, previewActor(approvedBy), id, team); err != nil {
+	createdActor := previewActor(approvedBy)
+	if len(branches) == 0 && approvedBy == "" {
+		createdActor = "CI preview credential"
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES($1,'environment preview created',$2,201,$3)`, createdActor, id, team); err != nil {
 		return "", false, err
 	}
 	return id, true, nil
@@ -263,7 +299,7 @@ func (s *Server) setPreviewState(ctx context.Context, q interface {
 func (s *Server) failPreview(ctx context.Context, id, stage, detail string) error {
 	_, err := s.DB.Exec(ctx, `UPDATE environment_previews SET state='failed',stage=$2,detail=$3,updated_at=now(),next_attempt_at=now()+interval '1 minute' WHERE id=$1`, id, stage, detail)
 	if err == nil {
-		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview failed at '||$2,id,500,team_id FROM environment_previews WHERE id=$1`, id, stage)
+		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview failed at '||$2,id,500,team_id FROM environment_previews WHERE id=$1 FOR KEY SHARE`, id, stage)
 	}
 	return err
 }
@@ -279,7 +315,7 @@ func (s *Server) advancePreview(ctx context.Context, id string) error {
 	if p.State != "deleting" && !p.Pinned {
 		expired := p.LastActivity.Add(time.Duration(p.Snapshot.Recipe.TTLHours) * time.Hour).Before(time.Now())
 		if expired {
-			return s.requestPreviewDeletion(ctx, s.DB, id, "inactive for "+fmt.Sprint(p.Snapshot.Recipe.TTLHours)+" hours")
+			return s.expirePreview(ctx, id)
 		}
 	}
 	switch p.State {
@@ -292,13 +328,14 @@ func (s *Server) advancePreview(ctx context.Context, id string) error {
 		if previewDrifted(resources) {
 			return s.markPreviewDrifted(ctx, id)
 		}
-		return s.setPreviewState(ctx, s.DB, id, "ready", "ready", p.Detail, 5*time.Minute)
+		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1 AND state='ready' AND stage='ready'`, id)
+		return err
 	case "awaiting_approval":
-		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1`, id)
+		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1 AND state='awaiting_approval'`, id)
 		return err
 	case "failed":
 		// A failed preview waits for an explicit retry; only its expiry is checked here.
-		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1`, id)
+		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 minutes' WHERE id=$1 AND state='failed'`, id)
 		return err
 	}
 	switch p.Stage {
@@ -323,7 +360,7 @@ func (s *Server) requestPreviewDeletion(ctx context.Context, q interface {
 }, id, reason string) error {
 	tag, err := q.Exec(ctx, `UPDATE environment_previews SET state='deleting',stage='remove',delete_reason=$2,detail='',updated_at=now(),next_attempt_at=now() WHERE id=$1 AND state<>'deleting'`, id, reason)
 	if err == nil && tag.RowsAffected() > 0 {
-		_, err = q.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview deletion: '||$2,id,202,team_id FROM environment_previews WHERE id=$1`, id, reason)
+		_, err = q.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview deletion: '||$2,id,202,team_id FROM environment_previews WHERE id=$1 FOR KEY SHARE`, id, reason)
 	}
 	return err
 }
@@ -403,6 +440,18 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 	if current.Environment != "" || current.Stage != "plan" || current.State != "creating" {
 		return tx.Commit(ctx)
 	}
+	if previewCIHash(current.Snapshot.CI) != previewCIHash(p.Snapshot.CI) {
+		return tx.Commit(ctx)
+	}
+	if p.Snapshot.CI != nil {
+		for id, binding := range p.Snapshot.CI.Bindings {
+			actual, _, problem := s.previewCIBinding(ctx, tx, p.Team, p.Base, id, recipe)
+			if problem != nil || previewCIHash(actual) != previewCIHash(binding) {
+				tx.Rollback(ctx)
+				return s.failPreview(ctx, p.ID, "plan", "CI resource scope changed before preview planning. Issue a replacement credential and use a new preview key.")
+			}
+		}
+	}
 	branches := map[int64]string{}
 	rows, err := tx.Query(ctx, `SELECT repository_id,head FROM environment_preview_branches WHERE preview_id=$1`, p.ID)
 	if err != nil {
@@ -445,7 +494,7 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 		item := plans[src.ID]
 		policy := recipe.Resources[src.ID]
 		target := targets[src.ID]
-		config := workloadInput{Name: src.Name, NodeID: src.Node, Kind: src.Kind, JobService: src.Config.JobService, Limits: src.Config.Limits, Hooks: src.Config.Hooks, Environment: map[string]string{}}
+		config := workloadInput{Name: src.Name, NodeID: src.Node, Kind: src.Config.Kind, Database: src.Config.Database, JobService: src.Config.JobService, Limits: src.Config.Limits, Hooks: src.Config.Hooks, Environment: map[string]string{}}
 		if config.Kind == "" {
 			config.Kind = "service"
 		}
@@ -481,6 +530,22 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 			baseline.Compose = deployed.Compose
 		}
 		config.Compose = baseline.Compose
+		if config.Database != nil {
+			if err = isolateDatabaseCopy(&config, target); err != nil {
+				return s.failPreview(ctx, p.ID, "plan", "Database private configuration cannot be isolated")
+			}
+			baseline.Compose = config.Compose
+		}
+		if p.Snapshot.CI != nil {
+			if binding, ok := p.Snapshot.CI.Bindings[src.ID]; ok {
+				names, problem := previewCIServices(baseline.Compose)
+				if problem != nil || previewCIHash(names) != previewCIHash(binding.Services) {
+					tx.Rollback(ctx)
+					return s.failPreview(ctx, p.ID, "plan", "Deploy the saved Compose service set before creating a CI preview.")
+				}
+				config.Source = nil
+			}
+		}
 		if src.Kind == "job" && baseline.Source != nil {
 			pinned := *baseline.Source
 			config.Source = &pinned
@@ -497,7 +562,34 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 		if src.Kind == "job" && policy.Schedule {
 			cron = src.JobCron
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='' THEN NULL ELSE now()+interval '1 minute' END)`, target, src.Node, src.Name, encrypted, config.Kind, environment, p.Team, p.Project, cpu, memory, cron); err != nil {
+		zone := src.JobTimezone
+		if zone == "" {
+			zone = "UTC"
+		}
+		var nextJob *time.Time
+		if cron != "" {
+			schedule, err := parseCron(cron)
+			if err != nil {
+				return err
+			}
+			schedule.location, err = time.LoadLocation(zone)
+			if err != nil {
+				return err
+			}
+			next, err := schedule.next(time.Now())
+			if err != nil {
+				return err
+			}
+			nextJob = &next
+		}
+		overlap, timeout := src.JobOverlap, src.JobTimeout
+		if overlap == "" {
+			overlap = "skip"
+		}
+		if timeout == 0 {
+			timeout = worker.DefaultJobTimeoutSeconds
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO workloads(id,node_id,name,configuration,kind,environment_id,team_id,project_id,configured_cpu,configured_memory_mb,job_cron,next_job_at,job_timezone,job_overlap_policy,job_timeout_seconds) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, target, src.Node, src.Name, encrypted, resourceKind(config), environment, p.Team, p.Project, cpu, memory, cron, nextJob, zone, overlap, timeout); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.ConstraintName == "cove_team_quota" {
 				tx.Rollback(ctx)
@@ -559,7 +651,8 @@ func (s *Server) planPreviewStage(ctx context.Context, p *previewRow) error {
 			if err != nil {
 				return s.failPreview(ctx, p.ID, "plan", err.Error())
 			}
-			routes = append(routes, worker.Route{Domain: domain, Service: route.Service, Port: route.Port, Auth: p.Snapshot.Auth})
+			route.Domain, route.Auth = domain, p.Snapshot.Auth
+			routes = append(routes, route)
 		}
 		routesJSON, err := json.Marshal(routes)
 		if err != nil {
@@ -909,12 +1002,17 @@ func (s *Server) previewDeployRequest(ctx context.Context, tx pgx.Tx, p *preview
 	if err := s.unsealJSON(raw, &config); err != nil {
 		return worker.Request{}, err
 	}
-	request := worker.Request{ID: resourceID(), Workload: resource.ResourceID, Action: "deploy", Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets}
+	request := worker.Request{ID: resourceID(), Workload: resource.ResourceID, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Environment: config.Environment, Kind: config.Kind, JobService: config.JobService, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets}
 	isolation := resource.Isolation
 	isolation.Images = nil
 	isolation.Refresh = false
 	request.EnvironmentPreview = &isolation
-	if resource.BranchRevision != "" && config.Source != nil {
+	if resource.CIIdentity != "" {
+		request.Source = nil
+		request.Compose = resource.Baseline.Compose
+		request.ImagePins = resource.CIImages
+		request.EnvironmentPreview.ImageRegistry = resource.CIRegistry
+	} else if resource.BranchRevision != "" && config.Source != nil {
 		source := *config.Source
 		source.Revision = resource.BranchRevision
 		source.Token = ""
@@ -1012,6 +1110,17 @@ func (s *Server) deployPreviewStage(ctx context.Context, p *previewRow) error {
 		tx, err := s.DB.Begin(ctx)
 		if err != nil {
 			return err
+		}
+		if p.Snapshot.CI != nil {
+			current, problem := s.loadPreviewRow(ctx, tx, p.ID, true)
+			if problem != nil {
+				tx.Rollback(ctx)
+				return problem
+			}
+			if current.Stage != "deploy" || (current.State != "creating" && current.State != "updating") || current.Snapshot.CI == nil || current.Snapshot.CI.Identity != p.Snapshot.CI.Identity {
+				tx.Rollback(ctx)
+				return nil
+			}
 		}
 		active, err := activeOperation(ctx, tx, resource.ResourceID)
 		if err != nil || active {
@@ -1133,7 +1242,7 @@ func (s *Server) publishPreviewStage(ctx context.Context, p *previewRow) error {
 	}
 	detail := ""
 	if p.State == "creating" {
-		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) VALUES('Cove','environment preview ready',$1,200,$2)`, p.ID, p.Team)
+		_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(actor,action,subject,status,team_id) SELECT 'Cove','environment preview ready',id,200,team_id FROM environment_previews WHERE id=$1 AND team_id=$2 FOR KEY SHARE`, p.ID, p.Team)
 		if err != nil {
 			return err
 		}
@@ -1205,7 +1314,7 @@ func (s *Server) removePreviewStage(ctx context.Context, p *previewRow) error {
 		if _, err = s.DB.Exec(ctx, `DELETE FROM resource_connections WHERE source_id=ANY($1) OR target_id=ANY($1)`, ids); err != nil {
 			return err
 		}
-		if _, err = s.DB.Exec(ctx, `UPDATE workloads SET job_cron='',next_job_at=NULL WHERE id=ANY($1)`, ids); err != nil {
+		if _, err = s.DB.Exec(ctx, `UPDATE workloads SET job_cron='',next_job_at=NULL,job_pending_at=NULL WHERE id=ANY($1)`, ids); err != nil {
 			return err
 		}
 	}
@@ -1275,23 +1384,6 @@ func (s *Server) removePreviewStage(ctx context.Context, p *previewRow) error {
 		}
 		_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET next_attempt_at=now()+interval '5 seconds' WHERE id=$1`, p.ID)
 		return err
-	}
-	for _, resource := range resources {
-		for _, route := range resource.Routes {
-			if resource.RoutesOperation == "" {
-				continue
-			}
-			zone, address, err := s.previewDNSZone(ctx, p.Team, resource.Node, route.Domain)
-			if err != nil {
-				return err
-			}
-			if zone != nil {
-				if err = s.removeDNSRecord(ctx, *zone, route.Domain, address); err != nil {
-					_, err = s.DB.Exec(ctx, `UPDATE environment_previews SET detail=$2,next_attempt_at=now()+interval '1 minute' WHERE id=$1`, p.ID, "Could not remove the DNS record for "+route.Domain+"; retrying.")
-					return err
-				}
-			}
-		}
 	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {

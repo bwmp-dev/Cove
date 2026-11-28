@@ -7,11 +7,13 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import { useLogout } from "../api/mutations";
 import { workloadQuery } from "../api/queries";
+import { accountSignInMethodsQuery } from "../api/security";
 import { useOnline } from "../lib/hooks";
 import { currentTeam, managesTeam } from "../lib/permissions";
 import { useSession, useSwitchTeam } from "../lib/session";
-import { groupLabelClass, inputClass, navItemClass } from "../lib/styles";
-import { Spinner } from "./ui";
+import { buttonClass, groupLabelClass, inputClass, navItemClass } from "../lib/styles";
+import { CommandCenter, SearchButton } from "./CommandCenter";
+import { EmptyState, Spinner } from "./ui";
 
 function Wordmark() {
   return (
@@ -105,6 +107,7 @@ function Navigation() {
   const team = currentTeam(session);
   const manager = managesTeam(team) || Boolean(session?.is_admin);
   const placedResource = usePlacedResourceOpen();
+  const apiDocs = useRouterState({ select: (state) => state.location.pathname === "/api-docs" });
   return (
     <nav aria-label="Primary" className="space-y-5 px-2 py-3">
       <TeamSwitcher />
@@ -139,7 +142,7 @@ function Navigation() {
           Team settings
         </Link>
         {manager && <Link to="/notifications" className={navItemClass}><Bell aria-hidden className="size-4 shrink-0" />Notifications</Link>}
-        <Link to="/tokens" className={navItemClass}>
+        <Link to="/tokens" className={navItemClass} data-section={apiDocs || undefined}>
           <KeyRound aria-hidden className="size-4 shrink-0" />
           API keys and tokens
         </Link>
@@ -188,6 +191,7 @@ function MobileHeader({ fetching }: { fetching: boolean }) {
         <Wordmark />
         <div className="flex items-center gap-2">
           {fetching && <Spinner className="size-3.5 text-fg-subtle" />}
+          <SearchButton compact />
           <button
             ref={trigger}
             type="button"
@@ -211,10 +215,36 @@ function MobileHeader({ fetching }: { fetching: boolean }) {
   );
 }
 
+// When the instance or the selected team requires a second factor, resource APIs refuse this account until it
+// enrols one, so every page except Account is replaced by the way forward. Switching team re-evaluates the policy.
+function useEnrolmentRequired() {
+  const session = useSession();
+  const factors = useQuery({ ...accountSignInMethodsQuery, enabled: Boolean(session) });
+  const onAccount = useRouterState({ select: (state) => state.location.pathname === "/account" });
+  return factors.data?.enrolment_required === true && !onAccount;
+}
+
+function EnrolmentRequired() {
+  return (
+    <EmptyState
+      title="Set up two-step verification to continue"
+      action={
+        <Link to="/account" className={buttonClass("primary")}>
+          Set up two-step verification
+        </Link>
+      }
+    >
+      This instance or the selected team requires a second factor before you can use its projects and resources. Add an authenticator app or a passkey from
+      your account page. You can still switch to another team from the navigation.
+    </EmptyState>
+  );
+}
+
 export function AppShell() {
   const online = useOnline();
   const session = useSession();
   const fetching = useIsFetching() > 0;
+  const enrolmentRequired = useEnrolmentRequired();
 
   return (
     <div className="min-h-dvh bg-canvas lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
@@ -229,6 +259,9 @@ export function AppShell() {
         <div className="flex h-14 shrink-0 items-center justify-between px-4">
           <Wordmark />
           {fetching && <Spinner className="size-3.5 text-fg-subtle" />}
+        </div>
+        <div className="shrink-0 px-2">
+          <SearchButton />
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
           <Navigation />
@@ -249,10 +282,11 @@ export function AppShell() {
             </div>
           )}
           <main key={session?.team_id} id="main" tabIndex={-1} className="page-grid pb-12 focus:outline-none">
-            <Outlet />
+            {enrolmentRequired ? <EnrolmentRequired /> : <Outlet />}
           </main>
         </div>
       </div>
+      <CommandCenter />
     </div>
   );
 }

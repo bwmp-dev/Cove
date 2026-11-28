@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Info, LoaderCir
 import { Children, isValidElement, useId, useState, type ButtonHTMLAttributes, type ComponentProps, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import { buttonClass, type Size, type Variant } from "../lib/styles";
+import { ErrorRemediation } from "./ErrorRemediation";
 import { Switch } from "./Switch";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -126,6 +127,7 @@ export function QueryError({ error, onRetry, retrying, what }: { error: unknown;
       }
     >
       {errorMessage(error)}
+      <ErrorRemediation error={error} />
     </Notice>
   );
 }
@@ -222,7 +224,7 @@ export function LoadingRows({ label, rows = 4 }: { label: string; rows?: number 
 }
 
 export function SectionGrid({ children }: { children: ReactNode }) {
-  return <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,30rem),1fr))] items-start gap-5 px-4 pt-5 sm:px-6 [&>div]:min-w-0 [&>div]:px-0 [&>div]:pt-0 [&>div>section]:px-0 [&>div>section]:pt-0 [&>section]:px-0 [&>section]:pt-0">{children}</div>;
+  return <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,30rem),1fr))] items-start gap-5 px-4 pt-5 sm:px-6 [&>div]:min-w-0 [&>div]:px-0 [&>div]:pt-0 [&>div>section]:px-0 [&>div>section]:pt-0 [&>div>form>section]:px-0 [&>div>form>section]:pt-0 [&>form>section]:px-0 [&>form>section]:pt-0 [&>section]:px-0 [&>section]:pt-0">{children}</div>;
 }
 
 interface SectionProps {
@@ -359,13 +361,15 @@ export function DefinitionList({ items, compact = false }: { items: { term: stri
 
 // Metadata items separated by middle dots that wrap as whole items. Each item draws its dot in the gap before it,
 // and the wrapper clips the dot of whichever item starts a line, so no line begins with a separator.
+// Each item is a flex item beside its dot, so content that wraps never falls under the clipped dot, and an item that
+// sets min-w-0 can shrink and truncate inside the line.
 export function MetaList({ children, className = "" }: { children: ReactNode; className?: string }) {
   const items = Children.toArray(children).filter(Boolean);
   return (
     <span className={`-mx-1 -my-1 block overflow-hidden px-1 py-1 ${className}`}>
       <span className="-ml-4 flex flex-wrap items-center gap-y-1">
         {items.map((item, index) => (
-          <span key={isValidElement(item) && item.key !== null ? item.key : index} className="min-w-0 before:inline-block before:w-4 before:text-center before:text-fg-subtle before:content-['·']">
+          <span key={isValidElement(item) && item.key !== null ? item.key : index} className="flex min-w-0 items-baseline before:w-4 before:shrink-0 before:text-center before:text-fg-subtle before:content-['·']">
             {item}
           </span>
         ))}

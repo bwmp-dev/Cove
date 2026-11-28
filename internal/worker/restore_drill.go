@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,29 @@ import (
 func (e *Engine) cleanupDrill(ctx context.Context, id string) error {
 	if !identifier.MatchString(id) {
 		return errors.New("invalid drill recovery ID")
+	}
+	marker, err := os.ReadFile(filepath.Join(e.Root, "drills", id+".json"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var recovery struct {
+		Workload       string
+		DatabaseVerify bool `json:"database_verify"`
+	}
+	if len(marker) > 0 {
+		if json.Unmarshal(marker, &recovery) != nil {
+			return errors.New("invalid drill recovery record")
+		}
+		if recovery.DatabaseVerify {
+			if !workloadIdentifier.MatchString(recovery.Workload) {
+				return errors.New("invalid drill workload")
+			}
+			for _, suffix := range []string{"", "-apply"} {
+				if err = e.cleanupDatabaseVerifier(ctx, Request{ID: id + suffix, Workload: recovery.Workload}); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	for _, label := range []string{"dev.cove.drill=", "dev.cove.operation="} {
 		raw, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label="+label+id)
@@ -94,7 +118,7 @@ func (e *Engine) performDrill(ctx context.Context, r Request, out io.Writer) (re
 	if err = os.MkdirAll(root, 0700); err != nil {
 		return err
 	}
-	if err = writeJSON(filepath.Join(root, r.ID+".json"), map[string]string{"workload": r.Workload}); err != nil {
+	if err = writeJSON(filepath.Join(root, r.ID+".json"), map[string]any{"workload": r.Workload, "database_verify": manifest.Record.Database != nil && extendedDatabase(manifest.Record.Database.Engine)}); err != nil {
 		return err
 	}
 	defer func() {
@@ -132,7 +156,12 @@ func (e *Engine) performDrill(ctx context.Context, r Request, out io.Writer) (re
 	if err = e.restic(ctx, r, nil, false, out, "check", "--read-data"); err != nil {
 		return errors.New("backup repository integrity check failed")
 	}
-	if err = e.restic(ctx, r, mounts, true, out, "restore", manifest.Record.Snapshot, "--target", "/", "--include", "/data", "--verify"); err != nil {
+	if manifest.Record.DataSnapshot != "" {
+		err = e.readDatabaseSnapshot(ctx, r, manifest, filepath.Join(stage, "000", "database.dump"))
+	} else {
+		err = e.restic(ctx, r, mounts, true, out, "restore", manifest.Record.Snapshot, "--target", "/", "--include", "/data", "--verify")
+	}
+	if err != nil {
 		return errors.New("backup could not be restored into temporary storage")
 	}
 	fmt.Fprintln(out, "Backup restored and verified in isolated temporary storage; production mounts were not used.")
@@ -141,7 +170,20 @@ func (e *Engine) performDrill(ctx context.Context, r Request, out io.Writer) (re
 		return nil
 	}
 	d := manifest.Record.Database
-	ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+r.Workload, "--filter", "label=com.docker.compose.service="+d.Service)
+	if extendedDatabase(d.Engine) {
+		source := r
+		source.Backup.Database = d
+		ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service="+d.Service)
+		if err != nil || len(strings.Fields(ids)) != 1 {
+			return errors.New("database service identity unavailable")
+		}
+		cleanup, err := e.verifyExtendedDatabase(ctx, source, strings.Fields(ids)[0], filepath.Join(stage, "000", "database.dump"), false)
+		if err != nil {
+			return err
+		}
+		return cleanup()
+	}
+	ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service="+d.Service)
 	if err != nil || len(strings.Fields(ids)) != 1 {
 		return errors.New("database drill requires the original database service container to identify its image")
 	}

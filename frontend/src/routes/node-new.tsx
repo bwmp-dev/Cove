@@ -28,7 +28,13 @@ export function NewNodePage() {
         icon={<Server aria-hidden />}
         breadcrumbs={<Breadcrumbs><Link to="/nodes" className="rounded hover:text-fg">Nodes</Link>Add node</Breadcrumbs>}
         title="Add node"
-        description="Requires Linux with systemd and OpenSSH. On apt-based distributions the installer adds Docker and Compose when they are missing; other distributions need them preinstalled."
+        description={
+          <span className="block max-w-3xl">
+            Requires a Linux amd64 or arm64 host with systemd and sudo access. On Ubuntu and Debian, and on RHEL, AlmaLinux, Rocky Linux and CentOS
+            Stream 9 or 10, the installer adds Docker, Compose, Buildx, OpenSSH, curl, Git and jq when they are missing. Other systemd distributions
+            need them preinstalled.
+          </span>
+        }
       />
       {create.data ? (
         <EnrollmentPanel

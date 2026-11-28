@@ -8,9 +8,40 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestPreviewRejectsExternalFilesBeforeBuiltinResolution(t *testing.T) {
+	for _, compose := range []string{
+		"include: /must-not-read.yaml\nservices: {}\n",
+		"services:\n  app:\n    image: busybox\n    env_file: /must-not-read.env\n",
+	} {
+		engine, err := NewEngine(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := Request{ID: "unsafe-preview", Workload: "preview", Action: "deploy", Preview: true, Compose: compose, BuiltinDefaults: map[string]string{CoveProject: "project"}}
+		if _, err = engine.Submit(request); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		engine.Run = func(context.Context, string, []string, []string, io.Writer) error {
+			calls++
+			return nil
+		}
+		var jobs sync.WaitGroup
+		if err = engine.dispatch(context.Background(), &jobs); err != nil {
+			t.Fatal(err)
+		}
+		jobs.Wait()
+		operation, err := engine.Status(request.ID)
+		if err != nil || operation.State != "failed" || calls != 0 {
+			t.Fatalf("preview resolved before isolation: state=%s calls=%d err=%v", operation.State, calls, err)
+		}
+	}
+}
 
 func TestPreviewComposeIsolation(t *testing.T) {
 	root := t.TempDir()

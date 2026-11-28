@@ -1,10 +1,12 @@
 import { SharedVariables } from "../components/SharedVariables";
 import { DeploymentPolicy } from "../components/DeploymentPolicy";
+import { ResourceDefaultsSection } from "../components/ResourceDefaults";
 import { DependencyMap } from "../components/DependencyMap";
 import { EnvironmentResources } from "../components/PrivateConnections";
+import { EnvironmentSuspensionSection } from "../components/EnvironmentSuspension";
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, Outlet, useNavigate, useParams } from "@tanstack/react-router";
-import { Folder, GitBranch, Layers, Plus } from "lucide-react";
+import { FileCog, Folder, GitBranch, Layers, Plus } from "lucide-react";
 import { createContext, Fragment, use, useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { errorMessage } from "../api/client";
 import { projectsQuery, useCreateEnvironment, useDeleteEnvironment, useDeleteProject, type Environment, type Project } from "../api/projects";
@@ -15,8 +17,12 @@ import { DeploymentPlan } from "../components/DeploymentPlan";
 import { CloneForm } from "../components/Clone";
 import { ConfirmDialog, Dialog } from "../components/ConfirmDialog";
 import { PlacementRow } from "../components/EnvironmentList";
+import { Notes } from "../components/Notes";
+import { PinButton } from "../components/PinButton";
+import { ProjectCosts } from "../components/ProjectCosts";
+import { StatusPageSettings } from "../components/StatusPageSettings";
 import { Breadcrumbs, Button, EmptyState, Field, LoadingRows, MetaList, Notice, PageHeader, QueryError, Section, SectionGrid, TabNav } from "../components/ui";
-import { countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
+import { canCompareEnvironments, canExportConfiguration, countLabel, nodeNames, previewEnvironments, productionEnvironments, resourcesIn, suggestedEnvironments } from "../lib/hierarchy";
 import { useOnline } from "../lib/hooks";
 import { can, canCreateProjects } from "../lib/permissions";
 import { useSession } from "../lib/session";
@@ -30,7 +36,7 @@ interface ProjectContextValue {
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
 
-function useProject() {
+export function useProject() {
   const value = use(ProjectContext);
   if (!value) throw new Error("Project pages must render inside the project layout.");
   return value;
@@ -282,8 +288,8 @@ function ProjectFrame({ project, workloads, environmentId, crumbsRoot }: { proje
           </MetaList>
         }
         actions={
-          (canEditProject || canCreate) && (
             <>
+              {current ? <PinButton kind="environment" id={current.id} name={current.name} /> : <PinButton kind="project" id={project.id} name={project.name} />}
               {canEditProject && (
                 <Button onClick={() => setCreating(true)}>
                   <Layers aria-hidden className="size-3.5" />
@@ -294,7 +300,6 @@ function ProjectFrame({ project, workloads, environmentId, crumbsRoot }: { proje
               {canEditProject && <DeploymentPlan projectId={project.id} resources={resources} />}
               {canEditProject && <ProjectActions project={project} resources={resources.length} />}
             </>
-          )
         }
         tabs={<ProjectTabs project={project} resources={resources} inPreview={!!current?.preview_id} />}
       />
@@ -331,6 +336,12 @@ function ProjectTabs({ project, resources, inPreview }: { project: Project; reso
         Previews
         {previews.length > 0 && <span className="text-xs font-normal text-fg-subtle tabular-nums">{previews.length}</span>}
       </Link>
+      {(can(project.permissions, "read") || canCompareEnvironments(project) || canExportConfiguration(project)) && (
+        <Link to="/projects/$projectId/configuration" params={{ projectId: project.id }} className={tabLinkClass}>
+          <FileCog aria-hidden className="size-3.5" />
+          Configuration
+        </Link>
+      )}
     </TabNav>
   );
 }
@@ -384,7 +395,10 @@ export function ProjectOverview() {
           <DeploymentPolicy scope="project" id={project.id} />
         </SectionGrid>
       )}
+      {can(project.permissions, "read") && <ProjectCosts projectId={project.id} />}
+      {editable && <StatusPageSettings projectId={project.id} />}
       {can(project.permissions, "read") && <DependencyMap projectId={project.id} />}
+      {can(project.permissions, "read") && <Notes key={project.id} scope="project" id={project.id} canEdit={editable} />}
     </>
   );
 }
@@ -401,6 +415,7 @@ export function EnvironmentPage() {
     return (
       <Fragment key={environment.id}>
         <PreviewStatus previewId={environment.preview_id} />
+        <EnvironmentSuspensionSection environment={environment} preview />
         <EnvironmentResources
           projectId={project.id}
           environmentId={environment.id}
@@ -418,6 +433,7 @@ export function EnvironmentPage() {
   // siblings individually with the same value made React keep the old section mounted each time.
   return (
     <Fragment key={environment.id}>
+      <EnvironmentSuspensionSection environment={environment} />
       <EnvironmentResources
         projectId={project.id}
         environmentId={environment.id}
@@ -437,8 +453,10 @@ export function EnvironmentPage() {
         <SectionGrid>
           <SharedVariables scope="environment" id={environment.id} collapsible />
           <DeploymentPolicy scope="environment" id={environment.id} />
+          <ResourceDefaultsSection target={{ scope: "environment", id: environment.id }} canEdit />
         </SectionGrid>
       )}
+      {can(project.permissions, "read") && <ProjectCosts projectId={project.id} environmentId={environment.id} />}
     </Fragment>
   );
 }

@@ -85,8 +85,8 @@ func TestGitDeploymentPreservesReleaseDirectory(t *testing.T) {
 	if result.State != "succeeded" || result.Revision != commit {
 		t.Fatalf("unexpected deployment: %+v", result)
 	}
-	if len(commands) != 12 {
-		t.Fatalf("expected checkout, deployment and immutable snapshot commands; got %d", len(commands))
+	if len(commands) != 13 {
+		t.Fatalf("expected checkout, capacity, deployment and immutable snapshot commands; got %d", len(commands))
 	}
 	current, err := os.ReadFile(filepath.Join(e.Root, "workloads", "app", "current.json"))
 	if err != nil || !strings.Contains(string(current), "git-release") {

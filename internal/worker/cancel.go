@@ -1,8 +1,14 @@
 package worker
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 func (e *Engine) Cancel(request Request) (Operation, error) {
+	if request.DatabaseMaintenance != nil {
+		return Operation{}, errors.New("database maintenance must finish or be retried")
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	op, err := e.submitLocked(request)

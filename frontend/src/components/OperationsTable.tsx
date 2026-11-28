@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import type { Operation } from "../api/types";
 import { formatDuration, shortId } from "../lib/format";
-import { actionLabels, durationMs, isActive } from "../lib/operations";
+import { actionLabels, durationMs, isActive, workerResult } from "../lib/operations";
 import { listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { RelativeTime } from "./RelativeTime";
 import { OperationStateLabel } from "./status";
@@ -45,7 +45,7 @@ export function OperationsTable({ operations, workloadNames, caption }: Operatio
         {operations.map((operation) => {
           const duration = durationMs(operation);
           const workloadName = workloadNames?.get(operation.workload_id);
-          const revision = operation.result?.revision;
+          const revision = workerResult(operation)?.revision;
           return (
             <tr key={operation.id} className={tableRowClass}>
               <td className="py-2.5 pr-4 pl-4">
@@ -58,6 +58,7 @@ export function OperationsTable({ operations, workloadNames, caption }: Operatio
                 </Link>
                 <span className="ml-2 font-mono text-xs text-fg-subtle">{shortId(operation.id)}</span>
                 {showWorkload && <div className="mt-0.5 truncate text-xs text-fg-muted md:hidden">{workloadName ?? "Unknown resource"}</div>}
+                {operation.reason && <div className="mt-0.5 line-clamp-2 max-w-prose text-xs break-words text-fg-muted" title={operation.reason}>Reason: {operation.reason}</div>}
               </td>
               {showWorkload && (
                 <td className="hidden max-w-56 truncate py-2.5 pr-4 text-[13px] text-fg-muted md:table-cell">

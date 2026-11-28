@@ -19,6 +19,13 @@ type Registry struct {
 	Password string `json:"password"`
 }
 
+func ValidateRegistryRepository(repository string) error {
+	if len(repository) > 200 || !repositoryPath.MatchString(repository) {
+		return errors.New("use a lowercase repository path of at most 200 characters, without a registry host or tag")
+	}
+	return nil
+}
+
 func ValidateRegistry(r *Registry) error {
 	if r == nil {
 		return nil
@@ -66,6 +73,13 @@ func (e *Engine) TestRegistry(ctx context.Context, r *Registry) error {
 	}
 	defer os.RemoveAll(dir)
 	command := exec.CommandContext(ctx, "docker", "--config", dir, "login", r.Server, "--username", r.Username, "--password-stdin")
+	proxy, err := readOutboundConfig(e.Root)
+	if err != nil {
+		return err
+	}
+	if proxy != nil {
+		command.Env = append(os.Environ(), proxy.Env()...)
+	}
 	command.Stdin = strings.NewReader(r.Password)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard

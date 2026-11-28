@@ -4,7 +4,16 @@ import { Button } from "./ui";
 
 type Status = "idle" | "copied" | "failed";
 
-export function CopyButton({ text, label = "Copy", variant = "secondary" }: { text: string; label?: string; variant?: "secondary" | "primary" | "ghost" }) {
+interface CopyButtonProps {
+  text: string;
+  label?: string;
+  variant?: "secondary" | "primary" | "ghost";
+  size?: "sm" | "md";
+  // Names what is copied when several copy buttons share a view, such as "reference for web".
+  subject?: string;
+}
+
+export function CopyButton({ text, label = "Copy", variant = "secondary", size = "md", subject }: CopyButtonProps) {
   const [status, setStatus] = useState<Status>("idle");
 
   useEffect(() => {
@@ -24,7 +33,7 @@ export function CopyButton({ text, label = "Copy", variant = "secondary" }: { te
 
   return (
     <span className="inline-flex items-center gap-2">
-      <Button variant={variant} onClick={() => void copy()}>
+      <Button variant={variant} size={size} aria-label={subject ? `${status === "copied" ? "Copied" : label} ${subject}` : undefined} onClick={() => void copy()}>
         {status === "copied" ? <Check aria-hidden className="size-3.5" /> : <Copy aria-hidden className="size-3.5" />}
         {status === "copied" ? "Copied" : label}
       </Button>

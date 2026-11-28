@@ -3,6 +3,7 @@ package control
 import (
 	"cove/internal/worker"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -27,10 +28,15 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "configuration unavailable", 503)
 		return
 	}
-	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", Compose: c.Compose, Source: c.Source, Environment: c.Environment, Limits: c.Limits, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy}
+	request := worker.Request{ID: resourceID(), Workload: r.PathValue("id"), Action: "deploy", ComposeBundle: c.ComposeBundle, Compose: c.Compose, Source: c.Source, Environment: c.Environment, Limits: c.Limits, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy, Rollout: c.Rollout}
 	// The inspection has no operation row. Preparation enriches only this request;
 	// its persistence UPDATE matches no row, and no deployment is queued.
 	if err = s.prepareInfrastructure(r.Context(), &request); err != nil {
+		var resolution *variableResolutionError
+		if errors.As(err, &resolution) {
+			http.Error(w, resolution.Error(), 409)
+			return
+		}
 		http.Error(w, "check shared variable references, worker capabilities, and selected infrastructure connections", 409)
 		return
 	}
@@ -39,6 +45,10 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := s.nodeRPC(r.Context(), node, worker.RPCRequest{Method: "preflight", Request: &request})
+	if errors.Is(err, errOutboundWorkerUnsupported) {
+		http.Error(w, err.Error(), 409)
+		return
+	}
 	if err != nil || response.Preflight == nil {
 		http.Error(w, "preflight unavailable; check worker connectivity", 502)
 		return

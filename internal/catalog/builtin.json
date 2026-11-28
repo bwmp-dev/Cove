@@ -1,0 +1,2437 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "schema_version": 1,
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "description": "PostgreSQL database with named persistent storage.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/postgres",
+      "license": "https://www.postgresql.org/about/licence/",
+      "docs": "https://hub.docker.com/_/postgres",
+      "notes": "Database ports are not published. Initialization credentials apply only to an empty volume. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "postgres": "postgres:18.7-alpine"
+      },
+      "compose": "services:\n  postgres:\n    image: postgres:18.7-alpine\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/postgresql\n    environment:\n      POSTGRES_DB: app\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "POSTGRES_PASSWORD",
+          "label": "Postgres Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "mysql",
+      "name": "MySQL",
+      "description": "MySQL LTS relational database.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/mysql",
+      "license": "https://hub.docker.com/_/mysql",
+      "docs": "https://hub.docker.com/_/mysql",
+      "notes": "App database/user are app. Initialization applies only to an empty volume. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "mysql": "mysql:8.4.13"
+      },
+      "compose": "services:\n  mysql:\n    image: mysql:8.4.13\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/mysql\n    environment:\n      MYSQL_DATABASE: app\n      MYSQL_USER: app\n      MYSQL_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      MYSQL_ROOT_PASSWORD: ${ROOT_PASSWORD:?Set ROOT_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - mysqladmin ping -h 127.0.0.1 -u root --password=\"$${MYSQL_ROOT_PASSWORD}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ROOT_PASSWORD",
+          "label": "Root Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "mariadb",
+      "name": "MariaDB",
+      "description": "MariaDB relational database.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/mariadb",
+      "license": "https://hub.docker.com/_/mariadb",
+      "docs": "https://hub.docker.com/_/mariadb",
+      "notes": "App database/user are app; ports stay internal. Initial credentials apply only to empty storage. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "mariadb": "mariadb:11.8.9"
+      },
+      "compose": "services:\n  mariadb:\n    image: mariadb:11.8.9\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/mysql\n    environment:\n      MARIADB_DATABASE: app\n      MARIADB_USER: app\n      MARIADB_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      MARIADB_ROOT_PASSWORD: ${ROOT_PASSWORD:?Set ROOT_PASSWORD}\n    healthcheck:\n      test:\n      - CMD\n      - healthcheck.sh\n      - --connect\n      - --innodb_initialized\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ROOT_PASSWORD",
+          "label": "Root Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "mongodb",
+      "name": "MongoDB",
+      "description": "MongoDB document database with authenticated administration.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/mongo",
+      "license": "https://hub.docker.com/_/mongo",
+      "docs": "https://hub.docker.com/_/mongo",
+      "notes": "Authenticate as app against the admin database. Ports are internal; initial credentials apply only to empty storage. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "mongo": "mongo:8.0.38-noble"
+      },
+      "compose": "services:\n  mongo:\n    image: mongo:8.0.38-noble\n    restart: unless-stopped\n    volumes:\n    - data:/data/db\n    environment:\n      MONGO_INITDB_ROOT_USERNAME: app\n      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Set MONGO_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - 'mongosh --quiet --eval \"quit(db.adminCommand({ping:1}).ok ? 0 : 1)\"'\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "MONGO_PASSWORD",
+          "label": "Mongo Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "redis",
+      "name": "Redis",
+      "description": "Redis cache with append-only persistence.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/redis",
+      "license": "https://hub.docker.com/_/redis",
+      "docs": "https://hub.docker.com/_/redis",
+      "notes": "Authentication is required. No host ports are published. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "redis": "redis:8.10.3-alpine"
+      },
+      "compose": "services:\n  redis:\n    image: redis:8.10.3-alpine\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    environment:\n      CACHE_PASSWORD: ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    command:\n    - redis-server\n    - --appendonly\n    - 'yes'\n    - --requirepass\n    - ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - redis-cli -a \"$${CACHE_PASSWORD}\" ping | grep -q PONG\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "CACHE_PASSWORD",
+          "label": "Cache Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "valkey",
+      "name": "Valkey",
+      "description": "Valkey cache with append-only persistence.",
+      "category": "Databases",
+      "source": "https://github.com/valkey-io/valkey",
+      "license": "https://github.com/valkey-io/valkey/blob/unstable/COPYING",
+      "docs": "https://valkey.io/topics/installation/",
+      "notes": "Authentication is required. No host ports are published. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "valkey": "valkey/valkey:9.2.0-alpine"
+      },
+      "compose": "services:\n  valkey:\n    image: valkey/valkey:9.2.0-alpine\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    environment:\n      CACHE_PASSWORD: ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    command:\n    - valkey-server\n    - --appendonly\n    - 'yes'\n    - --requirepass\n    - ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - valkey-cli -a \"$${CACHE_PASSWORD}\" ping | grep -q PONG\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "CACHE_PASSWORD",
+          "label": "Cache Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "clickhouse",
+      "name": "ClickHouse",
+      "description": "Column-oriented analytics database.",
+      "category": "Databases",
+      "source": "https://github.com/ClickHouse/ClickHouse",
+      "license": "https://github.com/ClickHouse/ClickHouse/blob/master/LICENSE",
+      "docs": "https://clickhouse.com/docs/install/docker",
+      "notes": " Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "clickhouse": "clickhouse/clickhouse-server:26.9.36.3"
+      },
+      "compose": "services:\n  clickhouse:\n    image: clickhouse/clickhouse-server:26.9.36.3\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/clickhouse\n    - logs:/var/log/clickhouse-server\n    environment:\n      CLICKHOUSE_DB: app\n      CLICKHOUSE_USER: app\n      CLICKHOUSE_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1'\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - wget -q -O - http://127.0.0.1:8123/ping | grep -q Ok\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  logs: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data",
+        "logs"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1024,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "couchdb",
+      "name": "CouchDB",
+      "description": "Single-node CouchDB document database.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/couchdb",
+      "license": "https://hub.docker.com/_/couchdb",
+      "docs": "https://hub.docker.com/_/couchdb",
+      "notes": " Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "couchdb": "couchdb:3.5.3"
+      },
+      "compose": "services:\n  couchdb:\n    image: couchdb:3.5.3\n    configs:\n      - source: single-node\n        target: /opt/couchdb/etc/local.d/10-single-node.ini\n    restart: unless-stopped\n    volumes:\n    - data:/opt/couchdb/data\n    environment:\n      COUCHDB_USER: app\n      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:?Set COUCHDB_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - curl --fail --silent http://127.0.0.1:5984/_up\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\nconfigs:\n  single-node:\n    content: '[couchdb]\n\n      single_node = true\n\n      '\n",
+      "variables": [
+        {
+          "key": "COUCHDB_PASSWORD",
+          "label": "Couchdb Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "couchdb",
+        "port": 5984,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "influxdb",
+      "name": "InfluxDB",
+      "description": "InfluxDB 2 time-series database.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/influxdb",
+      "license": "https://hub.docker.com/_/influxdb",
+      "docs": "https://hub.docker.com/_/influxdb",
+      "notes": "Organization and initial bucket are app. Initialization values only apply to an empty volume. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "influxdb": "influxdb:2.9.1-alpine"
+      },
+      "compose": "services:\n  influxdb:\n    image: influxdb:2.9.1-alpine\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/influxdb2\n    - config:/etc/influxdb2\n    environment:\n      DOCKER_INFLUXDB_INIT_MODE: setup\n      DOCKER_INFLUXDB_INIT_USERNAME: app\n      DOCKER_INFLUXDB_INIT_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n      DOCKER_INFLUXDB_INIT_ORG: app\n      DOCKER_INFLUXDB_INIT_BUCKET: app\n      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN}\n    healthcheck:\n      test:\n      - CMD\n      - influx\n      - ping\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  config: {}\n",
+      "variables": [
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ADMIN_TOKEN",
+          "label": "Admin Token",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "influxdb",
+        "port": 8086,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "config",
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "rabbitmq",
+      "name": "RabbitMQ",
+      "description": "Message broker with authenticated management UI.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/rabbitmq",
+      "license": "https://hub.docker.com/_/rabbitmq",
+      "docs": "https://hub.docker.com/_/rabbitmq",
+      "notes": "AMQP stays internal. Sign into management as app. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "rabbitmq": "rabbitmq:4.4.1-management-alpine"
+      },
+      "compose": "services:\n  rabbitmq:\n    image: rabbitmq:4.4.1-management-alpine\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/rabbitmq\n    environment:\n      RABBITMQ_DEFAULT_USER: app\n      RABBITMQ_DEFAULT_PASS: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n    healthcheck:\n      test:\n      - CMD\n      - rabbitmq-diagnostics\n      - -q\n      - ping\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "rabbitmq",
+        "port": 15672,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "nats",
+      "name": "NATS",
+      "description": "NATS with authenticated clients and persistent JetStream.",
+      "category": "Databases",
+      "source": "https://hub.docker.com/_/nats",
+      "license": "https://hub.docker.com/_/nats",
+      "docs": "https://docs.nats.io/running-a-nats-service/introduction/installation/installing_nats_docker",
+      "notes": "Client connections use port 4222 and app credentials. Monitoring is intentionally internal. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "nats": "nats:2.15.3-alpine"
+      },
+      "compose": "services:\n  nats:\n    image: nats:2.15.3-alpine\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    command:\n    - --jetstream\n    - --store_dir\n    - /data\n    - --user\n    - app\n    - --pass\n    - ${CLIENT_PASSWORD:?Set CLIENT_PASSWORD}\n    - --http_port\n    - '8222'\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - wget -q -O - http://127.0.0.1:8222/healthz\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "CLIENT_PASSWORD",
+          "label": "Client Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "nats",
+        "port": 8222,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "dragonfly",
+      "name": "Dragonfly",
+      "description": "Redis-compatible cache with scheduled snapshots.",
+      "category": "Databases",
+      "source": "https://github.com/dragonflydb/dragonfly",
+      "license": "https://github.com/dragonflydb/dragonfly/blob/v1.38.0/LICENSE.md",
+      "docs": "https://www.dragonflydb.io/docs/getting-started/docker-compose",
+      "notes": "Starts with two Dragonfly I/O threads and a 512 MB cache budget; adjust these explicit flags for the worker and data size. Data snapshots run hourly. Port 6379 stays internal; plan application-consistent backups separately. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "dragonfly": "docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0"
+      },
+      "compose": "services:\n  dragonfly:\n    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    command:\n    - --requirepass\n    - ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    - --proactor_threads=2\n    - --maxmemory=512mb\n    - --dir=/data\n    - --snapshot_cron=0 * * * *\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - redis-cli ping | grep -q PONG\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    environment:\n      REDISCLI_AUTH: ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "CACHE_PASSWORD",
+          "label": "Cache Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": null,
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 2,
+        "memory_mb": 1024,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "adminer",
+      "name": "Adminer",
+      "description": "Adminer with a private PostgreSQL database.",
+      "category": "Administration",
+      "source": "https://hub.docker.com/_/adminer",
+      "license": "https://hub.docker.com/_/adminer",
+      "docs": "https://hub.docker.com/_/adminer",
+      "notes": "Includes PostgreSQL; select PostgreSQL, server db, database app and user app. Use the generated database password. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "adminer": "adminer:6.3.0-standalone",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  adminer:\n    image: adminer:6.3.0-standalone\n    restart: unless-stopped\n    environment:\n      ADMINER_DEFAULT_SERVER: db\n    healthcheck:\n      test:\n      - CMD\n      - php\n      - -r\n      - exit(@file_get_contents('http://127.0.0.1:8080')===false?1:0);\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: app\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "adminer",
+        "port": 8080,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "pgweb",
+      "name": "pgweb",
+      "description": "PostgreSQL browser with HTTP basic authentication.",
+      "category": "Administration",
+      "source": "https://github.com/sosedoff/pgweb",
+      "license": "https://github.com/sosedoff/pgweb/blob/main/LICENSE",
+      "docs": "https://github.com/sosedoff/pgweb/wiki/Usage",
+      "notes": "Includes a private PostgreSQL database. Web authentication uses app and the separate generated web password. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "pgweb": "sosedoff/pgweb:0.17.0",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  pgweb:\n    image: sosedoff/pgweb:0.17.0\n    restart: unless-stopped\n    depends_on:\n      db:\n        condition: service_healthy\n    environment:\n      PGWEB_DATABASE_URL: postgres://app:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}@db:5432/app?sslmode=disable\n      PGWEB_AUTH_USER: app\n      PGWEB_AUTH_PASS: ${WEB_PASSWORD:?Set WEB_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - curl --fail --silent --user \"app:$${PGWEB_AUTH_PASS}\" http://127.0.0.1:8081/\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: app\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "WEB_PASSWORD",
+          "label": "Web Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "pgweb",
+        "port": 8081,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "phpmyadmin",
+      "name": "phpMyAdmin",
+      "description": "phpMyAdmin with a private MariaDB database.",
+      "category": "Administration",
+      "source": "https://hub.docker.com/_/phpmyadmin",
+      "license": "https://hub.docker.com/_/phpmyadmin",
+      "docs": "https://hub.docker.com/_/phpmyadmin",
+      "notes": "Includes MariaDB. Sign in as app with the generated database password; root has a separate password. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "phpmyadmin": "phpmyadmin:5.2.3-apache",
+        "db": "mariadb:11.8.9"
+      },
+      "compose": "services:\n  phpmyadmin:\n    image: phpmyadmin:5.2.3-apache\n    restart: unless-stopped\n    volumes:\n    - sessions:/sessions\n    environment:\n      PMA_HOST: db\n    healthcheck:\n      test:\n      - CMD\n      - curl\n      - --fail\n      - --silent\n      - --output\n      - /dev/null\n      - --max-time\n      - '3'\n      - http://127.0.0.1:80/\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: mariadb:11.8.9\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/mysql\n    environment:\n      MARIADB_DATABASE: app\n      MARIADB_USER: app\n      MARIADB_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      MARIADB_ROOT_PASSWORD: ${ROOT_PASSWORD:?Set ROOT_PASSWORD}\n    healthcheck:\n      test:\n      - CMD\n      - healthcheck.sh\n      - --connect\n      - --innodb_initialized\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  sessions: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ROOT_PASSWORD",
+          "label": "Root Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "phpmyadmin",
+        "port": 80,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "database",
+        "sessions"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "cloudbeaver",
+      "name": "CloudBeaver",
+      "description": "Browser-based database administration workspace.",
+      "category": "Administration",
+      "source": "https://github.com/dbeaver/cloudbeaver",
+      "license": "https://github.com/dbeaver/cloudbeaver/blob/devel/LICENSE",
+      "docs": "https://dbeaver.com/docs/cloudbeaver/CloudBeaver-Deployment/",
+      "notes": "First-start auto-configuration creates administrator app. Add database connections after signing in. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "cloudbeaver": "dbeaver/cloudbeaver:26.2.5.1"
+      },
+      "compose": "services:\n  cloudbeaver:\n    image: dbeaver/cloudbeaver:26.2.5.1\n    restart: unless-stopped\n    volumes:\n    - workspace:/opt/cloudbeaver/workspace\n    environment:\n      CB_SERVER_NAME: CloudBeaver\n      CB_SERVER_URL: ${APP_URL:?Set APP_URL}\n      CB_ADMIN_NAME: app\n      CB_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n    healthcheck:\n      test:\n      - CMD\n      - bash\n      - -ec\n      - 'exec 3<>/dev/tcp/127.0.0.1/8978; printf ''GET / HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n''\n        >&3; read -r status <&3; [[ \"$$status\" =~ ^HTTP/[0-9.]+[[:space:]][23][0-9][0-9][[:space:]]\n        ]]'\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  workspace: {}\n",
+      "variables": [
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "cloudbeaver",
+        "port": 8978,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "workspace"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1024,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "redisinsight",
+      "name": "Redis Insight",
+      "description": "Persistent connection browser for Redis and Valkey.",
+      "category": "Administration",
+      "source": "https://github.com/redis/RedisInsight",
+      "license": "https://github.com/redis/RedisInsight/blob/main/LICENSE",
+      "docs": "https://redis.io/docs/latest/operate/redisinsight/install/install-on-docker/",
+      "notes": "Configure connections on first use. Protect this administration UI before routing it publicly. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "redisinsight": "redis/redisinsight:3.10.0"
+      },
+      "compose": "services:\n  redisinsight:\n    image: redis/redisinsight:3.10.0\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - wget -q -O /dev/null http://127.0.0.1:5540/\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "redisinsight",
+        "port": 5540,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "mongo-express",
+      "name": "Mongo Express",
+      "description": "MongoDB administration with web and database authentication.",
+      "category": "Administration",
+      "source": "https://github.com/mongo-express/mongo-express",
+      "license": "https://github.com/mongo-express/mongo-express/blob/master/LICENSE.md",
+      "docs": "https://hub.docker.com/_/mongo-express",
+      "notes": "Includes MongoDB. Web basic authentication uses app and the web password. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "mongo-express": "mongo-express:1.0.2-20-alpine3.19",
+        "db": "mongo:8.0.38-noble"
+      },
+      "compose": "services:\n  mongo-express:\n    image: mongo-express:1.0.2-20-alpine3.19\n    restart: unless-stopped\n    environment:\n      ME_CONFIG_MONGODB_URL: mongodb://app:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}@db:27017/?authSource=admin\n      ME_CONFIG_BASICAUTH_USERNAME: app\n      ME_CONFIG_BASICAUTH_PASSWORD: ${WEB_PASSWORD:?Set WEB_PASSWORD}\n    healthcheck:\n      test:\n      - CMD\n      - node\n      - -e\n      - fetch('http://127.0.0.1:8081/',{redirect:'manual',headers:{Authorization:'Basic\n        '+Buffer.from(process.env.ME_CONFIG_BASICAUTH_USERNAME+':'+process.env.ME_CONFIG_BASICAUTH_PASSWORD).toString('base64')}}).then(r=>process.exit(r.status>=200&&r.status<400?0:1)).catch(()=>process.exit(1))\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: mongo:8.0.38-noble\n    restart: unless-stopped\n    volumes:\n    - data:/data/db\n    environment:\n      MONGO_INITDB_ROOT_USERNAME: app\n      MONGO_INITDB_ROOT_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - 'mongosh --quiet --eval \"quit(db.adminCommand({ping:1}).ok ? 0 : 1)\"'\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "WEB_PASSWORD",
+          "label": "Web Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "mongo-express",
+        "port": 8081,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "grafana",
+      "name": "Grafana",
+      "description": "Metrics and dashboards with persistent configuration.",
+      "category": "Observability",
+      "source": "https://github.com/grafana/grafana",
+      "license": "https://github.com/grafana/grafana/blob/main/LICENSE",
+      "docs": "https://grafana.com/docs/grafana/latest/setup-grafana/installation/docker/",
+      "notes": "First-start administrator is app. Add data sources after signing in. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "grafana": "grafana/grafana:13.3.1"
+      },
+      "compose": "services:\n  grafana:\n    image: grafana/grafana:13.3.1\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/grafana\n    environment:\n      GF_SECURITY_ADMIN_USER: app\n      GF_SECURITY_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n      GF_SERVER_ROOT_URL: ${APP_URL:?Set APP_URL}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - wget -q -O - http://127.0.0.1:3000/api/health\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "grafana",
+        "port": 3000,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "prometheus",
+      "name": "Prometheus",
+      "description": "Prometheus with persistent time-series storage.",
+      "category": "Observability",
+      "source": "https://github.com/prometheus/prometheus",
+      "license": "https://github.com/prometheus/prometheus/blob/main/LICENSE",
+      "docs": "https://prometheus.io/docs/prometheus/latest/installation/",
+      "notes": "Starts with the image\u2019s upstream self-monitoring configuration. Configure collection and authenticated access deliberately. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "prometheus": "prom/prometheus:v3.16.0"
+      },
+      "compose": "services:\n  prometheus:\n    image: prom/prometheus:v3.16.0\n    restart: unless-stopped\n    volumes:\n    - data:/prometheus\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - wget -q -O - http://127.0.0.1:9090/-/ready\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "prometheus",
+        "port": 9090,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "loki",
+      "name": "Loki",
+      "description": "Single-node Loki log storage.",
+      "category": "Observability",
+      "source": "https://github.com/grafana/loki",
+      "license": "https://github.com/grafana/loki/blob/main/LICENSE",
+      "docs": "https://grafana.com/docs/loki/latest/setup/install/docker/",
+      "notes": "The minimal upstream image has no HTTP health client; Cove local acceptance probes its readiness endpoint externally. Uses the image\u2019s upstream local configuration. Loki has no built-in authentication; keep ingestion/query access private and configure retention. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "loki": "grafana/loki:3.7.10"
+      },
+      "compose": "services:\n  loki:\n    image: grafana/loki:3.7.10\n    restart: unless-stopped\n    volumes:\n    - data:/loki\n    command:\n    - -config.file=/etc/loki/local-config.yaml\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "loki",
+        "port": 3100,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "otel-collector",
+      "name": "OpenTelemetry Collector",
+      "description": "Internal OTLP receiver with rotating persistent file export.",
+      "category": "Observability",
+      "source": "https://github.com/open-telemetry/opentelemetry-collector-contrib",
+      "license": "https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/LICENSE",
+      "docs": "https://opentelemetry.io/docs/collector/install/docker/",
+      "notes": "The minimal upstream image has no HTTP health client; Cove local acceptance probes its readiness endpoint externally. Receives OTLP on internal ports 4317/4318. The health extension uses 13133. Telemetry files are bounded by rotation; configure a real downstream exporter for your production topology. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "collector": "otel/opentelemetry-collector-contrib:0.165.0"
+      },
+      "compose": "services:\n  collector:\n    image: otel/opentelemetry-collector-contrib:0.165.0\n    restart: unless-stopped\n    volumes:\n    - data:/var/lib/otelcol\n    command:\n    - --config=/etc/otelcol/config.yaml\n    configs:\n    - source: collector\n      target: /etc/otelcol/config.yaml\nvolumes:\n  data: {}\nconfigs:\n  collector:\n    content: \"receivers:\\n  otlp:\\n    protocols:\\n      grpc:\\n        endpoint:\\\n      \\ 0.0.0.0:4317\\n      http:\\n        endpoint: 0.0.0.0:4318\\nexporters:\\n  file:\\n\\\n      \\    path: /var/lib/otelcol/telemetry.json\\n    rotation:\\n      max_megabytes:\\\n      \\ 100\\n      max_backups: 5\\nextensions:\\n  health_check:\\n    endpoint: 0.0.0.0:13133\\n\\\n      service:\\n  extensions: [health_check]\\n  pipelines:\\n    traces:\\n      receivers:\\\n      \\ [otlp]\\n      exporters: [file]\\n    metrics:\\n      receivers: [otlp]\\n \\\n      \\     exporters: [file]\\n    logs:\\n      receivers: [otlp]\\n      exporters:\\\n      \\ [file]\\n\"\n",
+      "variables": [],
+      "web": {
+        "service": "collector",
+        "port": 13133,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "uptime-kuma",
+      "name": "Uptime Kuma",
+      "description": "Uptime checks, notifications and status pages.",
+      "category": "Observability",
+      "source": "https://github.com/louislam/uptime-kuma",
+      "license": "https://github.com/louislam/uptime-kuma/blob/master/LICENSE",
+      "docs": "https://github.com/louislam/uptime-kuma/wiki/How-to-Install",
+      "notes": "Claim the first administrator account before exposing this instance to other users. Use local storage for SQLite locking. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "uptime-kuma": "louislam/uptime-kuma:2.5.12"
+      },
+      "compose": "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:2.5.12\n    restart: unless-stopped\n    volumes:\n    - data:/app/data\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "uptime-kuma",
+        "port": 3001,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "beszel",
+      "name": "Beszel",
+      "description": "Lightweight server metrics hub.",
+      "category": "Observability",
+      "source": "https://github.com/henrygd/beszel",
+      "license": "https://github.com/henrygd/beszel/blob/main/LICENSE",
+      "docs": "https://beszel.dev/guide/hub-installation",
+      "notes": "Hub only, without Docker socket or host access. Claim the first administrator account, then enroll agents explicitly. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "beszel": "henrygd/beszel:0.21.2"
+      },
+      "compose": "services:\n  beszel:\n    image: henrygd/beszel:0.21.2\n    restart: unless-stopped\n    volumes:\n    - data:/beszel_data\n    environment:\n      APP_URL: ${APP_URL:?Set APP_URL}\n    healthcheck:\n      test:\n      - CMD\n      - /beszel\n      - health\n      - --url\n      - http://localhost:8090\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "beszel",
+        "port": 8090,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "dozzle",
+      "name": "Dozzle",
+      "description": "Container log viewer requiring explicit Docker socket access.",
+      "category": "Observability",
+      "source": "https://github.com/amir20/dozzle",
+      "license": "https://github.com/amir20/dozzle/blob/main/LICENSE",
+      "docs": "https://dozzle.dev/guide/getting-started",
+      "notes": "A read-only socket mount still grants powerful Docker API access. Only use on a trusted dedicated worker. Configure Dozzle authentication before exposing its UI. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "dozzle": "amir20/dozzle:v11.5.0"
+      },
+      "compose": "services:\n  dozzle:\n    image: amir20/dozzle:v11.5.0\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    - /var/run/docker.sock:/var/run/docker.sock:ro\n    healthcheck:\n      test:\n      - CMD\n      - /dozzle\n      - healthcheck\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "dozzle",
+        "port": 8080,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": [
+        "docker_socket"
+      ]
+    },
+    {
+      "schema_version": 1,
+      "id": "garage",
+      "name": "Garage",
+      "description": "Single-node S3 object storage with an initial data bucket.",
+      "category": "Storage",
+      "source": "https://github.com/deuxfleurs-org/garage",
+      "license": "https://github.com/deuxfleurs-org/garage/blob/main-v2/LICENSE",
+      "docs": "https://garagehq.deuxfleurs.fr/documentation/quick-start/",
+      "notes": "Single node, replication factor 1: this is not high availability. S3 region garage, access key GKcove00000000000000000000, initial bucket data. Use path-style S3 access through a private endpoint. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "garage": "dxflrs/garage:v2.5.0"
+      },
+      "compose": "services:\n  garage:\n    image: dxflrs/garage:v2.5.0\n    restart: unless-stopped\n    volumes:\n    - metadata:/var/lib/garage/meta\n    - data:/var/lib/garage/data\n    environment:\n      GARAGE_DEFAULT_ACCESS_KEY: GKcove00000000000000000000\n      GARAGE_DEFAULT_SECRET_KEY: ${S3_SECRET_KEY:?Set S3_SECRET_KEY}\n      GARAGE_DEFAULT_BUCKET: data\n    command:\n    - /garage\n    - server\n    - --single-node\n    - --default-bucket\n    healthcheck:\n      test:\n      - CMD\n      - /garage\n      - status\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    configs:\n    - source: garage\n      target: /etc/garage.toml\nvolumes:\n  metadata: {}\n  data: {}\nconfigs:\n  garage:\n    content: 'metadata_dir = \"/var/lib/garage/meta\"\n\n      data_dir = \"/var/lib/garage/data\"\n\n      db_engine = \"sqlite\"\n\n      replication_factor = 1\n\n      rpc_bind_addr = \"[::]:3901\"\n\n      rpc_public_addr = \"127.0.0.1:3901\"\n\n      rpc_secret = \"${RPC_SECRET:?Set RPC_SECRET}\"\n\n      [s3_api]\n\n      s3_region = \"garage\"\n\n      api_bind_addr = \"[::]:3900\"\n\n      [admin]\n\n      api_bind_addr = \"[::]:3903\"\n\n      admin_token = \"${ADMIN_TOKEN:?Set ADMIN_TOKEN}\"\n\n      '\n",
+      "variables": [
+        {
+          "key": "RPC_SECRET",
+          "label": "Rpc Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ADMIN_TOKEN",
+          "label": "Admin Token",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "S3_SECRET_KEY",
+          "label": "S3 Secret Key",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "garage",
+        "port": 3900,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data",
+        "metadata"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "seaweedfs",
+      "name": "SeaweedFS",
+      "description": "Single-node SeaweedFS with authenticated S3 gateway.",
+      "category": "Storage",
+      "source": "https://github.com/seaweedfs/seaweedfs",
+      "license": "https://github.com/seaweedfs/seaweedfs/blob/master/LICENSE",
+      "docs": "https://github.com/seaweedfs/seaweedfs",
+      "notes": "Single-node storage is not high availability. S3 access key cove; master/filer and S3 ports stay internal. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "seaweedfs": "chrislusf/seaweedfs:4.54"
+      },
+      "compose": "services:\n  seaweedfs:\n    image: chrislusf/seaweedfs:4.54\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    command:\n    - server\n    - -dir=/data\n    - -s3\n    - -s3.config=/etc/seaweedfs/s3.json\n    configs:\n    - source: s3\n      target: /etc/seaweedfs/s3.json\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - wget -q -O /dev/null http://127.0.0.1:9333/cluster/status\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\nconfigs:\n  s3:\n    content: '{\"identities\": [{\"name\": \"cove\", \"credentials\": [{\"accessKey\": \"cove\",\n      \"secretKey\": \"${S3_SECRET_KEY:?Set S3_SECRET_KEY}\"}], \"actions\": [\"Admin\", \"Read\",\n      \"List\", \"Tagging\", \"Write\"]}]}'\n",
+      "variables": [
+        {
+          "key": "S3_SECRET_KEY",
+          "label": "S3 Secret Key",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "seaweedfs",
+        "port": 8333,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "keycloak",
+      "name": "Keycloak",
+      "description": "Keycloak identity provider with PostgreSQL.",
+      "category": "Authentication",
+      "source": "https://github.com/keycloak/keycloak",
+      "license": "https://github.com/keycloak/keycloak/blob/main/LICENSE.txt",
+      "docs": "https://www.keycloak.org/server/containers",
+      "notes": "Sign into the admin console as app. HTTP is internal behind Cove HTTPS; forwarded proxy headers require an isolated ingress network. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "keycloak": "quay.io/keycloak/keycloak:26.8.2",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  keycloak:\n    image: quay.io/keycloak/keycloak:26.8.2\n    restart: unless-stopped\n    environment:\n      KC_DB: postgres\n      KC_DB_URL_HOST: db\n      KC_DB_URL_DATABASE: keycloak\n      KC_DB_USERNAME: keycloak\n      KC_DB_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      KC_HTTP_ENABLED: 'true'\n      KC_PROXY_HEADERS: xforwarded\n      KC_HOSTNAME: ${APP_URL:?Set APP_URL}\n      KC_HEALTH_ENABLED: 'true'\n      KC_BOOTSTRAP_ADMIN_USERNAME: app\n      KC_BOOTSTRAP_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n    command:\n    - start\n    depends_on:\n      db:\n        condition: service_healthy\n    healthcheck:\n      test:\n      - CMD\n      - bash\n      - -ec\n      - 'exec 3<>/dev/tcp/127.0.0.1/9000; printf ''GET /health/ready HTTP/1.0\\r\\nHost:\n        localhost\\r\\n\\r\\n'' >&3; read -r status <&3; [[ \"$$status\" =~ ^HTTP/[0-9.]+[[:space:]][23][0-9][0-9][[:space:]]\n        ]]'\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: keycloak\n      POSTGRES_USER: keycloak\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "keycloak",
+        "port": 8080,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1536,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "authentik",
+      "name": "Authentik",
+      "description": "Authentik identity provider with background worker and PostgreSQL.",
+      "category": "Authentication",
+      "source": "https://github.com/goauthentik/authentik",
+      "license": "https://github.com/goauthentik/authentik/blob/main/LICENSE",
+      "docs": "https://docs.goauthentik.io/install-config/install/docker-compose",
+      "notes": "Open /if/flow/initial-setup/ to claim the initial account before public use. Docker socket integration is intentionally omitted; deploy outposts manually. No host namespace access is required. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "postgresql": "postgres:17.12-alpine",
+        "server": "ghcr.io/goauthentik/server:2026.8.6",
+        "worker": "ghcr.io/goauthentik/server:2026.8.6"
+      },
+      "compose": "services:\n  postgresql:\n    environment:\n      POSTGRES_DB: authentik\n      POSTGRES_USER: authentik\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      interval: 30s\n      retries: 5\n      start_period: 20s\n      test:\n      - CMD-SHELL\n      - pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}\n      timeout: 5s\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n  server:\n    command: server\n    depends_on:\n      postgresql:\n        condition: service_healthy\n    environment:\n      AUTHENTIK_POSTGRESQL__HOST: postgresql\n      AUTHENTIK_POSTGRESQL__NAME: authentik\n      AUTHENTIK_POSTGRESQL__USER: authentik\n      AUTHENTIK_POSTGRESQL__PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?Set AUTHENTIK_SECRET_KEY}\n    image: ghcr.io/goauthentik/server:2026.8.6\n    restart: unless-stopped\n    shm_size: 512mb\n    volumes:\n    - data:/data\n    - templates:/templates\n  worker:\n    command: worker\n    depends_on:\n      postgresql:\n        condition: service_healthy\n    environment:\n      AUTHENTIK_POSTGRESQL__HOST: postgresql\n      AUTHENTIK_POSTGRESQL__NAME: authentik\n      AUTHENTIK_POSTGRESQL__USER: authentik\n      AUTHENTIK_POSTGRESQL__PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?Set AUTHENTIK_SECRET_KEY}\n    image: ghcr.io/goauthentik/server:2026.8.6\n    restart: unless-stopped\n    shm_size: 512mb\n    volumes:\n    - data:/data\n    - templates:/templates\n    - certs:/certs\nvolumes:\n  database: {}\n  data: {}\n  templates: {}\n  certs: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "AUTHENTIK_SECRET_KEY",
+          "label": "Authentik Secret Key",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "server",
+        "port": 9000,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "certs",
+        "data",
+        "database",
+        "templates"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 2048,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "gitea",
+      "name": "Gitea",
+      "description": "Git hosting over HTTPS with persistent repositories.",
+      "category": "Applications",
+      "source": "https://github.com/go-gitea/gitea",
+      "license": "https://github.com/go-gitea/gitea/blob/main/LICENSE",
+      "docs": "https://docs.gitea.com/installation/install-with-docker",
+      "notes": "Complete first-run installation and claim the administrator before public use. SSH Git access is disabled; use HTTPS. Runners are not installed. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "gitea": "gitea/gitea:28.4.0",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  gitea:\n    image: gitea/gitea:28.4.0\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    environment:\n      GITEA__database__DB_TYPE: postgres\n      GITEA__database__HOST: db:5432\n      GITEA__database__NAME: app\n      GITEA__database__USER: app\n      GITEA__database__PASSWD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      GITEA__server__ROOT_URL: ${APP_URL:?Set APP_URL}\n      GITEA__server__DISABLE_SSH: 'true'\n      GITEA__security__SECRET_KEY: ${APP_SECRET:?Set APP_SECRET}\n    depends_on:\n      db:\n        condition: service_healthy\n    healthcheck:\n      test:\n      - CMD\n      - curl\n      - --fail\n      - --silent\n      - --output\n      - /dev/null\n      - --max-time\n      - '3'\n      - http://127.0.0.1:3000/api/healthz\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: app\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "gitea",
+        "port": 3000,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data",
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "forgejo",
+      "name": "Forgejo",
+      "description": "Git hosting over HTTPS with persistent repositories.",
+      "category": "Applications",
+      "source": "https://github.com/forgejo/forgejo",
+      "license": "https://github.com/forgejo/forgejo",
+      "docs": "https://forgejo.org/docs/latest/admin/installation/docker/",
+      "notes": "Complete first-run installation and claim the administrator before public use. SSH Git access is disabled; use HTTPS. Runners are not installed. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "forgejo": "codeberg.org/forgejo/forgejo:15.0.12",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  forgejo:\n    image: codeberg.org/forgejo/forgejo:15.0.12\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    environment:\n      FORGEJO__database__DB_TYPE: postgres\n      FORGEJO__database__HOST: db:5432\n      FORGEJO__database__NAME: app\n      FORGEJO__database__USER: app\n      FORGEJO__database__PASSWD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      FORGEJO__server__ROOT_URL: ${APP_URL:?Set APP_URL}\n      FORGEJO__server__DISABLE_SSH: 'true'\n      FORGEJO__security__SECRET_KEY: ${APP_SECRET:?Set APP_SECRET}\n    depends_on:\n      db:\n        condition: service_healthy\n    healthcheck:\n      test:\n      - CMD\n      - curl\n      - --fail\n      - --silent\n      - --output\n      - /dev/null\n      - --max-time\n      - '3'\n      - http://127.0.0.1:3000/api/healthz\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: app\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "forgejo",
+        "port": 3000,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data",
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "n8n",
+      "name": "n8n",
+      "description": "Workflow automation with persistent encrypted settings.",
+      "category": "Applications",
+      "source": "https://github.com/n8n-io/n8n",
+      "license": "https://github.com/n8n-io/n8n/blob/master/LICENSE.md",
+      "docs": "https://docs.n8n.io/deploy/host-n8n/install-options/install-using-docker-compose/",
+      "notes": "Claim the initial owner account before public use. Keep the encryption key with your backups; existing credentials cannot be recovered without it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "n8n": "docker.n8n.io/n8nio/n8n:2.48.7"
+      },
+      "compose": "services:\n  n8n:\n    image: docker.n8n.io/n8nio/n8n:2.48.7\n    restart: unless-stopped\n    volumes:\n    - data:/home/node/.n8n\n    environment:\n      N8N_ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY}\n      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'true'\n      N8N_PROXY_HOPS: '1'\n      N8N_PROTOCOL: https\n      WEBHOOK_URL: ${APP_URL:?Set APP_URL}\n      N8N_EDITOR_BASE_URL: ${APP_URL:?Set APP_URL}\n    healthcheck:\n      test:\n      - CMD\n      - node\n      - -e\n      - fetch('http://127.0.0.1:5678/healthz/readiness').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "ENCRYPTION_KEY",
+          "label": "Encryption Key",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "n8n",
+        "port": 5678,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "umami",
+      "name": "Umami",
+      "description": "Privacy-focused web analytics with PostgreSQL.",
+      "category": "Applications",
+      "source": "https://github.com/umami-software/umami",
+      "license": "https://github.com/umami-software/umami/blob/master/LICENSE",
+      "docs": "https://docs.umami.is/docs/install",
+      "notes": "No automatic public route: Upstream initially creates admin / umami. Change that password immediately on a private connection before public access. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "umami": "ghcr.io/umami-software/umami:3.5.0",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  umami:\n    image: ghcr.io/umami-software/umami:3.5.0\n    restart: unless-stopped\n    environment:\n      DATABASE_URL: postgresql://umami:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}@db:5432/umami\n      APP_SECRET: ${APP_SECRET:?Set APP_SECRET}\n      TWO_FACTOR_ENCRYPTION_KEY: ${TWO_FACTOR_KEY:?Set TWO_FACTOR_KEY}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - curl --fail --silent http://127.0.0.1:3000/api/heartbeat\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: umami\n      POSTGRES_USER: umami\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "TWO_FACTOR_KEY",
+          "label": "Two Factor Key",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "umami",
+        "port": 3000,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "vaultwarden",
+      "name": "Vaultwarden",
+      "description": "Bitwarden-compatible password vault.",
+      "category": "Applications",
+      "source": "https://github.com/dani-garcia/vaultwarden",
+      "license": "https://github.com/dani-garcia/vaultwarden/blob/main/LICENSE.txt",
+      "docs": "https://github.com/dani-garcia/vaultwarden/wiki/Using-Docker-Compose",
+      "notes": "Open /admin with the generated token and invite users; public registration is disabled. Preserve /data and the administration token in encrypted backups. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "vaultwarden": "vaultwarden/server:1.37.5"
+      },
+      "compose": "services:\n  vaultwarden:\n    image: vaultwarden/server:1.37.5\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    environment:\n      DOMAIN: ${APP_URL:?Set APP_URL}\n      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN}\n      SIGNUPS_ALLOWED: 'false'\n    healthcheck:\n      test:\n      - CMD\n      - /healthcheck.sh\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "ADMIN_TOKEN",
+          "label": "Admin Token",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "vaultwarden",
+        "port": 80,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "nextcloud",
+      "name": "Nextcloud",
+      "description": "File collaboration with PostgreSQL-backed persistent storage.",
+      "category": "Applications",
+      "source": "https://hub.docker.com/_/nextcloud",
+      "license": "https://hub.docker.com/_/nextcloud",
+      "docs": "https://hub.docker.com/_/nextcloud",
+      "notes": "Administrator app is created on first boot. Enter the route hostname in Trusted domain, and configure background cron for production workloads. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "nextcloud": "nextcloud:32.0.15-apache",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  nextcloud:\n    image: nextcloud:32.0.15-apache\n    restart: unless-stopped\n    volumes:\n    - data:/var/www/html\n    environment:\n      POSTGRES_HOST: db\n      POSTGRES_DB: nextcloud\n      POSTGRES_USER: nextcloud\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      NEXTCLOUD_ADMIN_USER: app\n      NEXTCLOUD_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n      NEXTCLOUD_TRUSTED_DOMAINS: ${TRUSTED_DOMAIN:?Set TRUSTED_DOMAIN}\n      OVERWRITEPROTOCOL: https\n      OVERWRITECLIURL: ${APP_URL:?Set APP_URL}\n    depends_on:\n      db:\n        condition: service_healthy\n    healthcheck:\n      test:\n      - CMD\n      - curl\n      - --fail\n      - --silent\n      - --output\n      - /dev/null\n      - --max-time\n      - '3'\n      - http://127.0.0.1:80/status.php\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: nextcloud\n      POSTGRES_USER: nextcloud\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "TRUSTED_DOMAIN",
+          "label": "Trusted domain (same as the route hostname)",
+          "type": "hostname",
+          "default": "",
+          "required": true,
+          "generated": false
+        }
+      ],
+      "web": {
+        "service": "nextcloud",
+        "port": 80,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data",
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1024,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "wordpress",
+      "name": "WordPress",
+      "description": "WordPress with MariaDB and persistent themes, uploads and plugins.",
+      "category": "Applications",
+      "source": "https://hub.docker.com/_/wordpress",
+      "license": "https://hub.docker.com/_/wordpress",
+      "docs": "https://hub.docker.com/_/wordpress",
+      "notes": "Complete first-run site and administrator setup on a private connection before public access. The image generates WordPress authentication salts. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "wordpress": "wordpress:7.1.5-php8.2-apache",
+        "db": "mariadb:11.8.9"
+      },
+      "compose": "services:\n  wordpress:\n    image: wordpress:7.1.5-php8.2-apache\n    restart: unless-stopped\n    volumes:\n    - data:/var/www/html\n    environment:\n      WORDPRESS_DB_HOST: db\n      WORDPRESS_DB_USER: app\n      WORDPRESS_DB_NAME: app\n      WORDPRESS_DB_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    depends_on:\n      db:\n        condition: service_healthy\n    healthcheck:\n      test:\n      - CMD\n      - curl\n      - --fail\n      - --silent\n      - --output\n      - /dev/null\n      - --max-time\n      - '3'\n      - http://127.0.0.1:80/\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: mariadb:11.8.9\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/mysql\n    environment:\n      MARIADB_DATABASE: app\n      MARIADB_USER: app\n      MARIADB_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      MARIADB_ROOT_PASSWORD: ${ROOT_PASSWORD:?Set ROOT_PASSWORD}\n    healthcheck:\n      test:\n      - CMD\n      - healthcheck.sh\n      - --connect\n      - --innodb_initialized\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ROOT_PASSWORD",
+          "label": "Root Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "wordpress",
+        "port": 80,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data",
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "ghost",
+      "name": "Ghost",
+      "description": "Ghost publishing with supported MySQL storage.",
+      "category": "Applications",
+      "source": "https://hub.docker.com/_/ghost",
+      "license": "https://hub.docker.com/_/ghost",
+      "docs": "https://hub.docker.com/_/ghost",
+      "notes": "Claim /ghost administration on a private connection before public use. Configure a mail transport before relying on transactional mail. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "ghost": "ghost:6.78.0-alpine",
+        "db": "mysql:8.4.13"
+      },
+      "compose": "services:\n  ghost:\n    image: ghost:6.78.0-alpine\n    restart: unless-stopped\n    volumes:\n    - content:/var/lib/ghost/content\n    environment:\n      NODE_ENV: production\n      url: ${APP_URL:?Set APP_URL}\n      database__client: mysql\n      database__connection__host: db\n      database__connection__user: app\n      database__connection__password: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      database__connection__database: app\n    depends_on:\n      db:\n        condition: service_healthy\n    healthcheck:\n      test:\n      - CMD\n      - node\n      - -e\n      - fetch('http://127.0.0.1:2368/',{redirect:'manual'}).then(r=>process.exit(r.status>=200&&r.status<400?0:1)).catch(()=>process.exit(1))\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: mysql:8.4.13\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/mysql\n    environment:\n      MYSQL_DATABASE: app\n      MYSQL_USER: app\n      MYSQL_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      MYSQL_ROOT_PASSWORD: ${ROOT_PASSWORD:?Set ROOT_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - mysqladmin ping -h 127.0.0.1 -u root --password=\"$${MYSQL_ROOT_PASSWORD}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  content: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ROOT_PASSWORD",
+          "label": "Root Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "ghost",
+        "port": 2368,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "content",
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1024,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "directus",
+      "name": "Directus",
+      "description": "Data platform backed by PostgreSQL.",
+      "category": "Applications",
+      "source": "https://github.com/directus/directus",
+      "license": "https://github.com/directus/directus/blob/main/license",
+      "docs": "https://directus.com/docs/self-hosting/deploying",
+      "notes": "Review upstream licence eligibility before use. Initial admin credentials apply on first boot only. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "directus": "directus/directus:12.7.0",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  directus:\n    image: directus/directus:12.7.0\n    restart: unless-stopped\n    volumes:\n    - uploads:/directus/uploads\n    - extensions:/directus/extensions\n    environment:\n      SECRET: ${APP_SECRET:?Set APP_SECRET}\n      ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL}\n      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n      DB_CLIENT: pg\n      DB_HOST: db\n      DB_PORT: '5432'\n      DB_DATABASE: directus\n      DB_USER: directus\n      DB_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      PUBLIC_URL: ${APP_URL:?Set APP_URL}\n    healthcheck:\n      test:\n      - CMD\n      - node\n      - -e\n      - fetch('http://127.0.0.1:8055/server/ping').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: directus\n      POSTGRES_USER: directus\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  uploads: {}\n  extensions: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ADMIN_EMAIL",
+          "label": "Admin Email",
+          "type": "email",
+          "default": "",
+          "required": true,
+          "generated": false
+        },
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "directus",
+        "port": 8055,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "database",
+        "extensions",
+        "uploads"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "metabase",
+      "name": "Metabase",
+      "description": "Business intelligence with a persistent PostgreSQL application database.",
+      "category": "Applications",
+      "source": "https://github.com/metabase/metabase",
+      "license": "https://github.com/metabase/metabase/blob/master/LICENSE.txt",
+      "docs": "https://www.metabase.com/docs/latest/installation-and-operation/running-metabase-on-docker",
+      "notes": "Complete first-run owner setup privately. Preserve the encryption key to retain saved database credentials. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "metabase": "metabase/metabase:v0.65.6",
+        "db": "postgres:17.12-alpine"
+      },
+      "compose": "services:\n  metabase:\n    image: metabase/metabase:v0.65.6\n    restart: unless-stopped\n    environment:\n      MB_DB_TYPE: postgres\n      MB_DB_HOST: db\n      MB_DB_PORT: '5432'\n      MB_DB_DBNAME: metabase\n      MB_DB_USER: metabase\n      MB_DB_PASS: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      MB_ENCRYPTION_SECRET_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY}\n      MB_SITE_URL: ${APP_URL:?Set APP_URL}\n    depends_on:\n      db:\n        condition: service_healthy\n    healthcheck:\n      test:\n      - CMD\n      - curl\n      - --fail\n      - --silent\n      - --output\n      - /dev/null\n      - --max-time\n      - '3'\n      - http://127.0.0.1:3000/api/health\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: metabase\n      POSTGRES_USER: metabase\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ENCRYPTION_KEY",
+          "label": "Encryption Key",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "metabase",
+        "port": 3000,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "database"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1536,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "jellyfin",
+      "name": "Jellyfin",
+      "description": "Media server with persistent configuration and named media storage.",
+      "category": "Applications",
+      "source": "https://github.com/jellyfin/jellyfin",
+      "license": "https://github.com/jellyfin/jellyfin/blob/master/LICENSE",
+      "docs": "https://jellyfin.org/docs/general/installation/container/",
+      "notes": "Create the administrator on first visit. Import media into the named media volume. CPU-only: hardware acceleration and host mounts are deliberately not enabled. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "jellyfin": "jellyfin/jellyfin:12.4"
+      },
+      "compose": "services:\n  jellyfin:\n    image: jellyfin/jellyfin:12.4\n    restart: unless-stopped\n    volumes:\n    - config:/config\n    - cache:/cache\n    - media:/media:ro\nvolumes:\n  config: {}\n  cache: {}\n  media: {}\n",
+      "variables": [],
+      "web": {
+        "service": "jellyfin",
+        "port": 8096,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "cache",
+        "config",
+        "media"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 512,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "paperless-ngx",
+      "name": "Paperless-ngx",
+      "description": "Document management with PostgreSQL and authenticated Valkey.",
+      "category": "Applications",
+      "source": "https://github.com/paperless-ngx/paperless-ngx",
+      "license": "https://github.com/paperless-ngx/paperless-ngx/blob/dev/LICENSE",
+      "docs": "https://docs.paperless-ngx.com/setup/",
+      "notes": "Initial administrator app is provisioned on first boot. Import documents through the UI or the consume volume. OCR may require substantially more CPU and memory. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "paperless": "ghcr.io/paperless-ngx/paperless-ngx:3.5.1",
+        "db": "postgres:17.12-alpine",
+        "broker": "valkey/valkey:9.2.0-alpine"
+      },
+      "compose": "services:\n  paperless:\n    image: ghcr.io/paperless-ngx/paperless-ngx:3.5.1\n    restart: unless-stopped\n    volumes:\n    - data:/usr/src/paperless/data\n    - media:/usr/src/paperless/media\n    - export:/usr/src/paperless/export\n    - consume:/usr/src/paperless/consume\n    environment:\n      PAPERLESS_REDIS: redis://:${CACHE_PASSWORD:?Set CACHE_PASSWORD}@broker:6379\n      PAPERLESS_DBHOST: db\n      PAPERLESS_DBENGINE: postgresql\n      PAPERLESS_DBNAME: paperless\n      PAPERLESS_DBUSER: paperless\n      PAPERLESS_DBPASS: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      PAPERLESS_SECRET_KEY: ${APP_SECRET:?Set APP_SECRET}\n      PAPERLESS_URL: ${APP_URL:?Set APP_URL}\n      PAPERLESS_ADMIN_USER: app\n      PAPERLESS_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n    depends_on:\n      db:\n        condition: service_healthy\n      broker:\n        condition: service_healthy\n  db:\n    image: postgres:17.12-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql/data\n    environment:\n      POSTGRES_DB: paperless\n      POSTGRES_USER: paperless\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  broker:\n    image: valkey/valkey:9.2.0-alpine\n    restart: unless-stopped\n    volumes:\n    - cache:/data\n    environment:\n      CACHE_PASSWORD: ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    command:\n    - valkey-server\n    - --appendonly\n    - 'yes'\n    - --requirepass\n    - ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - valkey-cli -a \"$${CACHE_PASSWORD}\" ping | grep -q PONG\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  media: {}\n  export: {}\n  consume: {}\n  database: {}\n  cache: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "CACHE_PASSWORD",
+          "label": "Cache Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "paperless",
+        "port": 8000,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "cache",
+        "consume",
+        "data",
+        "database",
+        "export",
+        "media"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1536,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "freshrss",
+      "name": "FreshRSS",
+      "description": "Self-hosted feed reader with persistent SQLite data.",
+      "category": "Applications",
+      "source": "https://github.com/FreshRSS/FreshRSS",
+      "license": "https://github.com/FreshRSS/FreshRSS/blob/edge/LICENSE.txt",
+      "docs": "https://github.com/FreshRSS/FreshRSS/tree/edge/Docker",
+      "notes": "Complete first-run account setup privately. Feed refresh runs at minutes 1 and 31; SQLite data and extensions persist. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "freshrss": "freshrss/freshrss:1.30.4"
+      },
+      "compose": "services:\n  freshrss:\n    image: freshrss/freshrss:1.30.4\n    restart: unless-stopped\n    volumes:\n    - data:/var/www/FreshRSS/data\n    - extensions:/var/www/FreshRSS/extensions\n    environment:\n      CRON_MIN: 1,31\n    healthcheck:\n      test:\n      - CMD\n      - bash\n      - -ec\n      - 'exec 3<>/dev/tcp/127.0.0.1/80; printf ''GET / HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n''\n        >&3; read -r status <&3; [[ \"$$status\" =~ ^HTTP/[0-9.]+[[:space:]][23][0-9][0-9][[:space:]]\n        ]]'\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  extensions: {}\n",
+      "variables": [],
+      "web": {
+        "service": "freshrss",
+        "port": 80,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data",
+        "extensions"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "linkding",
+      "name": "linkding",
+      "description": "Bookmark manager with an initial administrator and persistent SQLite data.",
+      "category": "Applications",
+      "source": "https://github.com/sissbruecker/linkding",
+      "license": "https://github.com/sissbruecker/linkding/blob/master/LICENSE.txt",
+      "docs": "https://linkding.link/installation/",
+      "notes": "Sign in as app. Initial administrator provisioning does not rotate an existing account password. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "linkding": "sissbruecker/linkding:1.47.0"
+      },
+      "compose": "services:\n  linkding:\n    image: sissbruecker/linkding:1.47.0\n    restart: unless-stopped\n    volumes:\n    - data:/etc/linkding/data\n    environment:\n      LD_SUPERUSER_NAME: app\n      LD_SUPERUSER_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n      LD_CSRF_TRUSTED_ORIGINS: ${APP_URL:?Set APP_URL}\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "linkding",
+        "port": 9090,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "changedetection",
+      "name": "changedetection.io",
+      "description": "Website change detection with persistent watches.",
+      "category": "Applications",
+      "source": "https://github.com/dgtlmoon/changedetection.io",
+      "license": "https://github.com/dgtlmoon/changedetection.io/blob/master/LICENSE",
+      "docs": "https://github.com/dgtlmoon/changedetection.io",
+      "notes": "Set an application password before public routing. This base template uses HTTP requests; optional browser/Playwright services are not included. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "changedetection": "dgtlmoon/changedetection.io:0.70.4"
+      },
+      "compose": "services:\n  changedetection:\n    image: dgtlmoon/changedetection.io:0.70.4\n    restart: unless-stopped\n    volumes:\n    - data:/datastore\n    healthcheck:\n      test:\n      - CMD\n      - python3\n      - -c\n      - import http.client; c=http.client.HTTPConnection('127.0.0.1',5000,timeout=3);\n        c.request('GET','/'); r=c.getresponse(); assert 200 <= r.status < 400\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "changedetection",
+        "port": 5000,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "homepage",
+      "name": "Homepage",
+      "description": "Private service dashboard with persistent configuration.",
+      "category": "Applications",
+      "source": "https://github.com/gethomepage/homepage",
+      "license": "https://github.com/gethomepage/homepage/blob/dev/LICENSE",
+      "docs": "https://gethomepage.dev/installation/docker/",
+      "notes": "No application authentication or Docker socket is enabled. Set the private hostname you will use, configure services in the config volume and keep dashboard access private. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "homepage": "ghcr.io/gethomepage/homepage:v2.8.0"
+      },
+      "compose": "services:\n  homepage:\n    image: ghcr.io/gethomepage/homepage:v2.8.0\n    restart: unless-stopped\n    volumes:\n    - config:/app/config\n    environment:\n      HOMEPAGE_ALLOWED_HOSTS: ${ALLOWED_HOST:?Set ALLOWED_HOST}\nvolumes:\n  config: {}\n",
+      "variables": [
+        {
+          "key": "ALLOWED_HOST",
+          "label": "Private dashboard hostname",
+          "type": "hostname",
+          "default": "",
+          "required": true,
+          "generated": false
+        }
+      ],
+      "web": {
+        "service": "homepage",
+        "port": 3000,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "config"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "navidrome",
+      "name": "Navidrome",
+      "description": "Music streaming with persistent configuration and named music storage.",
+      "category": "Applications",
+      "source": "https://github.com/navidrome/navidrome",
+      "license": "https://github.com/navidrome/navidrome/blob/master/LICENSE",
+      "docs": "https://www.navidrome.org/docs/installation/docker/",
+      "notes": "Claim the first administrator account privately. Import music into the named music volume; no host directories are mounted. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "navidrome": "deluan/navidrome:0.64.2"
+      },
+      "compose": "services:\n  navidrome:\n    image: deluan/navidrome:0.64.2\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    - music:/music:ro\n    healthcheck:\n      test:\n      - CMD\n      - curl\n      - --fail\n      - --silent\n      - --output\n      - /dev/null\n      - --max-time\n      - '3'\n      - http://127.0.0.1:4533/\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n  music: {}\n",
+      "variables": [],
+      "web": {
+        "service": "navidrome",
+        "port": 4533,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data",
+        "music"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "syncthing",
+      "name": "Syncthing",
+      "description": "Private file synchronisation with persistent device identity.",
+      "category": "Applications",
+      "source": "https://github.com/syncthing/syncthing",
+      "license": "https://github.com/syncthing/syncthing/blob/main/LICENSE",
+      "docs": "https://github.com/syncthing/syncthing/blob/main/README-Docker.md",
+      "notes": "Configure GUI authentication and devices privately. Public sync/listen ports are not published; outbound relay connections remain available. This service has no automatic public route. Use a private network or configure authenticated access before publishing it. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "syncthing": "syncthing/syncthing:2.1.7"
+      },
+      "compose": "services:\n  syncthing:\n    image: syncthing/syncthing:2.1.7\n    restart: unless-stopped\n    volumes:\n    - data:/var/syncthing\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "syncthing",
+        "port": 8384,
+        "route": false,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "actual-budget",
+      "name": "Actual Budget",
+      "description": "Personal budgeting with persistent server data.",
+      "category": "Applications",
+      "source": "https://github.com/actualbudget/actual",
+      "license": "https://github.com/actualbudget/actual/blob/master/LICENSE.txt",
+      "docs": "https://actualbudget.org/docs/install/docker/",
+      "notes": "Set the server password on first use before public access. Enable end-to-end encryption in the client for sensitive budget data. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "actual": "actualbudget/actual-server:26.11.0"
+      },
+      "compose": "services:\n  actual:\n    image: actualbudget/actual-server:26.11.0\n    restart: unless-stopped\n    volumes:\n    - data:/data\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - node scripts/health-check.js\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [],
+      "web": {
+        "service": "actual",
+        "port": 5006,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 0.25,
+        "memory_mb": 256,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "immich",
+      "name": "Immich",
+      "description": "Photo and video library with supported vector database and machine learning.",
+      "category": "Applications",
+      "source": "https://github.com/immich-app/immich",
+      "license": "https://github.com/immich-app/immich/blob/main/LICENSE",
+      "docs": "https://docs.immich.app/install/docker-compose/",
+      "notes": "Upstream requires at least 6 GB RAM (8 GB recommended) with machine learning enabled, 2 CPU cores, and x86-64-v2 on amd64 for v3. Uses the upstream release\u2019s matching vector database image and default image health checks. CPU-only machine learning; no hardware acceleration or host mounts. Claim the first account privately and budget storage for originals, thumbnails and backups. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "immich-server": "ghcr.io/immich-app/immich-server:v3.4.2",
+        "immich-machine-learning": "ghcr.io/immich-app/immich-machine-learning:v3.4.2",
+        "redis": "docker.io/valkey/valkey:9@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd",
+        "database": "ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23"
+      },
+      "compose": "services:\n  immich-server:\n    image: ghcr.io/immich-app/immich-server:v3.4.2\n    volumes:\n    - uploads:/data\n    depends_on:\n    - redis\n    - database\n    restart: always\n    healthcheck:\n      disable: false\n    environment:\n      DB_HOSTNAME: database\n      DB_USERNAME: postgres\n      DB_DATABASE_NAME: immich\n      DB_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      REDIS_HOSTNAME: redis\n  immich-machine-learning:\n    image: ghcr.io/immich-app/immich-machine-learning:v3.4.2\n    volumes:\n    - model-cache:/cache\n    environment:\n      MACHINE_LEARNING_MODEL_REVISION: v2\n    restart: always\n    healthcheck:\n      disable: false\n  redis:\n    image: docker.io/valkey/valkey:9@sha256:418652cfb58ef879d4978c33553735d7147016032d5aefaa14c828e611eb9dfd\n    healthcheck:\n      test: redis-cli ping | grep -q PONG || exit 1\n    restart: always\n    volumes:\n    - cache:/data\n  database:\n    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23\n    environment:\n      POSTGRES_USER: postgres\n      POSTGRES_DB: immich\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n      POSTGRES_INITDB_ARGS: --data-checksums\n    volumes:\n    - database:/var/lib/postgresql/data\n    shm_size: 128mb\n    restart: always\n    healthcheck:\n      disable: false\nvolumes:\n  uploads: {}\n  model-cache: {}\n  cache: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "immich-server",
+        "port": 2283,
+        "route": true,
+        "url_variable": ""
+      },
+      "storage": [
+        "cache",
+        "database",
+        "model-cache",
+        "uploads"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 2,
+        "memory_mb": 6144,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "plausible",
+      "name": "Plausible",
+      "description": "Community analytics with PostgreSQL and ClickHouse.",
+      "category": "Applications",
+      "source": "https://github.com/plausible/community-edition",
+      "license": "https://github.com/plausible/community-edition/blob/v3.2.1/LICENSE",
+      "docs": "https://github.com/plausible/community-edition",
+      "notes": "Uses upstream ClickHouse small-instance tuning. Complete initial registration privately; configure mail before relying on invitations. Registration is disabled after initial setup; see upstream account provisioning instructions. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "plausible_db": "postgres:17.12-alpine",
+        "plausible_events_db": "clickhouse/clickhouse-server:24.12.6.70-alpine",
+        "plausible": "ghcr.io/plausible/community-edition:v3.2.1"
+      },
+      "compose": "services:\n  plausible_db:\n    image: postgres:17.12-alpine\n    restart: always\n    volumes:\n    - db-data:/var/lib/postgresql/data\n    environment:\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U postgres\n      start_period: 1m\n  plausible_events_db:\n    image: clickhouse/clickhouse-server:24.12.6.70-alpine\n    restart: always\n    volumes:\n    - event-data:/var/lib/clickhouse\n    - event-logs:/var/log/clickhouse-server\n    ulimits:\n      nofile:\n        soft: 262144\n        hard: 262144\n    environment:\n    - CLICKHOUSE_SKIP_USER_SETUP=1\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - wget --no-verbose --tries=1 -O - http://127.0.0.1:8123/ping || exit 1\n      start_period: 1m\n    configs:\n    - source: clickhouse-logs\n      target: /etc/clickhouse-server/config.d/logs.xml\n    - source: clickhouse-ipv4\n      target: /etc/clickhouse-server/config.d/ipv4-only.xml\n    - source: clickhouse-lowresources\n      target: /etc/clickhouse-server/config.d/low-resources.xml\n    - source: clickhouse-profile\n      target: /etc/clickhouse-server/users.d/default-profile-low-resources-overrides.xml\n  plausible:\n    image: ghcr.io/plausible/community-edition:v3.2.1\n    restart: always\n    command: sh -c \"/entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh\n      run\"\n    depends_on:\n      plausible_db:\n        condition: service_healthy\n      plausible_events_db:\n        condition: service_healthy\n    volumes:\n    - plausible-data:/var/lib/plausible\n    ulimits:\n      nofile:\n        soft: 65535\n        hard: 65535\n    environment:\n      TMPDIR: /var/lib/plausible/tmp\n      BASE_URL: ${APP_URL:?Set APP_URL}\n      SECRET_KEY_BASE: ${APP_SECRET:?Set APP_SECRET}\n      DATABASE_URL: postgres://postgres:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}@plausible_db:5432/plausible_db\n      CLICKHOUSE_DATABASE_URL: http://plausible_events_db:8123/plausible_events_db\n      DISABLE_REGISTRATION: 'true'\n    healthcheck:\n      test:\n      - CMD\n      - python3\n      - -c\n      - import http.client; c=http.client.HTTPConnection('127.0.0.1',8000,timeout=3);\n        c.request('GET','/'); r=c.getresponse(); assert 200 <= r.status < 400\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  db-data: {}\n  event-data: {}\n  event-logs: {}\n  plausible-data: {}\nconfigs:\n  clickhouse-logs:\n    content: \"<clickhouse>\\n    <logger>\\n        <level>warning</level>\\n       \\\n      \\ <console>true</console>\\n    </logger>\\n\\n    <query_log replace=\\\"1\\\">\\n\\\n      \\        <database>system</database>\\n        <table>query_log</table>\\n   \\\n      \\     <flush_interval_milliseconds>7500</flush_interval_milliseconds>\\n    \\\n      \\    <engine>\\n            ENGINE = MergeTree\\n            PARTITION BY event_date\\n\\\n      \\            ORDER BY (event_time)\\n            TTL event_date + interval 30\\\n      \\ day\\n            SETTINGS ttl_only_drop_parts=1\\n        </engine>\\n    </query_log>\\n\\\n      \\n    <!-- Stops unnecessary logging -->\\n    <metric_log remove=\\\"remove\\\"\\\n      \\ />\\n    <asynchronous_metric_log remove=\\\"remove\\\" />\\n    <query_thread_log\\\n      \\ remove=\\\"remove\\\" />\\n    <text_log remove=\\\"remove\\\" />\\n    <trace_log remove=\\\"\\\n      remove\\\" />\\n    <session_log remove=\\\"remove\\\" />\\n    <part_log remove=\\\"\\\n      remove\\\" />\\n</clickhouse>\\n\"\n  clickhouse-ipv4:\n    content: \"<clickhouse>\\n    <listen_host>0.0.0.0</listen_host>\\n</clickhouse>\\n\"\n  clickhouse-lowresources:\n    content: \"<clickhouse>\\n    <!-- https://clickhouse.com/docs/en/operations/server-configuration-parameters/settings#mark_cache_size\\\n      \\ -->\\n    <mark_cache_size>524288000</mark_cache_size>\\n</clickhouse>\\n\"\n  clickhouse-profile:\n    content: \"<!-- https://clickhouse.com/docs/en/operations/tips#using-less-than-16gb-of-ram\\\n      \\ -->\\n<clickhouse>\\n    <profiles>\\n        <default>\\n            <!-- https://clickhouse.com/docs/en/operations/settings/settings#max_threads\\\n      \\ -->\\n            <max_threads>1</max_threads>\\n            <!-- https://clickhouse.com/docs/en/operations/settings/settings#max_block_size\\\n      \\ -->\\n            <max_block_size>8192</max_block_size>\\n            <!-- https://clickhouse.com/docs/en/operations/settings/settings#max_download_threads\\\n      \\ -->\\n            <max_download_threads>1</max_download_threads>\\n        \\\n      \\    <!--\\n            https://clickhouse.com/docs/en/operations/settings/settings#input_format_parallel_parsing\\\n      \\ -->\\n            <input_format_parallel_parsing>0</input_format_parallel_parsing>\\n\\\n      \\            <!--\\n            https://clickhouse.com/docs/en/operations/settings/settings#output_format_parallel_formatting\\\n      \\ -->\\n            <output_format_parallel_formatting>0</output_format_parallel_formatting>\\n\\\n      \\        </default>\\n    </profiles>\\n</clickhouse>\\n\"\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "service": "plausible",
+        "port": 8000,
+        "route": true,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "db-data",
+        "event-data",
+        "event-logs",
+        "plausible-data"
+      ],
+      "backup": "Back up the named data volumes consistently. For database-backed applications stop the stack or use application/database-native backups; test restores and retain off-host copies.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 2048,
+        "disk_mb": 1024
+      },
+      "capabilities": []
+    },
+    {
+      "schema_version": 1,
+      "id": "glitchtip",
+      "name": "GlitchTip",
+      "description": "Error tracking with the upstream all-in-one worker and PostgreSQL.",
+      "category": "Observability",
+      "source": "https://gitlab.com/glitchtip/glitchtip-backend",
+      "license": "https://gitlab.com/glitchtip/glitchtip-backend/-/blob/master/LICENSE",
+      "docs": "https://glitchtip.com/documentation/install/",
+      "notes": "All-in-one server includes background jobs. Email delivery is disabled until you configure a real SMTP EMAIL_URL; do that before invitations, account recovery or alerts. Claim the first account privately and review registration policy. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "glitchtip": "glitchtip/glitchtip:7.0.0",
+        "db": "postgres:18.7-alpine",
+        "cache": "valkey/valkey:9.2.0-alpine"
+      },
+      "compose": "services:\n  glitchtip:\n    image: glitchtip/glitchtip:7.0.0\n    restart: unless-stopped\n    volumes:\n    - uploads:/code/uploads\n    environment:\n      DATABASE_URL: postgres://glitchtip:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}@db:5432/glitchtip\n      VALKEY_URL: redis://:${CACHE_PASSWORD:?Set CACHE_PASSWORD}@cache:6379/0\n      SECRET_KEY: ${APP_SECRET:?Set APP_SECRET}\n      EMAIL_URL: dummymail://\n      GLITCHTIP_DOMAIN: ${APP_URL:?Set APP_URL}\n      DEFAULT_FROM_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL}\n      SERVER_ROLE: all_in_one\n      ENABLE_ADMIN: 'False'\n      ENABLE_OPENAPI: 'False'\n      GLITCHTIP_ENABLE_MCP: 'False'\n      GLITCHTIP_ENABLE_DUCKDB: 'False'\n    healthcheck:\n      test:\n      - CMD\n      - python\n      - -c\n      - import http.client;c=http.client.HTTPConnection('127.0.0.1',8000,timeout=3);c.request('GET','/');assert\n        200<=c.getresponse().status<400\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    depends_on:\n      db:\n        condition: service_healthy\n      cache:\n        condition: service_healthy\n  db:\n    image: postgres:18.7-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql\n    environment:\n      POSTGRES_DB: glitchtip\n      POSTGRES_USER: glitchtip\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    command:\n    - postgres\n    - -c\n    - max_locks_per_transaction=512\n  cache:\n    image: valkey/valkey:9.2.0-alpine\n    restart: unless-stopped\n    volumes:\n    - cache:/data\n    environment:\n      CACHE_PASSWORD: ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - valkey-cli -a \"$${CACHE_PASSWORD}\" ping | grep -q PONG\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    command:\n    - valkey-server\n    - --appendonly\n    - 'yes'\n    - --requirepass\n    - ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\nvolumes:\n  uploads: {}\n  database: {}\n  cache: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "CACHE_PASSWORD",
+          "label": "Cache Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "ADMIN_EMAIL",
+          "label": "Sender email",
+          "type": "email",
+          "default": "",
+          "required": true,
+          "generated": false
+        }
+      ],
+      "web": {
+        "route": true,
+        "service": "glitchtip",
+        "port": 8000,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "uploads",
+        "database",
+        "cache"
+      ],
+      "backup": "Back up the persistent data with the application stopped or its supported consistent export. Back up PostgreSQL with pg_dump where present, preserve generated secrets independently, and test restores.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1024,
+        "disk_mb": 2048
+      },
+      "capabilities": [],
+      "file_secrets": []
+    },
+    {
+      "schema_version": 1,
+      "id": "mattermost",
+      "name": "Mattermost",
+      "description": "Team Edition messaging with persistent configuration, files and PostgreSQL.",
+      "category": "Applications",
+      "source": "https://github.com/mattermost/mattermost",
+      "license": "https://github.com/mattermost/mattermost/blob/master/LICENSE.txt",
+      "docs": "https://docs.mattermost.com/deployment-guide/server/deploy-containers.html",
+      "notes": "Uses the image-provided mmctl system-status health check and the image's default container-local management socket. Team Edition, without calls/RTC host ports or optional integrations. Claim the initial system administrator privately, configure SMTP, then review signup policy before public use. Image initialization owns the named volumes. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "mattermost": "mattermost/mattermost-team-edition:12.1.0",
+        "db": "postgres:18.7-alpine"
+      },
+      "compose": "services:\n  mattermost:\n    image: mattermost/mattermost-team-edition:12.1.0\n    restart: unless-stopped\n    volumes:\n    - config:/mattermost/config\n    - data:/mattermost/data\n    - logs:/mattermost/logs\n    - plugins:/mattermost/plugins\n    - client-plugins:/mattermost/client/plugins\n    environment:\n      MM_SQLSETTINGS_DRIVERNAME: postgres\n      MM_SQLSETTINGS_DATASOURCE: postgres://mattermost:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}@db:5432/mattermost?sslmode=disable&connect_timeout=10\n      MM_SERVICESETTINGS_SITEURL: ${APP_URL:?Set APP_URL}\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:18.7-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql\n    environment:\n      POSTGRES_DB: mattermost\n      POSTGRES_USER: mattermost\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  config: {}\n  data: {}\n  logs: {}\n  plugins: {}\n  client-plugins: {}\n  database: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "route": true,
+        "service": "mattermost",
+        "port": 8065,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "config",
+        "data",
+        "logs",
+        "plugins",
+        "client-plugins",
+        "database"
+      ],
+      "backup": "Back up the persistent data with the application stopped or its supported consistent export. Back up PostgreSQL with pg_dump where present, preserve generated secrets independently, and test restores.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 2048,
+        "disk_mb": 2048
+      },
+      "capabilities": [],
+      "file_secrets": []
+    },
+    {
+      "schema_version": 1,
+      "id": "outline",
+      "name": "Outline",
+      "description": "Collaborative knowledge base with PostgreSQL, Valkey and local file storage.",
+      "category": "Applications",
+      "source": "https://github.com/outline/outline",
+      "license": "https://github.com/outline/outline/blob/main/LICENSE",
+      "docs": "https://docs.getoutline.com/s/hosting/doc/docker-7pfeLP5a8t",
+      "notes": "Requires an existing OIDC provider and a registered client; use the real provider authorization/token/userinfo URLs and set its callback to https://YOUR_DOMAIN/auth/oidc.callback. Synthetic local readiness does not validate provider login. Preserve SECRET_KEY and UTILS_SECRET with backups; configure SMTP for email workflows. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "outline": "docker.getoutline.com/outlinewiki/outline:1.13.0",
+        "db": "postgres:18.7-alpine",
+        "cache": "valkey/valkey:9.2.0-alpine"
+      },
+      "compose": "services:\n  outline:\n    image: docker.getoutline.com/outlinewiki/outline:1.13.0\n    restart: unless-stopped\n    volumes:\n    - storage:/var/lib/outline/data\n    environment:\n      NODE_ENV: production\n      URL: ${APP_URL:?Set APP_URL}\n      PORT: '3000'\n      SECRET_KEY: ${APP_SECRET:?Set APP_SECRET}\n      UTILS_SECRET: ${UTILS_SECRET:?Set UTILS_SECRET}\n      DATABASE_URL: postgres://outline:${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}@db:5432/outline\n      PGSSLMODE: disable\n      REDIS_URL: redis://:${CACHE_PASSWORD:?Set CACHE_PASSWORD}@cache:6379/0\n      FILE_STORAGE: local\n      FILE_STORAGE_LOCAL_ROOT_DIR: /var/lib/outline/data\n      FORCE_HTTPS: 'true'\n      OIDC_USERNAME_CLAIM: preferred_username\n      OIDC_DISPLAY_NAME: OpenID Connect\n      OIDC_SCOPES: openid profile email\n      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?Set OIDC_CLIENT_ID}\n      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?Set OIDC_CLIENT_SECRET}\n      OIDC_AUTH_URI: ${OIDC_AUTH_URI:?Set OIDC_AUTH_URI}\n      OIDC_TOKEN_URI: ${OIDC_TOKEN_URI:?Set OIDC_TOKEN_URI}\n      OIDC_USERINFO_URI: ${OIDC_USERINFO_URI:?Set OIDC_USERINFO_URI}\n    healthcheck:\n      test:\n      - CMD\n      - node\n      - -e\n      - fetch('http://127.0.0.1:3000/',{redirect:'manual'}).then(r=>process.exit(r.status>=200&&r.status<400?0:1)).catch(()=>process.exit(1))\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    depends_on:\n      db:\n        condition: service_healthy\n      cache:\n        condition: service_healthy\n  db:\n    image: postgres:18.7-alpine\n    restart: unless-stopped\n    volumes:\n    - database:/var/lib/postgresql\n    environment:\n      POSTGRES_DB: outline\n      POSTGRES_USER: outline\n      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n  cache:\n    image: valkey/valkey:9.2.0-alpine\n    restart: unless-stopped\n    volumes:\n    - cache:/data\n    environment:\n      CACHE_PASSWORD: ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\n    healthcheck:\n      test:\n      - CMD-SHELL\n      - valkey-cli -a \"$${CACHE_PASSWORD}\" ping | grep -q PONG\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n    command:\n    - valkey-server\n    - --appendonly\n    - 'yes'\n    - --requirepass\n    - ${CACHE_PASSWORD:?Set CACHE_PASSWORD}\nvolumes:\n  storage: {}\n  database: {}\n  cache: {}\n",
+      "variables": [
+        {
+          "key": "DATABASE_PASSWORD",
+          "label": "Database Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "CACHE_PASSWORD",
+          "label": "Cache Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "UTILS_SECRET",
+          "label": "Utils Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        },
+        {
+          "key": "OIDC_CLIENT_ID",
+          "label": "Oidc Client Id",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "generated": false
+        },
+        {
+          "key": "OIDC_CLIENT_SECRET",
+          "label": "Oidc Client Secret",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": false
+        },
+        {
+          "key": "OIDC_AUTH_URI",
+          "label": "Oidc Auth Uri",
+          "type": "url",
+          "default": "",
+          "required": true,
+          "generated": false
+        },
+        {
+          "key": "OIDC_TOKEN_URI",
+          "label": "Oidc Token Uri",
+          "type": "url",
+          "default": "",
+          "required": true,
+          "generated": false
+        },
+        {
+          "key": "OIDC_USERINFO_URI",
+          "label": "Oidc Userinfo Uri",
+          "type": "url",
+          "default": "",
+          "required": true,
+          "generated": false
+        }
+      ],
+      "web": {
+        "route": true,
+        "service": "outline",
+        "port": 3000,
+        "url_variable": "APP_URL"
+      },
+      "storage": [
+        "storage",
+        "database",
+        "cache"
+      ],
+      "backup": "Back up the persistent data with the application stopped or its supported consistent export. Back up PostgreSQL with pg_dump where present, preserve generated secrets independently, and test restores.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 1024,
+        "disk_mb": 2048
+      },
+      "capabilities": [],
+      "file_secrets": []
+    },
+    {
+      "schema_version": 1,
+      "id": "pocketbase",
+      "name": "PocketBase",
+      "description": "SQLite backend using a pinned community container and generated administrator password.",
+      "category": "Applications",
+      "source": "https://github.com/muchobien/pocketbase-docker",
+      "license": "https://github.com/pocketbase/pocketbase/blob/master/LICENSE.md",
+      "docs": "https://pocketbase.io/docs/going-to-production/",
+      "notes": "This is the muchobien community container; PocketBase publishes no official image. The container runs the upstream binary and creates the superuser from PB_ADMIN_EMAIL/PB_ADMIN_PASSWORD. Administration is at /_/, readiness at /api/health; the public root has no application. Configure SMTP, rate limiting and settings encryption as described upstream before production use. Stop the application or use its built-in backup API for consistent backups. Cove resource figures are starter sizing floors, not application-capacity guarantees; size and back up for your workload.",
+      "images": {
+        "pocketbase": "ghcr.io/muchobien/pocketbase:0.42.3"
+      },
+      "compose": "services:\n  pocketbase:\n    image: ghcr.io/muchobien/pocketbase:0.42.3\n    restart: unless-stopped\n    volumes:\n    - data:/pb_data\n    environment:\n      PB_HOST: 0.0.0.0\n      PB_PORT: '8090'\n      PB_ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL}\n      PB_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}\n    healthcheck:\n      test:\n      - CMD\n      - wget\n      - --no-verbose\n      - --tries=1\n      - --spider\n      - http://127.0.0.1:8090/api/health\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\nvolumes:\n  data: {}\n",
+      "variables": [
+        {
+          "key": "ADMIN_EMAIL",
+          "label": "Administrator email",
+          "type": "email",
+          "default": "",
+          "required": true,
+          "generated": false
+        },
+        {
+          "key": "ADMIN_PASSWORD",
+          "label": "Admin Password",
+          "type": "secret",
+          "default": "",
+          "required": true,
+          "generated": true
+        }
+      ],
+      "web": {
+        "route": true,
+        "service": "pocketbase",
+        "port": 8090,
+        "url_variable": ""
+      },
+      "storage": [
+        "data"
+      ],
+      "backup": "Back up the persistent data with the application stopped or its supported consistent export. Back up PostgreSQL with pg_dump where present, preserve generated secrets independently, and test restores.",
+      "minimum": {
+        "cpus": 1,
+        "memory_mb": 256,
+        "disk_mb": 2048
+      },
+      "capabilities": [],
+      "file_secrets": []
+    }
+  ]
+}

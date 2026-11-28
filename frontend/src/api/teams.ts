@@ -3,12 +3,21 @@ import { request } from "./client";
 import { keys } from "./queries";
 import type { Grant, TeamRole } from "./types";
 
+export interface MembershipSource {
+  source_kind: "github" | "scim" | "ldap";
+  source_id: string;
+  // Only returned to instance administrators.
+  display_name?: string;
+}
+
 export interface Member {
   user_id: string;
   email: string;
   name: string;
   role: TeamRole;
   grants: Grant[];
+  // Directory sources that grant this membership. Empty for memberships managed only by hand.
+  managed_by?: MembershipSource[] | null;
 }
 
 export interface Invitation {
@@ -139,5 +148,37 @@ export function useUpdateAccount() {
     gcTime: 0,
     mutationFn: (input: { name: string; email: string; current_password: string }) => request<{ ok: boolean; verification_required: boolean }>("PUT", "/api/account", input),
     onSettled: () => client.invalidateQueries({ queryKey: keys.session }),
+  });
+}
+
+export interface CustomRole {
+  id: string;
+  name: string;
+  permissions: string[];
+}
+
+export interface TeamRoles {
+  roles: CustomRole[];
+  permission_catalogue: string[];
+  built_in: Record<"viewer" | "operator" | "editor", string[]>;
+}
+
+export const rolesQuery = (teamId: string) =>
+  queryOptions({ queryKey: ["teams", teamId, "roles"] as const, queryFn: ({ signal }) => request<TeamRoles>("GET", `${team(teamId)}/roles`, undefined, signal) });
+
+export function useSaveRole(teamId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...input }: { id?: string; name: string; permissions: string[] }) =>
+      request<{ id: string }>(id ? "PUT" : "POST", id ? `${team(teamId)}/roles/${encodeURIComponent(id)}` : `${team(teamId)}/roles`, input),
+    onSettled: () => client.invalidateQueries({ queryKey: rolesQuery(teamId).queryKey }),
+  });
+}
+
+export function useDeleteRole(teamId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => request<{ id: string }>("DELETE", `${team(teamId)}/roles/${encodeURIComponent(id)}`),
+    onSettled: () => client.invalidateQueries({ queryKey: rolesQuery(teamId).queryKey }),
   });
 }

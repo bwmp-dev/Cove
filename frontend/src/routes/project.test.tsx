@@ -18,7 +18,7 @@ vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ environmentId: route.environmentId }),
   useNavigate: () => () => undefined,
 }));
-vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => String(error) }));
+vi.mock("../api/client", () => ({ request: vi.fn(), errorMessage: (error: unknown) => String(error), isStatus: () => false }));
 vi.mock("../components/SharedVariables", () => ({ SharedVariables: ({ id }: { id: string }) => <section aria-label={`Shared variables ${id}`} /> }));
 vi.mock("../components/DeploymentPolicy", () => ({ DeploymentPolicy: ({ id }: { id: string }) => <section aria-label={`Deployment policy ${id}`} /> }));
 afterEach(() => vi.clearAllMocks());
@@ -40,7 +40,9 @@ it("replaces the environment sections instead of accumulating them when switchin
     if (path === "/api/projects") return Promise.resolve([project]);
     if (path === "/api/workloads") return Promise.resolve([workload("web", "e1"), workload("db", "e1"), workload("api", "e2"), workload("cache", "e2")]);
     if (path === "/api/operations") return Promise.resolve([]);
-    if (path === "/api/session") return Promise.resolve({ teams: [], is_admin: false });
+    if (path === "/api/session") return Promise.resolve({ teams: [], is_admin: false, permissions: [] });
+    if (path === "/api/nodes") return Promise.resolve([]);
+    if (path.endsWith("/suspension")) return Promise.resolve({ paused: false, phase: "active", resources: [] });
     if (path.startsWith("/api/projects/p/connections")) return Promise.resolve({ resources: [], connections: [], shared_networks: [] });
     return Promise.reject(new Error(`unexpected ${path}`));
   });
@@ -64,4 +66,27 @@ it("replaces the environment sections instead of accumulating them when switchin
   expect(screen.getByRole("region", { name: "Shared variables e2" })).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "web" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: "api" })).toBeInTheDocument();
+});
+
+it.each([
+  { readable: ["read"], shown: true },
+  { readable: [], shown: false },
+])("shows the Configuration tab without project read only when two environments are readable ($shown)", async ({ readable, shown }) => {
+  route.environmentId = "e1";
+  const limited = { ...project, permissions: [], environments: [{ id: "e1", name: "production", permissions: ["read"] }, { id: "e2", name: "staging", permissions: readable }] };
+  vi.mocked(request).mockImplementation((_method: string, path: string) => {
+    if (path === "/api/projects") return Promise.resolve([limited]);
+    if (path === "/api/workloads") return Promise.resolve([]);
+    if (path === "/api/operations") return Promise.resolve([]);
+    if (path === "/api/session") return Promise.resolve({ teams: [], is_admin: false });
+    if (path.startsWith("/api/projects/p/connections")) return Promise.resolve({ resources: [], connections: [], shared_networks: [] });
+    return Promise.reject(new Error(`unexpected ${path}`));
+  });
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <ProjectLayout />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("heading", { name: "Resources in production" });
+  expect(screen.queryByRole("link", { name: "Configuration" }) !== null).toBe(shown);
 });

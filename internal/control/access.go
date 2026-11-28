@@ -24,6 +24,7 @@ type membership struct {
 	Grants []grant `json:"grants"`
 }
 type identity struct {
+	Permissions  []string     `json:"permissions"`
 	ID           string       `json:"user_id"`
 	Email        string       `json:"email"`
 	Name         string       `json:"name"`
@@ -105,13 +106,27 @@ func (s *Server) sessionIdentity(r *http.Request) (*identity, error) {
 		return nil, pgx.ErrNoRows
 	}
 	var id string
-	err = s.DB.QueryRow(r.Context(), "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>now()", tokenHash(c.Value)).Scan(&id)
+	err = s.DB.QueryRow(r.Context(), "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>now() AND (second_factor_verified OR NOT EXISTS(SELECT 1 FROM account_totp WHERE user_id=sessions.user_id AND confirmed) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id=sessions.user_id))", tokenHash(c.Value)).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
 	return s.identity(r, id)
 }
-func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request) { respond(w, 200, actor(r)) }
+func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request) {
+	p := actor(r)
+	p.Permissions = []string{}
+	for _, permission := range permissionCatalogue {
+		allowed, err := s.permission(r, "team", "", permission)
+		if err != nil {
+			http.Error(w, "authorization unavailable", 503)
+			return
+		}
+		if allowed {
+			p.Permissions = append(p.Permissions, permission)
+		}
+	}
+	respond(w, 200, p)
+}
 func permissions(level int) []string {
 	p := []string{}
 	if level >= 1 {
@@ -142,20 +157,38 @@ func (s *Server) access(r *http.Request, kind, id string) (int, error) {
 	return level, err
 }
 func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, kind, id string, needed int) bool {
-	level, err := s.access(r, kind, id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.NotFound(w, r)
-		return false
+	permission := "view"
+	if needed == 2 {
+		permission = "operate"
 	}
-	if err != nil {
-		http.Error(w, "authorization unavailable", 503)
-		return false
+	if needed == 3 {
+		permission = "edit_configuration"
+		if r.Method == "GET" {
+			permission = "read_secrets"
+		}
 	}
-	if level < needed {
-		http.Error(w, "permission denied", 403)
-		return false
+	if strings.HasSuffix(r.URL.Path, "/credentials") || strings.HasSuffix(r.URL.Path, "/variables/export") || strings.HasSuffix(r.URL.Path, "/variables/resolve") || strings.HasSuffix(r.URL.Path, "/compose-bundle/export") || strings.HasSuffix(r.URL.Path, "/configuration/export") {
+		permission = "read_secrets"
 	}
-	return true
+	if strings.HasSuffix(r.URL.Path, "/backup-policy") && r.Method != "GET" {
+		permission = "manage_backups"
+	}
+	if strings.HasSuffix(r.URL.Path, "/operations") && r.Method == "POST" {
+		fields, ok := bodyFields(w, r)
+		if !ok {
+			return false
+		}
+		if field(fields, "action") == "build" && !s.requirePermission(w, r, kind, id, "read_secrets") {
+			return false
+		}
+		if action := field(fields, "action"); action == "backup" || action == "restore" || action == "drill" {
+			if action != "backup" && !s.requirePermission(w, r, kind, id, "edit_configuration") {
+				return false
+			}
+			permission = "manage_backups"
+		}
+	}
+	return s.requirePermission(w, r, kind, id, permission)
 }
 func (s *Server) teamAdmin(r *http.Request, team string) bool {
 	p := actor(r)
@@ -205,9 +238,57 @@ func field(v map[string]json.RawMessage, k string) string {
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	p := actor(r)
 	path := r.URL.Path
+	if bearer(r) != s.AdminToken && p.ID != "" {
+		var locked bool
+		if err := s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM authentication_failures WHERE key=$1 AND locked_until>now())", "account:"+p.ID).Scan(&locked); err != nil {
+			http.Error(w, "authentication unavailable", 503)
+			return false
+		}
+		if locked {
+			w.Header().Set("Retry-After", "900")
+			http.Error(w, "too many attempts; try again later", 429)
+			return false
+		}
+	}
+	if bearer(r) != s.AdminToken && path != "/api/session" && path != "/api/teams" && !strings.HasPrefix(path, "/api/account") {
+		var required bool
+		policyTeam := p.Team
+		if strings.HasPrefix(path, "/api/teams/") {
+			policyTeam = r.PathValue("id")
+		}
+		err := s.DB.QueryRow(r.Context(), `SELECT (c.require_second_factor OR COALESCE((SELECT require_second_factor FROM teams WHERE id=$2),false)) AND NOT EXISTS(SELECT 1 FROM account_totp WHERE user_id=$1 AND confirmed) AND NOT EXISTS(SELECT 1 FROM passkeys WHERE user_id=$1) FROM control_settings c WHERE id=1`, p.ID, policyTeam).Scan(&required)
+		if err != nil {
+			http.Error(w, "authorization unavailable", 503)
+			return false
+		}
+		if required {
+			respond(w, 403, map[string]string{"error": "second_factor_enrolment_required"})
+			return false
+		}
+	}
 	id := r.PathValue("id")
 	deny := func() bool { http.Error(w, "permission denied", 403); return false }
 	switch {
+	case path == "/api/preferences/timezone":
+		return true
+	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/notes") && r.Method == "GET":
+		return s.requireAccess(w, r, "project", id, 1)
+	case path == "/api/search" || path == "/api/activity" || path == "/api/onboarding" || path == "/api/resource-browser" || path == "/api/bulk-actions" || path == "/api/pins":
+		return true
+	case path == "/api/access-tokens" || strings.HasPrefix(path, "/api/access-tokens/"):
+		return true
+	case path == "/api/mcp":
+		return p.Admin || deny()
+	case path == "/api/templates" || path == "/api/templates/draft" || path == "/api/database-engines":
+		return true
+	case path == "/api/resource-defaults" || path == "/api/placement-suggestions":
+		return true
+	case path == "/api/node-providers" || strings.HasPrefix(path, "/api/node-providers/") || path == "/api/node-provisions" || strings.HasPrefix(path, "/api/node-provisions/"):
+		return p.Admin || deny()
+	case path == "/api/bastions" || strings.HasPrefix(path, "/api/bastions/"):
+		return p.Admin || deny()
+	case strings.HasPrefix(path, "/api/managed-registries"):
+		return r.Method == "GET" || s.teamAdmin(r, p.Team) || deny()
 	case path == "/api/cloudflare" || strings.HasPrefix(path, "/api/cloudflare/"):
 		return true
 	case path == "/api/github/app" || path == "/api/github/app/connect" || strings.HasPrefix(path, "/api/github/app/installations/") && r.Method == "PUT":
@@ -218,14 +299,29 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method == "GET" {
 			return true
 		}
-		return s.teamAdmin(r, p.Team) || deny()
+		if !s.teamAdmin(r, p.Team) {
+			return deny()
+		}
+		return s.requirePermission(w, r, "team", "", "edit_configuration") && s.requirePermission(w, r, "team", "", "read_secrets")
 	case strings.HasPrefix(path, "/api/notifications"):
-		return s.teamAdmin(r, p.Team) || deny()
+		if !s.teamAdmin(r, p.Team) {
+			return deny()
+		}
+		if r.Method == "GET" {
+			return s.requirePermission(w, r, "team", "", "view")
+		}
+		return s.requirePermission(w, r, "team", "", "edit_configuration") && s.requirePermission(w, r, "team", "", "read_secrets")
 	case strings.HasPrefix(path, "/api/terminal") || strings.HasPrefix(path, "/api/github/app"):
 		if !p.Admin {
 			return deny()
 		}
 		return true
+	case strings.HasPrefix(path, "/api/git/") || path == "/api/secret-providers" || strings.HasPrefix(path, "/api/secret-providers/"):
+		level := 1
+		if r.Method != "GET" {
+			level = 3
+		}
+		return s.requireAccess(w, r, "team", "", level)
 	case path == "/api/github/repositories":
 		return s.requireAccess(w, r, "team", "", 3)
 	case path == "/api/shared-variables":
@@ -233,29 +329,70 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			return deny()
 		}
 		return true
-	case strings.HasPrefix(path, "/api/account/sessions") || path == "/api/session" || path == "/api/account" || path == "/api/password" || path == "/api/teams":
+	case strings.HasPrefix(path, "/api/account/") || path == "/api/session" || path == "/api/account" || path == "/api/password" || path == "/api/teams":
 		return true
+	case path == "/api/settings/metrics-token":
+		if !p.Admin {
+			return deny()
+		}
+		if r.Method == "GET" {
+			return s.requirePermission(w, r, "team", "", "view")
+		}
+		return s.requirePermission(w, r, "team", "", "read_secrets")
+	case strings.HasPrefix(path, "/api/settings/panel-backup"):
+		if !p.Admin {
+			return deny()
+		}
+		if r.Method == "GET" {
+			return s.requirePermission(w, r, "team", "", "view")
+		}
+		return s.requirePermission(w, r, "team", "", "manage_backups") && s.requirePermission(w, r, "team", "", "edit_configuration") && s.requirePermission(w, r, "team", "", "read_secrets")
 	case strings.HasPrefix(path, "/api/users") || (path == "/api/settings" || strings.HasPrefix(path, "/api/settings/")) || path == "/api/updates":
 		if !p.Admin {
 			return deny()
 		}
-		return true
+		permission := "view"
+		if r.Method != "GET" {
+			permission = "edit_configuration"
+		}
+		return s.requirePermission(w, r, "team", "", permission)
 	case strings.HasPrefix(path, "/api/teams/"):
 		if !s.teamAdmin(r, id) {
-			return deny()
+			if !strings.Contains(path, "/members") && !strings.Contains(path, "/invitations") && !(r.Method == "GET" && path == "/api/teams/"+id+"/roles") {
+				return deny()
+			}
+			var allowed bool
+			if s.DB.QueryRow(r.Context(), "SELECT cove_permission($1,$2,'','','manage_members')", p.ID, id).Scan(&allowed) != nil || !allowed {
+				return deny()
+			}
 		}
 		if strings.HasSuffix(path, "/nodes") && r.Method != "GET" && !p.Admin {
 			return deny()
 		}
 		return true
 	case strings.HasPrefix(path, "/api/nodes"):
+		if p.Admin && (r.Pattern == "PUT /api/nodes/{id}" || r.Pattern == "DELETE /api/nodes/{id}" || r.Method != "GET" && (strings.HasSuffix(path, "/identity") || strings.HasSuffix(path, "/bastion") || strings.HasSuffix(path, "/enrollment") || strings.Contains(path, "/ingress-listeners") || strings.Contains(path, "/cloudflare-tunnel") || strings.HasSuffix(path, "/host-maintenance"))) {
+			var moving bool
+			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM workload_moves m JOIN operations o ON o.id=m.operation_id WHERE (m.source_node=$1 OR m.target_node=$1) AND o.state IN ('queued','running'))`, id).Scan(&moving); err != nil {
+				http.Error(w, "move state unavailable", 503)
+				return false
+			}
+			if moving {
+				http.Error(w, "finish the node move before changing either node's SSH connection or identity", 409)
+				return false
+			}
+		}
 		if r.Pattern == "GET /api/nodes" {
 			return true
 		}
 		if !p.Admin {
 			return deny()
 		}
-		return true
+		permission := "view"
+		if r.Method != "GET" {
+			permission = "edit_configuration"
+		}
+		return s.requirePermission(w, r, "team", "", permission)
 	case path == "/api/private-connections" || strings.HasPrefix(path, "/api/private-connections/"):
 		// Handlers check access to both endpoints of the connection.
 		return true
@@ -283,7 +420,22 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/environment-previews") && r.Method == "GET":
 		// Each preview is filtered by access to its production environment.
 		return true
+	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/configuration/compare") && r.Method == "GET":
+		return true
+	case strings.HasPrefix(path, "/api/projects/") && (strings.HasSuffix(path, "/configuration") || strings.HasSuffix(path, "/configuration/gitops")) && r.Method == "GET":
+		return s.requireAccess(w, r, "project", id, 1)
+	case strings.HasPrefix(path, "/api/projects/") && strings.HasSuffix(path, "/costs") && r.Method == "GET":
+		return s.requireAccess(w, r, "project", id, 1)
 	case strings.HasPrefix(path, "/api/projects/"):
+		if strings.HasSuffix(path, "/configuration/export") {
+			return true
+		}
+		if strings.HasSuffix(path, "/status-share") || strings.HasSuffix(path, "/status-page") || strings.Contains(path, "/configuration/drafts") {
+			return s.requirePermission(w, r, "project", id, "edit_configuration")
+		}
+		if r.Method == "GET" && (r.Context().Value(apiRouteKey{}) != nil || strings.HasSuffix(path, "/preview-images")) {
+			return s.requireAccess(w, r, "project", id, 1)
+		}
 		if r.Method == "GET" && strings.HasSuffix(path, "/connections") {
 			// Environment-scoped members view their environment's graph; each resource is still filtered by access.
 			if environment := r.URL.Query().Get("environment"); environment != "" {
@@ -296,6 +448,23 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return s.requireAccess(w, r, "project", id, 3)
 	case strings.HasPrefix(path, "/api/environments/"):
+		if strings.HasSuffix(path, "/resource-defaults") {
+			permission := "view"
+			if r.Method != "GET" {
+				permission = "edit_configuration"
+			}
+			return s.requirePermission(w, r, "environment", id, permission)
+		}
+		if r.Method == "GET" && r.Context().Value(apiRouteKey{}) != nil {
+			return s.requireAccess(w, r, "environment", id, 1)
+		}
+		if strings.HasSuffix(path, "/suspension") {
+			needed := 1
+			if r.Method != "GET" {
+				needed = 2
+			}
+			return s.requireAccess(w, r, "environment", id, needed)
+		}
 		if r.Method != "GET" {
 			var preview bool
 			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM environment_previews WHERE environment_id=$1)`, id).Scan(&preview); err != nil {
@@ -346,6 +515,18 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case strings.HasPrefix(path, "/api/workloads/"):
 		if r.Method != "GET" {
+			var managedRegistry bool
+			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM managed_registries WHERE id=$1)`, id).Scan(&managedRegistry); err != nil {
+				http.Error(w, "authorization unavailable", 503)
+				return false
+			}
+			if managedRegistry && !strings.HasSuffix(path, "/certificates") && !strings.Contains(path, "/certificates/") {
+				http.Error(w, "this resource is managed by its registry; use the managed registry actions", 409)
+				return false
+			}
+			if managedRegistry && !s.teamAdmin(r, p.Team) {
+				return deny()
+			}
 			var preview bool
 			if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM previews WHERE workload_id=$1)`, id).Scan(&preview); err != nil {
 				http.Error(w, "authorization unavailable", 503)
@@ -398,8 +579,64 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 			if field(v, "action") != "restore" && field(v, "action") != "drill" {
 				needed = 2
 			}
+			if field(v, "action") == "build" {
+				needed = 3
+			}
+		}
+		if strings.Contains(path, "/pitr") {
+			needed = 1
 		}
 		if !s.requireAccess(w, r, "workload", id, needed) {
+			return false
+		}
+		if strings.Contains(path, "/pitr") {
+			permissions := []string{}
+			switch {
+			case r.Method == http.MethodGet:
+			case r.Method == http.MethodPut:
+				permissions = []string{"manage_backups", "edit_configuration", "read_secrets"}
+			case r.Method == http.MethodDelete:
+				permissions = []string{"manage_backups", "edit_configuration"}
+			case strings.HasSuffix(path, "/restore-copy"):
+				permissions = []string{"manage_backups", "read_secrets"}
+			default:
+				permissions = []string{"manage_backups"}
+			}
+			for _, permission := range permissions {
+				if !s.requirePermission(w, r, "workload", id, permission) {
+					return false
+				}
+			}
+		}
+		if (strings.Contains(path, "/database/") && r.Method != "GET") || strings.HasSuffix(path, "/database/credentials") || strings.Contains(path, "/object-buckets") && r.Method != "GET" {
+			if !s.requirePermission(w, r, "workload", id, "read_secrets") {
+				return false
+			}
+		}
+		if r.Method != "GET" && !strings.Contains(path, "/database/maintenance") && !strings.Contains(path, "/object-buckets") && s.databaseLocked(r.Context(), id) {
+			http.Error(w, "finish or retry database maintenance or bucket provisioning before changing this resource", 409)
+			return false
+		}
+		if r.Method != "GET" && strings.Contains(path, "/node-move") && !s.requirePermission(w, r, "workload", id, "read_secrets") {
+			return false
+		}
+		if strings.Contains(path, "/files") {
+			if !s.requirePermission(w, r, "workload", id, "edit_configuration") {
+				return false
+			}
+			if !s.requirePermission(w, r, "workload", id, "read_secrets") {
+				return false
+			}
+		}
+		if strings.HasSuffix(path, "/backups/snapshot-preview") || strings.Contains(path, "/backups/") && (strings.HasSuffix(path, "/download") || strings.HasSuffix(path, "/import") || strings.HasSuffix(path, "/import-s3")) {
+			if !s.requirePermission(w, r, "workload", id, "manage_backups") {
+				return false
+			}
+			if !strings.HasSuffix(path, "/snapshot-preview") && !s.requirePermission(w, r, "workload", id, "read_secrets") {
+				return false
+			}
+		}
+		if r.Method != "GET" && !s.requireAdoptionComplete(w, r, id) {
 			return false
 		}
 		if strings.HasSuffix(path, "/environment") {

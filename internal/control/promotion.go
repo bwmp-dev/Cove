@@ -12,11 +12,16 @@ import (
 func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(3 * time.Minute))
 	var in struct {
+		Reason     string `json:"reason"`
 		Source     string `json:"source_id"`
 		Release    string `json:"release"`
 		Repository string `json:"registry_repository"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if !validOperationReason(in.Reason) {
+		http.Error(w, "reason must be at most 1000 bytes without NUL", 400)
 		return
 	}
 	target := r.PathValue("id")
@@ -65,6 +70,10 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	src, dst := resources[in.Source], resources[target]
+	if _, err = environmentOperationGate(r.Context(), tx, target, "rollout_promote"); err != nil {
+		http.Error(w, "resume the target environment before promoting a release", 409)
+		return
+	}
 	if src.project != dst.project {
 		http.Error(w, "promotion requires resources in the same project", 400)
 		return
@@ -74,7 +83,7 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var valid, active bool
-	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback')),EXISTS(SELECT 1 FROM operations WHERE workload_id IN ($2,$3) AND state IN ('queued','running'))`, in.Release, in.Source, target).Scan(&valid, &active); err != nil {
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM operations WHERE id=$1 AND workload_id=$2 AND state='succeeded' AND action IN ('deploy','rollback','adopt') AND COALESCE(result->'rollout'->>'phase','') NOT IN ('waiting','aborted')),EXISTS(SELECT 1 FROM operations WHERE workload_id IN ($2,$3) AND state IN ('queued','running'))`, in.Release, in.Source, target).Scan(&valid, &active); err != nil {
 		http.Error(w, "operations unavailable", 503)
 		return
 	}
@@ -115,9 +124,19 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "source images unavailable; verify the retained release and registry publication settings", 502)
 		return
 	}
-	request := worker.Request{ID: resourceID(), Workload: target, Action: "deploy", Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, ImagePins: result.Images, Registry: export.Registry}
+	request := worker.Request{ID: resourceID(), Workload: target, Action: "deploy", ComposeBundle: config.ComposeBundle, Compose: config.Compose, Source: config.Source, Environment: config.Environment, Kind: config.Kind, Routes: config.Routes, Private: config.Private, Limits: config.Limits, Hooks: config.Hooks, FileSecrets: config.FileSecrets, GuardedDeploy: config.GuardedDeploy, Rollout: config.Rollout, ImagePins: result.Images, Registry: export.Registry}
 	if err = loadNetworkRequest(r.Context(), tx, &request); err != nil {
 		http.Error(w, "target networking unavailable", 409)
+		return
+	}
+	retainedPreview := request
+	if _, err = s.retainImageUpdatesForRequest(r.Context(), tx, &retainedPreview); err != nil {
+		var retained *imageUpdateRetentionError
+		if errors.As(err, &retained) {
+			http.Error(w, retained.Error(), 409)
+		} else {
+			http.Error(w, "Retained automatic image versions are unavailable; check the image update policy before deploying.", 503)
+		}
 		return
 	}
 	if err = worker.ValidateRequest(request); err != nil {
@@ -142,6 +161,10 @@ func (s *Server) promoteRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		http.Error(w, "could not queue promotion", 503)
+		return
+	}
+	if err = saveOperationReason(r.Context(), tx, request.ID, in.Reason, actor(r).ID); err != nil {
+		http.Error(w, "could not record promotion reason", 503)
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `UPDATE workloads SET manually_stopped=false WHERE id=$1`, target); err != nil {

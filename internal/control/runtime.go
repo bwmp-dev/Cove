@@ -7,6 +7,9 @@ import (
 	"net/http"
 )
 
+func (s *Server) workloadObservations(w http.ResponseWriter, r *http.Request) {
+	s.readRuntime(w, r, "observations")
+}
 func (s *Server) workloadRuntime(w http.ResponseWriter, r *http.Request) {
 	s.readRuntime(w, r, "containers")
 }
@@ -35,6 +38,14 @@ func (s *Server) readRuntime(w http.ResponseWriter, r *http.Request, method stri
 		http.Error(w, "runtime information is unavailable; check node connectivity and deployment state", 502)
 		return
 	}
+	if method == "observations" {
+		if response.Error != "" || response.Observations == nil {
+			http.Error(w, "upgrade and verify worker for resource observations", 502)
+			return
+		}
+		respond(w, 200, response.Observations)
+		return
+	}
 	if method == "releases" {
 		if response.Releases == nil {
 			response.Releases = []worker.Release{}
@@ -50,10 +61,14 @@ func (s *Server) readRuntime(w http.ResponseWriter, r *http.Request, method stri
 		return
 	}
 	if method == "containers" {
+		if err := s.observePorts(r.Context(), r.PathValue("id"), response.Containers); err != nil {
+			http.Error(w, "runtime security observation unavailable", 503)
+			return
+		}
 		if response.Containers == nil {
 			response.Containers = []worker.Container{}
 		}
-		respond(w, 200, map[string]any{"containers": response.Containers})
+		respond(w, 200, map[string]any{"containers": response.Containers, "rollout": response.Rollout, "suspension": response.Suspension, "idle": response.Idle})
 		return
 	}
 	respond(w, 200, map[string]string{"logs": response.Logs})

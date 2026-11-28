@@ -19,11 +19,13 @@ import (
 )
 
 type Route struct {
-	Domain  string `json:"domain"`
-	Service string `json:"service"`
-	Port    int    `json:"port"`
+	Protocol string `json:"protocol,omitempty"`
+	Domain   string `json:"domain"`
+	Service  string `json:"service"`
+	Port     int    `json:"port"`
 	// Auth is an htpasswd bcrypt entry; when set the proxy requires it before forwarding.
-	Auth string `json:"auth,omitempty"`
+	Auth   string       `json:"auth,omitempty"`
+	Policy *RoutePolicy `json:"policy,omitempty"`
 }
 
 var routeAuth = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}:\$2[aby]\$1[0-4]\$[./A-Za-z0-9]{53}$`)
@@ -32,19 +34,67 @@ var domainLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func ValidateRoutes(routes []Route, kind string) error {
 	if len(routes) > 32 || (kind == "job" && len(routes) > 0) {
-		return errors.New("only services can have routes, with at most 32 hostnames")
+		return errors.New("only services can have routes, with at most 32 routes")
 	}
 	seen := map[string]bool{}
+	certificates := map[string]string{}
 	for _, route := range routes {
-		if len(route.Domain) > 253 || !strings.Contains(route.Domain, ".") || seen[route.Domain] || !serviceIdentifier.MatchString(route.Service) || route.Port < 1 || route.Port > 65535 || (route.Auth != "" && !routeAuth.MatchString(route.Auth)) {
+		if route.protocol() != "http" {
+			if err := validateTransportRoute(route); err != nil {
+				return err
+			}
+			key := "listener/" + route.listener()
+			if seen[key] {
+				return errors.New("a dedicated listener can have only one route")
+			}
+			seen[key] = true
+			continue
+		}
+		key := route.Domain + "/" + route.pathPrefix()
+		if len(route.Domain) > 253 || !strings.Contains(route.Domain, ".") || seen[key] || !serviceIdentifier.MatchString(route.Service) || route.Port < 1 || route.Port > 65535 || (route.Auth != "" && !routeAuth.MatchString(route.Auth)) {
 			return errors.New("invalid or duplicate route hostname, service or port")
 		}
-		for _, label := range strings.Split(route.Domain, ".") {
+		base := strings.TrimPrefix(route.Domain, "*.")
+		if !strings.Contains(base, ".") {
+			return errors.New("route hostnames require a complete DNS name")
+		}
+		for _, label := range strings.Split(base, ".") {
 			if !domainLabel.MatchString(label) {
-				return errors.New("route hostnames must be lowercase DNS names without schemes, paths or wildcards")
+				return errors.New("route hostnames must be lowercase DNS names, optionally beginning with *.")
 			}
 		}
-		seen[route.Domain] = true
+		if strings.HasPrefix(route.Domain, "*.") && (route.Policy == nil || route.Policy.CertificateSource != "uploaded" || route.Policy.CertificateID == "") {
+			return errors.New("wildcard routes require an assigned wildcard certificate; HTTP-01 cannot issue wildcard certificates")
+		}
+		if err := route.validatePolicy(); err != nil {
+			return err
+		}
+		selection := "acme"
+		if p := route.Policy; p != nil {
+			if p.CertificateSource == "default" {
+				selection = "default"
+			} else if p.CertificateSource == "uploaded" {
+				selection = "uploaded/" + p.CertificateID
+			}
+		}
+		if previous := certificates[route.Domain]; previous != "" && previous != selection {
+			return errors.New("all paths on a hostname must select the same certificate source and version")
+		}
+		certificates[route.Domain] = selection
+		seen[key] = true
+	}
+	if err := validateRouteVisibilities(routes); err != nil {
+		return err
+	}
+	for _, wildcard := range routes {
+		if !strings.HasPrefix(wildcard.Domain, "*.") {
+			continue
+		}
+		for _, exact := range routes {
+			if !strings.HasPrefix(exact.Domain, "*.") && RouteDomainsOverlap(wildcard.Domain, exact.Domain) && (exact.Policy == nil || exact.Policy.CertificateSource != "uploaded") {
+				return errors.New("exact hostnames covered by a managed wildcard must also select a stored certificate")
+			}
+		}
 	}
 	return nil
 }
@@ -62,15 +112,30 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 			return "", err
 		}
 		for _, route := range list {
+			if route.IsTransportRoute() {
+				config.addRoute(workload, route)
+				continue
+			}
 			if owner := owners[route.Domain]; owner != "" && owner != workload {
 				return "", errors.New("hostname already belongs to another workload")
 			}
 			owners[route.Domain] = workload
-			config.add(route.Domain, fmt.Sprintf("http://%s:%d", routeAlias(workload, route.Service), route.Port), route.Auth)
+			config.addRoute(workload, route)
 		}
 	}
+	for domain, owner := range owners {
+		if _, base, ok := strings.Cut(domain, "."); ok && !strings.HasPrefix(domain, "*.") {
+			if other := owners["*."+base]; other != "" && other != owner {
+				return "", errors.New("wildcard hostname overlaps another workload")
+			}
+		}
+	}
+	if err := validateTransportOwners(routes); err != nil {
+		return "", err
+	}
+	config.addPrivateDenials(routes)
 	// Traefik rejects empty nested maps as standalone configuration elements.
-	if len(config.HTTP.Routers) == 0 {
+	if config.empty() {
 		return "{}", nil
 	}
 	data, err := json.Marshal(config)
@@ -79,31 +144,42 @@ func ingressConfig(routes map[string][]Route) (string, error) {
 
 type ingressRouter struct {
 	Rule        string            `json:"rule"`
+	Priority    int               `json:"priority,omitempty"`
 	EntryPoints []string          `json:"entryPoints"`
 	Middlewares []string          `json:"middlewares,omitempty"`
 	Service     string            `json:"service"`
 	TLS         map[string]string `json:"tls"`
 }
 
+type ingressBasicAuth struct {
+	Users        []string `json:"users"`
+	RemoveHeader bool     `json:"removeHeader"`
+}
 type ingressMiddleware struct {
-	BasicAuth struct {
-		Users        []string `json:"users"`
-		RemoveHeader bool     `json:"removeHeader"`
-	} `json:"basicAuth"`
+	ForwardAuth   map[string]any    `json:"forwardAuth,omitempty"`
+	Errors        map[string]any    `json:"errors,omitempty"`
+	BasicAuth     *ingressBasicAuth `json:"basicAuth,omitempty"`
+	Headers       map[string]any    `json:"headers,omitempty"`
+	IPAllowList   map[string]any    `json:"ipAllowList,omitempty"`
+	RedirectRegex map[string]any    `json:"redirectRegex,omitempty"`
 }
 
 type ingressService struct {
-	LoadBalancer struct {
-		Servers []map[string]string `json:"servers"`
-	} `json:"loadBalancer"`
+	LoadBalancer *ingressLoadBalancer `json:"loadBalancer,omitempty"`
+	Weighted     *ingressWeighted     `json:"weighted,omitempty"`
+}
+
+type ingressLoadBalancer struct {
+	ServersTransport string           `json:"serversTransport,omitempty"`
+	Servers          []map[string]any `json:"servers"`
+	Sticky           map[string]any   `json:"sticky,omitempty"`
 }
 
 type dynamicIngress struct {
-	HTTP struct {
-		Routers     map[string]ingressRouter     `json:"routers,omitempty"`
-		Services    map[string]ingressService    `json:"services,omitempty"`
-		Middlewares map[string]ingressMiddleware `json:"middlewares,omitempty"`
-	} `json:"http"`
+	TLS  *ingressTLS             `json:"tls,omitempty"`
+	HTTP ingressHTTP             `json:"http"`
+	TCP  *ingressTransportConfig `json:"tcp,omitempty"`
+	UDP  *ingressTransportConfig `json:"udp,omitempty"`
 }
 
 func newIngressConfig() dynamicIngress {
@@ -116,9 +192,14 @@ func newIngressConfig() dynamicIngress {
 func (c *dynamicIngress) add(domain, upstream, auth string) {
 	sum := sha256.Sum256([]byte(domain + "/" + upstream))
 	name := "cove-route-" + hex.EncodeToString(sum[:16])
-	router := ingressRouter{Rule: "Host(`" + domain + "`)", EntryPoints: []string{"websecure"}, Service: name, TLS: map[string]string{"certResolver": "cove"}}
+	c.addNamed(domain, upstream, auth, name)
+}
+
+func (c *dynamicIngress) addNamed(domain, upstream, auth, name string) {
+	router := ingressRouter{Rule: routeHostRule(domain), Priority: routePriority(Route{Domain: domain}), EntryPoints: []string{"websecure"}, Service: name, TLS: map[string]string{"certResolver": "cove"}}
 	if auth != "" {
 		middleware := ingressMiddleware{}
+		middleware.BasicAuth = &ingressBasicAuth{}
 		middleware.BasicAuth.Users = []string{auth}
 		middleware.BasicAuth.RemoveHeader = true
 		if c.HTTP.Middlewares == nil {
@@ -128,8 +209,8 @@ func (c *dynamicIngress) add(domain, upstream, auth string) {
 		router.Middlewares = []string{name + "-auth"}
 	}
 	c.HTTP.Routers[name] = router
-	service := ingressService{}
-	service.LoadBalancer.Servers = []map[string]string{{"url": upstream}}
+	service := ingressService{LoadBalancer: &ingressLoadBalancer{}}
+	service.LoadBalancer.Servers = []map[string]any{{"url": upstream}}
 	c.HTTP.Services[name] = service
 }
 
@@ -172,6 +253,22 @@ func (e *Engine) ingressArgs() ([]string, error) {
 	} else if e.ACMERoot != "" {
 		return nil, errors.New("ACME root requires a custom ACME directory")
 	}
+	traffic, err := e.trafficSettings()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]any, len(args))
+	for i, arg := range args {
+		values[i] = arg
+	}
+	configured, err := trafficCommand(values, traffic)
+	if err != nil {
+		return nil, err
+	}
+	args = args[:0]
+	for _, arg := range configured {
+		args = append(args, arg.(string))
+	}
 	return args, nil
 }
 
@@ -182,6 +279,17 @@ func (e *Engine) output(ctx context.Context, args ...string) (string, error) {
 }
 
 func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
+	if ctx.Value(nodeLeaseContextKey{}) != e {
+		unlock, err := e.lockNodeChange(false)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		ctx = context.WithValue(ctx, nodeLeaseContextKey{}, e)
+	}
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
 	args, err := e.ingressArgs()
 	if err != nil {
 		return err
@@ -201,11 +309,27 @@ func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if id == "" {
+		if err := e.requireInterlockedHostSchedule(); err != nil {
+			return err
+		}
+		state, err := e.loadIngressExposures()
+		if err != nil {
+			return err
+		}
+		client := e.ingressDockerClient()
+		restored, restoreErr := restoreSavedIngressProxy(ctx, client, state)
+		client.CloseIdleConnections()
+		if restoreErr != nil {
+			return restoreErr
+		}
+		if restored {
+			return nil
+		}
 		mode, err := e.ingressMode()
 		if err != nil {
 			return err
 		}
-		create := []string{"docker", "create", "--name", "cove-ingress", "--label", "cove.managed=ingress", "--restart", "unless-stopped", "--network", "cove-ingress", "--security-opt", "no-new-privileges:true"}
+		create := []string{"docker", "create", "--name", "cove-ingress", "--label", "cove.managed=ingress", "--restart", "unless-stopped", "--network", "cove-ingress", "--security-opt", "no-new-privileges:true", "--log-driver", "json-file", "--log-opt", "max-size=4m", "--log-opt", "max-file=3"}
 		if !mode.Staged {
 			create = append(create, "-p", "80:80", "-p", "443:443")
 		}
@@ -231,6 +355,17 @@ func (e *Engine) ensureIngress(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if !strings.HasPrefix(image, "traefik:") {
+		proxy, err := e.inspectProxy(ctx)
+		if err == nil && proxy.Image == image {
+			return nil
+		}
+		if imageDigest.MatchString(image) {
+			change, changeErr := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "cove.traffic-change"}}`, "cove-ingress")
+			_, parseErr := hex.DecodeString(change)
+			if changeErr == nil && len(change) == 32 && parseErr == nil {
+				return nil
+			}
+		}
 		return errors.New("existing ingress needs migration to Traefik before deploying routes")
 	}
 	return nil
@@ -252,15 +387,35 @@ func (e *Engine) loadIngress() (map[string][]Route, error) {
 }
 
 func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out io.Writer) error {
-	config, err := ingressConfig(routes)
+	if ctx.Value(nodeLeaseContextKey{}) != e {
+		unlock, err := e.lockNodeChange(false)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		ctx = context.WithValue(ctx, nodeLeaseContextKey{}, e)
+	}
+	if err := e.restrictCloudflareOrigins(ctx, routes); err != nil {
+		return err
+	}
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
+	if _, err := ingressConfig(routes); err != nil {
+		return err
+	}
+	if err := e.ensureIngress(ctx, out); err != nil {
+		return err
+	}
+	if err := e.validateManagedRouteIngress(ctx, routes); err != nil {
+		return err
+	}
+	config, err := e.ingressTraffic(ctx, routes, out)
 	if err != nil {
 		return err
 	}
 	config, err = e.migrationIngressConfig(config)
 	if err != nil {
-		return err
-	}
-	if err = e.ensureIngress(ctx, out); err != nil {
 		return err
 	}
 	panel, err := e.output(ctx, "docker", "inspect", "--format", `{{index .Config.Labels "cove.panel.domain"}}`, "cove-ingress")
@@ -273,7 +428,7 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 		}
 		for _, list := range routes {
 			for _, route := range list {
-				if route.Domain == panel {
+				if RouteDomainsOverlap(route.Domain, panel) {
 					return errors.New("the dashboard hostname is reserved")
 				}
 			}
@@ -285,11 +440,26 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 		}
 	}
 	for workload, list := range routes {
-		for _, route := range list {
-			ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
+		suspension, err := e.readSuspension(workload)
+		if err != nil {
+			return err
+		}
+		if suspension != nil && suspension.Phase != "awake" {
+			continue
+		}
+		idle, err := e.readIdle(workload)
+		if err != nil {
+			return err
+		}
+		if idle != nil {
+			continue
+		}
+		for _, route := range routeTargets(list) {
+			selected, err := e.trafficContainers(ctx, workload, route.Service, false)
 			if err != nil {
 				return err
 			}
+			ids := strings.Join(selected, " ")
 			if ids == "" {
 				continue
 			}
@@ -306,32 +476,49 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 						return err
 					}
 				} else if !slices.Contains(fields[1:], alias) {
+					traffic, err := e.loadTraffic(workload)
+					if err != nil {
+						return err
+					}
+					if len(traffic[route.Service]) > 0 {
+						continue
+					}
 					return fmt.Errorf("service %q joins cove-ingress without Cove's routing alias; remove that network from its Compose file", route.Service)
 				}
 			}
 		}
 	}
-	path := filepath.Join(e.Root, "ingress.traefik.yaml")
-	if err = os.WriteFile(path, []byte(config), 0600); err != nil {
-		return err
-	}
-	if err = e.Run(ctx, e.Root, []string{"docker", "cp", path, "cove-ingress:/data/routes.next"}, nil, out); err != nil {
-		return err
-	}
-	if err = e.Run(ctx, e.Root, []string{"docker", "start", "cove-ingress"}, nil, out); err != nil {
-		return err
-	}
-	if err = e.Run(ctx, e.Root, []string{"docker", "exec", "cove-ingress", "sh", "-ec", "mkdir -p /data/dynamic; mv /data/routes.next /data/dynamic/routes.yaml"}, nil, out); err != nil {
+	confirmTransports, err := e.needsTransportConfirmation(routes)
+	if err != nil {
 		return err
 	}
 	var desired dynamicIngress
 	if err = json.Unmarshal([]byte(config), &desired); err != nil {
 		return err
 	}
+	if err = e.retireUDPIngress(ctx, desired, out); err != nil {
+		return err
+	}
+	if err = e.publishIngress(ctx, config, out); err != nil {
+		return err
+	}
+	var certificateErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		current, readErr := e.output(ctx, "docker", "exec", "cove-ingress", "wget", "-qO-", "http://127.0.0.1:8080/api/http/routers")
 		if readErr == nil && ingressAccepted(current, desired) {
-			return nil
+			certificateErr = e.confirmTransportIngress(ctx, desired, confirmTransports)
+			if certificateErr == nil {
+				certificateErr = e.validateManagedRouteIngress(ctx, routes)
+			}
+			if certificateErr == nil {
+				certificateErr = e.confirmRouteCertificates(ctx, routes)
+			}
+			if certificateErr == nil {
+				if err := e.clearIngressTransition(); err != nil {
+					return err
+				}
+				return e.pruneRouteAuxiliary(ctx, desired, out)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -339,18 +526,31 @@ func (e *Engine) syncIngress(ctx context.Context, routes map[string][]Route, out
 		case <-time.After(time.Second):
 		}
 	}
+	if certificateErr != nil {
+		return certificateErr
+	}
 	return errors.New("ingress did not accept configuration; check ports 80/443 and ingress logs")
 }
 
 func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route, out io.Writer) error {
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
-	for _, route := range list {
-		ids, err := e.output(ctx, "docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+route.Service)
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
+	suspension, err := e.readSuspension(workload)
+	if err != nil {
+		return err
+	}
+	for _, route := range routeTargets(list) {
+		if suspension != nil && suspension.Phase != "awake" {
+			continue
+		}
+		ids, err := e.trafficContainers(ctx, workload, route.Service, false)
 		if err != nil {
 			return err
 		}
-		if ids == "" {
+		if len(ids) == 0 {
 			return fmt.Errorf("route service %q has no container; check the service name against the deployed Compose file", route.Service)
 		}
 	}
@@ -376,9 +576,9 @@ func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route
 	if _, err = ingressConfig(desired); err != nil {
 		return err
 	}
-	if err = writeJSON(filepath.Join(e.Root, "ingress.json"), desired); err != nil {
+	if err = e.writeManagedIngress(desired); err != nil {
 		// A failed write may still have replaced the file, which the next worker start would apply.
-		if restoreErr := writeJSON(filepath.Join(e.Root, "ingress.json"), previous); restoreErr != nil {
+		if restoreErr := e.writeManagedIngress(previous); restoreErr != nil {
 			return fmt.Errorf("%w: %w", errIngressUnrestored, errors.Join(err, restoreErr))
 		}
 		return err
@@ -386,7 +586,7 @@ func (e *Engine) applyIngress(ctx context.Context, workload string, list []Route
 	if err = e.syncIngress(ctx, desired, out); err != nil {
 		recovery, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancel()
-		if saveErr := writeJSON(filepath.Join(e.Root, "ingress.json"), previous); saveErr != nil {
+		if saveErr := e.writeManagedIngress(previous); saveErr != nil {
 			return fmt.Errorf("%w: %w", errIngressUnrestored, errors.Join(err, saveErr))
 		}
 		if restoreErr := e.syncIngress(recovery, previous, out); restoreErr != nil {
@@ -412,6 +612,9 @@ var errRoutesCancelled = errors.New("route change cancelled")
 // the journal records Committed after the proxy and current.json hold the new routes. Failure or
 // cancellation before the commit restores the previous routes; after it the change is final.
 func (e *Engine) updateRoutes(ctx context.Context, r Request, dir string, out io.Writer) error {
+	if err := e.validateIdleRoutes(ctx, r.Workload, r.Routes); err != nil {
+		return err
+	}
 	path := filepath.Join(dir, "current.json")
 	current, released, err := readCurrent(path)
 	if err != nil {
@@ -493,6 +696,9 @@ func (e *Engine) restorePrevious(ctx context.Context, workload string, previous 
 func (e *Engine) restoreRoutes(ctx context.Context, workload string, previous []Route, out io.Writer) error {
 	e.ingressMu.Lock()
 	defer e.ingressMu.Unlock()
+	if err := e.ingressExposureReady(); err != nil {
+		return err
+	}
 	owned, err := e.loadIngress()
 	if err != nil {
 		return err
@@ -502,7 +708,7 @@ func (e *Engine) restoreRoutes(ctx context.Context, workload string, previous []
 	} else {
 		owned[workload] = previous
 	}
-	if err = writeJSON(filepath.Join(e.Root, "ingress.json"), owned); err != nil {
+	if err = e.writeManagedIngress(owned); err != nil {
 		return err
 	}
 	path := filepath.Join(e.Root, "workloads", workload, "current.json")
@@ -510,7 +716,7 @@ func (e *Engine) restoreRoutes(ctx context.Context, workload string, previous []
 	if err != nil {
 		return err
 	}
-	if released && !slices.Equal(current.Routes, previous) {
+	if released && !RoutesEqual(current.Routes, previous) {
 		current.Routes = previous
 		if err = writeJSON(path, current); err != nil {
 			return err
@@ -548,6 +754,15 @@ func (e *Engine) settleRoutes(ctx context.Context, id, state string) error {
 	e.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if j.SuspensionChange != nil || j.IdleChange != nil {
+		return e.settleSuspension(ctx, id)
+	}
+	if j.JobRun != nil {
+		return e.settleJob(ctx, id, state)
+	}
+	if j.RolloutChange != nil {
+		return e.settleRollout(ctx, id, state)
 	}
 	if j.Operation.State != "running" || j.RouteChange == nil {
 		return nil
@@ -608,6 +823,15 @@ func routeOutcome(state string) string {
 
 // busy reports whether the workload has an executing operation or an unsettled route change.
 func (e *Engine) busy(workload string) bool {
+	if e.moving(workload) {
+		return true
+	}
+	if e.trafficRecoveryPending() {
+		return true
+	}
+	if e.active[housekeepingWorkload] {
+		return true
+	}
 	if e.active[workload] {
 		return true
 	}
@@ -638,6 +862,8 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		Rule        string
 		Service     string
 		Middlewares []string
+		EntryPoints []string
+		Priority    int
 	}
 	if json.Unmarshal([]byte(data), &routers) != nil {
 		return false
@@ -652,6 +878,12 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		if !ok || router.Status != "enabled" || router.Rule != want.Rule || strings.TrimSuffix(router.Service, "@file") != want.Service || len(router.Middlewares) != len(want.Middlewares) {
 			return false
 		}
+		if !slices.Equal(router.EntryPoints, want.EntryPoints) {
+			return false
+		}
+		if want.Priority != 0 && router.Priority != want.Priority {
+			return false
+		}
 		// A protected route counts as applied only once the proxy enforces its authentication.
 		for i, middleware := range want.Middlewares {
 			if strings.TrimSuffix(router.Middlewares[i], "@file") != middleware {
@@ -661,4 +893,47 @@ func ingressAccepted(data string, desired dynamicIngress) bool {
 		found++
 	}
 	return found == len(desired.HTTP.Routers)
+}
+
+func (e *Engine) recoverIngressDecisions() error {
+	e.mu.Lock()
+	ids := make([]string, 0, len(e.recovering))
+	for id := range e.recovering {
+		ids = append(ids, id)
+	}
+	e.mu.Unlock()
+	e.ingressMu.Lock()
+	defer e.ingressMu.Unlock()
+	routes, err := e.loadIngress()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, id := range ids {
+		journal, err := e.read(id)
+		if err != nil {
+			return err
+		}
+		if journal.RouteChange == nil {
+			continue
+		}
+		desired := journal.Request.Routes
+		if !journal.RouteChange.Committed {
+			desired = journal.RouteChange.Previous
+		}
+		if RoutesEqual(routes[journal.Request.Workload], desired) {
+			continue
+		}
+		if len(desired) == 0 {
+			delete(routes, journal.Request.Workload)
+		} else {
+			routes[journal.Request.Workload] = desired
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	// Decide all interrupted route changes before any startup sync can expose an uncommitted protection removal.
+	return e.writeManagedIngress(routes)
 }

@@ -66,7 +66,10 @@ test("environment previews: recipe from a real deployment, preview states and co
   // A credential-like variable must be decided before previews can copy it.
   expect((await page.request.put(`/api/workloads/${id}`, { headers: { Origin: origin }, data: { name: resource.name, node_id: resource.node_id, kind: "service", compose: resource.compose, environment: { API_TOKEN: "production-token-fixture", LOG_LEVEL: "info" } } })).status()).toBe(200);
   const deploy = (await (await page.request.post(`/api/workloads/${id}/operations`, { headers: { Origin: origin }, data: { action: "deploy" } })).json()) as { id: string };
-  await expect.poll(async () => ((await (await page.request.get(`/api/operations/${deploy.id}`)).json()) as { state: string }).state, { timeout: 180_000 }).toBe("succeeded");
+  const deployState = async () => ((await (await page.request.get(`/api/operations/${deploy.id}`)).json()) as { state: string }).state;
+  await expect.poll(deployState, { timeout: 180_000 }).toMatch(/^(succeeded|failed|cancelled|interrupted)$/);
+  const finalState = await deployState();
+  if (finalState !== "succeeded") throw new Error(`Initial deploy ${deploy.id} ended ${finalState}:\n${await (await page.request.get(`/api/operations/${deploy.id}/logs`)).text()}`);
 
   // The recipe plan is read from the deployed release on the worker.
   await page.goto(`/projects/${projectId}/previews`);
@@ -89,7 +92,7 @@ test("environment previews: recipe from a real deployment, preview states and co
   const now = Date.now();
   const iso = (offset: number) => new Date(now + offset).toISOString();
   const branch = (repository: string, head: string) => ({ repository_id: repository === "acme/web" ? 1 : 2, repository, branch: "staging/checkout-redesign", head, checked_at: iso(-60_000) });
-  const preview = (previewId: string, slug: string, state: string, stage: string, extra = {}) => ({ id: previewId, project_id: projectId, environment_id: `${previewId}-env`, base_environment_id: "prod", suffix: slug, slug, state, stage, detail: "", pinned: false, access: "private", delete_reason: "", last_activity_at: iso(-3_600_000), expires_at: iso(68 * 3_600_000), created_at: iso(-7_200_000), branches: [branch("acme/web", "4f1c2e9a7b0d3c5e6f8091a2b3c4d5e6f7081920"), branch("acme/api", "")], permissions: ["read", "operate", "edit"], ...extra });
+  const preview = (previewId: string, slug: string, state: string, stage: string, extra = {}) => ({ id: previewId, project_id: projectId, environment_id: `${previewId}-env`, base_environment_id: "prod", suffix: slug, slug, state, stage, detail: "", pinned: false, access: "private", delete_reason: "", last_activity_at: iso(-3_600_000), expires_at: iso(68 * 3_600_000), created_at: iso(-7_200_000), branches: [branch("acme/web", "4f1c2e9a7b0d3c5e6f8091a2b3c4d5e6f7081920"), branch("acme/api", "")], permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"], ...extra });
   const previews = [
     preview("p-awaiting", "invoice-export", "awaiting_approval", "approval", { environment_id: "" }),
     preview("p-ready", "checkout-redesign", "ready", "ready", { pinned: true, expires_at: null }),
@@ -136,9 +139,11 @@ test("environment previews: recipe from a real deployment, preview states and co
   await page.route("**/api/projects", async (route) => {
     const response = await route.fetch();
     const projects = (await response.json()) as { id: string; environments: unknown[] }[];
-    for (const project of projects) if (project.id === projectId) project.environments.push({ id: "p-ready-env", name: "Preview checkout-redesign", preview_id: "p-ready", permissions: ["read", "operate", "edit"] });
+    for (const project of projects) if (project.id === projectId) project.environments.push({ id: "p-ready-env", name: "Preview checkout-redesign", preview_id: "p-ready", permissions: ["read", "operate", "edit", "view", "read_secrets", "edit_configuration", "manage_backups"] });
     await route.fulfill({ response, json: projects });
   });
+  // Fixture: the intercepted preview environment does not exist in the database, so its pause state is intercepted too.
+  await page.route("**/api/environments/p-ready-env/suspension", (route) => route.fulfill({ json: { paused: false, phase: "active", resources: [] } }));
   await page.goto(`/projects/${projectId}/environments/p-ready-env`);
   await expect(page.getByRole("heading", { name: "Preview checkout-redesign" })).toBeVisible();
   await expect(page.getByText("14 tables and 182340 rows verified", { exact: false }).first()).toBeAttached();
@@ -146,6 +151,8 @@ test("environment previews: recipe from a real deployment, preview states and co
   await expect(page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Previews" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Project sections" }).getByRole("link", { name: /Previews/ })).toHaveAttribute("aria-current", "page");
   await expect(page.getByRole("button", { name: "New connection" })).toHaveCount(0);
+  await expect(page.getByText(/paused, redeployed and removed through their preview/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Pause environment" })).toHaveCount(0);
   await captureWidths(page, (width) => testInfo.outputPath(`preview-environment-${width}.png`));
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });

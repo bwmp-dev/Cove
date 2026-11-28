@@ -2,7 +2,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { rememberTeam } from "../lib/team";
 import { keys } from "./queries";
-import type { Enrollment, NodeInput, OperationAction, QueuedOperation, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
+import { acceptsReason, withReason } from "../lib/operations";
+import type { AutoscalePolicy, AutoscaleState, Enrollment, IdlePolicy, NodeInput, OperationRequest, QueuedOperation, RestartPolicy, Route, RoutesUpdate, VerifyResult, WorkloadInput } from "./types";
 
 // Mutations carrying credentials (passwords, setup commands, secrets) use gcTime 0 so
 // their variables and results leave the in-memory mutation cache once the form unmounts.
@@ -12,7 +13,8 @@ export function useLogin() {
   const client = useQueryClient();
   return useMutation({
     ...transient,
-    mutationFn: (input: { email?: string; password: string }) => request<{ user: string }>("POST", "/auth/login", input),
+    // A second_factor_required response carries a session that only proves the password; the dashboard stays closed until the challenge passes.
+    mutationFn: (input: { email?: string; password: string; break_glass?: boolean }) => request<{ user: string; second_factor_required: boolean }>("POST", "/auth/login", input),
     // The session (teams, permissions) is reloaded in full rather than taken from the login response, starting from the account's default team.
     onSuccess: () => {
       rememberTeam(null);
@@ -76,11 +78,13 @@ export function useVerifyNode() {
   });
 }
 
-export function useCreateWorkload() {
+// The input can carry routes with typed header values and forward-auth URLs, and a source access token. Mutation
+// variables stay in the cache after a failure, so the mutation takes none: mutationFn reads the input from the caller when it runs.
+export function useCreateWorkload(input: () => WorkloadInput) {
   const client = useQueryClient();
   return useMutation({
     ...transient,
-    mutationFn: (input: WorkloadInput) => request<{ id: string }>("POST", "/api/workloads", input),
+    mutationFn: () => request<{ id: string }>("POST", "/api/workloads", input()),
     onSettled: () => client.invalidateQueries({ queryKey: keys.workloads }),
   });
 }
@@ -94,10 +98,13 @@ export function useUpdateWorkload(workloadId: string) {
   });
 }
 
-export function useUpdateRoutes(workloadId: string) {
+// Routes can carry typed header values and forward-auth URLs. Mutation variables stay in the cache after a failure, so
+// the mutation takes none: mutationFn reads the routes from the caller when it runs.
+export function useUpdateRoutes(workloadId: string, routes: () => Route[]) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (routes: Route[]) => request<RoutesUpdate>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/routes`, { routes }),
+    ...transient,
+    mutationFn: () => request<RoutesUpdate>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/routes`, { routes: routes() }),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
   });
 }
@@ -105,9 +112,38 @@ export function useUpdateRoutes(workloadId: string) {
 export function useQueueOperation(workloadId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (action: Exclude<OperationAction, "routes">) =>
-      request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, { action }),
+    mutationFn: ({ reason = "", ...input }: OperationRequest) =>
+      request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, acceptsReason(input.action) ? withReason(input, reason) : input),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
+  });
+}
+
+// Turning the policy off cancels queued automatic restarts, so operations are refreshed as well.
+export function useUpdateRestartPolicy(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) => request<RestartPolicy>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/restart-policy`, { enabled }),
+    onSuccess: (policy) => client.setQueryData(keys.restartPolicy(workloadId), policy),
+    onError: () => client.invalidateQueries({ queryKey: keys.restartPolicy(workloadId) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
+  });
+}
+
+// The worker applies the policy in an operation; the saved policy is refreshed once that operation succeeds.
+export function useUpdateIdlePolicy(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (policy: IdlePolicy) => request<QueuedOperation>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/idle-policy`, policy),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
+  });
+}
+
+// Saved immediately without an operation; the response is the new saved state.
+export function useUpdateAutoscalePolicy(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (policy: AutoscalePolicy) => request<AutoscaleState>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/autoscale-policy`, policy),
+    onSuccess: (state) => client.setQueryData(keys.autoscalePolicy(workloadId), state),
   });
 }
 
@@ -122,7 +158,42 @@ export function useCancelOperation(operationId: string) {
 export function useRollback(workloadId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (release: string) => request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, { action: "rollback", release }),
+    mutationFn: ({ release, reason = "" }: { release: string; reason?: string }) => request<QueuedOperation>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/operations`, withReason({ action: "rollback", release }, reason)),
     onSettled: () => Promise.all([client.invalidateQueries({ queryKey: keys.operations }), client.invalidateQueries({ queryKey: keys.workload(workloadId) })]),
+  });
+}
+
+export interface PortBindingRewrite {
+  compose: string;
+  changed: number;
+  revision: string;
+  saved: boolean;
+}
+
+// Previews with confirm false; saving needs confirm true and the revision the preview returned.
+export function useEmergencyOverride(operationId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (reason: string) => request<unknown>("POST", `/api/operations/${encodeURIComponent(operationId)}/emergency-override`, { reason: reason.trim() }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.operations }),
+  });
+}
+
+export function usePortBindings(workloadId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    ...transient,
+    mutationFn: (input: { address: string; confirm: boolean; revision?: string }) => request<PortBindingRewrite>("POST", `/api/workloads/${encodeURIComponent(workloadId)}/port-bindings`, input),
+    onSuccess: (result) => {
+      if (result.saved) void client.invalidateQueries({ queryKey: keys.workload(workloadId) });
+    },
+  });
+}
+
+export function useUpdateWorkloadOwner(id: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (userID: string) => request<{ ok: boolean }>("PUT", `/api/workloads/${encodeURIComponent(id)}/owner`, { user_id: userID }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.workloadOwner(id) }),
   });
 }

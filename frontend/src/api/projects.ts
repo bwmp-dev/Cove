@@ -1,7 +1,7 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
 import { keys } from "./queries";
-import type { Permission } from "./types";
+import type { EnvironmentSuspension, Permission } from "./types";
 
 export interface Environment {
   id: string;
@@ -56,11 +56,27 @@ export function useDeleteEnvironment() {
   });
 }
 
-export function useAssignEnvironment(workloadId: string) {
+// Pause and resume progress is read from the durable queue and workers. Settling environments refresh at the operation
+// cadence; settled and failed ones keep refreshing slowly so a later worker report is not missed.
+export const environmentSuspensionQuery = (environmentId: string) =>
+  queryOptions({
+    queryKey: keys.environmentSuspension(environmentId),
+    queryFn: ({ signal }) => request<EnvironmentSuspension>("GET", `/api/environments/${encodeURIComponent(environmentId)}/suspension`, undefined, signal),
+    refetchInterval: (query) => (query.state.data?.phase === "pausing" || query.state.data?.phase === "resuming" ? 2_500 : 30_000),
+    retry: 1,
+  });
+
+// A 202 means the requested state was saved and queued, not that any resource has paused or resumed yet.
+export function useSetEnvironmentPaused(environmentId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (placement: { project_id: string; environment_id: string }) =>
-      request<{ ok: boolean }>("PUT", `/api/workloads/${encodeURIComponent(workloadId)}/environment`, placement),
-    onSettled: () => client.invalidateQueries({ queryKey: keys.workloads }),
+    mutationFn: (paused: boolean) => request<EnvironmentSuspension>("PUT", `/api/environments/${encodeURIComponent(environmentId)}/suspension`, { paused }),
+    onSuccess: (state) => client.setQueryData(keys.environmentSuspension(environmentId), state),
+    onSettled: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: keys.environmentSuspension(environmentId) }),
+        client.invalidateQueries({ queryKey: keys.workloads }),
+        client.invalidateQueries({ queryKey: keys.operations }),
+      ]),
   });
 }

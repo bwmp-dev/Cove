@@ -36,7 +36,7 @@ var errProxyMissing = errors.New("the managed proxy has not been created on this
 func (e *Engine) inspectProxy(ctx context.Context) (proxyInfo, error) {
 	var info proxyInfo
 	out := &limitedBuffer{Limit: 1024 * 1024}
-	format := `{"labels":{{json .Config.Labels}},"running":{{json .State.Running}},"image":{{json .Config.Image}},"args":{{json .Args}},"ports":{{json .HostConfig.PortBindings}}}`
+	format := `{"labels":{{json .Config.Labels}},"running":{{json .State.Running}},"image":{{json .Config.Image}},"image_id":{{json .Image}},"args":{{json .Args}},"ports":{{json .HostConfig.PortBindings}}}`
 	if err := e.Run(ctx, e.Root, []string{"docker", "inspect", "--type", "container", "--format", format, "cove-ingress"}, nil, out); err != nil {
 		if strings.Contains(out.data.String(), "No such") {
 			return info, errProxyMissing
@@ -46,6 +46,7 @@ func (e *Engine) inspectProxy(ctx context.Context) (proxyInfo, error) {
 	var raw struct {
 		Labels  map[string]string                              `json:"labels"`
 		Running bool                                           `json:"running"`
+		ImageID string                                         `json:"image_id"`
 		Image   string                                         `json:"image"`
 		Args    []string                                       `json:"args"`
 		Ports   map[string][]struct{ HostIP, HostPort string } `json:"ports"`
@@ -56,7 +57,7 @@ func (e *Engine) inspectProxy(ctx context.Context) (proxyInfo, error) {
 	if raw.Labels["cove.managed"] != "ingress" {
 		return info, errors.New("existing cove-ingress container is not managed by Cove")
 	}
-	if !strings.HasPrefix(raw.Image, "traefik:") {
+	if !supportedIngressProxyImage(raw.Image, raw.ImageID, raw.Labels) {
 		return info, errors.New("the managed proxy needs migration to Traefik before custom configuration can be managed")
 	}
 	info = proxyInfo{Running: raw.Running, Image: raw.Image, Args: raw.Args, PanelDomain: raw.Labels["cove.panel.domain"]}
@@ -211,6 +212,12 @@ func parseRawData(data []byte) (map[string]rawObject, error) {
 			}
 			for _, field := range []string{"status", "error", "using", "usedBy", "serverStatus", "observability"} {
 				delete(definition, field)
+			}
+			if kind == "http.routers" {
+				if tls, ok := definition["tls"].(map[string]any); ok && tls["options"] == "default" {
+					// Traefik materializes the implicit default after some dynamic reloads.
+					delete(tls, "options")
+				}
 			}
 			config, err := json.Marshal(definition)
 			if err != nil {

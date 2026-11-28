@@ -17,6 +17,21 @@ export function productionEnvironments(project: Project) {
   return project.environments.filter((environment) => !environment.preview_id);
 }
 
+// Comparing needs read access to both environments, not to the project.
+export function canCompareEnvironments(project: Project) {
+  return productionEnvironments(project).filter((environment) => environment.permissions.includes("read")).length >= 2;
+}
+
+// Exports decrypt secrets: the whole project needs read_secrets on the project, one environment needs it on that
+// environment. Edit access alone is not enough.
+export function exportableEnvironments(project: Project) {
+  return productionEnvironments(project).filter((environment) => environment.permissions.includes("read_secrets"));
+}
+
+export function canExportConfiguration(project: Project) {
+  return project.permissions.includes("read_secrets") || exportableEnvironments(project).length > 0;
+}
+
 export function previewEnvironments(project: Project) {
   return project.environments.filter((environment) => environment.preview_id);
 }

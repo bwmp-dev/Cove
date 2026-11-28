@@ -35,6 +35,10 @@ func (s *Server) refreshNodes(ctx context.Context) error {
 	for _, n := range nodes {
 		group.Go(func() {
 			response, probeErr := s.nodeRPC(ctx, n.id, worker.RPCRequest{Method: "probe"})
+			if err := s.noteHostIdentity(ctx, n.id, probeErr); err != nil {
+				failures <- err
+				return
+			}
 			state := "unreachable"
 			if probeErr == nil && response.Probe != nil && response.Probe.Protocol == 1 {
 				state = "ssh_verified"
@@ -47,7 +51,12 @@ func (s *Server) refreshNodes(ctx context.Context) error {
 				result, updateErr := s.DB.Exec(ctx, "UPDATE nodes SET state=$1,capabilities=$2,last_checked_at=now() WHERE id=$3 AND address=$4 AND port=$5", state, data, n.id, n.address, n.port)
 				err = updateErr
 				if err == nil && result.RowsAffected() == 1 {
-					err = s.nodeHealth(ctx, n.id, state, response.Probe)
+					if response.Probe != nil {
+						err = s.storeNodeMetric(ctx, n.id, response.Probe.Metrics)
+					}
+					if err == nil {
+						err = s.nodeHealth(ctx, n.id, state, response.Probe)
+					}
 				}
 			}
 			if err != nil {
@@ -60,5 +69,5 @@ func (s *Server) refreshNodes(ctx context.Context) error {
 	for err := range failures {
 		return err
 	}
-	return nil
+	return s.refreshPortExposure(ctx)
 }

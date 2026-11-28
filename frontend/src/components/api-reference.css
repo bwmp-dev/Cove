@@ -1,0 +1,14 @@
+/* Swagger UI brings its own stylesheet; these rules only fit it into the dashboard's section surface. */
+html.dark-mode .api-reference .swagger-ui {
+  background: transparent;
+  color: var(--color-fg);
+}
+
+.api-reference .swagger-ui .wrapper {
+  max-width: none;
+  padding: 0;
+}
+
+.api-reference .swagger-ui .information-container .info {
+  margin: 0 0 1rem;
+}

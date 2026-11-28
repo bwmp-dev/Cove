@@ -16,6 +16,7 @@ type PreflightCheck struct {
 	Message string `json:"message"`
 }
 type PreflightReport struct {
+	Usage    *ResourceUsage   `json:"usage,omitempty"`
 	Checks   []PreflightCheck `json:"checks"`
 	Revision string           `json:"revision,omitempty"`
 }
@@ -81,7 +82,20 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 			return report
 		}
 	}
+	if len(r.BuiltinDefaults) > 0 {
+		_, overridden := r.Environment[CoveCommitSHA]
+		r.Environment, _ = mergeBuiltinDefaults(r.Environment, r.BuiltinDefaults)
+		if !overridden && r.Source != nil {
+			r.Environment[CoveCommitSHA] = report.Revision
+		}
+	}
 	env := []string{}
+	if r.OutboundProxy != nil {
+		env = append(env, r.OutboundProxy.Env()...)
+		if r.OutboundProxy.HTTP != "" || r.OutboundProxy.HTTPS != "" {
+			add("Docker daemon proxy", "warning", "Registry pulls run in dockerd. Configure its http-proxy, https-proxy and no-proxy host settings explicitly; request proxy variables do not configure dockerd. Use scripts/configure-docker-proxy.py --apply only during an operator-approved maintenance window.")
+		}
+	}
 	for key, value := range r.Environment {
 		env = append(env, key+"="+value)
 	}
@@ -93,7 +107,12 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 		}
 		env = append(env, "DOCKER_CONFIG="+config)
 	}
-	args := []string{"docker", "compose", "--project-name", "cove-" + r.Workload, "--file", composePath, "config", "--format", "json"}
+	composePath, err = e.prepareComposeBundle(ctx, r, dir, composePath, env)
+	if err != nil {
+		add("Compose", "error", "Cannot resolve selected Compose files and profiles.")
+		return report
+	}
+	args := []string{"docker", "compose", "--project-name", e.composeProject(r.Workload), "--file", composePath, "config", "--format", "json"}
 	resolved := &limitedBuffer{Limit: 2 * 1024 * 1024}
 	if err = e.Run(ctx, dir, args, env, resolved); err != nil {
 		add("Compose", "error", "Compose validation failed. Check required variables, service definitions, and file paths.")
@@ -104,8 +123,16 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 		add("Compose", "error", "Compose reported warnings or could not produce a complete configuration. Check missing variables.")
 		return report
 	}
+	if err = applyDefaultLimits(config, r.DefaultLimits); err != nil {
+		add("Resource defaults", "error", "Default resource limits could not be applied.")
+		return report
+	}
 	if err = applyLimits(config, r.Limits); err != nil {
 		add("Resource limits", "error", "Limits reference invalid or missing services.")
+		return report
+	}
+	if err = e.validateGPUs(ctx, r.Limits); err != nil {
+		add("GPU assignments", "error", err.Error())
 		return report
 	}
 	if err = validateFileSecretTargets(config, r); err != nil {
@@ -115,7 +142,13 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 	if len(r.FileSecrets) > 0 {
 		add("File secrets", "pass", "Source variables and selected runtime/build services exist; no secret files were mounted.")
 	}
-	if r.GuardedDeploy != nil && *r.GuardedDeploy {
+	if r.Rollout != nil && r.Rollout.Strategy != "disabled" {
+		if reason := rolloutEligibility(r, config); reason != "" {
+			add("Replacement strategy", "warning", reason)
+		} else {
+			add("Replacement strategy", "pass", "Compose can run parallel generations. Image storage declarations and actual health are checked during deployment.")
+		}
+	} else if r.GuardedDeploy != nil && *r.GuardedDeploy {
 		if _, err = guardedService(config); err != nil {
 			add("Deployment safety", "error", err.Error())
 			return report
@@ -156,6 +189,9 @@ func (e *Engine) Preflight(ctx context.Context, r Request) (report PreflightRepo
 				if published != "" && published != "0" {
 					protocol, _ := port["protocol"].(string)
 					host, _ := port["host_ip"].(string)
+					if host == "" || host == "0.0.0.0" || host == "::" {
+						add("Exposure: "+name, "warning", "This service publishes a host port on all interfaces. Bind to loopback or a private address unless public access is intended.")
+					}
 					key := host + ":" + protocol + ":" + published
 					if ports[key] {
 						add("Ports: "+name, "error", "Multiple services publish the same host port; review their bindings.")

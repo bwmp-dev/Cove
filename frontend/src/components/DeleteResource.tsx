@@ -11,15 +11,15 @@ const copy = {
   node: {
     label: "node",
     path: "nodes",
-    description: "Cove stops managing this node and removes its credentials. The node must have no resources. The installed worker is not uninstalled.",
-    confirm: "The node must have no resources. Cove removes its credentials and stops managing it. The installed worker is not uninstalled.",
+    description: "Cove stops managing this node and removes its credentials. The node must have no resources, build node assignments or builds still recorded for a resource. The installed worker is not uninstalled.",
+    confirm: "The node must have no resources, build node assignments or builds still recorded for a resource. Cove removes its credentials and stops managing it. The installed worker is not uninstalled.",
   },
   workload: {
     label: "resource",
     path: "workloads",
-    description: "Stop the resource first. Volumes, backups and worker files stay on the node.",
+    description: "Stop the resource first. Volumes, backups and the metadata needed to restore them stay on the node. Other worker files and unused build images with Cove-generated names are removed; worker files are kept if their storage layout cannot be verified.",
     confirm:
-      "Stop the resource first. Cove removes its routes, stopped containers, API tokens and dashboard history. Volumes, backups and worker files remain on the node for recovery; they are not deleted.",
+      "Stop the resource first. Cove removes its routes, stopped containers, API tokens, dashboard history, other worker files and unused build images with Cove-generated names. Volumes, backups and the metadata needed to restore them stay on the node, as do images you named, including ones Cove built. If Cove cannot verify the worker's storage layout, it keeps all worker files.",
   },
 } as const;
 

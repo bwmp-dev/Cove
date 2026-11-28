@@ -62,6 +62,18 @@ func TestCustomIngressDocker(t *testing.T) {
 	if err = e.syncIngress(ctx, routes, io.Discard); err != nil {
 		t.Fatal(err)
 	}
+	policies := map[string][]Route{"app": {{Domain: "app.example.test", Service: "web", Port: 80, Policy: &RoutePolicy{
+		PathPrefix: "/api", SecurityHeaders: true, RequestHeaders: map[string]string{"X-App": "api"},
+		ResponseHeaders: map[string]string{"X-Version": "1"}, IPAllowList: []string{"10.0.0.0/8", "fd00::/8"},
+		RedirectHost: "www.example.test", RedirectPermanent: true, CertificateSource: "default",
+		Upstreams: []RouteUpstream{{Service: "api", Port: 8080}}, Sticky: true,
+	}}}}
+	if err = e.syncIngress(ctx, policies, io.Discard); err != nil {
+		t.Fatal("Traefik rejected route policies:", err)
+	}
+	if err = e.syncIngress(ctx, routes, io.Discard); err != nil {
+		t.Fatal("could not restore legacy route:", err)
+	}
 	started, err := e.output(ctx, "docker", "inspect", "--format", "{{.Id}} {{.State.StartedAt}}", "cove-ingress")
 	if err != nil {
 		t.Fatal(err)

@@ -34,12 +34,15 @@ jobs:
         working-directory: frontend
       - run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
         working-directory: frontend
+      - run: python3 scripts/test-offline-bundle.py
       - run: python3 scripts/test-update-panel.py
       - run: python3 scripts/test-worker-update.py
       - run: python3 scripts/test-install.py
       - run: sh -n scripts/install-auto-update.sh && sh -n scripts/install.sh && sh -n scripts/configure.sh
-      - run: go test -race ./... -timeout 10m
+      - run: go test -race ./... -timeout 30m
       - run: go vet ./...
+      - run: go test ./... && go vet ./... && go build ./...
+        working-directory: terraform-provider-cove
   release-please:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -60,6 +63,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     with:
       channel: beta
       version: beta-${{ github.sha }}
@@ -72,6 +76,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     with:
       channel: release
       version: ${{ needs.release-please.outputs.tag_name }}

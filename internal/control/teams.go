@@ -61,7 +61,10 @@ func (s *Server) validGrants(r *http.Request, team string, in memberInput) bool 
 	}
 	for _, g := range in.Grants {
 		if g.Role != "viewer" && g.Role != "operator" && g.Role != "editor" {
-			return false
+			var exists bool
+			if s.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM team_roles WHERE team_id=$1 AND id=$2)", team, g.Role).Scan(&exists) != nil || !exists {
+				return false
+			}
 		}
 		var found bool
 		var err error
@@ -85,23 +88,26 @@ func (s *Server) validGrants(r *http.Request, team string, in memberInput) bool 
 	return true
 }
 func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(r.Context(), "SELECT u.id,COALESCE(u.email,''),u.name,m.role,m.grants FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 ORDER BY u.name,u.id", r.PathValue("id"))
+	rows, err := s.DB.Query(r.Context(), `SELECT u.id,COALESCE(u.email,''),u.name,m.role,m.grants,
+ COALESCE((SELECT jsonb_agg(v) FROM (SELECT DISTINCT source_kind,source_id FROM identity_membership_claims c WHERE c.team_id=m.team_id AND c.user_id=m.user_id ORDER BY source_kind,source_id) v),'[]'::jsonb)
+ FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 ORDER BY u.name,u.id`, r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	defer rows.Close()
 	type member struct {
-		ID     string  `json:"user_id"`
-		Email  string  `json:"email"`
-		Name   string  `json:"name"`
-		Role   string  `json:"role"`
-		Grants []grant `json:"grants"`
+		ID      string            `json:"user_id"`
+		Email   string            `json:"email"`
+		Name    string            `json:"name"`
+		Role    string            `json:"role"`
+		Grants  []grant           `json:"grants"`
+		Sources []directorySource `json:"managed_by"`
 	}
 	out := []member{}
 	for rows.Next() {
 		var m member
-		if err = rows.Scan(&m.ID, &m.Email, &m.Name, &m.Role, &m.Grants); err != nil {
+		if err = rows.Scan(&m.ID, &m.Email, &m.Name, &m.Role, &m.Grants, &m.Sources); err != nil {
 			http.Error(w, "could not read members", 500)
 			return
 		}
@@ -110,6 +116,20 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 	if rows.Err() != nil {
 		http.Error(w, "could not read members", 500)
 		return
+	}
+	rows.Close()
+	if actor(r).Admin {
+		names, e := s.directorySourceNames(r.Context())
+		if e != nil {
+			http.Error(w, "membership sources unavailable", 503)
+			return
+		}
+		for i := range out {
+			for j := range out[i].Sources {
+				source := &out[i].Sources[j]
+				source.Name = names[source.Kind+"\x00"+source.ID]
+			}
+		}
 	}
 	respond(w, 200, out)
 }
@@ -138,8 +158,12 @@ func (s *Server) changeMember(w http.ResponseWriter, r *http.Request) {
 	if err == nil && !actor(r).Admin {
 		err = tx.QueryRow(r.Context(), "SELECT role FROM team_members WHERE team_id=$1 AND user_id=$2", team, actor(r).ID).Scan(&callerRole)
 		if err == nil && callerRole != "owner" && callerRole != "admin" {
-			http.Error(w, "permission denied", 403)
-			return
+			var allowed bool
+			err = tx.QueryRow(r.Context(), "SELECT cove_permission($1,$2,'','','manage_members')", actor(r).ID, team).Scan(&allowed)
+			if err != nil || !allowed || in.Role == "admin" {
+				http.Error(w, "permission denied", 403)
+				return
+			}
 		}
 	}
 	if err == nil {
@@ -153,19 +177,34 @@ func (s *Server) changeMember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
-	if !actor(r).Admin && callerRole != "owner" && (targetRole == "owner" || in.Role == "owner") {
+	if !actor(r).Admin && callerRole != "owner" && (targetRole == "owner" || in.Role == "owner" || (callerRole != "admin" && targetRole == "admin")) {
 		http.Error(w, "only owners can manage owners", 403)
 		return
 	}
 	if targetRole == "owner" && (r.Method == "DELETE" || in.Role != "owner") {
 		var count int
-		err = tx.QueryRow(r.Context(), "SELECT count(*) FROM team_members WHERE team_id=$1 AND role='owner'", team).Scan(&count)
+		err = tx.QueryRow(r.Context(), "SELECT count(*) FROM team_members m JOIN users u ON u.id=m.user_id WHERE m.team_id=$1 AND m.user_id<>$2 AND m.role='owner' AND NOT u.disabled", team, user).Scan(&count)
 		if err != nil {
 			http.Error(w, "database unavailable", 503)
 			return
 		}
-		if count < 2 {
+		if count < 1 {
 			http.Error(w, "team must keep an owner", 409)
+			return
+		}
+	}
+	var managed bool
+	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM identity_membership_bases WHERE team_id=$1 AND user_id=$2)", team, user).Scan(&managed); err != nil {
+		http.Error(w, "membership settings unavailable", 503)
+		return
+	}
+	if managed {
+		if r.Method != "PUT" || in.Role != "owner" {
+			http.Error(w, "membership is managed by a directory; change its group mappings instead", 409)
+			return
+		}
+		if _, err = tx.Exec(r.Context(), "UPDATE identity_membership_bases SET role='owner',grants='[]' WHERE team_id=$1 AND user_id=$2", team, user); err != nil {
+			http.Error(w, "membership settings unavailable", 503)
 			return
 		}
 	}
@@ -304,6 +343,10 @@ func (s *Server) invitations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email, valid := normalizeEmail(in.Email)
+	if !s.teamAdmin(r, team) && in.Role == "admin" {
+		http.Error(w, "permission denied", 403)
+		return
+	}
 	if !valid || in.Role == "owner" || !s.validGrants(r, team, memberInput{in.Role, in.Grants}) {
 		http.Error(w, "valid email, role, and permission scopes required", 400)
 		return
@@ -337,7 +380,7 @@ func (s *Server) previewInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var v invitation
-	err := s.DB.QueryRow(r.Context(), `SELECT i.id,i.email,t.name,i.role,i.grants,i.expires_at,EXISTS(SELECT 1 FROM users WHERE email=i.email) FROM invitations i JOIN teams t ON t.id=i.team_id JOIN users creator ON creator.id=i.created_by WHERE i.token_hash=$1 AND i.consumed_at IS NULL AND i.expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin')))`, tokenHash(in.Token)).Scan(&v.ID, &v.Email, &v.Team, &v.Role, &v.Grants, &v.Expires, &v.AccountExists)
+	err := s.DB.QueryRow(r.Context(), `SELECT i.id,i.email,t.name,i.role,i.grants,i.expires_at,EXISTS(SELECT 1 FROM users WHERE email=i.email) FROM invitations i JOIN teams t ON t.id=i.team_id JOIN users creator ON creator.id=i.created_by WHERE i.token_hash=$1 AND i.consumed_at IS NULL AND i.expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR (cove_permission(i.created_by,i.team_id,'','','manage_members') AND (i.role<>'admin' OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin')))))`, tokenHash(in.Token)).Scan(&v.ID, &v.Email, &v.Team, &v.Role, &v.Grants, &v.Expires, &v.AccountExists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "invalid or expired invitation", 400)
 		return
@@ -365,7 +408,7 @@ func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var id, team, email, role string
 	var grants json.RawMessage
-	err = tx.QueryRow(r.Context(), `SELECT i.id,i.team_id,i.email,i.role,i.grants FROM invitations i JOIN users creator ON creator.id=i.created_by WHERE token_hash=$1 AND consumed_at IS NULL AND expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin'))) FOR UPDATE OF i`, tokenHash(in.Token)).Scan(&id, &team, &email, &role, &grants)
+	err = tx.QueryRow(r.Context(), `SELECT i.id,i.team_id,i.email,i.role,i.grants FROM invitations i JOIN users creator ON creator.id=i.created_by WHERE token_hash=$1 AND consumed_at IS NULL AND expires_at>now() AND NOT creator.disabled AND (creator.is_admin OR (cove_permission(i.created_by,i.team_id,'','','manage_members') AND (i.role<>'admin' OR EXISTS(SELECT 1 FROM team_members m WHERE m.team_id=i.team_id AND m.user_id=i.created_by AND m.role IN ('owner','admin'))))) FOR UPDATE OF i`, tokenHash(in.Token)).Scan(&id, &team, &email, &role, &grants)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "invalid or expired invitation", 400)
 		return

@@ -18,6 +18,9 @@ func (e *Engine) loadBackupManifest(ctx context.Context, r Request, out io.Write
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		err = json.Unmarshal(raw, &manifest)
+		if err == nil && manifest.Record.DataSnapshot != "" && !snapshotIdentifier.MatchString(manifest.Record.DataSnapshot) {
+			err = errors.New("invalid database data snapshot")
+		}
 		return manifest, err
 	}
 	if !os.IsNotExist(err) {
@@ -57,6 +60,9 @@ func (e *Engine) loadBackupManifest(ctx context.Context, r Request, out io.Write
 	}
 	if manifest.Record.Workload != r.Workload || manifest.Record.ID != r.BackupID || manifest.Record.Repository != r.Backup.Repository {
 		return manifest, errors.New("remote backup metadata does not match this resource and repository")
+	}
+	if manifest.Record.DataSnapshot != "" && !snapshotIdentifier.MatchString(manifest.Record.DataSnapshot) {
+		return manifest, errors.New("invalid database data snapshot")
 	}
 	manifest.Record.Snapshot = records[0].ID
 	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {

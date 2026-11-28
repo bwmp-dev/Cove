@@ -4,6 +4,7 @@ import { errorMessage } from "../api/client";
 import type { Project } from "../api/projects";
 import { recipeQuery, useSaveRecipe, type PlannedResource, type PlannedVolume, type PreviewPlan, type PreviewRecipe, type PreviewResourcePolicy, type RecipeView, type VariableMode } from "../api/previews";
 import { useOnline } from "../lib/hooks";
+import { resourceTypeLabel } from "../lib/operations";
 import { draftFromView, formatBytes, missingOverrides, recipeForSave, resourceSource, setOmitted, setVariable, shortRevision, unresolved, updatePolicy } from "../lib/previews";
 import { choiceClass, inputClass, tableHeadClass, tableRowClass } from "../lib/styles";
 import { Checkbox } from "./Checkbox";
@@ -72,7 +73,7 @@ function RecipeForm({ project, view, environmentId, environments, onEnvironment,
       <Section
         title="Preview recipe"
         width="form"
-        description="A preview copies the selected production environment for one branch name across your repositories. Saved changes apply to previews created afterwards."
+        description="Branch and CI previews are set up from the selected production environment using this saved recipe, including which data they receive. Saved changes apply to previews created afterwards."
       >
         <GeneralSettings draft={draft} edit={edit} plan={plan} environmentId={environmentId} environments={environments} onEnvironment={onEnvironment} dirty={dirty} />
       </Section>
@@ -145,7 +146,7 @@ function GeneralSettings({ draft, edit, plan, environmentId, environments, onEnv
   const id = useId();
   return (
     <SettingRows>
-      <SwitchField id={`${id}-enabled`} layout="row" label="Create previews from branches" description="Matching branch pushes create or update previews. Turning this off stops new previews and branch updates; existing previews keep running until they are removed." checked={draft.enabled} onChange={(event) => edit({ ...draft, enabled: event.target.checked })} />
+      <SwitchField id={`${id}-enabled`} layout="row" label="Create previews" description="Matching branch pushes from the selected repositories and CI image submissions create or update previews. Repositories are optional when previews come only from CI-built images. Turning this off stops new previews and updates; existing previews keep running until they are removed." checked={draft.enabled} onChange={(event) => edit({ ...draft, enabled: event.target.checked })} />
       <Field id={`${id}-environment`} layout="row" label="Production environment" hint="Previews copy this environment's deployed revisions, data and connections.">
         <Select
           id={`${id}-environment`}
@@ -201,10 +202,10 @@ function GeneralSettings({ draft, edit, plan, environmentId, environments, onEnv
       <Field id={`${id}-ttl`} layout="row" label="Remove after inactivity" hint="Hours without a push or preview action. Pinned previews are kept.">
         <input id={`${id}-ttl`} type="number" min={1} max={720} className={`${inputClass} tabular-nums`} value={draft.ttl_hours} onChange={(event) => edit({ ...draft, ttl_hours: wholeNumber(event.target.value) })} required aria-describedby={`${id}-ttl-hint`} />
       </Field>
-      <Field id={`${id}-max`} layout="row" label="Previews at a time" hint="Further branches wait until a preview is removed. Each preview copies the production data again.">
+      <Field id={`${id}-max`} layout="row" label="Previews at a time" hint="Branch and CI previews share this limit; further previews wait until one is removed. Each preview receives data as this recipe specifies, and volumes may start empty.">
         <input id={`${id}-max`} type="number" min={1} max={20} className={`${inputClass} tabular-nums`} value={draft.max_previews} onChange={(event) => edit({ ...draft, max_previews: wholeNumber(event.target.value) })} required aria-describedby={`${id}-max-hint`} />
       </Field>
-      <SwitchField id={`${id}-approval`} layout="row" label="Require approval" description="Anyone who can push a matching branch could otherwise get a copy of production data. An editor approves each new preview." checked={draft.require_approval} onChange={(event) => edit({ ...draft, require_approval: event.target.checked })} />
+      <SwitchField id={`${id}-approval`} layout="row" label="Require approval" description="Anyone who can push a matching branch or holds a CI credential could otherwise get production data. An editor approves each new preview and each change to CI inputs." checked={draft.require_approval} onChange={(event) => edit({ ...draft, require_approval: event.target.checked })} />
     </SettingRows>
   );
 }
@@ -229,7 +230,7 @@ function RepositoryChoices({ draft, edit, plan, environmentId }: SettingsProps) 
         ))}
       </fieldset>
     ) : (
-      <p className="text-xs text-fg-muted">{environmentId ? "No resources in this environment use a GitHub App repository." : "Choose an environment first."}</p>
+      <p className="text-xs text-fg-muted">{environmentId ? "No resources in this environment use a GitHub App repository. Previews can still come from CI-built images." : "Choose an environment first."}</p>
     )}
     </>
   );
@@ -258,7 +259,7 @@ function ResourcePolicy({ resource, policy, recipe, onChange }: { resource: Plan
         <div className="min-w-0 flex-1 basis-64">
           <h3 className="text-[13px] font-semibold break-words text-fg">{resource.name}</h3>
           <p className="mt-0.5 text-xs text-fg-muted">
-            {resource.kind === "job" ? "Job" : "Service"}
+            {resourceTypeLabel(resource.kind)}
             {resource.repository && (
               <>
                 {" · "}

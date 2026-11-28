@@ -15,12 +15,12 @@ pnpm build      # writes dist/, served by the Go control plane (COVE_FRONTEND_DI
 
 ## Development against a running control plane
 
-The control plane only accepts state-changing requests whose `Origin` equals `COVE_PUBLIC_URL`, and sets a `__Host-` cookie that browsers keep only on secure origins (`http://localhost` counts as secure in current Chromium and Firefox).
+The control plane only accepts state-changing requests whose `Origin` equals the origin (scheme, host and port) of `COVE_PUBLIC_URL`, serves `/api` and `/auth` under that URL's path when it has one, and sets a `__Host-` cookie that browsers keep only on secure origins (`http://localhost` counts as secure in current Chromium and Firefox).
 
 Set these in `frontend/.env.local`:
 
 - `COVE_DEV_BACKEND`: control-plane listen address, default `http://127.0.0.1:8080`.
-- `COVE_DEV_PUBLIC_URL`: the control plane's `COVE_PUBLIC_URL`. The dev proxy rewrites `Origin` to this value on proxied requests that carry one. Production builds are unaffected, and the backend's origin policy is never relaxed.
+- `COVE_DEV_PUBLIC_URL`: the control plane's full `COVE_PUBLIC_URL`, including any path, for example `https://cove.example/control/cove`. The dev proxy rewrites `Origin` to the URL's origin only (`https://cove.example`) on proxied requests that carry one, and prefixes proxied `/api` and `/auth` paths with the URL's path (`/api/session` becomes `/control/cove/api/session`), keeping the query and body. The dev dashboard itself stays at the root. Leave it unset, or use a URL without a path, to proxy paths unchanged. Production builds are unaffected, and the backend's origin policy is never relaxed.
 
 Open `http://localhost:5173` and sign in with the administrator password.
 

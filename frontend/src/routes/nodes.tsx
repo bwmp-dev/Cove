@@ -9,8 +9,11 @@ import { LocalNodeButton, LocalNodeResult } from "../components/LocalNode";
 import { ExpiryTime, RelativeTime } from "../components/RelativeTime";
 import { NodeStateLabel } from "../components/status";
 import { nodeStates } from "../lib/nodes";
+import { ClientPagination } from "../components/ListPagination";
 import { Button, EmptyState, LoadingRows, PageHeader, QueryError, Section } from "../components/ui";
 import { SharedNodeWarning } from "../components/Access";
+import { Bastions } from "../components/Bastions";
+import { CloudServers, ProviderTokens } from "../components/NodeProviders";
 import { countLabel } from "../lib/hierarchy";
 import { useSession } from "../lib/session";
 import { buttonClass, listLinkClass, tableHeadClass, tableRowClass } from "../lib/styles";
@@ -170,6 +173,8 @@ export function NodesPage() {
             </div>
           )}
           <Section title={countLabel(nodes.data.length, "node")} flush>
+            <ClientPagination rows={nodes.data} label="Node pages" noun="nodes">
+              {(rows) => (
             <table className="w-full text-left">
               <caption className="sr-only">Nodes</caption>
               <thead>
@@ -200,14 +205,19 @@ export function NodesPage() {
                 </tr>
               </thead>
               <tbody>
-                {nodes.data.map((node) => (
+                {rows.map((node) => (
                   <NodeRow key={node.id} node={node} verify={verify} admin={admin} />
                 ))}
               </tbody>
             </table>
+              )}
+            </ClientPagination>
           </Section>
         </>
       )}
+      {admin && <CloudServers />}
+      {admin && <ProviderTokens />}
+      {admin && <Bastions />}
     </>
   );
 }

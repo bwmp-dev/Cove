@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -164,7 +162,7 @@ func (s *Server) githubAppSetup(w http.ResponseWriter, r *http.Request) {
 	if in.Organization != "" {
 		action = "https://github.com/organizations/" + in.Organization + "/settings/apps/new"
 	}
-	manifest := map[string]any{"name": in.Name, "description": in.Description, "url": s.PublicURL, "public": true, "redirect_url": s.PublicURL + "/api/github/app/callback", "setup_url": s.PublicURL + "/integrations", "hook_attributes": map[string]any{"url": s.PublicURL + "/hooks/github-app", "active": true}, "default_permissions": map[string]string{"contents": "read", "pull_requests": "read", "members": "read"}, "default_events": []string{"push", "pull_request"}}
+	manifest := map[string]any{"name": in.Name, "description": in.Description, "url": s.PublicURL, "public": true, "redirect_url": s.PublicURL + "/api/github/app/callback", "setup_url": s.PublicURL + "/integrations", "hook_attributes": map[string]any{"url": s.PublicURL + "/hooks/github-app", "active": true}, "default_permissions": map[string]string{"contents": "read", "pull_requests": "write", "statuses": "write", "deployments": "write", "members": "read"}, "default_events": []string{"push", "pull_request", "release"}}
 	manifest["callback_urls"] = []string{s.PublicURL + "/api/github/app/connect/callback"}
 	b, err := json.Marshal(manifest)
 	if err != nil {
@@ -321,11 +319,15 @@ func (s *Server) syncGithubInstallations(w http.ResponseWriter, r *http.Request)
 	s.githubAppInfo(w, r)
 }
 func (s *Server) installationToken(ctx context.Context, id, repo int64) (string, error) {
+	return s.installationAccessToken(ctx, id, repo, map[string]string{"contents": "read"})
+}
+
+func (s *Server) installationAccessToken(ctx context.Context, id, repo int64, permissions map[string]string) (string, error) {
 	jwt, err := s.appToken(ctx)
 	if err != nil {
 		return "", err
 	}
-	input := map[string]any{"permissions": map[string]string{"contents": "read"}}
+	input := map[string]any{"permissions": permissions}
 	if repo > 0 {
 		input["repository_ids"] = []int64{repo}
 	}
@@ -370,28 +372,14 @@ func (s *Server) githubRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	all := []appRepository{}
+	provider := s.githubProvider()
 	for _, id := range ids {
-		token, err := s.installationToken(r.Context(), id, 0)
+		repositories, err := provider.Repositories(r.Context(), id)
 		if err != nil {
-			http.Error(w, "GitHub installation is unavailable; check its permissions or suspension", 502)
+			http.Error(w, err.Error(), 502)
 			return
 		}
-		for page := 1; ; page++ {
-			var result struct {
-				Repositories []appRepository `json:"repositories"`
-			}
-			if err = s.appAPI(r.Context(), "GET", fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page), token, nil, &result); err != nil {
-				http.Error(w, "could not list GitHub repositories", 502)
-				return
-			}
-			for _, repo := range result.Repositories {
-				repo.InstallationID = id
-				all = append(all, repo)
-			}
-			if len(result.Repositories) < 100 {
-				break
-			}
-		}
+		all = append(all, repositories...)
 	}
 	respond(w, 200, all)
 }
@@ -456,8 +444,13 @@ func (s *Server) githubSource(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var encrypted []byte
 	var team string
-	if err = tx.QueryRow(r.Context(), "SELECT configuration,team_id FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&encrypted, &team); err != nil {
+	var connected bool
+	if err = tx.QueryRow(r.Context(), "SELECT configuration,team_id,EXISTS(SELECT 1 FROM git_sources WHERE workload_id=$1) FROM workloads WHERE id=$1 FOR UPDATE", id).Scan(&encrypted, &team, &connected); err != nil {
 		http.NotFound(w, r)
+		return
+	}
+	if connected && r.Method != "DELETE" {
+		http.Error(w, "disconnect the existing Git provider first", 409)
 		return
 	}
 	var active bool
@@ -530,7 +523,17 @@ func (s *Server) githubSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prepareAppDeployment(ctx context.Context, request *worker.Request) error {
-	if request.Action != "deploy" || request.Source == nil || request.Source.Token != "" {
+	if (request.Action == "deploy" || request.Action == "build") && request.Source != nil && strings.HasPrefix(request.Source.Repository, "ssh://") {
+		return s.prepareGitDeployKey(ctx, request)
+	}
+
+	if (request.Action == "deploy" || request.Action == "build") && request.Source != nil {
+		handled, err := s.prepareConnectedGitDeployment(ctx, request)
+		if handled || err != nil {
+			return err
+		}
+	}
+	if (request.Action != "deploy" && request.Action != "build") || request.Source == nil || request.Source.Token != "" {
 		return nil
 	}
 	var installation, repo int64
@@ -545,9 +548,23 @@ func (s *Server) prepareAppDeployment(ctx context.Context, request *worker.Reque
 	if repository != request.Source.Repository {
 		return errors.New("GitHub source changed; reconnect the repository")
 	}
-	token, err := s.installationToken(ctx, installation, repo)
+	token, err := s.githubProvider().CloneToken(ctx, installation, repo)
 	if err != nil {
 		return err
+	}
+	var reporting bool
+	if err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM github_reporting r LEFT JOIN previews p ON p.workload_id=$1 WHERE r.workload_id=COALESCE(p.source_id,$1) AND r.enabled)`, request.Workload).Scan(&reporting); err != nil {
+		return err
+	}
+	if reporting && request.Source.Revision == "" {
+		revision, err := s.githubProvider().BranchHead(ctx, installation, repo, request.Source.Branch)
+		if err != nil {
+			return err
+		}
+		if revision == "" {
+			return errors.New("GitHub branch is unavailable")
+		}
+		request.Source.Revision = revision
 	}
 	request.Source.Token = token
 	raw, err := json.Marshal(request)
@@ -574,10 +591,7 @@ func (s *Server) githubAppWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid webhook", 400)
 		return
 	}
-	mac := hmac.New(sha256.New, []byte(credentials.WebhookSecret))
-	mac.Write(body)
-	signature, err := hex.DecodeString(strings.TrimPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256="))
-	if err != nil || !strings.HasPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256=") || !hmac.Equal(signature, mac.Sum(nil)) {
+	if !s.githubProvider().VerifyWebhook([]byte(credentials.WebhookSecret), body, r.Header) {
 		http.Error(w, "invalid signature", 401)
 		return
 	}
@@ -589,10 +603,19 @@ func (s *Server) githubAppWebhook(w http.ResponseWriter, r *http.Request) {
 		respond(w, 200, map[string]bool{"ok": true})
 		return
 	}
+	if r.Header.Get("X-GitHub-Event") == "release" {
+		s.githubReleaseWebhook(w, r, body)
+		return
+	}
 	if r.Header.Get("X-GitHub-Event") != "push" {
 		respond(w, 200, map[string]bool{"ok": true})
 		return
 	}
+	s.githubAppPush(w, r, body, "push")
+}
+
+func (s *Server) githubAppPush(w http.ResponseWriter, r *http.Request, body []byte, eventKind string) {
+	var err error
 	if !regexp.MustCompile(`^[a-zA-Z0-9-]{1,100}$`).MatchString(r.Header.Get("X-GitHub-Delivery")) {
 		http.Error(w, "invalid push", 400)
 		return
@@ -623,13 +646,21 @@ func (s *Server) githubAppWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid commit", 400)
 		return
 	}
+	if strings.HasPrefix(event.Ref, "refs/tags/") && eventKind == "push" {
+		revision, err := s.githubProvider().TagHead(r.Context(), event.Installation.ID, event.Repository.ID, strings.TrimPrefix(event.Ref, "refs/tags/"))
+		if err != nil {
+			http.Error(w, "tag commit could not be resolved", 502)
+			return
+		}
+		event.After = revision
+	}
 	tx, err := s.DB.Begin(r.Context())
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), "SELECT w.id,w.configuration,g.repository FROM github_sources g JOIN workloads w ON w.id=g.workload_id JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.installation_id=$1 AND g.repository_id=$2 AND g.automatic AND NOT w.manually_stopped FOR UPDATE OF w", event.Installation.ID, event.Repository.ID)
+	rows, err := tx.Query(r.Context(), "SELECT w.id,w.configuration,g.repository,COALESCE(t.kind,'branch'),COALESCE(t.pattern,'') FROM github_sources g JOIN workloads w ON w.id=g.workload_id LEFT JOIN git_source_triggers t ON t.workload_id=w.id JOIN github_installation_teams i ON i.installation_id=g.installation_id AND i.team_id=w.team_id WHERE g.installation_id=$1 AND g.repository_id=$2 AND g.automatic AND NOT w.manually_stopped AND NOT EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) AND NOT EXISTS(SELECT 1 FROM environment_suspensions c WHERE c.workload_id=w.id) FOR UPDATE OF w", event.Installation.ID, event.Repository.ID)
 	if err != nil {
 		http.Error(w, "database unavailable", 503)
 		return
@@ -638,8 +669,9 @@ func (s *Server) githubAppWebhook(w http.ResponseWriter, r *http.Request) {
 	matchedPaths := map[string]bool{}
 	for rows.Next() {
 		var id, repository string
+		var trigger gitSourceTrigger
 		var encrypted []byte
-		if err = rows.Scan(&id, &encrypted, &repository); err != nil {
+		if err = rows.Scan(&id, &encrypted, &repository, &trigger.Kind, &trigger.Pattern); err != nil {
 			break
 		}
 		raw, e := unseal(s.Key, encrypted)
@@ -648,13 +680,16 @@ func (s *Server) githubAppWebhook(w http.ResponseWriter, r *http.Request) {
 			err = errors.New("invalid configuration")
 			break
 		}
-		if c.Source == nil || c.Source.Repository != repository || event.Ref != "refs/heads/"+c.Source.Branch {
+		if c.Source == nil || c.Source.Repository != repository || !triggerMatches(trigger, eventKind, event.Ref, c.Source.Branch) {
 			continue
 		}
-		matchedPaths[id] = pushMatchesWatchPaths(body, c.Source.WatchPaths)
+		matchedPaths[id] = eventKind != "push" || strings.HasPrefix(event.Ref, "refs/tags/") || pushMatchesWatchPaths(body, c.Source.WatchPaths)
+		if strings.HasPrefix(event.Ref, "refs/tags/") {
+			c.Source.Branch = strings.TrimPrefix(event.Ref, "refs/tags/")
+		}
 		c.Source.Revision = event.After
 		c.Source.Token = ""
-		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Source: c.Source, Compose: c.Compose, Environment: c.Environment, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy})
+		requests = append(requests, worker.Request{ID: resourceID(), Workload: id, Action: "deploy", Source: c.Source, ComposeBundle: c.ComposeBundle, Compose: c.Compose, Environment: c.Environment, Kind: c.Kind, JobService: c.JobService, Routes: c.Routes, Private: c.Private, Limits: c.Limits, Hooks: c.Hooks, FileSecrets: c.FileSecrets, GuardedDeploy: c.GuardedDeploy, Rollout: c.Rollout})
 	}
 	if err == nil {
 		err = rows.Err()

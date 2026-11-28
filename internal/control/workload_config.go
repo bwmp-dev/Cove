@@ -6,12 +6,21 @@ import (
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"net/http"
-	"slices"
+	"reflect"
 	"sort"
 	"strings"
 )
 
 func validateWorkload(in workloadInput) error {
+	if err := validateDatabaseResource(in); err != nil {
+		return err
+	}
+	if in.Source != nil && in.Source.SSHPrivateKey != "" {
+		return errors.New("SSH private keys are managed through the deploy key endpoint")
+	}
+	if err := validateAutoscale(in); err != nil {
+		return err
+	}
 	if in.Kind == "job" && in.Backup != nil {
 		return errors.New("disable backups before converting a service to a job")
 	}
@@ -21,13 +30,13 @@ func validateWorkload(in workloadInput) error {
 	if strings.TrimSpace(in.Name) == "" || len(in.Name) > 120 {
 		return errors.New("a name of at most 120 characters is required")
 	}
-	return worker.ValidateRequest(worker.Request{ID: "validation", Workload: "validation", Action: "deploy", Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy})
+	return worker.ValidateRequest(worker.Request{ManagedDatabase: in.Database != nil, ID: "validation", Workload: "validation", Action: "deploy", ComposeBundle: in.ComposeBundle, Compose: in.Compose, Environment: in.Environment, Source: in.Source, Kind: in.Kind, JobService: in.JobService, Routes: in.Routes, Private: in.Private, Limits: in.Limits, Hooks: in.Hooks, FileSecrets: in.FileSecrets, GuardedDeploy: in.GuardedDeploy, Rollout: in.Rollout})
 }
 func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	var encrypted []byte
 	var environmentID, projectID string
-	var stopped bool
-	err := s.DB.QueryRow(r.Context(), "SELECT configuration,COALESCE(environment_id,''),project_id,manually_stopped FROM workloads WHERE id=$1", r.PathValue("id")).Scan(&encrypted, &environmentID, &projectID, &stopped)
+	var stopped, paused bool
+	err := s.DB.QueryRow(r.Context(), "SELECT configuration,COALESCE(environment_id,''),project_id,manually_stopped,EXISTS(SELECT 1 FROM environments e WHERE e.id=w.environment_id AND e.paused) FROM workloads w WHERE id=$1", r.PathValue("id")).Scan(&encrypted, &environmentID, &projectID, &stopped, &paused)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -50,17 +59,29 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 	for key := range configuration.Environment {
 		keys = append(keys, key)
 	}
+	if configuration.Database != nil {
+		keys = databaseExportKeysFor(configuration.Database)
+	}
 	configuration.Environment = nil
 	sort.Strings(keys)
 	hasToken := false
 	if configuration.Source != nil {
 		hasToken = configuration.Source.Token != ""
 		configuration.Source.Token = ""
+		configuration.Source.SSHPrivateKey = ""
 	}
 	level, err := s.access(r, "workload", r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "authorization unavailable", 503)
 		return
+	}
+	var managedRegistry bool
+	if err = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM managed_registries WHERE id=$1)`, r.PathValue("id")).Scan(&managedRegistry); err != nil {
+		http.Error(w, "managed resource metadata unavailable", 503)
+		return
+	}
+	if managedRegistry {
+		level = 1
 	}
 	deployed, err := deployedWorkload(r.Context(), s.DB, r.PathValue("id"))
 	if err != nil {
@@ -80,15 +101,40 @@ func (s *Server) getWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "preview metadata unavailable", 503)
 		return
 	}
+	var pendingAdoption string
+	if err = s.DB.QueryRow(r.Context(), `SELECT COALESCE((SELECT id FROM compose_adoptions WHERE status='applying' AND resource_ids ? $1 LIMIT 1),'')`, r.PathValue("id")).Scan(&pendingAdoption); err != nil {
+		http.Error(w, "adoption metadata unavailable", 503)
+		return
+	}
+	if pendingAdoption != "" {
+		level = 1
+	}
+	names, err := s.permissionNames(r, "workload", r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "authorization unavailable", 503)
+		return
+	}
+	if previewSource != "" || pendingAdoption != "" || managedRegistry {
+		names = permissions(level)
+	}
 	// Protected preview routes keep their password hash on the server.
 	for i := range configuration.Routes {
 		configuration.Routes[i].Auth = ""
 	}
-	respond(w, 200, map[string]any{"environment_preview_id": environmentPreview, "preview_source_id": previewSource, "guarded_deploy": configuration.GuardedDeploy, "file_secrets": configuration.FileSecrets, "hooks": configuration.Hooks, "limits": configuration.Limits, "deployed": deployed, "permissions": permissions(level), "id": r.PathValue("id"), "name": configuration.Name, "node_id": configuration.NodeID, "compose": configuration.Compose, "environment_keys": keys, "source": configuration.Source, "has_source_token": hasToken, "kind": configuration.Kind, "job_service": configuration.JobService, "routes": configuration.Routes, "environment_id": environmentID, "project_id": projectID, "manually_stopped": stopped})
+	configuration.Routes = routesWithoutSecrets(configuration.Routes)
+	respond(w, 200, workloadView{Database: databaseMetadata(configuration.Database), PendingAdoptionID: pendingAdoption, EnvironmentPaused: paused, Rollout: configuration.Rollout, ID: r.PathValue("id"), Name: configuration.Name, NodeID: configuration.NodeID, ProjectID: projectID, EnvironmentID: environmentID, Kind: resourceKind(configuration), JobService: configuration.JobService, Compose: configuration.Compose, Source: configuration.Source, HasSourceToken: hasToken, EnvironmentKeys: keys, Routes: configuration.Routes, GuardedDeploy: configuration.GuardedDeploy, FileSecrets: configuration.FileSecrets, Hooks: configuration.Hooks, Limits: configuration.Limits, Deployed: deployed, Permissions: names, ManuallyStopped: stopped, PreviewSourceID: previewSource, EnvironmentPreviewID: environmentPreview})
 }
 func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
-	var in workloadInput
-	if !decode(w, r, &in) {
+	var input struct {
+		workloadInput
+		Routes []routeInput `json:"routes"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	in := input.workloadInput
+	if in.Autoscale != nil {
+		http.Error(w, "use the CPU scaling policy endpoint", 400)
 		return
 	}
 	if in.Backup != nil {
@@ -96,7 +142,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.EnvironmentID != "" || in.ProjectID != "" {
-		http.Error(w, "use the environment endpoint to change project placement", 400)
+		http.Error(w, "use the reviewed resource move endpoint to change project placement", 400)
 		return
 	}
 	if in.Environment != nil && in.EnvironmentPatch != nil {
@@ -133,7 +179,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "wait for the active operation before editing", 409)
 		return
 	}
-	if in.Source != nil && in.Source.InlineCompose {
+	if in.ComposeBundle != nil || in.Source != nil && in.Source.InlineCompose {
 		var saved []byte
 		err := tx.QueryRow(r.Context(), "SELECT configuration FROM preview_policies WHERE workload_id=$1", r.PathValue("id")).Scan(&saved)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -148,7 +194,7 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if policy.Enabled {
-				http.Error(w, "disable previews before switching to Cove-managed Compose", 409)
+				http.Error(w, "disable previews before selecting Cove-managed Compose, multiple files or profiles", 409)
 				return
 			}
 		}
@@ -164,8 +210,26 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "configuration unavailable", 500)
 			return
 		}
+		if old.Database != nil {
+			if in.Database != nil || in.Compose != old.Compose || in.Source != nil || in.Kind == "job" || in.JobService != "" || len(in.EnvironmentPatch) > 0 || in.Environment != nil && !reflect.DeepEqual(in.Environment, old.Environment) || len(in.Routes) > 0 || in.Hooks != nil || len(in.FileSecrets) > 0 || in.Private != nil {
+				http.Error(w, "database engine, Compose and credentials are managed; create another database for a different version", 409)
+				return
+			}
+			in.Database, in.Kind = old.Database, "service"
+			in.FileSecrets = old.FileSecrets
+		} else if in.Database != nil || in.Kind == "database" {
+			http.Error(w, "create a database resource instead of converting an existing service", 400)
+			return
+		}
+		in.Routes, err = retainedRouteAuth(input.Routes, old.Routes)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 		if in.Backup == nil {
 			in.Backup = old.Backup
+		} else if !s.requireBackupConfigurationAccess(w, r, "workload", r.PathValue("id")) {
+			return
 		}
 		in.Private = old.Private
 		if in.Limits == nil {
@@ -180,12 +244,19 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		if in.GuardedDeploy == nil {
 			in.GuardedDeploy = old.GuardedDeploy
 		}
+		if in.ComposeBundle == nil {
+			in.ComposeBundle = old.ComposeBundle
+		}
+		in.Autoscale = old.Autoscale
+		if in.Rollout == nil {
+			in.Rollout = old.Rollout
+		}
 		if in.Environment == nil {
 			in.Environment = old.Environment
 		}
 		if in.Routes == nil {
 			in.Routes = old.Routes
-		} else if !slices.Equal(in.Routes, old.Routes) {
+		} else if !worker.RoutesEqual(in.Routes, old.Routes) {
 			attempted, err := deployAttempted(r.Context(), tx, r.PathValue("id"))
 			if err != nil {
 				http.Error(w, "database unavailable", 503)
@@ -195,12 +266,27 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "use the routes endpoint to change routes on a deployed resource", 409)
 				return
 			}
-			if !s.checkRouteClaims(w, r.Context(), tx, r.PathValue("id"), in.Routes) {
+			if !s.checkRouteClaims(w, r.Context(), tx, r.PathValue("id"), node, in.Routes) {
+				return
+			}
+			if !s.checkRouteListenerSelection(w, r, node, in.Routes) {
 				return
 			}
 		}
 		if in.Source != nil && in.Source.Token == "" && old.Source != nil && in.Source.Repository == old.Source.Repository {
 			in.Source.Token = old.Source.Token
+		}
+	}
+	if in.Source != nil && strings.HasPrefix(in.Source.Repository, "ssh://") {
+		var repository, host string
+		err := tx.QueryRow(r.Context(), `SELECT repository,host_key FROM git_deploy_keys WHERE workload_id=$1`, r.PathValue("id")).Scan(&repository, &host)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "deploy key unavailable", 503)
+			return
+		}
+		if err == nil && (repository != in.Source.Repository || host != in.Source.SSHHostKey) {
+			http.Error(w, "use Rotate key in SSH deploy key settings to change its repository or host pin", 409)
+			return
 		}
 	}
 	if in.EnvironmentPatch != nil {
@@ -223,6 +309,10 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 	if in.Kind == "" {
 		in.Kind = "service"
 	}
+	if in.Rollout != nil {
+		value := in.Rollout.Normalized()
+		in.Rollout = &value
+	}
 	data, err := json.Marshal(in)
 	if err != nil {
 		http.Error(w, "invalid configuration", 400)
@@ -233,10 +323,24 @@ func (s *Server) updateWorkload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not protect configuration", 500)
 		return
 	}
+	var registryHook bool
+	if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM registry_webhooks WHERE workload_id=$1)", r.PathValue("id")).Scan(&registryHook); err != nil {
+		http.Error(w, "registry webhook state unavailable", 503)
+		return
+	}
+	if registryHook {
+		if _, err = s.registryWebhookDeployment(r.PathValue("id"), encrypted); err != nil {
+			http.Error(w, "remove the registry webhook before changing this resource to a job, Git/build source or pinned-only images", 409)
+			return
+		}
+	}
 	cpu, memory := configuredUsage(in)
-	_, err = tx.Exec(r.Context(), "UPDATE workloads SET name=$1,configuration=$2,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END WHERE id=$3", in.Name, encrypted, r.PathValue("id"), in.Kind, cpu, memory)
+	_, err = tx.Exec(r.Context(), "UPDATE workloads SET name=$1,configuration=$2,kind=$4,configured_cpu=$5,configured_memory_mb=$6,job_cron=CASE WHEN $4='job' THEN job_cron ELSE '' END,next_job_at=CASE WHEN $4='job' THEN next_job_at ELSE NULL END,job_pending_at=CASE WHEN $4='job' THEN job_pending_at ELSE NULL END,job_overlap_policy=CASE WHEN $4='job' THEN job_overlap_policy ELSE 'skip' END,job_timeout_seconds=CASE WHEN $4='job' THEN job_timeout_seconds ELSE 1800 END WHERE id=$3", in.Name, encrypted, r.PathValue("id"), resourceKind(in), cpu, memory)
 	if quotaError(w, err) {
 		return
+	}
+	if err == nil {
+		err = s.pruneImageUpdateRetention(r.Context(), tx, r.PathValue("id"), in)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())

@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -32,9 +33,20 @@ func TestProjectResourcePlacement(t *testing.T) {
 	}
 	f.call(editor, "default", "PUT", path+"/environment", map[string]string{"project_id": "q"}, 403)
 	f.call("root", "default", "PUT", path+"/environment", map[string]string{"project_id": "p", "environment_id": "f"}, 400)
-	f.call(editor, "default", "PUT", path+"/environment", map[string]string{"project_id": "p", "environment_id": "e"}, 200)
+	move := func(environment string) {
+		t.Helper()
+		in := resourceMoveInput{TeamID: "default", ProjectID: "p", EnvironmentID: environment}
+		var review resourceMoveReview
+		if json.Unmarshal(f.call(editor, "default", "POST", path+"/move/preview", in, 200).Body.Bytes(), &review) != nil {
+			t.Fatal("invalid move review")
+		}
+		in.Version, in.Acknowledge = review.Version, true
+		f.call(editor, "default", "POST", path+"/move", in, 200)
+	}
+	f.call(editor, "default", "PUT", path+"/environment", map[string]string{"project_id": "p", "environment_id": "e"}, 409)
+	move("e")
 	f.call(viewer, "default", "GET", path, nil, 200)
-	f.call(editor, "default", "PUT", path+"/environment", map[string]string{"project_id": "p"}, 200)
+	move("")
 	f.call(viewer, "default", "GET", path, nil, 403)
 	f.call(editor, "default", "DELETE", "/api/projects/p", nil, 409)
 	copy := jsonString(t, f.call("root", "default", "POST", "/api/projects/p/clone", map[string]string{"name": "Copy"}, 201), "id")

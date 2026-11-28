@@ -20,14 +20,15 @@ import (
 // preview. Every storage mount of such a resource is rewritten to a volume the preview owns, so a
 // preview never mounts, writes or deletes the production resource's storage.
 type EnvironmentPreview struct {
-	Preview  string            `json:"preview"`
-	Source   string            `json:"source,omitempty"`
-	Volumes  []PreviewVolume   `json:"volumes,omitempty"`
-	Disabled []string          `json:"disabled,omitempty"`
-	Database *PreviewDatabase  `json:"database,omitempty"`
-	Networks []string          `json:"networks,omitempty"`
-	Images   map[string]string `json:"images,omitempty"`
-	Refresh  bool              `json:"refresh,omitempty"`
+	Preview       string            `json:"preview"`
+	Source        string            `json:"source,omitempty"`
+	Volumes       []PreviewVolume   `json:"volumes,omitempty"`
+	Disabled      []string          `json:"disabled,omitempty"`
+	Database      *PreviewDatabase  `json:"database,omitempty"`
+	Networks      []string          `json:"networks,omitempty"`
+	Images        map[string]string `json:"images,omitempty"`
+	Refresh       bool              `json:"refresh,omitempty"`
+	ImageRegistry string            `json:"image_registry,omitempty"`
 }
 
 // PreviewVolume maps one storage mount of the production release to a preview-owned volume.
@@ -96,6 +97,17 @@ func validateEnvironmentPreview(r Request) error {
 		}
 		return nil
 	}
+	if p.ImageRegistry != "" {
+		if r.Action != "deploy" || r.Source != nil || r.Kind == "job" || len(r.ImagePins) == 0 {
+			return errors.New("CI preview images require an image-only service deployment")
+		}
+		if err := ValidatePreviewRegistryImages(r.ImagePins, p.ImageRegistry); err != nil {
+			return err
+		}
+		if r.Registry != nil && r.Registry.Server != p.ImageRegistry {
+			return errors.New("CI preview registry credentials do not match its image scope")
+		}
+	}
 	if !identifier.MatchString(p.Preview) {
 		return errors.New("invalid environment preview")
 	}
@@ -159,6 +171,9 @@ func validateEnvironmentPreview(r Request) error {
 		}
 	}
 	if p.Database != nil {
+		if extendedDatabase(p.Database.Engine) {
+			return errors.New("environment preview database refresh supports PostgreSQL and MariaDB; use an isolated backup restore copy for this engine")
+		}
 		if err := validateDatabaseBackup(&DatabaseBackup{Engine: p.Database.Engine, Service: p.Database.Service, Name: p.Database.Name}); err != nil {
 			return err
 		}
@@ -458,7 +473,7 @@ func (e *Engine) preparePreviewStorage(ctx context.Context, r Request, dir strin
 		return "", errors.New("could not resolve Compose for preview isolation")
 	}
 	var config map[string]any
-	if err := json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err := unmarshalCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", errors.New("invalid resolved Compose configuration")
 	}
 	volumes, err := isolatePreviewCompose(config, r.EnvironmentPreview, r.Workload, filepath.Join(dir, "releases"))
@@ -512,7 +527,7 @@ func (e *Engine) seedPreviewDatabase(ctx context.Context, r Request, dir string,
 	if err = e.Run(ctx, dir, up, env, out); err != nil {
 		return errors.New("the preview database service did not start")
 	}
-	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project=cove-"+r.Workload, "--filter", "label=com.docker.compose.service="+db.Service)
+	ids, err := e.output(ctx, "docker", "ps", "-q", "--filter", "label=com.docker.compose.project="+e.composeProject(r.Workload), "--filter", "label=com.docker.compose.service="+db.Service)
 	if err != nil || len(strings.Fields(ids)) != 1 {
 		return errors.New("the preview database must run exactly one container")
 	}

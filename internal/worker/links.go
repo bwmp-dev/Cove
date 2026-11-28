@@ -303,6 +303,26 @@ func (e *Engine) ApplyLinks(ctx context.Context, c LinkConfig) (LinkStatus, erro
 	}
 	e.linkMu.Lock()
 	defer e.linkMu.Unlock()
+	workloads := map[string]bool{}
+	for _, source := range c.Sources {
+		workloads[source.Workload] = true
+		if source.TargetWorkload != "" {
+			workloads[source.TargetWorkload] = true
+		}
+	}
+	for _, target := range c.Targets {
+		workloads[target.Workload] = true
+	}
+	for workload := range workloads {
+		state, err := e.readIdle(workload)
+		if err != nil {
+			return LinkStatus{}, err
+		}
+		if state != nil {
+			return LinkStatus{}, errors.New("disable idle sleep before adding private connections")
+		}
+	}
+
 	if err := os.MkdirAll(e.linksDir(), 0700); err != nil {
 		return LinkStatus{}, err
 	}
@@ -396,7 +416,11 @@ func (e *Engine) inspectNetworks(ctx context.Context, filter ...string) ([]docke
 }
 
 func (e *Engine) linkNetworks(ctx context.Context) (map[string]*linkNetworkInfo, error) {
-	networks, err := e.inspectNetworks(ctx, "--filter", "label=cove.managed=link")
+	return e.helperNetworks(ctx, "link")
+}
+
+func (e *Engine) helperNetworks(ctx context.Context, managed string) (map[string]*linkNetworkInfo, error) {
+	networks, err := e.inspectNetworks(ctx, "--filter", "label=cove.managed="+managed)
 	if err != nil {
 		return nil, err
 	}
@@ -426,21 +450,35 @@ func linkPool() (netip.Prefix, error) {
 	return pool.Masked(), nil
 }
 
-// ensureLinkNetwork creates an internal bridge network from Cove's dedicated pool. Docker's default
-// pools hold only a few dozen networks, so link networks use small /27 subnets instead.
 func (e *Engine) ensureLinkNetwork(ctx context.Context, networks map[string]*linkNetworkInfo, name, role, workload string) (*linkNetworkInfo, error) {
+	return e.ensureHelperNetwork(ctx, networks, name, "link", role, workload, 27)
+}
+
+// Docker's default pools hold only a few dozen networks. Helpers share Cove's pool and allocate
+// only the subnet size their endpoint count needs.
+func (e *Engine) ensureHelperNetwork(ctx context.Context, networks map[string]*linkNetworkInfo, name, managed, role, workload string, bits int) (*linkNetworkInfo, error) {
+	e.networkMu.Lock()
+	defer e.networkMu.Unlock()
+	roleLabel, workloadLabel := "cove."+managed+"-role", "cove."+managed+"-workload"
 	if n, ok := networks[name]; ok {
-		if n.Labels["cove.link-workload"] != workload || n.Labels["cove.link-role"] != role {
-			return nil, errors.New("existing private link network has unexpected ownership")
+		if n.Labels[workloadLabel] != workload || n.Labels[roleLabel] != role {
+			return nil, errors.New("existing helper network has unexpected ownership")
 		}
 		return n, nil
 	}
-	if existing, _ := e.output(ctx, "docker", "network", "ls", "-q", "--filter", "name=^"+name+"$"); existing != "" {
+	existing, err := e.output(ctx, "docker", "network", "ls", "-q", "--filter", "name=^"+name+"$")
+	if err != nil {
+		return nil, err
+	}
+	if existing != "" {
 		return nil, errors.New("a network named " + name + " exists that Cove does not manage")
 	}
 	pool, err := linkPool()
 	if err != nil {
 		return nil, err
+	}
+	if bits < pool.Bits() || bits > 29 {
+		return nil, errors.New("Cove's helper address pool is too small for this network")
 	}
 	all, err := e.inspectNetworks(ctx)
 	if err != nil {
@@ -455,41 +493,61 @@ func (e *Engine) ensureLinkNetwork(ctx context.Context, networks map[string]*lin
 		}
 	}
 	start := pool.Addr().As4()
-	base := uint32(start[0])<<24 | uint32(start[1])<<16 | uint32(start[2])<<8 | uint32(start[3])
-	count := uint32(1) << (27 - pool.Bits())
+	base := uint64(start[0])<<24 | uint64(start[1])<<16 | uint64(start[2])<<8 | uint64(start[3])
+	count, step := uint64(1)<<uint(bits-pool.Bits()), uint64(1)<<uint(32-bits)
 	var lastErr error
-	for i := uint32(0); i < count; i++ {
-		value := base + i*32
-		candidate := netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)}), 27)
+	for i := uint64(0); i < count; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value := base + i*step
+		candidate := netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)}), bits)
 		overlaps := false
 		for _, prefix := range used {
 			if prefix.Overlaps(candidate) {
 				overlaps = true
+				if prefix.Addr().Is4() {
+					address := prefix.Masked().Addr().As4()
+					end := (uint64(address[0])<<24 | uint64(address[1])<<16 | uint64(address[2])<<8 | uint64(address[3])) + (uint64(1) << uint(32-prefix.Bits()))
+					if skip := (end - base + step - 1) / step; skip > i+1 {
+						i = skip - 1
+					}
+				}
 				break
 			}
 		}
 		if overlaps {
 			continue
 		}
-		lastErr = e.Run(ctx, e.Root, []string{"docker", "network", "create", "--driver", "bridge", "--internal", "--subnet", candidate.String(), "--label", "cove.managed=link", "--label", "cove.link-role=" + role, "--label", "cove.link-workload=" + workload, name}, nil, io.Discard)
+		lastErr = e.Run(ctx, e.Root, []string{"docker", "network", "create", "--driver", "bridge", "--internal", "--subnet", candidate.String(), "--label", "cove.managed=" + managed, "--label", roleLabel + "=" + role, "--label", workloadLabel + "=" + workload, name}, nil, io.Discard)
 		if lastErr == nil {
-			n := &linkNetworkInfo{Name: name, Subnet: candidate.String(), Labels: map[string]string{"cove.link-role": role, "cove.link-workload": workload}, Containers: map[string]bool{}}
+			n := &linkNetworkInfo{Name: name, Subnet: candidate.String(), Labels: map[string]string{"cove.managed": managed, roleLabel: role, workloadLabel: workload}, Containers: map[string]bool{}}
 			networks[name] = n
 			return n, nil
 		}
 		used = append(used, candidate)
 	}
 	if lastErr != nil {
-		return nil, fmt.Errorf("could not create private link network: %w", lastErr)
+		return nil, fmt.Errorf("could not create helper network: %w", lastErr)
 	}
 	return nil, errors.New("the private link address pool is exhausted; set COVE_LINK_POOL to a larger unused range")
 }
 
 func (e *Engine) serviceContainers(ctx context.Context, workload, service string) ([]string, bool, error) {
-	out, err := e.output(ctx, "docker", "ps", "-a", "--no-trunc", "--filter", "label=com.docker.compose.project=cove-"+workload, "--filter", "label=com.docker.compose.service="+service, "--filter", "label=com.docker.compose.oneoff=False", "--format", "{{.ID}} {{.State}}")
+	names, err := e.serviceNames(workload, service)
 	if err != nil {
 		return nil, false, err
 	}
+	var output strings.Builder
+	for _, name := range names {
+		part, err := e.output(ctx, "docker", "ps", "-a", "--no-trunc", "--filter", "label=com.docker.compose.project="+e.composeProject(workload), "--filter", "label=com.docker.compose.service="+name, "--filter", "label=com.docker.compose.oneoff=False", "--format", "{{.ID}} {{.State}}")
+		if err != nil {
+			return nil, false, err
+		}
+		output.WriteString(part)
+		output.WriteByte('\n')
+	}
+	out := output.String()
 	var ids []string
 	running := false
 	for _, line := range strings.Split(out, "\n") {
@@ -523,6 +581,8 @@ func (e *Engine) attach(ctx context.Context, n *linkNetworkInfo, container strin
 }
 
 func (e *Engine) linkGatewayImage(ctx context.Context) (string, error) {
+	e.helperImageMu.Lock()
+	defer e.helperImageMu.Unlock()
 	executable, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -1002,7 +1062,7 @@ func (e *Engine) prepareLinks(ctx context.Context, r Request, dir string, args, 
 		return "", false, errors.New("could not resolve Compose for private connections")
 	}
 	var config map[string]any
-	if err = json.Unmarshal(resolved.data.Bytes(), &config); err != nil {
+	if err = decodeResolvedCompose(resolved.data.Bytes(), &config); err != nil {
 		return "", false, errors.New("invalid resolved Compose configuration")
 	}
 	if err = addLinkNetworks(config, attachments); err != nil {

@@ -227,6 +227,9 @@ type previewSource struct {
 	DeployedRevision                    string
 	DeployedAt                          *time.Time
 	JobCron                             string
+	JobTimezone                         string
+	JobOverlap                          string
+	JobTimeout                          int
 	Inventory                           *worker.PreviewInventory
 	InventoryError                      string
 }
@@ -358,9 +361,9 @@ func (s *Server) loadPreviewSources(ctx context.Context, team, environment strin
  COALESCE((n.capabilities->>'environment_previews')::boolean,false),n.state='ready',
  COALESCE(g.repository_id,0),COALESCE(g.repository,''),COALESCE(g.installation_id,0),
  EXISTS(SELECT 1 FROM github_installation_teams i WHERE i.installation_id=g.installation_id AND i.team_id=w.team_id),
- COALESCE(o.id,''),COALESCE(o.action,''),o.payload,COALESCE(o.result->>'revision',''),o.updated_at
+ COALESCE(o.id,''),COALESCE(o.action,''),o.payload,COALESCE(o.result->>'revision',''),o.updated_at,w.job_timezone,w.job_overlap_policy,w.job_timeout_seconds
  FROM workloads w JOIN nodes n ON n.id=w.node_id LEFT JOIN github_sources g ON g.workload_id=w.id
- LEFT JOIN LATERAL (SELECT id,action,payload,result,updated_at FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback') AND state='succeeded' ORDER BY updated_at DESC LIMIT 1) o ON true
+ LEFT JOIN LATERAL (SELECT id,action,payload,result,updated_at FROM operations WHERE workload_id=w.id AND action IN ('deploy','rollback','adopt') AND state='succeeded' AND COALESCE(result->'rollout'->>'phase','') NOT IN ('waiting','aborted') ORDER BY updated_at DESC LIMIT 1) o ON true
  WHERE w.team_id=$1 AND w.environment_id=$2 AND NOT EXISTS(SELECT 1 FROM environment_preview_resources r WHERE r.resource_id=w.id)
  ORDER BY w.name,w.id`, team, environment)
 	if err != nil {
@@ -371,7 +374,7 @@ func (s *Server) loadPreviewSources(ctx context.Context, team, environment strin
 		var src previewSource
 		var config, payload []byte
 		var updated *time.Time
-		if err = rows.Scan(&src.ID, &src.Name, &src.Kind, &src.Node, &src.Project, &config, &src.JobCron, &src.Capable, &src.NodeReady, &src.Repository, &src.RepositoryName, &src.Installation, &src.InstallationAssigned, &src.Release, &src.ReleaseAction, &payload, &src.DeployedRevision, &updated); err != nil {
+		if err = rows.Scan(&src.ID, &src.Name, &src.Kind, &src.Node, &src.Project, &config, &src.JobCron, &src.Capable, &src.NodeReady, &src.Repository, &src.RepositoryName, &src.Installation, &src.InstallationAssigned, &src.Release, &src.ReleaseAction, &payload, &src.DeployedRevision, &updated, &src.JobTimezone, &src.JobOverlap, &src.JobTimeout); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -613,6 +616,23 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 	routedServices := map[string]bool{}
 	for i, route := range src.Config.Routes {
 		routedServices[route.Service] = true
+		if route.Policy != nil {
+			if recipe.DomainTemplate != "" && route.Policy.CertificateID != "" {
+				block("route_certificate", "Uploaded certificates are scoped to production hostnames.", "Exclude this resource or remove its certificate assignment before publishing copied routes.", "")
+			}
+			for _, upstream := range route.Policy.Upstreams {
+				routedServices[upstream.Service] = true
+			}
+			if recipe.DomainTemplate != "" && route.Policy.RedirectHost != "" {
+				block("route_redirect", "A route redirects to a fixed hostname that may reach production.", "Exclude this resource or remove its hostname redirect before publishing preview domains.", "")
+			}
+		}
+		if route.IsTransportRoute() || route.Policy != nil && (route.Policy.Visibility == "lan" || route.Policy.Visibility == "tailscale") {
+			if recipe.DomainTemplate != "" {
+				block("route_listener", "Dedicated or private route listeners cannot be copied to preview hostnames.", "Exclude this resource or disable published preview domains; previews never reuse production listeners.", "")
+			}
+			continue
+		}
 		if recipe.DomainTemplate != "" {
 			name := resourceSlug(src.Name)
 			if i > 0 {
@@ -844,6 +864,10 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 		}
 		external := false
 		for _, match := range sharedReference.FindAllStringSubmatch(value, -1) {
+			if match[1] != "resource" {
+				external = true
+				continue
+			}
 			if match[1] == "resource" {
 				if source, ok := bindingSource[match[2]]; ok && inside(source) {
 					allInternal = true
@@ -853,8 +877,8 @@ func (s *Server) planPreviewResource(recipe previewRecipe, src *previewSource, t
 			}
 		}
 		switch {
-		case external:
-			variable.Classification, variable.Mode, variable.Reason = "sensitive", "", "Takes its value from a resource outside this preview."
+		case external || strings.Contains(value, "{{secret."):
+			variable.Classification, variable.Mode, variable.Reason = "sensitive", "", "Uses a shared variable, secret provider or resource outside this preview."
 		case allInternal:
 			variable.Classification, variable.Reason = "internal", "Points at a service inside the preview, which resolves to the preview's own copy."
 		case sensitiveVariable.MatchString(key):
